@@ -18,3 +18,19 @@
 *.mp3  binary
 *.ttf  binary
 *.heightmap binary
+
+# ── GitHub language stats (Linguist) ──
+#
+# miniaudio is a vendored single-header C library, and at ~4 MB it is six times
+# the size of all the Go in this repository. Linguist counts bytes, so without
+# this the project is reported as a C project. `vendored` is the accurate
+# label: it is third-party code we redistribute but do not maintain.
+audio/miniaudio.c linguist-vendored
+audio/miniaudio.h linguist-vendored
+
+# Compiled SPIR-V is a build artifact of the .vert/.frag sources beside it,
+# committed only so `go get` works. It is not hand-written source.
+*.spv linguist-generated
+
+# Shared GLSL includes; Linguist otherwise guesses from the .inc extension.
+shaders/*.inc linguist-language=GLSL
