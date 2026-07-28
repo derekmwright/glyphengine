@@ -17,6 +17,7 @@ Each is a complete, self-contained `main()` — copy one and start editing.
 | 05 | `05-textures` | Loading assets from an `fs.FS` — embedded or on disk | 1 generated PNG |
 | 06 | `06-skinned` | Rigged glTF, GPU skinning, clip selection and cross-fade | Kenney CC0 character |
 | 07 | `07-terrain` | Procedural heightmap as both collision and geometry, walking over terrain | none |
+| 08 | `08-grass` | Instanced flora scattered from the heightmap, density masking | Quaternius CC0 grass |
 
 More land as the extraction proceeds — glTF loading, skinned animation,
 shadows, MSDF text, YAML UI, audio, and particles. Numbering has gaps on

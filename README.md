@@ -170,7 +170,7 @@ takes `-screenshot out.png` to capture its last frame.
 | | |
 |---|---|
 | ![](docs/images/02-cube.png) `02-cube` | ![](docs/images/03-physics.png) `03-physics` |
-| ![](docs/images/05-textures.png) `05-textures` | ![](docs/images/07-terrain.png) `07-terrain` |
+| ![](docs/images/05-textures.png) `05-textures` | ![](docs/images/08-grass.png) `08-grass` |
 
 ```
 task example:01-triangle      # window, renderer, input loop
@@ -180,6 +180,7 @@ task example:04-first-person  # FP camera, MoveIntent, character controller
 task example:05-textures      # loading assets from an embedded filesystem
 task example:06-skinned       # rigged glTF character, GPU skinning, clip blending
 task example:07-terrain       # heightmap as both collision and geometry
+task example:08-grass         # instanced flora scattered across terrain
 ```
 
 ## Building
