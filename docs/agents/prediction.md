@@ -82,6 +82,38 @@ func (g *game) reconcile(e *glyph.Engine, n uint64, s glyphengine.CharacterState
 `closeEnough` is deliberately yours. A footrace game corrects at a centimetre;
 a slower game tolerates more to avoid visible snapping.
 
+## Compare at the matching tick, not against the present
+
+The mistake that looks correct and is not:
+
+```go
+predicted, _ := e.SnapshotCharacter(player)   // WRONG: this is "now"
+if far(predicted.Position, authoritative.Position) { correct() }
+```
+
+By the time an authoritative update for tick N arrives, the client is already a
+round trip past N. Comparing its current state against the server's state for a
+tick in the past always mismatches, so this corrects on *every packet* — the
+character is permanently being yanked backwards, and it looks exactly like
+network jitter.
+
+Keep a history of your own predictions keyed by tick, and compare like for
+like:
+
+```go
+predicted, ok := g.predictedAt[msg.tick]
+if !ok || close(predicted.Position, msg.state.Position) {
+	return // prediction held
+}
+e.RestoreCharacter(g.player, msg.state)
+for _, u := range g.unacked {
+	e.MoveCharacter(g.player, u.intent, dt)
+}
+```
+
+Prune the history as inputs are acknowledged, the same way you prune the
+unacknowledged input buffer.
+
 ## Why replay is exact
 
 `MoveCharacter` is a pure function of `(CharacterState, MoveIntent, dt)` plus
@@ -90,6 +122,15 @@ replaying the same intents from the same state produces bit-identical results.
 `prediction_test.go` asserts exactly that over 180 ticks against real collision
 geometry, including a mid-stream rewind, and re-runs it 50 times to rule out
 map-iteration order mattering.
+
+`reconcile_test.go` goes further and runs the whole loop: two Scenes, one
+authoritative and one predicting, with simulated latency between them. With
+matching tick stamps and no divergence the client's prediction equals the
+server's authoritative state at **every** tick and zero corrections are ever
+needed — at 1, 6, and 20 ticks of latency. When the server applies an impulse
+the client could not predict, the client notices, rewinds, replays, and
+reconverges. Introducing an off-by-one in the buffer trim, or skipping the
+rewind, makes those tests fail.
 
 That exactness is the entire reason movement is on the fixed tick. On the frame
 clock, jump apex alone varies ~5% between 30fps and 300fps, so a client and
