@@ -36,6 +36,29 @@ jobs:
           vulkan-components: Vulkan-Headers, Vulkan-Loader
           vulkan-use-cache: true
 
+      # MinGW's linker resolves `-lvulkan` to libvulkan.a, but the Vulkan SDK
+      # ships the loader as vulkan-1.lib. Nothing bridges the two, which is why
+      # a fresh Windows checkout fails to link with "cannot find -lvulkan" —
+      # the single most common first-run failure on this platform.
+      #
+      # Both are COFF import libraries, so aliasing the name is enough.
+      - name: Configure Vulkan link flags
+        shell: bash
+        run: |
+          echo "VULKAN_SDK=$VULKAN_SDK"
+          find "$VULKAN_SDK" \( -name '*.lib' -o -name '*.a' -o -name '*vulkan*.dll' \) -print | head -20
+
+          lib=$(find "$VULKAN_SDK" \( -iname 'libvulkan.a' -o -iname 'libvulkan.dll.a' -o -iname 'vulkan-1.lib' \) -print -quit)
+          if [ -z "$lib" ]; then
+            echo "::error::no Vulkan loader import library found under VULKAN_SDK"
+            exit 1
+          fi
+          echo "using loader library: $lib"
+
+          mkdir -p "$RUNNER_TEMP/vklib"
+          cp "$lib" "$RUNNER_TEMP/vklib/libvulkan.a"
+          echo "CGO_LDFLAGS=-L$(cygpath -m "$RUNNER_TEMP/vklib")" >> "$GITHUB_ENV"
+
       - name: Install go-task
         run: go install github.com/go-task/task/v3/cmd/task@latest
 
