@@ -5,41 +5,44 @@ import "math"
 // CreateCube creates an indexed cube mesh centered at origin with the given size.
 // Each face has 4 vertices (24 total) with per-face normals for correct lighting.
 // All vertex colors are white so tint controls the visible color.
+//
+// Each face carries a full 0..1 UV quad, so attaching a MaterialRef texture
+// maps one copy of the image onto every face.
 func (r *Renderer) CreateCube(size float32) (*Mesh, error) {
 	h := size / 2
 	w := [3]float32{1, 1, 1} // white
 
 	vertices := []Vertex{
 		// Front face (+Z)
-		{Pos: [3]float32{-h, -h, h}, Color: w, Normal: [3]float32{0, 0, 1}},
-		{Pos: [3]float32{h, -h, h}, Color: w, Normal: [3]float32{0, 0, 1}},
-		{Pos: [3]float32{h, h, h}, Color: w, Normal: [3]float32{0, 0, 1}},
-		{Pos: [3]float32{-h, h, h}, Color: w, Normal: [3]float32{0, 0, 1}},
+		{Pos: [3]float32{-h, -h, h}, Color: w, Normal: [3]float32{0, 0, 1}, UV: [2]float32{0, 1}},
+		{Pos: [3]float32{h, -h, h}, Color: w, Normal: [3]float32{0, 0, 1}, UV: [2]float32{1, 1}},
+		{Pos: [3]float32{h, h, h}, Color: w, Normal: [3]float32{0, 0, 1}, UV: [2]float32{1, 0}},
+		{Pos: [3]float32{-h, h, h}, Color: w, Normal: [3]float32{0, 0, 1}, UV: [2]float32{0, 0}},
 		// Back face (-Z)
-		{Pos: [3]float32{h, -h, -h}, Color: w, Normal: [3]float32{0, 0, -1}},
-		{Pos: [3]float32{-h, -h, -h}, Color: w, Normal: [3]float32{0, 0, -1}},
-		{Pos: [3]float32{-h, h, -h}, Color: w, Normal: [3]float32{0, 0, -1}},
-		{Pos: [3]float32{h, h, -h}, Color: w, Normal: [3]float32{0, 0, -1}},
+		{Pos: [3]float32{h, -h, -h}, Color: w, Normal: [3]float32{0, 0, -1}, UV: [2]float32{0, 1}},
+		{Pos: [3]float32{-h, -h, -h}, Color: w, Normal: [3]float32{0, 0, -1}, UV: [2]float32{1, 1}},
+		{Pos: [3]float32{-h, h, -h}, Color: w, Normal: [3]float32{0, 0, -1}, UV: [2]float32{1, 0}},
+		{Pos: [3]float32{h, h, -h}, Color: w, Normal: [3]float32{0, 0, -1}, UV: [2]float32{0, 0}},
 		// Top face (+Y)
-		{Pos: [3]float32{-h, h, h}, Color: w, Normal: [3]float32{0, 1, 0}},
-		{Pos: [3]float32{h, h, h}, Color: w, Normal: [3]float32{0, 1, 0}},
-		{Pos: [3]float32{h, h, -h}, Color: w, Normal: [3]float32{0, 1, 0}},
-		{Pos: [3]float32{-h, h, -h}, Color: w, Normal: [3]float32{0, 1, 0}},
+		{Pos: [3]float32{-h, h, h}, Color: w, Normal: [3]float32{0, 1, 0}, UV: [2]float32{0, 1}},
+		{Pos: [3]float32{h, h, h}, Color: w, Normal: [3]float32{0, 1, 0}, UV: [2]float32{1, 1}},
+		{Pos: [3]float32{h, h, -h}, Color: w, Normal: [3]float32{0, 1, 0}, UV: [2]float32{1, 0}},
+		{Pos: [3]float32{-h, h, -h}, Color: w, Normal: [3]float32{0, 1, 0}, UV: [2]float32{0, 0}},
 		// Bottom face (-Y)
-		{Pos: [3]float32{-h, -h, -h}, Color: w, Normal: [3]float32{0, -1, 0}},
-		{Pos: [3]float32{h, -h, -h}, Color: w, Normal: [3]float32{0, -1, 0}},
-		{Pos: [3]float32{h, -h, h}, Color: w, Normal: [3]float32{0, -1, 0}},
-		{Pos: [3]float32{-h, -h, h}, Color: w, Normal: [3]float32{0, -1, 0}},
+		{Pos: [3]float32{-h, -h, -h}, Color: w, Normal: [3]float32{0, -1, 0}, UV: [2]float32{0, 1}},
+		{Pos: [3]float32{h, -h, -h}, Color: w, Normal: [3]float32{0, -1, 0}, UV: [2]float32{1, 1}},
+		{Pos: [3]float32{h, -h, h}, Color: w, Normal: [3]float32{0, -1, 0}, UV: [2]float32{1, 0}},
+		{Pos: [3]float32{-h, -h, h}, Color: w, Normal: [3]float32{0, -1, 0}, UV: [2]float32{0, 0}},
 		// Right face (+X)
-		{Pos: [3]float32{h, -h, h}, Color: w, Normal: [3]float32{1, 0, 0}},
-		{Pos: [3]float32{h, -h, -h}, Color: w, Normal: [3]float32{1, 0, 0}},
-		{Pos: [3]float32{h, h, -h}, Color: w, Normal: [3]float32{1, 0, 0}},
-		{Pos: [3]float32{h, h, h}, Color: w, Normal: [3]float32{1, 0, 0}},
+		{Pos: [3]float32{h, -h, h}, Color: w, Normal: [3]float32{1, 0, 0}, UV: [2]float32{0, 1}},
+		{Pos: [3]float32{h, -h, -h}, Color: w, Normal: [3]float32{1, 0, 0}, UV: [2]float32{1, 1}},
+		{Pos: [3]float32{h, h, -h}, Color: w, Normal: [3]float32{1, 0, 0}, UV: [2]float32{1, 0}},
+		{Pos: [3]float32{h, h, h}, Color: w, Normal: [3]float32{1, 0, 0}, UV: [2]float32{0, 0}},
 		// Left face (-X)
-		{Pos: [3]float32{-h, -h, -h}, Color: w, Normal: [3]float32{-1, 0, 0}},
-		{Pos: [3]float32{-h, -h, h}, Color: w, Normal: [3]float32{-1, 0, 0}},
-		{Pos: [3]float32{-h, h, h}, Color: w, Normal: [3]float32{-1, 0, 0}},
-		{Pos: [3]float32{-h, h, -h}, Color: w, Normal: [3]float32{-1, 0, 0}},
+		{Pos: [3]float32{-h, -h, -h}, Color: w, Normal: [3]float32{-1, 0, 0}, UV: [2]float32{0, 1}},
+		{Pos: [3]float32{-h, -h, h}, Color: w, Normal: [3]float32{-1, 0, 0}, UV: [2]float32{1, 1}},
+		{Pos: [3]float32{-h, h, h}, Color: w, Normal: [3]float32{-1, 0, 0}, UV: [2]float32{1, 0}},
+		{Pos: [3]float32{-h, h, -h}, Color: w, Normal: [3]float32{-1, 0, 0}, UV: [2]float32{0, 0}},
 	}
 
 	// 6 indices per face (2 triangles), CW winding for Vulkan Y-flip
@@ -57,6 +60,10 @@ func (r *Renderer) CreateCube(size float32) (*Mesh, error) {
 
 // CreatePlane creates an indexed plane on the XZ plane (Y=0) centered at origin.
 // All vertex colors are white so tint controls the visible color.
+//
+// UVs span 0..1 across the whole surface, so a texture is stretched over it
+// rather than tiled. For tiled ground, build the mesh yourself with UVs in
+// world units, or use TerrainMesh, which does exactly that.
 func (r *Renderer) CreatePlane(width, depth float32) (*Mesh, error) {
 	hw := width / 2
 	hd := depth / 2
@@ -64,10 +71,10 @@ func (r *Renderer) CreatePlane(width, depth float32) (*Mesh, error) {
 	up := [3]float32{0, 1, 0}
 
 	vertices := []Vertex{
-		{Pos: [3]float32{-hw, 0, -hd}, Color: w, Normal: up},
-		{Pos: [3]float32{hw, 0, -hd}, Color: w, Normal: up},
-		{Pos: [3]float32{hw, 0, hd}, Color: w, Normal: up},
-		{Pos: [3]float32{-hw, 0, hd}, Color: w, Normal: up},
+		{Pos: [3]float32{-hw, 0, -hd}, Color: w, Normal: up, UV: [2]float32{0, 0}},
+		{Pos: [3]float32{hw, 0, -hd}, Color: w, Normal: up, UV: [2]float32{1, 0}},
+		{Pos: [3]float32{hw, 0, hd}, Color: w, Normal: up, UV: [2]float32{1, 1}},
+		{Pos: [3]float32{-hw, 0, hd}, Color: w, Normal: up, UV: [2]float32{0, 1}},
 	}
 
 	// CCW winding when viewed from +Y

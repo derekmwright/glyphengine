@@ -110,6 +110,7 @@ type config struct {
 	tickRate   int
 	maxCatchUp time.Duration
 	maxFrames  int
+	screenshot string
 	fov        float32
 	near, far  float32
 }
@@ -245,6 +246,20 @@ func WithMaxFrames(n int) Option {
 	return func(c *config) { c.maxFrames = n }
 }
 
+// WithScreenshot writes a PNG of the last rendered frame to path when Run
+// finishes, then returns.
+//
+// Pair it with WithMaxFrames so the run is deterministic: render a fixed
+// number of frames, capture, exit. That is how the images in the README are
+// produced, and it is reproducible rather than a hand-taken grab.
+//
+// Capture reads the presented swapchain image back from the GPU, so it costs a
+// device-idle wait — fine once at the end of a run, not something to do per
+// frame.
+func WithScreenshot(path string) Option {
+	return func(c *config) { c.screenshot = path }
+}
+
 // WithProjection overrides the vertical field of view in degrees and the near
 // and far clip planes. Defaults are 45°, 0.1, and 500.
 func WithProjection(fovDegrees, near, far float32) Option {
@@ -291,6 +306,7 @@ type Engine struct {
 	maxCatchUp   time.Duration
 	maxFrames    int
 	frameCount   int
+	screenshot   string
 	alpha        float32 // fraction between the last two ticks; see Alpha
 }
 
@@ -385,6 +401,7 @@ func New(g Game, opts ...Option) (*Engine, error) {
 		tickDuration: time.Second / time.Duration(cfg.tickRate),
 		maxCatchUp:   resolveMaxCatchUp(cfg.maxCatchUp, time.Second/time.Duration(cfg.tickRate)),
 		maxFrames:    cfg.maxFrames,
+		screenshot:   cfg.screenshot,
 	}
 
 	// Celestial billboards are engine-owned meshes, not game assets.
@@ -540,6 +557,10 @@ func (e *Engine) Run() {
 	prev := time.Now()
 	tickDt := float32(e.tickDuration.Seconds())
 
+	// Deferred so it covers both exits: the frame budget running out and
+	// the window closing.
+	defer e.captureIfRequested()
+
 	for !e.window.ShouldClose() {
 		frameStart := time.Now()
 		frameDelta := frameStart.Sub(prev)
@@ -620,6 +641,20 @@ func (e *Engine) Run() {
 			return
 		}
 	}
+}
+
+// captureIfRequested writes the screenshot asked for by WithScreenshot, if
+// any. A capture failure is logged rather than returned: losing a screenshot
+// should not look like the program crashed.
+func (e *Engine) captureIfRequested() {
+	if e.screenshot == "" {
+		return
+	}
+	if err := e.renderer.SaveScreenshot(e.screenshot); err != nil {
+		log.Printf("glyphengine: screenshot: %v", err)
+		return
+	}
+	log.Printf("glyphengine: wrote screenshot %s", e.screenshot)
 }
 
 // renderFrame builds the draw list and lighting for the current camera and

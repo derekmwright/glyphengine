@@ -155,6 +155,7 @@ func main() {
 	height := flag.Int("height", 720, "window height")
 	fullscreen := flag.Bool("fullscreen", false, "run fullscreen on the primary monitor")
 	frames := flag.Int("frames", 0, "render N frames then exit (0 = run until closed)")
+	shot := flag.String("screenshot", "", "write a PNG of the last frame to this path")
 	flag.Parse()
 
 	opts := []glyph.Option{
@@ -167,6 +168,9 @@ func main() {
 	}
 	if *frames > 0 {
 		opts = append(opts, glyph.WithMaxFrames(*frames))
+	}
+	if *shot != "" {
+		opts = append(opts, glyph.WithScreenshot(*shot))
 	}
 
 	e, err := glyph.New(&game{}, opts...)

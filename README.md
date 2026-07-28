@@ -11,6 +11,12 @@ runtime that loads your game.
 
 > **Status: v0.x.** APIs break without notice. Pin a commit if you build on it.
 
+![A skinned character walking past shadow-casting pillars](docs/images/06-skinned.png)
+
+*`task example:06-skinned` — a rigged glTF character, GPU skinning, cascaded
+shadow maps, and a day/night sky. Every image in this README is captured by the
+engine itself with `-screenshot`, not taken by hand.*
+
 ## Install
 
 ```
@@ -158,7 +164,13 @@ bit-identical results at 60Hz and at 300Hz.
 
 ## Examples
 
-One concept each. Examples 01–04 and 07 load nothing from disk.
+One concept each. Examples 01–04 and 07 load nothing from disk. Every one
+takes `-screenshot out.png` to capture its last frame.
+
+| | |
+|---|---|
+| ![](docs/images/02-cube.png) `02-cube` | ![](docs/images/03-physics.png) `03-physics` |
+| ![](docs/images/05-textures.png) `05-textures` | ![](docs/images/07-terrain.png) `07-terrain` |
 
 ```
 task example:01-triangle      # window, renderer, input loop
@@ -166,6 +178,7 @@ task example:02-cube          # Game, Scene, entities, orbit camera, day/night
 task example:03-physics       # colliders, gravity, spatial grids, picking
 task example:04-first-person  # FP camera, MoveIntent, character controller
 task example:05-textures      # loading assets from an embedded filesystem
+task example:06-skinned       # rigged glTF character, GPU skinning, clip blending
 task example:07-terrain       # heightmap as both collision and geometry
 ```
 

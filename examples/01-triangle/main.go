@@ -34,6 +34,7 @@ func main() {
 	height := flag.Int("height", 600, "window height")
 	fullscreen := flag.Bool("fullscreen", false, "run fullscreen on the primary monitor")
 	frames := flag.Int("frames", 0, "render N frames then exit (0 = run until closed)")
+	shot := flag.String("screenshot", "", "write a PNG of the last frame to this path")
 	flag.Parse()
 
 	var opts []window.Option
@@ -78,6 +79,16 @@ func main() {
 		}
 
 		if *frames > 0 && count+1 >= *frames {
+			// This example drives the renderer directly rather than through
+			// Engine, so it calls SaveScreenshot itself instead of using
+			// glyphengine.WithScreenshot.
+			if *shot != "" {
+				if err := rend.SaveScreenshot(*shot); err != nil {
+					log.Printf("screenshot: %v", err)
+				} else {
+					log.Printf("wrote screenshot %s", *shot)
+				}
+			}
 			log.Printf("rendered %d frames, exiting", count+1)
 			break
 		}

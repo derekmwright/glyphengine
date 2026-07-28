@@ -134,6 +134,7 @@ func main() {
 	fullscreen := flag.Bool("fullscreen", false, "run fullscreen on the primary monitor")
 	frames := flag.Int("frames", 0, "render N frames then exit (0 = run until closed)")
 	disk := flag.Bool("disk", false, "load assets from disk instead of the embedded FS")
+	shot := flag.String("screenshot", "", "write a PNG of the last frame to this path")
 	flag.Parse()
 
 	g := &game{assets: assetsFS}
@@ -153,6 +154,9 @@ func main() {
 	}
 	if *frames > 0 {
 		opts = append(opts, glyph.WithMaxFrames(*frames))
+	}
+	if *shot != "" {
+		opts = append(opts, glyph.WithScreenshot(*shot))
 	}
 
 	e, err := glyph.New(g, opts...)

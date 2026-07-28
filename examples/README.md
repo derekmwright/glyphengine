@@ -15,6 +15,7 @@ Each is a complete, self-contained `main()` — copy one and start editing.
 | 03 | `03-physics` | Colliders, gravity and ground snapping, spatial grids, mouse picking | none |
 | 04 | `04-first-person` | First-person camera, `MoveIntent`, character controller, wall collision | none |
 | 05 | `05-textures` | Loading assets from an `fs.FS` — embedded or on disk | 1 generated PNG |
+| 06 | `06-skinned` | Rigged glTF, GPU skinning, clip selection and cross-fade | Kenney CC0 character |
 | 07 | `07-terrain` | Procedural heightmap as both collision and geometry, walking over terrain | none |
 
 More land as the extraction proceeds — glTF loading, skinned animation,
@@ -34,6 +35,10 @@ the engine never downloads example code or assets. It carries a
 a plain `git clone`; the root `go.work` covers the same thing for workspace
 users. If you copy an example into your own project, drop that `replace` and
 `go get github.com/derekmwright/glyphengine` instead.
+
+**`-screenshot out.png`** writes a PNG of the last rendered frame, captured by
+the engine itself rather than by an external grabber. Combined with `-frames N`
+it is reproducible, which is how the images in the README are made.
 
 **`-frames N`** makes an example render a fixed number of frames and exit, which
 is how the smoke test and CI drive them without a human closing a window.

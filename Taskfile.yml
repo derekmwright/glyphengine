@@ -101,6 +101,7 @@ tasks:
       - go run ./03-physics -frames 60
       - go run ./04-first-person -frames 60
       - go run ./05-textures -frames 60
+      - go run ./06-skinned -frames 60
       - go run ./07-terrain -frames 60
 
   validate:
@@ -120,7 +121,7 @@ tasks:
       # because they surface at vkDestroyDevice rather than during rendering.
       - |
         status=0
-        for ex in 01-triangle 02-cube 03-physics 04-first-person 05-textures 07-terrain; do
+        for ex in 01-triangle 02-cube 03-physics 04-first-person 05-textures 06-skinned 07-terrain; do
           out=$(go run ./$ex -frames 30 2>&1) || { echo "$ex: FAILED TO RUN"; echo "$out"; status=1; continue; }
           msgs=$(echo "$out" | grep -cE "VULKAN (ERROR|WARNING)" || true)
           leaks=$(echo "$out" | grep -c "has not been destroyed" || true)
@@ -133,6 +134,17 @@ tasks:
           fi
         done
         exit $status
+
+  screenshots:
+    desc: Regenerate the documentation images in docs/images
+    dir: examples
+    cmds:
+      - go run ./01-triangle -frames 30 -screenshot ../docs/images/01-triangle.png
+      - go run ./02-cube -frames 150 -screenshot ../docs/images/02-cube.png
+      - go run ./03-physics -frames 150 -screenshot ../docs/images/03-physics.png
+      - go run ./05-textures -frames 90 -screenshot ../docs/images/05-textures.png
+      - go run ./06-skinned -demo -frames 200 -screenshot ../docs/images/06-skinned.png
+      - go run ./07-terrain -frames 150 -screenshot ../docs/images/07-terrain.png
 
   ci:
     desc: Run everything CI runs

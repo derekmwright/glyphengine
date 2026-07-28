@@ -78,6 +78,7 @@ type Renderer struct {
 	trianglePipelineLayout *core1_0.PipelineLayout
 
 	currentFrame       int
+	lastPresented      int // swapchain index of the most recent present; see CaptureFrame
 	framebufferResized bool
 	meshes             []*Mesh
 	jointBuffers       []*JointBuffer
@@ -226,6 +227,7 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 		win:           w,
 		msaaSamples:   core1_0.Samples2,
 		vsync:         true, // see WithVSync
+		lastPresented: -1,
 		shaders:       DefaultShaders(),
 		dynamicMeshes: make(map[*Mesh]*dynamicMesh),
 	}
@@ -796,6 +798,7 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, uiOv
 	}
 
 	// Present
+	r.lastPresented = imageIndex
 	presentResult, err := r.swapchainExt.QueuePresent(r.presentQueue, khr_swapchain.PresentInfo{
 		WaitSemaphores: []core1_0.Semaphore{r.sync.renderFinished[f]},
 		Swapchains:     []khr_swapchain.Swapchain{r.sc.swapchain},

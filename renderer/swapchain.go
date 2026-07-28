@@ -15,6 +15,10 @@ type swapchainDetails struct {
 	imageViews  []core1_0.ImageView
 	imageFormat core1_0.Format
 	extent      core1_0.Extent2D
+
+	// captureCapable records whether the images were created with
+	// TRANSFER_SRC, which CaptureFrame needs.
+	captureCapable bool
 }
 
 // chooseSwapSurfaceFormat picks B8G8R8A8 sRGB if available, otherwise the first format.
@@ -104,6 +108,18 @@ func createSwapchain(
 	presentMode := chooseSwapPresentMode(modes, vsync)
 	extent := chooseSwapExtent(capabilities, width, height)
 
+	// TransferSrc lets CaptureFrame read the presented image back. It is
+	// almost universally supported, but the spec does not guarantee it, so
+	// ask for it only when the surface advertises it — a screenshot is not
+	// worth failing swapchain creation over.
+	usage := core1_0.ImageUsageColorAttachment
+	captureSupported := capabilities.SupportedUsageFlags&core1_0.ImageUsageTransferSrc != 0
+	if captureSupported {
+		usage |= core1_0.ImageUsageTransferSrc
+	} else {
+		log.Println("Swapchain: surface does not support TRANSFER_SRC; CaptureFrame unavailable")
+	}
+
 	imageCount := capabilities.MinImageCount + 1
 	if capabilities.MaxImageCount > 0 && imageCount > capabilities.MaxImageCount {
 		imageCount = capabilities.MaxImageCount
@@ -116,7 +132,7 @@ func createSwapchain(
 		ImageColorSpace:  surfaceFormat.ColorSpace,
 		ImageExtent:      extent,
 		ImageArrayLayers: 1,
-		ImageUsage:       core1_0.ImageUsageColorAttachment,
+		ImageUsage:       usage,
 		PreTransform:     capabilities.CurrentTransform,
 		CompositeAlpha:   khr_surface.CompositeAlphaOpaque,
 		PresentMode:      presentMode,
@@ -175,10 +191,11 @@ func createSwapchain(
 		surfaceFormat.Format, presentMode, extent.Width, extent.Height, len(images))
 
 	return &swapchainDetails{
-		swapchain:   swapchain,
-		images:      images,
-		imageViews:  imageViews,
-		imageFormat: surfaceFormat.Format,
-		extent:      extent,
+		swapchain:      swapchain,
+		images:         images,
+		imageViews:     imageViews,
+		imageFormat:    surfaceFormat.Format,
+		extent:         extent,
+		captureCapable: captureSupported,
 	}, swapchainExt, nil
 }

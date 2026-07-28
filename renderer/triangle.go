@@ -174,6 +174,7 @@ func (r *Renderer) DrawTriangle() error {
 		return err
 	}
 
+	r.lastPresented = imageIndex
 	presentResult, err := r.swapchainExt.QueuePresent(r.presentQueue, khr_swapchain.PresentInfo{
 		WaitSemaphores: []core1_0.Semaphore{r.sync.renderFinished[f]},
 		Swapchains:     []khr_swapchain.Swapchain{r.sc.swapchain},
