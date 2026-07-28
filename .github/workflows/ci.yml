@@ -79,7 +79,8 @@ jobs:
 
   # Linux does not compile yet, and that is not our bug: vkngwrapper/core
   # v3.1.1 is missing an `unsafe` import in system_nonwindows.go. The fix is
-  # merged upstream but has never been tagged.
+  # merged upstream but has never been tagged — tracked in
+  # https://github.com/vkngwrapper/core/issues/13
   #
   # This job exists to notice the day that changes rather than to gate merges,
   # so it is allowed to fail. When it starts passing, drop continue-on-error,

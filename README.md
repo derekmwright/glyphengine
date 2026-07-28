@@ -29,7 +29,7 @@ go get github.com/derekmwright/glyphengine
 | Platform | Status |
 |---|---|
 | Windows | Supported, and where development happens |
-| Linux | Blocked upstream. `vkngwrapper/core` v3.1.1 is missing an `unsafe` import in `system_nonwindows.go` and does not compile. The fix is merged upstream but untagged. |
+| Linux | Blocked upstream. `vkngwrapper/core` v3.1.1 is missing an `unsafe` import in `system_nonwindows.go` and does not compile. The fix is merged on `main`; tracking a tag in [vkngwrapper/core#13](https://github.com/vkngwrapper/core/issues/13). |
 | macOS | Untested. Expect missing CGo flags and no MoltenVK portability handling. |
 
 ## Hello, triangle
