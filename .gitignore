@@ -1,0 +1,22 @@
+# Build output
+/dist/
+/.task/
+
+# Binaries
+*.exe
+*.test
+*.out
+
+# Profiling
+*.prof
+
+# Logs
+*.log
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# NOTE: shaders/*.spv are intentionally NOT ignored -- see .gitattributes.

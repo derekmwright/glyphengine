@@ -1,0 +1,20 @@
+# Normalize line endings; Go sources are LF in the repo.
+* text=auto eol=lf
+
+# Compiled SPIR-V is committed on purpose: shaders/shaders.go embeds it with
+# go:embed, so without these files the module does not build for anyone who
+# `go get`s it. glslc is therefore an authoring-only dependency.
+*.spv binary
+
+# Binary assets. Deliberately NOT tracked with Git LFS -- the Go module proxy
+# does not run LFS smudge, so consumers would receive pointer stubs where
+# go:embed and the asset loaders expect real content.
+*.png  binary
+*.jpg  binary
+*.glb  binary
+*.bin  binary
+*.wav  binary
+*.ogg  binary
+*.mp3  binary
+*.ttf  binary
+*.heightmap binary
