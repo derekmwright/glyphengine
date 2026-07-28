@@ -1,0 +1,147 @@
+version: "3"
+
+vars:
+  EXE: '{{if eq OS "windows"}}.exe{{end}}'
+  VERSION:
+    sh: git describe --tags --always --dirty 2>/dev/null || echo dev
+
+env:
+  CGO_ENABLED: "1"
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+    silent: true
+
+  # ───────────────────────── examples ─────────────────────────
+
+  examples:
+    desc: List the runnable examples
+    dir: examples
+    cmds:
+      - 'echo "Runnable examples (task example:<name>):"'
+      - 'ls -d [0-9]*/ | sed "s#/##" | sed "s/^/  /"'
+    silent: true
+
+  "example:*":
+    desc: "Run one example, e.g. task example:01-triangle"
+    vars:
+      NAME: '{{index .MATCH 0}}'
+    dir: 'examples/{{.NAME}}'
+    cmds:
+      - go run . {{.CLI_ARGS}}
+
+  # ───────────────────────── shaders ─────────────────────────
+  # .spv files are COMMITTED on purpose: shaders/shaders.go embeds them with
+  # go:embed, so without them the module will not build for anyone who runs
+  # `go get`. glslc is therefore only needed when editing GLSL.
+
+  shaders:
+    desc: Compile GLSL to SPIR-V (requires VULKAN_SDK; only needed when editing shaders)
+    dir: shaders
+    cmds:
+      - for f in *.vert *.frag; do "${VULKAN_SDK}/bin/glslc{{.EXE}}" "$f" -o "$f.spv"; done
+    sources:
+      - shaders/*.vert
+      - shaders/*.frag
+      - shaders/*.inc
+    generates:
+      - shaders/*.spv
+
+  # ───────────────────────── quality ─────────────────────────
+
+  build:
+    desc: Build the engine and all examples
+    cmds:
+      - go build ./...
+      - go build -C examples ./...
+
+  test:
+    desc: Run all tests
+    cmds:
+      - go test ./... -count=1
+
+  test:race:
+    desc: Run tests under the race detector (the parallel movement phase needs it)
+    cmds:
+      - go test -race ./... -count=1
+
+  fmt:
+    desc: Format all Go code
+    cmds:
+      - gofmt -w .
+
+  lint:
+    desc: Check formatting, then vet
+    cmds:
+      # -unsafeptr=false: window.go bridges a GLFW surface handle through
+      # unsafe.Pointer on purpose, and the check has no way to know that.
+      - |
+        unformatted=$(gofmt -l .)
+        if [ -n "$unformatted" ]; then
+          echo "Not gofmt'd:"
+          echo "$unformatted"
+          exit 1
+        fi
+      - go vet -unsafeptr=false ./...
+      # -C must be the first flag on the command line.
+      - go vet -C examples -unsafeptr=false ./...
+
+  smoke:
+    desc: "Headless-ish smoke test: render a fixed number of frames of every example and exit"
+    dir: examples
+    cmds:
+      # A non-zero exit from any of these means the Vulkan path broke. Frame
+      # counts are small on purpose -- this checks that pipelines build and
+      # frames present, not that the image looks right.
+      - go run ./01-triangle -frames 60
+      - go run ./02-cube -frames 60
+      - go run ./03-physics -frames 60
+      - go run ./04-first-person -frames 60
+      - go run ./07-terrain -frames 60
+
+  validate:
+    desc: "Run every example under the Vulkan validation layer; fails on leaked objects"
+    dir: examples
+    env:
+      GLYPHENGINE_VALIDATION: "1"
+    cmds:
+      # Requires a GPU and the Vulkan SDK, so this is deliberately not part of
+      # `task ci`.
+      #
+      # Every example is expected to run completely silent under the layer, so
+      # this fails on ANY validation message -- not just leaks. That is a
+      # strict gate on purpose: Vulkan misuse is usually invisible until it
+      # corrupts a frame on hardware you do not own, and the only cheap signal
+      # is "the layer said something". Leaked objects are reported separately
+      # because they surface at vkDestroyDevice rather than during rendering.
+      - |
+        status=0
+        for ex in 01-triangle 02-cube 03-physics 04-first-person 07-terrain; do
+          out=$(go run ./$ex -frames 30 2>&1) || { echo "$ex: FAILED TO RUN"; echo "$out"; status=1; continue; }
+          msgs=$(echo "$out" | grep -cE "VULKAN (ERROR|WARNING)" || true)
+          leaks=$(echo "$out" | grep -c "has not been destroyed" || true)
+          if [ "$msgs" -ne 0 ]; then
+            echo "$ex: $msgs validation message(s), $leaks of them leaked objects"
+            echo "$out" | grep -E "VULKAN (ERROR|WARNING)" | head -20
+            status=1
+          else
+            echo "$ex: clean"
+          fi
+        done
+        exit $status
+
+  ci:
+    desc: Run everything CI runs
+    cmds:
+      - task: lint
+      - task: build
+      - task: test
+      - task: test:race
+
+  clean:
+    desc: Remove build output
+    cmds:
+      - rm -rf dist .task

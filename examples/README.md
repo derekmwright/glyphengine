@@ -1,0 +1,38 @@
+# Examples
+
+One concept per example. Run any of them with:
+
+```
+task example:<name>
+```
+
+Each is a complete, self-contained `main()` — copy one and start editing.
+
+| # | Name | Teaches | Assets |
+|---|---|---|---|
+| 01 | `01-triangle` | Window, renderer, input loop, the Vulkan smoke test | none |
+| 02 | `02-cube` | `Game`, `Scene`, entities and components, orbit camera, day/night | none |
+| 03 | `03-physics` | Colliders, gravity and ground snapping, spatial grids, mouse picking | none |
+| 04 | `04-first-person` | First-person camera, `MoveIntent`, character controller, wall collision | none |
+| 07 | `07-terrain` | Procedural heightmap as both collision and geometry, walking over terrain | none |
+
+More land as the extraction proceeds — glTF loading, skinned animation,
+shadows, MSDF text, YAML UI, audio, and particles. Numbering has gaps on
+purpose: each slot is reserved for the concept it will teach, so the ladder
+stays in a sensible reading order as it fills in. See `docs/agents/` for
+capability-level documentation.
+
+## Notes
+
+**Start with `01-triangle`.** It loads nothing from disk, so if it runs your
+toolchain is correct. Debug there before anything else.
+
+**This is a separate Go module.** `examples/go.mod` exists so that `go get` of
+the engine never downloads example code or assets. It carries a
+`replace github.com/derekmwright/glyphengine => ../` so the examples build from
+a plain `git clone`; the root `go.work` covers the same thing for workspace
+users. If you copy an example into your own project, drop that `replace` and
+`go get github.com/derekmwright/glyphengine` instead.
+
+**`-frames N`** makes an example render a fixed number of frames and exit, which
+is how the smoke test and CI drive them without a human closing a window.

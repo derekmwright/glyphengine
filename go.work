@@ -1,0 +1,10 @@
+go 1.26.2
+
+// The examples live in their own module so that `go get` of the engine never
+// pulls example code or assets, while `git clone` still gets everything. This
+// workspace makes local edits to the engine resolve for the examples without
+// any replace directive -- and go.work is ignored by consumers.
+use (
+	.
+	./examples
+)
