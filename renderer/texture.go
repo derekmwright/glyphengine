@@ -21,6 +21,8 @@ type Texture struct {
 	view          core1_0.ImageView
 	sampler       core1_0.Sampler
 	DescriptorSet core1_0.DescriptorSet
+
+	destroyed bool
 }
 
 // createDescriptorSetLayout creates a layout with a single combined image sampler
@@ -777,6 +779,20 @@ func (r *Renderer) createFallbackTexture() (*Texture, error) {
 
 // DestroyTexture releases GPU resources for a texture.
 func (r *Renderer) DestroyTexture(t *Texture) {
+	if t == nil || t.destroyed {
+		return
+	}
+	t.destroyed = true
+
+	// Deregister for the same reason as DestroyMesh: the renderer's own
+	// cleanup would otherwise free these handles a second time.
+	for i, other := range r.textures {
+		if other == t {
+			r.textures = append(r.textures[:i], r.textures[i+1:]...)
+			break
+		}
+	}
+
 	r.deviceDriver.DestroySampler(t.sampler, nil)
 	r.deviceDriver.DestroyImageView(t.view, nil)
 	r.deviceDriver.FreeMemory(t.memory, nil)

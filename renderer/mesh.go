@@ -21,6 +21,8 @@ type Mesh struct {
 
 	BoundCenter [3]float32 // object-space bounding sphere center
 	BoundRadius float32    // object-space bounding sphere radius (0 = skip culling)
+
+	destroyed bool
 }
 
 func computeBoundingSphere(vertices []Vertex) ([3]float32, float32) {
@@ -393,11 +395,30 @@ func (r *Renderer) flushDynamicMeshes(frame int) {
 // DestroyMesh releases GPU resources for a mesh. Dynamic meshes are destroyed
 // after all in-flight frames finish referencing them.
 func (r *Renderer) DestroyMesh(m *Mesh) {
+	if m == nil || m.destroyed {
+		return
+	}
+	m.destroyed = true
+
+	// The renderer also tracks every mesh it hands out so Destroy can clean up
+	// after an application that did not. Dropping the mesh from that list here
+	// is not bookkeeping -- without it, an explicit DestroyMesh is followed by
+	// a second free at shutdown, and the validation layer reports the buffer
+	// and its memory as invalid handles.
+	for i, other := range r.meshes {
+		if other == m {
+			r.meshes = append(r.meshes[:i], r.meshes[i+1:]...)
+			break
+		}
+	}
+
 	if dm, ok := r.dynamicMeshes[m]; ok {
 		delete(r.dynamicMeshes, m)
 		r.DeferDestroy(func() { dm.destroy(r.deviceDriver) })
 		return
 	}
+	// A mesh created without indices leaves indexBuffer zeroed, whose handle
+	// is 0.
 	if m.indexBuffer.Handle() != 0 {
 		r.deviceDriver.DestroyBuffer(m.indexBuffer, nil)
 		r.deviceDriver.FreeMemory(m.indexMemory, nil)

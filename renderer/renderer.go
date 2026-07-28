@@ -843,14 +843,25 @@ func (r *Renderer) Destroy() {
 	// Application-owned resources, which are created after New and so are not
 	// on the init stack.
 	r.destroyTrianglePipeline()
-	for _, t := range r.textures {
+
+	// Hand the tracking lists off before destroying anything. The Destroy*
+	// methods deregister as they go, and mutating a slice while ranging over it
+	// shifts the backing array under the loop index -- which silently skips
+	// every second entry and leaks it.
+	textures, meshes, joints := r.textures, r.meshes, r.jointBuffers
+	r.textures, r.meshes, r.jointBuffers = nil, nil, nil
+	for _, t := range textures {
 		r.DestroyTexture(t)
 	}
-	r.textures = nil
-	for _, m := range r.meshes {
+	for _, m := range meshes {
 		r.DestroyMesh(m)
 	}
-	r.meshes = nil
+	// Joint buffers are swept for the same reason meshes are: an application
+	// that loads a skinned model and never explicitly releases it should still
+	// shut down clean.
+	for _, jb := range joints {
+		r.DestroyJointBuffer(jb)
+	}
 
 	// Dynamic meshes queue their buffer destruction via DeferDestroy; the GPU
 	// is already idle, so run anything queued during the loop above.
