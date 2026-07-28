@@ -1,0 +1,213 @@
+# ============================================================================
+# yamlui integration fixture
+# ============================================================================
+# Exercises every supported widget type (panel, label, button, progress_bar,
+# scroll_view, icon, text_input) plus the layout engine (vertical/horizontal,
+# flex, gap, padding, fixed sizes) and template bindings (text, value, max,
+# visible, disabled). Deliberately game-neutral: this file belongs to the
+# engine and must not depend on any consumer's assets.
+# ============================================================================
+
+widget: panel
+id: root_window
+width: 640
+height: 480
+nine_slice: panel_dark
+color: [1, 1, 1]
+opacity: 1.0
+padding: 0
+layout: vertical
+gap: 0
+children:
+
+  # ── Accent rule ────────────────────────────────────────────────────────
+  - widget: panel
+    height: 3
+    nine_slice: divider_accent
+    color: [0.784, 0.651, 0.306]
+
+  # ── Header: title, flex spacer, right-aligned subtitle ─────────────────
+  - widget: panel
+    id: header
+    height: 48
+    nine_slice: panel_raised
+    color: [1, 1, 1]
+    padding: 12
+    layout: horizontal
+    gap: 10
+    children:
+      - widget: label
+        id: title_label
+        text: "{title}"
+        font: title
+        font_size: 20
+        color: [0.784, 0.651, 0.306]
+        align: left
+
+      - widget: panel
+        id: header_spacer
+        flex: 1
+
+      - widget: label
+        id: subtitle_label
+        text: "Kitchen Sink"
+        font: body
+        font_size: 12
+        color: [0.541, 0.533, 0.502]
+        align: right
+
+  - widget: panel
+    height: 1
+    nine_slice: border_dark
+    color: [1, 1, 1]
+
+  # ── Body: fixed-width sidebar | separator | flexible detail pane ───────
+  - widget: panel
+    id: body
+    flex: 1
+    layout: horizontal
+    gap: 0
+    children:
+
+      # ── Sidebar ──────────────────────────────────────────────────────
+      - widget: panel
+        id: sidebar
+        width: 240
+        layout: vertical
+        gap: 0
+        children:
+          - widget: panel
+            padding: 10
+            children:
+              - widget: label
+                id: sidebar_heading
+                text: "ITEMS"
+                font: display
+                font_size: 11
+                color: [0.541, 0.447, 0.204]
+
+          - widget: text_input
+            id: filter_input
+            height: 24
+            text: "{filter_text}"
+            font: body
+            font_size: 12
+            nine_slice: input_bg
+            color: [1, 1, 1]
+            fg_color: [0.9, 0.9, 0.9]
+
+          - widget: scroll_view
+            id: item_scroll
+            flex: 1
+            scroll_direction: vertical
+            gap: 2
+            padding: 4
+
+      - widget: panel
+        width: 1
+        nine_slice: border_dark
+        color: [1, 1, 1]
+
+      # ── Detail pane: placeholder XOR detail, toggled by bindings ──────
+      - widget: panel
+        id: detail_pane
+        flex: 1
+        layout: vertical
+        gap: 0
+        children:
+
+          - widget: panel
+            id: placeholder
+            flex: 1
+            visible: "{show_placeholder}"
+            padding: 20
+            layout: vertical
+            gap: 8
+            children:
+              - widget: panel
+                flex: 1
+              - widget: label
+                text: "NOTHING SELECTED"
+                font: display
+                font_size: 18
+                color: [0.541, 0.533, 0.502]
+                align: center
+              - widget: panel
+                flex: 1
+
+          - widget: panel
+            id: detail_view
+            flex: 1
+            visible: "{show_detail}"
+            layout: vertical
+            gap: 0
+            children:
+
+              - widget: panel
+                id: detail_head
+                padding: 16
+                layout: horizontal
+                gap: 8
+                children:
+                  - widget: icon
+                    id: detail_icon
+                    width: 32
+                    height: 32
+                    texture: "{selected_icon}"
+                    color: [1, 1, 1]
+
+                  - widget: label
+                    id: detail_name
+                    text: "{selected_name}"
+                    font: display
+                    font_size: 18
+                    color: [0.784, 0.651, 0.306]
+
+              - widget: panel
+                height: 1
+                nine_slice: divider_subtle
+                color: [1, 1, 1]
+
+              - widget: scroll_view
+                id: detail_scroll
+                flex: 1
+                scroll_direction: vertical
+                gap: 4
+                padding: 16
+
+              # ── Action bar: button + bound progress bar ───────────────
+              - widget: panel
+                id: action_bar
+                height: 64
+                padding: 6
+                layout: vertical
+                gap: 4
+                nine_slice: panel_mid
+                color: [1, 1, 1]
+                children:
+                  - widget: button
+                    id: action_button
+                    height: 32
+                    text: "{action_label}"
+                    font: title
+                    font_size: 14
+                    nine_slice: btn_primary
+                    color: [1, 1, 1]
+                    fg_color: [0.05, 0.05, 0.05]
+                    disabled: "{action_disabled}"
+                    on_click: action_execute
+
+                  - widget: progress_bar
+                    id: action_progress
+                    height: 12
+                    visible: "{action_active}"
+                    nine_slice: bar_bg
+                    fg_nine_slice: bar_fg
+                    value: "{action_value}"
+                    max: "{action_max}"
+
+  - widget: panel
+    height: 2
+    nine_slice: divider_accent
+    color: [0.784, 0.651, 0.306]
+    opacity: 0.5

@@ -1,0 +1,884 @@
+package renderer
+
+import (
+	"log"
+	"math"
+	"unsafe"
+
+	"github.com/go-gl/mathgl/mgl32"
+	"github.com/vkngwrapper/core/v3/core1_0"
+)
+
+// MaxPointLights is the maximum number of unshadowed point lights supported.
+const MaxPointLights = 32
+
+// PointLightData matches the GLSL struct layout: vec4 posRange + vec4 color = 32 bytes.
+type PointLightData struct {
+	Pos   [3]float32
+	Range float32
+	Color [3]float32
+	Pad   float32
+}
+
+// SceneLighting holds global lighting parameters passed via push constants.
+type SceneLighting struct {
+	SunDir      [3]float32  // direction toward the sun (normalized)
+	SunColor    [3]float32  // sun RGB
+	PointPos    [3]float32  // point light world position
+	PointRange  float32     // point light falloff range
+	PointColor  [3]float32  // point light RGB
+	Ambient     [3]float32  // ambient RGB
+	SkyColor    [4]float32  // RGBA clear color for the sky
+	InvVP       [16]float32 // inverse view-projection for stars
+	CameraPos   [3]float32  // camera eye position for stars
+	Time        float32     // elapsed time for star twinkling
+	NightFactor float32     // 0=day, 1=night for star visibility
+
+	VP            [16]float32                // camera view-projection matrix (for instanced grass)
+	CameraRight   [3]float32                 // camera right vector (for billboard particles)
+	CameraUp      [3]float32                 // camera up vector (for billboard particles)
+	CascadeVPs    [ShadowCascades]mgl32.Mat4 // per-cascade light view-projections for shadow mapping
+	ShadowEnabled bool                       // true when the sun is above the horizon
+
+	PointLights     [MaxPointLights]PointLightData // unshadowed point lights
+	PointLightCount int                            // number of active unshadowed point lights (0..32)
+
+	FogDensity float32 // exp² distance fog density (0 disables fog)
+}
+
+// RenderObject pairs a mesh with its MVP matrix, model matrix, tint color, and optional texture for drawing.
+type RenderObject struct {
+	Mesh         *Mesh
+	Texture      *Texture
+	MVP          [16]float32
+	Model        [16]float32
+	Color        [3]float32
+	Metallic     float32          // 0 = dielectric, 1 = metal
+	Roughness    float32          // 0 = mirror, 1 = matte (default 0.5)
+	Emissive     bool             // bypass lighting in lit shader (tint.w = 1.0)
+	DoubleSided  bool             // render both front and back faces (no culling)
+	NoCastShadow bool             // skip this object in shadow pass (receives shadows only)
+	ShadowOnly   bool             // in light frustum but not camera frustum — shadow pass only
+	Joints       *JointBuffer     // non-nil = skinned mesh
+	TerrainMat   *TerrainMaterial // non-nil = render via the terrain splat pipeline
+}
+
+// SortKey groups draws to minimize state switches in the main pass: pipeline
+// variant (skinned / double-sided) first, then texture descriptor.
+func (d *RenderObject) SortKey() uint64 {
+	var key uint64
+	if d.Joints != nil {
+		key |= 1 << 63
+	}
+	if d.DoubleSided {
+		key |= 1 << 62
+	}
+	if d.Texture != nil {
+		key |= uint64(uintptr(d.Texture.DescriptorSet.Handle())) & (1<<62 - 1)
+	}
+	return key
+}
+
+// worldBoundSphere returns the draw's mesh bounding sphere transformed to
+// world space. A zero radius means the mesh has no bounds (always draw).
+func (d *RenderObject) worldBoundSphere() (cx, cy, cz, r float32) {
+	if d.Mesh.BoundRadius <= 0 {
+		return 0, 0, 0, 0
+	}
+	m := &d.Model
+	c := d.Mesh.BoundCenter
+	cx = m[0]*c[0] + m[4]*c[1] + m[8]*c[2] + m[12]
+	cy = m[1]*c[0] + m[5]*c[1] + m[9]*c[2] + m[13]
+	cz = m[2]*c[0] + m[6]*c[1] + m[10]*c[2] + m[14]
+	sx := float32(math.Sqrt(float64(m[0]*m[0] + m[1]*m[1] + m[2]*m[2])))
+	sy := float32(math.Sqrt(float64(m[4]*m[4] + m[5]*m[5] + m[6]*m[6])))
+	sz := float32(math.Sqrt(float64(m[8]*m[8] + m[9]*m[9] + m[10]*m[10])))
+	r = d.Mesh.BoundRadius * max(sx, sy, sz)
+	return cx, cy, cz, r
+}
+
+// pushConstantSize is the total push constant block size in bytes.
+// Layout: mvp(64) + model(64) + tint(16) + sunDir(16) + sunColor(16) + pointPos(16) + pointColor(16) + ambient(16) + cameraPos(16) = 240
+const pushConstantSize = 240
+
+// createFramebuffers creates one framebuffer per swapchain image view, each
+// referencing its own color and depth attachments.
+func createFramebuffers(deviceDriver core1_0.DeviceDriver, renderPass core1_0.RenderPass, imageViews []core1_0.ImageView, depthViews []core1_0.ImageView, msaaViews []core1_0.ImageView, extent core1_0.Extent2D) ([]core1_0.Framebuffer, error) {
+	framebuffers := make([]core1_0.Framebuffer, len(imageViews))
+
+	for i, view := range imageViews {
+		var attachments []core1_0.ImageView
+		if msaaViews != nil {
+			// MSAA: [msaaColor, depth, resolve(swapchain)]
+			attachments = []core1_0.ImageView{msaaViews[i], depthViews[i], view}
+		} else {
+			// No MSAA: [color(swapchain), depth]
+			attachments = []core1_0.ImageView{view, depthViews[i]}
+		}
+		fb, _, err := deviceDriver.CreateFramebuffer(nil, core1_0.FramebufferCreateInfo{
+			RenderPass:  renderPass,
+			Attachments: attachments,
+			Width:       extent.Width,
+			Height:      extent.Height,
+			Layers:      1,
+		})
+		if err != nil {
+			return nil, err
+		}
+		framebuffers[i] = fb
+	}
+
+	log.Printf("Created %d framebuffers", len(framebuffers))
+	return framebuffers, nil
+}
+
+// createCommandPool creates a command pool for the graphics queue family with
+// per-buffer reset support.
+func createCommandPool(deviceDriver core1_0.DeviceDriver, graphicsFamily int) (core1_0.CommandPool, error) {
+	pool, _, err := deviceDriver.CreateCommandPool(nil, core1_0.CommandPoolCreateInfo{
+		Flags:            core1_0.CommandPoolCreateResetBuffer,
+		QueueFamilyIndex: graphicsFamily,
+	})
+	if err != nil {
+		return core1_0.CommandPool{}, err
+	}
+
+	log.Println("Command pool created")
+	return pool, nil
+}
+
+// createCommandBuffers allocates primary command buffers from the pool.
+func createCommandBuffers(deviceDriver core1_0.DeviceDriver, pool core1_0.CommandPool, count int) ([]core1_0.CommandBuffer, error) {
+	buffers, _, err := deviceDriver.AllocateCommandBuffers(core1_0.CommandBufferAllocateInfo{
+		CommandPool:        pool,
+		Level:              core1_0.CommandBufferLevelPrimary,
+		CommandBufferCount: count,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	log.Printf("Allocated %d command buffers", len(buffers))
+	return buffers, nil
+}
+
+// packLightingPC fills push constant floats [36..59] with lighting + camera data.
+// Metallic/roughness are per-object and packed by the caller at [51] and [55].
+func packLightingPC(pc *[60]float32, lighting SceneLighting) {
+	// tint is at [32..35], filled by caller
+	// sunDir vec4 at [36..39]
+	pc[36] = lighting.SunDir[0]
+	pc[37] = lighting.SunDir[1]
+	pc[38] = lighting.SunDir[2]
+	pc[39] = 0 // padding
+	// sunColor vec4 at [40..43] (w = nightFactor for fog horizon color)
+	pc[40] = lighting.SunColor[0]
+	pc[41] = lighting.SunColor[1]
+	pc[42] = lighting.SunColor[2]
+	pc[43] = lighting.NightFactor
+	// pointPos vec4 at [44..47] (xyz = pos, w = range)
+	pc[44] = lighting.PointPos[0]
+	pc[45] = lighting.PointPos[1]
+	pc[46] = lighting.PointPos[2]
+	pc[47] = lighting.PointRange
+	// pointColor vec4 at [48..51] (w = roughness, set by caller)
+	pc[48] = lighting.PointColor[0]
+	pc[49] = lighting.PointColor[1]
+	pc[50] = lighting.PointColor[2]
+	// pc[51] = roughness — set by caller per-object
+	// ambient vec4 at [52..55] (w = metallic, set by caller)
+	pc[52] = lighting.Ambient[0]
+	pc[53] = lighting.Ambient[1]
+	pc[54] = lighting.Ambient[2]
+	// pc[55] = metallic — set by caller per-object
+	// cameraPos vec4 at [56..59] (w = fog density)
+	pc[56] = lighting.CameraPos[0]
+	pc[57] = lighting.CameraPos[1]
+	pc[58] = lighting.CameraPos[2]
+	pc[59] = lighting.FogDensity
+}
+
+// recordCommandBuffer records the shadow depth pass followed by the main render pass
+// that draws all scene objects and overlays.
+func recordCommandBuffer(
+	deviceDriver core1_0.DeviceDriver,
+	cmdBuf core1_0.CommandBuffer,
+	renderPass core1_0.RenderPass,
+	framebuffer core1_0.Framebuffer,
+	pipeline core1_0.Pipeline,
+	litDoubleSidedPipeline core1_0.Pipeline,
+	overlayPipeline core1_0.Pipeline,
+	skyPipeline core1_0.Pipeline,
+	starsPipeline core1_0.Pipeline,
+	uiPipeline core1_0.Pipeline,
+	msdfPipeline core1_0.Pipeline,
+	skinnedPipeline core1_0.Pipeline,
+	grassPipeline core1_0.Pipeline,
+	particlePipeline core1_0.Pipeline,
+	terrainPipeline core1_0.Pipeline,
+	pipelineLayout core1_0.PipelineLayout,
+	litPipelineLayout core1_0.PipelineLayout,
+	skinnedPipelineLayout core1_0.PipelineLayout,
+	terrainPipelineLayout core1_0.PipelineLayout,
+	extent core1_0.Extent2D,
+	draws []RenderObject,
+	overlays []RenderObject,
+	uiOverlays []UIRenderObject,
+	msdfOverlays []RenderObject,
+	lighting SceneLighting,
+	fallbackTexture *Texture,
+	shadow *shadowResources,
+	grass *GrassSystem,
+	particles *ParticleSystem,
+	frame int,
+	msaaEnabled bool,
+) error {
+	_, err := deviceDriver.BeginCommandBuffer(cmdBuf, core1_0.CommandBufferBeginInfo{})
+	if err != nil {
+		return err
+	}
+
+	// ── Sun shadow depth passes (one per cascade) ──
+	// Always run each pass to ensure the depth layer is cleared to 1.0
+	// (fully lit). When shadows are disabled, we clear but skip drawing geometry.
+	for cascade := 0; cascade < ShadowCascades; cascade++ {
+		err = deviceDriver.CmdBeginRenderPass(cmdBuf, core1_0.SubpassContentsInline, core1_0.RenderPassBeginInfo{
+			RenderPass:  shadow.renderPass,
+			Framebuffer: shadow.framebuffers[frame][cascade],
+			RenderArea: core1_0.Rect2D{
+				Offset: core1_0.Offset2D{X: 0, Y: 0},
+				Extent: core1_0.Extent2D{Width: ShadowMapSize, Height: ShadowMapSize},
+			},
+			ClearValues: []core1_0.ClearValue{
+				core1_0.ClearValueDepthStencil{Depth: 1.0, Stencil: 0},
+			},
+		})
+		if err != nil {
+			return err
+		}
+
+		if lighting.ShadowEnabled {
+			cascadeVP := lighting.CascadeVPs[cascade]
+			cascadeFrustum := ExtractFrustum(cascadeVP)
+
+			shadowViewport := core1_0.Viewport{
+				X: 0, Y: 0,
+				Width: ShadowMapSize, Height: ShadowMapSize,
+				MinDepth: 0, MaxDepth: 1,
+			}
+			shadowScissor := core1_0.Rect2D{
+				Offset: core1_0.Offset2D{X: 0, Y: 0},
+				Extent: core1_0.Extent2D{Width: ShadowMapSize, Height: ShadowMapSize},
+			}
+
+			deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, shadow.pipeline)
+			deviceDriver.CmdSetViewport(cmdBuf, shadowViewport)
+			deviceDriver.CmdSetScissor(cmdBuf, shadowScissor)
+			currentShadowSkinned := false
+
+			for i := range draws {
+				d := &draws[i]
+				if d.Emissive || d.NoCastShadow {
+					continue // skip emissive (celestial bodies) and non-shadow-casters (ground)
+				}
+
+				// Cull casters outside this cascade's frustum.
+				if cx, cy, cz, cr := d.worldBoundSphere(); cr > 0 && !cascadeFrustum.SphereInFrustum(cx, cy, cz, cr) {
+					continue
+				}
+
+				skinned := d.Joints != nil
+				if skinned != currentShadowSkinned {
+					if skinned {
+						deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, shadow.skinnedPipeline)
+					} else {
+						deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, shadow.pipeline)
+					}
+					deviceDriver.CmdSetViewport(cmdBuf, shadowViewport)
+					deviceDriver.CmdSetScissor(cmdBuf, shadowScissor)
+					currentShadowSkinned = skinned
+				}
+
+				if skinned {
+					deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, shadow.skinnedPipelineLayout, 0, []core1_0.DescriptorSet{d.Joints.descriptorSets[frame]}, nil)
+				}
+
+				deviceDriver.CmdBindVertexBuffers(cmdBuf, 0, []core1_0.Buffer{d.Mesh.vertexBuffer}, []int{0})
+
+				// Push constants: cascadeVP * model as MVP, and model matrix
+				lightModel := cascadeVP.Mul4(d.Model)
+				var shadowPC [32]float32
+				copy(shadowPC[:16], lightModel[:])
+				copy(shadowPC[16:32], d.Model[:])
+				activeLayout := shadow.pipelineLayout
+				if skinned {
+					activeLayout = shadow.skinnedPipelineLayout
+				}
+				pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&shadowPC[0])), 128)
+				deviceDriver.CmdPushConstants(cmdBuf, activeLayout, core1_0.StageVertex, 0, pcBytes)
+
+				if d.Mesh.IndexCount > 0 {
+					deviceDriver.CmdBindIndexBuffer(cmdBuf, d.Mesh.indexBuffer, 0, d.Mesh.indexType)
+					deviceDriver.CmdDrawIndexed(cmdBuf, d.Mesh.IndexCount, 1, 0, 0, 0)
+				} else {
+					deviceDriver.CmdDraw(cmdBuf, d.Mesh.VertexCount, 1, 0, 0)
+				}
+			}
+		}
+
+		deviceDriver.CmdEndRenderPass(cmdBuf)
+	}
+
+	// ── Point light cube shadow pass (6 faces) ──
+	if lighting.PointRange > 0 {
+		cubeViewport := core1_0.Viewport{
+			X: 0, Y: 0,
+			Width: PointShadowMapSize, Height: PointShadowMapSize,
+			MinDepth: 0, MaxDepth: 1,
+		}
+		cubeScissor := core1_0.Rect2D{
+			Offset: core1_0.Offset2D{X: 0, Y: 0},
+			Extent: core1_0.Extent2D{Width: PointShadowMapSize, Height: PointShadowMapSize},
+		}
+
+		lightPos := mgl32.Vec3{lighting.PointPos[0], lighting.PointPos[1], lighting.PointPos[2]}
+
+		// Pre-cull casters against the light's range sphere once; the face
+		// loops below then only frustum-test this subset. A zero radius means
+		// unbounded — always considered in range.
+		type cubeCaster struct {
+			idx            int
+			cx, cy, cz, cr float32
+		}
+		casters := make([]cubeCaster, 0, len(draws))
+		for i := range draws {
+			d := &draws[i]
+			if d.Emissive || d.NoCastShadow {
+				continue
+			}
+			cx, cy, cz, cr := d.worldBoundSphere()
+			if cr > 0 {
+				dx := cx - lightPos.X()
+				dy := cy - lightPos.Y()
+				dz := cz - lightPos.Z()
+				reach := lighting.PointRange + cr
+				if dx*dx+dy*dy+dz*dz > reach*reach {
+					continue
+				}
+			}
+			casters = append(casters, cubeCaster{idx: i, cx: cx, cy: cy, cz: cz, cr: cr})
+		}
+
+		for face := 0; face < 6; face++ {
+			faceVP := ComputeCubeFaceVP(lightPos, lighting.PointRange, face)
+			faceFrustum := ExtractFrustum(faceVP)
+
+			err = deviceDriver.CmdBeginRenderPass(cmdBuf, core1_0.SubpassContentsInline, core1_0.RenderPassBeginInfo{
+				RenderPass:  shadow.renderPass,
+				Framebuffer: shadow.cubeFramebuffers[frame][face],
+				RenderArea: core1_0.Rect2D{
+					Offset: core1_0.Offset2D{X: 0, Y: 0},
+					Extent: core1_0.Extent2D{Width: PointShadowMapSize, Height: PointShadowMapSize},
+				},
+				ClearValues: []core1_0.ClearValue{
+					core1_0.ClearValueDepthStencil{Depth: 1.0, Stencil: 0},
+				},
+			})
+			if err != nil {
+				return err
+			}
+
+			deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, shadow.pipeline)
+			deviceDriver.CmdSetViewport(cmdBuf, cubeViewport)
+			deviceDriver.CmdSetScissor(cmdBuf, cubeScissor)
+			currentCubeSkinned := false
+
+			for _, c := range casters {
+				d := &draws[c.idx]
+				if c.cr > 0 && !faceFrustum.SphereInFrustum(c.cx, c.cy, c.cz, c.cr) {
+					continue
+				}
+
+				skinned := d.Joints != nil
+				if skinned != currentCubeSkinned {
+					if skinned {
+						deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, shadow.skinnedPipeline)
+					} else {
+						deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, shadow.pipeline)
+					}
+					deviceDriver.CmdSetViewport(cmdBuf, cubeViewport)
+					deviceDriver.CmdSetScissor(cmdBuf, cubeScissor)
+					currentCubeSkinned = skinned
+				}
+
+				if skinned {
+					deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, shadow.skinnedPipelineLayout, 0, []core1_0.DescriptorSet{d.Joints.descriptorSets[frame]}, nil)
+				}
+
+				deviceDriver.CmdBindVertexBuffers(cmdBuf, 0, []core1_0.Buffer{d.Mesh.vertexBuffer}, []int{0})
+
+				faceMVP := faceVP.Mul4(d.Model)
+				var cubePC [32]float32
+				copy(cubePC[:16], faceMVP[:])
+				copy(cubePC[16:32], d.Model[:])
+				activeLayout := shadow.pipelineLayout
+				if skinned {
+					activeLayout = shadow.skinnedPipelineLayout
+				}
+				pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&cubePC[0])), 128)
+				deviceDriver.CmdPushConstants(cmdBuf, activeLayout, core1_0.StageVertex, 0, pcBytes)
+
+				if d.Mesh.IndexCount > 0 {
+					deviceDriver.CmdBindIndexBuffer(cmdBuf, d.Mesh.indexBuffer, 0, d.Mesh.indexType)
+					deviceDriver.CmdDrawIndexed(cmdBuf, d.Mesh.IndexCount, 1, 0, 0, 0)
+				} else {
+					deviceDriver.CmdDraw(cmdBuf, d.Mesh.VertexCount, 1, 0, 0)
+				}
+			}
+
+			deviceDriver.CmdEndRenderPass(cmdBuf)
+		}
+	}
+
+	// ── Main render pass ──
+	clearValues := []core1_0.ClearValue{
+		core1_0.ClearValueFloat{lighting.SkyColor[0], lighting.SkyColor[1], lighting.SkyColor[2], lighting.SkyColor[3]},
+		core1_0.ClearValueDepthStencil{Depth: 0.0, Stencil: 0},
+	}
+	if msaaEnabled {
+		// 3rd clear value for the resolve attachment (LoadOpDontCare, but Vulkan requires the count to match)
+		clearValues = append(clearValues, core1_0.ClearValueFloat{0, 0, 0, 1})
+	}
+	err = deviceDriver.CmdBeginRenderPass(cmdBuf, core1_0.SubpassContentsInline, core1_0.RenderPassBeginInfo{
+		RenderPass:  renderPass,
+		Framebuffer: framebuffer,
+		RenderArea: core1_0.Rect2D{
+			Offset: core1_0.Offset2D{X: 0, Y: 0},
+			Extent: extent,
+		},
+		ClearValues: clearValues,
+	})
+	if err != nil {
+		return err
+	}
+
+	viewport := core1_0.Viewport{
+		X:        0,
+		Y:        0,
+		Width:    float32(extent.Width),
+		Height:   float32(extent.Height),
+		MinDepth: 0,
+		MaxDepth: 1,
+	}
+	scissor := core1_0.Rect2D{
+		Offset: core1_0.Offset2D{X: 0, Y: 0},
+		Extent: extent,
+	}
+
+	// Draw procedural sky dome (opaque, replaces clear color)
+	{
+		deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, skyPipeline)
+		deviceDriver.CmdSetViewport(cmdBuf, viewport)
+		deviceDriver.CmdSetScissor(cmdBuf, scissor)
+		deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, []core1_0.DescriptorSet{fallbackTexture.DescriptorSet}, nil)
+
+		var pc [60]float32
+		copy(pc[:16], lighting.InvVP[:])
+		pc[16] = lighting.CameraPos[0]
+		pc[17] = lighting.CameraPos[1]
+		pc[18] = lighting.CameraPos[2]
+		pc[32] = lighting.Time
+		pc[33] = lighting.NightFactor
+		pc[36] = lighting.SunDir[0]
+		pc[37] = lighting.SunDir[1]
+		pc[38] = lighting.SunDir[2]
+		pc[40] = lighting.SunColor[0]
+		pc[41] = lighting.SunColor[1]
+		pc[42] = lighting.SunColor[2]
+		pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
+		deviceDriver.CmdPushConstants(cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
+		deviceDriver.CmdDraw(cmdBuf, 3, 1, 0, 0)
+	}
+
+	// Draw procedural stars (additive blend, no vertex buffer)
+	if lighting.NightFactor > 0 {
+		deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, starsPipeline)
+		deviceDriver.CmdSetViewport(cmdBuf, viewport)
+		deviceDriver.CmdSetScissor(cmdBuf, scissor)
+		deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, []core1_0.DescriptorSet{fallbackTexture.DescriptorSet}, nil)
+
+		var pc [60]float32
+		copy(pc[:16], lighting.InvVP[:])
+		pc[16] = lighting.CameraPos[0]
+		pc[17] = lighting.CameraPos[1]
+		pc[18] = lighting.CameraPos[2]
+		pc[32] = lighting.Time
+		pc[33] = lighting.NightFactor
+		pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
+		deviceDriver.CmdPushConstants(cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
+		deviceDriver.CmdDraw(cmdBuf, 3, 1, 0, 0)
+	}
+
+	// Draw lit scene geometry (static, double-sided, and skinned)
+	deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, pipeline)
+	deviceDriver.CmdSetViewport(cmdBuf, viewport)
+	deviceDriver.CmdSetScissor(cmdBuf, scissor)
+	currentSkinned := false
+	currentDoubleSided := false
+
+	// Shadow descriptor set for this frame
+	shadowDS := shadow.descriptorSets[frame]
+
+	// Terrain pass: splat-mapped ground via the dedicated terrain pipeline
+	// (set 0 = 4 detail/splat samplers, set 1 = shadow). Rendered before the
+	// general lit geometry so the lit bind-cache below starts clean.
+	terrainBound := false
+	for i := range draws {
+		d := &draws[i]
+		if d.ShadowOnly || d.TerrainMat == nil {
+			continue
+		}
+		if !terrainBound {
+			deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, terrainPipeline)
+			deviceDriver.CmdSetViewport(cmdBuf, viewport)
+			deviceDriver.CmdSetScissor(cmdBuf, scissor)
+			terrainBound = true
+		}
+		deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, terrainPipelineLayout, 0, []core1_0.DescriptorSet{d.TerrainMat.DescriptorSet, shadowDS}, nil)
+		deviceDriver.CmdBindVertexBuffers(cmdBuf, 0, []core1_0.Buffer{d.Mesh.vertexBuffer}, []int{0})
+
+		var pc [60]float32
+		copy(pc[:16], d.MVP[:])
+		copy(pc[16:32], d.Model[:])
+		pc[32], pc[33], pc[34], pc[35] = d.Color[0], d.Color[1], d.Color[2], 0.0
+		packLightingPC(&pc, lighting)
+		roughness := d.Roughness
+		if roughness == 0 {
+			roughness = 0.5
+		}
+		pc[51] = roughness
+		pc[55] = d.Metallic
+		pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
+		deviceDriver.CmdPushConstants(cmdBuf, terrainPipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
+
+		if d.Mesh.IndexCount > 0 {
+			deviceDriver.CmdBindIndexBuffer(cmdBuf, d.Mesh.indexBuffer, 0, d.Mesh.indexType)
+			deviceDriver.CmdDrawIndexed(cmdBuf, d.Mesh.IndexCount, 1, 0, 0, 0)
+		} else {
+			deviceDriver.CmdDraw(cmdBuf, d.Mesh.VertexCount, 1, 0, 0)
+		}
+	}
+
+	// Descriptor bind cache — draws arrive sorted by pipeline then texture,
+	// so consecutive draws usually share bindings.
+	var lastTex *Texture
+	var lastJoints *JointBuffer
+	bindValid := false
+
+	for i := range draws {
+		d := &draws[i]
+		if d.ShadowOnly {
+			continue // not visible from camera — only needed for shadow pass
+		}
+		if d.TerrainMat != nil {
+			continue // already drawn in the terrain pass
+		}
+		skinned := d.Joints != nil
+
+		// Switch pipeline if needed
+		doubleSided := d.DoubleSided
+		if skinned != currentSkinned || doubleSided != currentDoubleSided {
+			if skinned {
+				deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, skinnedPipeline)
+			} else if doubleSided {
+				deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, litDoubleSidedPipeline)
+			} else {
+				deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, pipeline)
+			}
+			deviceDriver.CmdSetViewport(cmdBuf, viewport)
+			deviceDriver.CmdSetScissor(cmdBuf, scissor)
+			currentSkinned = skinned
+			currentDoubleSided = doubleSided
+			bindValid = false
+		}
+
+		tex := d.Texture
+		if tex == nil {
+			tex = fallbackTexture
+		}
+
+		activeLayout := litPipelineLayout
+		if skinned {
+			activeLayout = skinnedPipelineLayout
+			if !bindValid || tex != lastTex || d.Joints != lastJoints {
+				// Skinned: set 0=tex, set 1=joints, set 2=shadow
+				deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, skinnedPipelineLayout, 0, []core1_0.DescriptorSet{tex.DescriptorSet, d.Joints.descriptorSets[frame], shadowDS}, nil)
+				lastTex = tex
+				lastJoints = d.Joints
+				bindValid = true
+			}
+		} else if !bindValid || tex != lastTex {
+			// Static lit: set 0=tex, set 1=shadow
+			deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, litPipelineLayout, 0, []core1_0.DescriptorSet{tex.DescriptorSet, shadowDS}, nil)
+			lastTex = tex
+			bindValid = true
+		}
+
+		deviceDriver.CmdBindVertexBuffers(cmdBuf, 0, []core1_0.Buffer{d.Mesh.vertexBuffer}, []int{0})
+
+		var pc [60]float32
+		copy(pc[:16], d.MVP[:])
+		copy(pc[16:32], d.Model[:])
+		pc[32] = d.Color[0]
+		pc[33] = d.Color[1]
+		pc[34] = d.Color[2]
+		pc[35] = 0.0
+		if d.Emissive {
+			pc[35] = 1.0
+		} else if d.DoubleSided {
+			pc[35] = -1.0 // signal flat shading for foliage
+		}
+		packLightingPC(&pc, lighting)
+		roughness := d.Roughness
+		if roughness == 0 {
+			roughness = 0.5 // default to semi-rough if unset
+		}
+		pc[51] = roughness  // pointColor.w = roughness
+		pc[55] = d.Metallic // ambient.w = metallic
+		pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
+		deviceDriver.CmdPushConstants(cmdBuf, activeLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
+
+		if d.Mesh.IndexCount > 0 {
+			deviceDriver.CmdBindIndexBuffer(cmdBuf, d.Mesh.indexBuffer, 0, d.Mesh.indexType)
+			deviceDriver.CmdDrawIndexed(cmdBuf, d.Mesh.IndexCount, 1, 0, 0, 0)
+		} else {
+			deviceDriver.CmdDraw(cmdBuf, d.Mesh.VertexCount, 1, 0, 0)
+		}
+	}
+
+	// Draw instanced grass variants (two-sided, depth tested, lit)
+	if grass != nil && len(grass.Variants) > 0 {
+		deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, grassPipeline)
+		deviceDriver.CmdSetViewport(cmdBuf, viewport)
+		deviceDriver.CmdSetScissor(cmdBuf, scissor)
+
+		// Push constants shared across all variants
+		var pc [60]float32
+		copy(pc[:16], lighting.VP[:])
+		// model = identity
+		pc[16] = 1
+		pc[21] = 1
+		pc[26] = 1
+		pc[31] = 1
+		// tint = white (vertex colors provide grass color)
+		pc[32] = 1.0
+		pc[33] = 1.0
+		pc[34] = 1.0
+		pc[35] = -1.0 // flat shading for grass (double-sided foliage)
+		packLightingPC(&pc, lighting)
+		pc[39] = lighting.Time // sunDir.w = time for wind animation
+		pc[51] = 1.0           // roughness = fully matte
+		pc[55] = 0.0           // metallic = non-metal
+		pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
+		deviceDriver.CmdPushConstants(cmdBuf, litPipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
+
+		// Cull tiles against the camera frustum and the shader's hard cull
+		// distance; only visible tiles are drawn (contiguous instance ranges).
+		camFrustum := ExtractFrustum(mgl32.Mat4(lighting.VP))
+		camX, camY, camZ := lighting.CameraPos[0], lighting.CameraPos[1], lighting.CameraPos[2]
+
+		var lastFloraTex *Texture
+		for i := range grass.Variants {
+			v := &grass.Variants[i]
+			if v.InstanceCount == 0 {
+				continue
+			}
+
+			// Bind this variant's texture (flowers/clover differ from grass)
+			// at set 0, shadow at set 1; skip when unchanged between variants.
+			tex := v.Texture
+			if tex == nil {
+				tex = grass.Texture
+			}
+			if tex == nil {
+				tex = fallbackTexture
+			}
+			if tex != lastFloraTex {
+				deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, litPipelineLayout, 0, []core1_0.DescriptorSet{tex.DescriptorSet, shadowDS}, nil)
+				lastFloraTex = tex
+			}
+
+			deviceDriver.CmdBindVertexBuffers(cmdBuf, 0, []core1_0.Buffer{v.Mesh.vertexBuffer, v.InstanceBuffer}, []int{0, 0})
+			deviceDriver.CmdBindIndexBuffer(cmdBuf, v.Mesh.indexBuffer, 0, v.Mesh.indexType)
+			for _, tile := range v.Tiles {
+				dx := tile.Center[0] - camX
+				dy := tile.Center[1] - camY
+				dz := tile.Center[2] - camZ
+				maxDist := float32(GrassMaxDistance) + tile.Radius
+				if dx*dx+dy*dy+dz*dz > maxDist*maxDist {
+					continue
+				}
+				if !camFrustum.SphereInFrustum(tile.Center[0], tile.Center[1], tile.Center[2], tile.Radius) {
+					continue
+				}
+				deviceDriver.CmdDrawIndexed(cmdBuf, v.Mesh.IndexCount, tile.Count, 0, 0, uint32(tile.FirstInstance))
+			}
+		}
+	}
+
+	// Draw instanced billboard particles (additive blend, depth test only)
+	if particles != nil && particles.InstanceCount > 0 {
+		deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, particlePipeline)
+		deviceDriver.CmdSetViewport(cmdBuf, viewport)
+		deviceDriver.CmdSetScissor(cmdBuf, scissor)
+		deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, []core1_0.DescriptorSet{fallbackTexture.DescriptorSet}, nil)
+
+		// Push constants: VP at [0..15], cameraRight packed into model col 0, cameraUp into model col 1
+		var pc [60]float32
+		copy(pc[:16], lighting.VP[:])
+		// model column 0 = cameraRight
+		pc[16] = lighting.CameraRight[0]
+		pc[17] = lighting.CameraRight[1]
+		pc[18] = lighting.CameraRight[2]
+		// model column 1 = cameraUp
+		pc[20] = lighting.CameraUp[0]
+		pc[21] = lighting.CameraUp[1]
+		pc[22] = lighting.CameraUp[2]
+		pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
+		deviceDriver.CmdPushConstants(cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
+
+		deviceDriver.CmdBindVertexBuffers(cmdBuf, 0, []core1_0.Buffer{particles.QuadMesh.vertexBuffer, particles.InstanceBuffers[frame]}, []int{0, 0})
+		deviceDriver.CmdBindIndexBuffer(cmdBuf, particles.QuadMesh.indexBuffer, 0, particles.QuadMesh.indexType)
+		deviceDriver.CmdDrawIndexed(cmdBuf, particles.QuadMesh.IndexCount, particles.InstanceCount, 0, 0, 0)
+	}
+
+	// Draw UI panels (alpha blended, textured, 9-slice)
+	if len(uiOverlays) > 0 {
+		deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, uiPipeline)
+
+		for i := range uiOverlays {
+			d := &uiOverlays[i]
+			if d.Mesh.IndexCount == 0 && d.Mesh.VertexCount == 0 {
+				continue
+			}
+
+			tex := d.Texture
+			if tex == nil {
+				tex = fallbackTexture
+			}
+			deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, []core1_0.DescriptorSet{tex.DescriptorSet}, nil)
+			deviceDriver.CmdBindVertexBuffers(cmdBuf, 0, []core1_0.Buffer{d.Mesh.vertexBuffer}, []int{0})
+
+			var pc [60]float32
+			copy(pc[:16], d.MVP[:])
+			// model = identity
+			pc[16] = 1
+			pc[21] = 1
+			pc[26] = 1
+			pc[31] = 1
+			// tint.rgb = 1 (vertex color already tinted), tint.a = opacity
+			pc[32] = 1.0
+			pc[33] = 1.0
+			pc[34] = 1.0
+			pc[35] = d.Opacity
+			// sunDir.x reused as texture mode flag (0=panel 9-slice, 1=straight texture)
+			if d.TextureMode {
+				pc[36] = 1.0
+			}
+			pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
+			deviceDriver.CmdPushConstants(cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
+
+			if d.Mesh.IndexCount > 0 {
+				deviceDriver.CmdBindIndexBuffer(cmdBuf, d.Mesh.indexBuffer, 0, d.Mesh.indexType)
+				deviceDriver.CmdDrawIndexed(cmdBuf, d.Mesh.IndexCount, 1, 0, 0, 0)
+			} else {
+				deviceDriver.CmdDraw(cmdBuf, d.Mesh.VertexCount, 1, 0, 0)
+			}
+		}
+	}
+
+	// Draw overlays (no depth test, no culling) — unlit path (bars, cooldowns)
+	if len(overlays) > 0 {
+		deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, overlayPipeline)
+		deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, []core1_0.DescriptorSet{fallbackTexture.DescriptorSet}, nil)
+
+		for i := range overlays {
+			d := &overlays[i]
+			if d.Mesh.IndexCount == 0 && d.Mesh.VertexCount == 0 {
+				continue
+			}
+			deviceDriver.CmdBindVertexBuffers(cmdBuf, 0, []core1_0.Buffer{d.Mesh.vertexBuffer}, []int{0})
+
+			// Overlay: MVP + identity model + tint, lighting zeroed
+			var pc [60]float32
+			copy(pc[:16], d.MVP[:])
+			// model = identity
+			pc[16] = 1
+			pc[21] = 1
+			pc[26] = 1
+			pc[31] = 1
+			pc[32] = d.Color[0]
+			pc[33] = d.Color[1]
+			pc[34] = d.Color[2]
+			pc[35] = 1.0
+			// lighting fields stay zero — overlay shader ignores them
+			pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
+			deviceDriver.CmdPushConstants(cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
+
+			if d.Mesh.IndexCount > 0 {
+				deviceDriver.CmdBindIndexBuffer(cmdBuf, d.Mesh.indexBuffer, 0, d.Mesh.indexType)
+				deviceDriver.CmdDrawIndexed(cmdBuf, d.Mesh.IndexCount, 1, 0, 0, 0)
+			} else {
+				deviceDriver.CmdDraw(cmdBuf, d.Mesh.VertexCount, 1, 0, 0)
+			}
+		}
+	}
+
+	// Draw MSDF text overlays (alpha blended, textured)
+	if len(msdfOverlays) > 0 {
+		deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, msdfPipeline)
+
+		for i := range msdfOverlays {
+			d := &msdfOverlays[i]
+			if d.Mesh.IndexCount == 0 && d.Mesh.VertexCount == 0 {
+				continue
+			}
+
+			// Bind the MSDF atlas texture descriptor set
+			tex := d.Texture
+			if tex == nil {
+				tex = fallbackTexture
+			}
+			deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, []core1_0.DescriptorSet{tex.DescriptorSet}, nil)
+			deviceDriver.CmdBindVertexBuffers(cmdBuf, 0, []core1_0.Buffer{d.Mesh.vertexBuffer}, []int{0})
+
+			// Push constants: MVP + identity model + tint(rgb=color, w=screenPxRange)
+			var pc [60]float32
+			copy(pc[:16], d.MVP[:])
+			// model = identity
+			pc[16] = 1
+			pc[21] = 1
+			pc[26] = 1
+			pc[31] = 1
+			// tint.rgb = 1 (per-vertex color handles text color), tint.w = screenPxRange
+			pc[32] = 1.0
+			pc[33] = 1.0
+			pc[34] = 1.0
+			pc[35] = d.Color[0] // screenPxRange
+			pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
+			deviceDriver.CmdPushConstants(cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
+
+			if d.Mesh.IndexCount > 0 {
+				deviceDriver.CmdBindIndexBuffer(cmdBuf, d.Mesh.indexBuffer, 0, d.Mesh.indexType)
+				deviceDriver.CmdDrawIndexed(cmdBuf, d.Mesh.IndexCount, 1, 0, 0, 0)
+			} else {
+				deviceDriver.CmdDraw(cmdBuf, d.Mesh.VertexCount, 1, 0, 0)
+			}
+		}
+	}
+
+	deviceDriver.CmdEndRenderPass(cmdBuf)
+
+	_, err = deviceDriver.EndCommandBuffer(cmdBuf)
+	return err
+}

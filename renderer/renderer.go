@@ -1,0 +1,852 @@
+package renderer
+
+import (
+	"errors"
+	"fmt"
+	"log"
+	"unsafe"
+
+	"github.com/vkngwrapper/core/v3/common"
+	"github.com/vkngwrapper/core/v3/core1_0"
+	"github.com/vkngwrapper/extensions/v3/ext_debug_utils"
+	"github.com/vkngwrapper/extensions/v3/khr_surface"
+	khr_surface_loader "github.com/vkngwrapper/extensions/v3/khr_surface/loader"
+	"github.com/vkngwrapper/extensions/v3/khr_swapchain"
+
+	"github.com/derekmwright/glyphengine/window"
+)
+
+// Renderer manages the Vulkan rendering pipeline: instance, device, swapchain,
+// render pass, graphics pipelines, and per-frame synchronization.
+type Renderer struct {
+	win *window.Window
+
+	instanceDriver core1_0.CoreInstanceDriver
+	deviceDriver   core1_0.CoreDeviceDriver
+	surfaceExt     khr_surface.ExtensionDriver
+	swapchainExt   khr_swapchain.ExtensionDriver
+
+	surface        khr_surface.Surface
+	physicalDevice core1_0.PhysicalDevice
+	indices        queueFamilyIndices
+
+	graphicsQueue core1_0.Queue
+	presentQueue  core1_0.Queue
+
+	sc                     *swapchainDetails
+	renderPass             core1_0.RenderPass
+	pipelineLayout         core1_0.PipelineLayout // non-lit (sky, stars, overlay, msdf, ui)
+	litPipelineLayout      core1_0.PipelineLayout // lit static: set 0=tex, set 1=shadow
+	pipeline               core1_0.Pipeline
+	litDoubleSidedPipeline core1_0.Pipeline
+	// Identical in layout to litPipelineLayout, but a distinct object:
+	// createGraphicsPipeline builds one per call.
+	litDoubleSidedPipelineLayout core1_0.PipelineLayout
+	overlayPipeline              core1_0.Pipeline
+	starsPipeline                core1_0.Pipeline
+	skyPipeline                  core1_0.Pipeline
+	uiPipeline                   core1_0.Pipeline
+	msdfPipeline                 core1_0.Pipeline
+	jointDescriptorSetLayout     core1_0.DescriptorSetLayout
+	skinnedPipelineLayout        core1_0.PipelineLayout // skinned: set 0=tex, set 1=joints, set 2=shadow
+	skinnedPipeline              core1_0.Pipeline
+	grassPipeline                core1_0.Pipeline
+	grass                        *GrassSystem
+	terrainSetLayout             core1_0.DescriptorSetLayout // set 0 = 4 terrain samplers
+	terrainPipelineLayout        core1_0.PipelineLayout      // terrain: set 0=4 tex, set 1=shadow
+	terrainPipeline              core1_0.Pipeline
+	particlePipeline             core1_0.Pipeline
+	particles                    *ParticleSystem
+	shadow                       *shadowResources
+	framebuffers                 []core1_0.Framebuffer
+	commandPool                  core1_0.CommandPool
+	commandBuffers               [maxFramesInFlight]core1_0.CommandBuffer
+	sync                         *syncObjects
+	depth                        *depthResources
+	msaa                         *msaaResources
+	msaaSamples                  core1_0.SampleCountFlags
+
+	descriptorSetLayout core1_0.DescriptorSetLayout
+	descriptorPool      core1_0.DescriptorPool
+	fallbackTexture     *Texture
+	textures            []*Texture
+
+	// Diagnostic tri-color triangle (see triangle.go). Built lazily on the
+	// first DrawTriangle call; nil for programs that never use it.
+	trianglePipeline       *core1_0.Pipeline
+	trianglePipelineLayout *core1_0.PipelineLayout
+
+	currentFrame       int
+	framebufferResized bool
+	meshes             []*Mesh
+	jointBuffers       []*JointBuffer
+	dynamicMeshes      map[*Mesh]*dynamicMesh
+	maxAnisotropy      float32 // 0 = anisotropic filtering unavailable
+
+	// Reported to Vulkan at instance creation; see WithApplicationName.
+	appName    string
+	appVersion common.Version
+
+	// vsync selects the swapchain present mode; see WithVSync.
+	vsync bool
+
+	// Validation layer plumbing; nil unless validation is enabled.
+	validation bool
+	debugExt   ext_debug_utils.ExtensionDriver
+	debugMsgr  ext_debug_utils.DebugUtilsMessenger
+
+	// initStack holds one teardown step per resource created by New, in
+	// creation order. Both the failure path in New and Destroy unwind it in
+	// reverse, so there is exactly one place that knows destruction order and
+	// the two can never drift apart.
+	//
+	// Steps read resources through r rather than capturing them, because
+	// recreateSwapchain replaces the swapchain, depth, MSAA, and framebuffers
+	// after New has already pushed their teardown.
+	initStack []func()
+
+	destroyed bool
+
+	deferredDestroys []deferredDestroy
+}
+
+// onInit records a teardown step for a resource that was just created
+// successfully.
+func (r *Renderer) onInit(fn func()) { r.initStack = append(r.initStack, fn) }
+
+// unwindInit runs every recorded teardown step in reverse creation order and
+// empties the stack, so calling it twice is harmless.
+func (r *Renderer) unwindInit() {
+	for i := len(r.initStack) - 1; i >= 0; i-- {
+		r.initStack[i]()
+	}
+	r.initStack = nil
+}
+
+// deferredDestroy holds a GPU resource destruction callback that must wait
+// for all in-flight frames to complete before executing.
+type deferredDestroy struct {
+	framesLeft int
+	fn         func()
+}
+
+// Option configures the Renderer at creation time.
+type Option func(*Renderer)
+
+// WithApplicationName sets the application name and version reported to Vulkan.
+// Driver tools, GPU profilers, and vendor control panels display it, and some
+// drivers key per-application optimizations off it, so a shipping game should
+// set its own rather than appearing as "GlyphEngine Application".
+//
+// Build version with common.CreateVersion(major, minor, patch). A zero version
+// means 0.1.0.
+func WithApplicationName(name string, version common.Version) Option {
+	return func(r *Renderer) {
+		r.appName = name
+		r.appVersion = version
+	}
+}
+
+// WithValidation enables the Khronos validation layer and routes its output
+// through the standard logger. It is off by default: validation costs real
+// frame time, and it requires the Vulkan SDK, which players do not have.
+//
+// When the layer is unavailable this logs a warning and continues without it,
+// rather than failing to start.
+//
+// The GLYPHENGINE_VALIDATION environment variable overrides this either way,
+// so validation can be switched on for any already-built binary:
+//
+//	GLYPHENGINE_VALIDATION=1 ./mygame
+func WithValidation(enabled bool) Option {
+	return func(r *Renderer) { r.validation = enabled }
+}
+
+// WithVSync controls frame pacing by selecting the swapchain present mode.
+// It defaults to true.
+//
+// With vsync on, the presentation engine blocks at the refresh rate of the
+// display the window is actually on. That is the correct place for the frame
+// limit to live: it costs no CPU, follows the window between monitors, and
+// cannot disagree with the hardware.
+//
+// With vsync off, the renderer draws unbounded — Mailbox where available (no
+// tearing, newest frame wins), Immediate otherwise (tearing). Expect a pegged
+// GPU and the fans that come with it; this is for benchmarking, profiling, and
+// latency-sensitive input, not a general default.
+func WithVSync(enabled bool) Option {
+	return func(r *Renderer) { r.vsync = enabled }
+}
+
+// WithMSAASamples requests an MSAA sample count (1, 2, 4, or 8). Invalid
+// values are ignored; the value is clamped to what the device supports for
+// both color and depth once the physical device is selected.
+func WithMSAASamples(n int) Option {
+	return func(r *Renderer) {
+		switch n {
+		case 1:
+			r.msaaSamples = core1_0.Samples1
+		case 2:
+			r.msaaSamples = core1_0.Samples2
+		case 4:
+			r.msaaSamples = core1_0.Samples4
+		case 8:
+			r.msaaSamples = core1_0.Samples8
+		}
+	}
+}
+
+// New initializes the full Vulkan rendering stack: instance, surface, device,
+// swapchain, render pass, pipelines, framebuffers, command buffers, and sync
+// objects. Call Destroy on the result.
+//
+// Every failure is wrapped with the step that produced it, because a bare
+// Vulkan result code does not say which of two dozen pipelines failed to
+// build.
+//
+// A failure at any step unwinds everything created before it, in reverse
+// order, so New either returns a usable Renderer or leaves nothing behind. The
+// same unwind runs in Destroy, which is what keeps creation and destruction
+// order from drifting apart.
+func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
+	r := &Renderer{
+		win:           w,
+		msaaSamples:   core1_0.Samples2,
+		vsync:         true, // see WithVSync
+		dynamicMeshes: make(map[*Mesh]*dynamicMesh),
+	}
+	for _, o := range opts {
+		o(r)
+	}
+
+	// Unwind on any failure below. Every `return nil, err` therefore leaves
+	// the process in the state it was in before New was called.
+	defer func() {
+		if err != nil {
+			r.unwindInit()
+		}
+	}()
+
+	// Step 1: Vulkan instance
+	instanceDriver, gotValidation, err := createInstance(w, r.appName, r.appVersion, validationSetting(r.validation))
+	if err != nil {
+		return nil, err
+	}
+	r.instanceDriver = instanceDriver
+	r.validation = gotValidation
+	r.onInit(func() { r.instanceDriver.DestroyInstance(nil) })
+
+	// Step 1b: Validation output. Created immediately after the instance so it
+	// captures messages from every later step, including the teardown that a
+	// failure in one of them triggers.
+	if r.validation {
+		debugExt, messenger, derr := createDebugMessenger(instanceDriver)
+		if derr != nil {
+			return nil, fmt.Errorf("renderer: create debug messenger: %w", derr)
+		}
+		if debugExt != nil {
+			r.debugExt, r.debugMsgr = debugExt, messenger
+			r.onInit(func() { r.debugExt.DestroyDebugUtilsMessenger(r.debugMsgr, nil) })
+		}
+	}
+
+	// Step 2: Surface
+	r.surfaceExt = khr_surface.CreateExtensionDriverFromCoreDriver(instanceDriver)
+	if r.surfaceExt == nil {
+		// VK_KHR_surface is not in the instance's extension set. GLFW asks for
+		// it via GetRequiredInstanceExtensions, so reaching here means the
+		// loader found no presentation-capable ICD — typically a headless
+		// machine, or a driver install that left only a software fallback
+		// without WSI.
+		return nil, errors.New("renderer: VK_KHR_surface unavailable — no presentation-capable Vulkan driver found")
+	}
+
+	instanceHandle := unsafe.Pointer(instanceDriver.Instance().Handle())
+	surfaceHandle, err := w.CreateVulkanSurface(instanceHandle)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create window surface: %w", err)
+	}
+
+	r.surface, err = r.surfaceExt.CreateSurfaceFromHandle(
+		khr_surface_loader.VkSurfaceKHR(surfaceHandle),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: wrap surface handle: %w", err)
+	}
+	log.Println("Vulkan surface created")
+	r.onInit(func() { r.surfaceExt.DestroySurface(r.surface, nil) })
+
+	// Step 3: Physical device
+	r.physicalDevice, r.indices, err = pickPhysicalDevice(instanceDriver, r.surfaceExt, r.surface)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: select physical device: %w", err)
+	}
+
+	// Clamp the requested MSAA level to what the device supports for both
+	// color and depth framebuffers, halving until a supported count is found.
+	if props, err := instanceDriver.GetPhysicalDeviceProperties(r.physicalDevice); err == nil {
+		supported := props.Limits.FramebufferColorSampleCounts & props.Limits.FramebufferDepthSampleCounts
+		requested := r.msaaSamples
+		for r.msaaSamples > core1_0.Samples1 && supported&r.msaaSamples == 0 {
+			r.msaaSamples >>= 1
+		}
+		if r.msaaSamples != requested {
+			log.Printf("MSAA: requested %dx not supported, using %dx", requested, r.msaaSamples)
+		} else {
+			log.Printf("MSAA: %dx", r.msaaSamples)
+		}
+
+		if instanceDriver.GetPhysicalDeviceFeatures(r.physicalDevice).SamplerAnisotropy {
+			r.maxAnisotropy = props.Limits.MaxSamplerAnisotropy
+			log.Printf("Anisotropic filtering: %gx", r.maxAnisotropy)
+		}
+	}
+
+	// Step 4: Logical device
+	r.deviceDriver, err = createLogicalDevice(instanceDriver, r.physicalDevice, r.indices)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create logical device: %w", err)
+	}
+	r.onInit(func() { r.deviceDriver.DestroyDevice(nil) })
+
+	r.graphicsQueue = r.deviceDriver.GetQueue(r.indices.graphicsFamily, 0)
+	r.presentQueue = r.deviceDriver.GetQueue(r.indices.presentFamily, 0)
+
+	// Step 5: Swapchain
+	width, height := w.GetFramebufferSize()
+	r.sc, r.swapchainExt, err = createSwapchain(r.deviceDriver, r.surfaceExt, r.surface, r.physicalDevice, r.indices, width, height, r.vsync)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create swapchain: %w", err)
+	}
+	// Reads r.sc at unwind time: recreateSwapchain replaces it on resize.
+	r.onInit(func() {
+		for _, iv := range r.sc.imageViews {
+			r.deviceDriver.DestroyImageView(iv, nil)
+		}
+		r.swapchainExt.DestroySwapchain(r.sc.swapchain, nil)
+	})
+
+	// Step 6: Depth buffer
+	r.depth, err = createDepthResources(r.instanceDriver, r.deviceDriver, r.physicalDevice, r.sc.extent, len(r.sc.imageViews), r.msaaSamples)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create depth resources: %w", err)
+	}
+	r.onInit(func() { r.depth.destroy(r.deviceDriver, len(r.depth.views)) })
+
+	// Step 6b: MSAA color images (when MSAA is enabled)
+	if r.msaaSamples != core1_0.Samples1 {
+		r.msaa, err = createMSAAResources(r.instanceDriver, r.deviceDriver, r.physicalDevice, r.sc.extent, r.sc.imageFormat, r.msaaSamples, len(r.sc.imageViews))
+		if err != nil {
+			return nil, fmt.Errorf("renderer: create MSAA resources: %w", err)
+		}
+		// Guarded: recreateSwapchain nils r.msaa when MSAA ends up disabled.
+		r.onInit(func() {
+			if r.msaa != nil {
+				r.msaa.destroy(r.deviceDriver, len(r.msaa.views))
+			}
+		})
+	}
+
+	// Step 7: Descriptor set layout + pool
+	r.descriptorSetLayout, err = createDescriptorSetLayout(r.deviceDriver)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create descriptor set layout: %w", err)
+	}
+	r.onInit(func() { r.deviceDriver.DestroyDescriptorSetLayout(r.descriptorSetLayout, nil) })
+
+	r.terrainSetLayout, err = createTerrainDescriptorSetLayout(r.deviceDriver)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create terrain descriptor set layout: %w", err)
+	}
+	r.onInit(func() { r.deviceDriver.DestroyDescriptorSetLayout(r.terrainSetLayout, nil) })
+
+	r.descriptorPool, err = createDescriptorPool(r.deviceDriver, 512)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create descriptor pool: %w", err)
+	}
+	r.onInit(func() { r.deviceDriver.DestroyDescriptorPool(r.descriptorPool, nil) })
+
+	r.jointDescriptorSetLayout, err = createJointDescriptorSetLayout(r.deviceDriver)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create joint descriptor set layout: %w", err)
+	}
+	r.onInit(func() { r.deviceDriver.DestroyDescriptorSetLayout(r.jointDescriptorSetLayout, nil) })
+
+	// Step 7b: Shadow resources (needs descriptor pool)
+	r.shadow, err = createShadowResources(r.instanceDriver, r.deviceDriver, r.physicalDevice, r.descriptorPool, r.jointDescriptorSetLayout)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create shadow resources: %w", err)
+	}
+	r.onInit(func() { r.shadow.destroy(r.deviceDriver) })
+
+	// Step 8: Render pass + pipeline
+	r.renderPass, err = createRenderPass(r.deviceDriver, r.sc.imageFormat, r.depth.format, r.msaaSamples)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create render pass: %w", err)
+	}
+	r.onInit(func() { r.deviceDriver.DestroyRenderPass(r.renderPass, nil) })
+
+	// Non-lit pipeline layout (set 0 = texture only) for sky, stars, overlay, msdf, ui
+	r.pipelineLayout, err = createNonLitPipelineLayout(r.deviceDriver, r.descriptorSetLayout)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create non-lit pipeline layout: %w", err)
+	}
+	r.onInit(func() { r.deviceDriver.DestroyPipelineLayout(r.pipelineLayout, nil) })
+
+	// Lit pipeline layout (set 0 = texture, set 1 = shadow) and lit pipeline
+	r.pipeline, r.litPipelineLayout, err = createGraphicsPipeline(r.deviceDriver, r.renderPass, r.sc.extent, r.descriptorSetLayout, r.shadow.descriptorSetLayout, r.msaaSamples)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create lit pipeline: %w", err)
+	}
+	r.onInit(func() {
+		r.deviceDriver.DestroyPipeline(r.pipeline, nil)
+		r.deviceDriver.DestroyPipelineLayout(r.litPipelineLayout, nil)
+	})
+	// createGraphicsPipeline builds a pipeline layout per call, so this second
+	// call returns its own. Discarding it with _ leaked a VkPipelineLayout for
+	// the life of the process — invisible without validation, since nothing
+	// else depends on it. Keep it and destroy it.
+	r.litDoubleSidedPipeline, r.litDoubleSidedPipelineLayout, err = createGraphicsPipeline(r.deviceDriver, r.renderPass, r.sc.extent, r.descriptorSetLayout, r.shadow.descriptorSetLayout, r.msaaSamples, 0)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create double-sided lit pipeline: %w", err)
+	}
+	r.onInit(func() {
+		r.deviceDriver.DestroyPipeline(r.litDoubleSidedPipeline, nil)
+		r.deviceDriver.DestroyPipelineLayout(r.litDoubleSidedPipelineLayout, nil)
+	})
+
+	// Terrain splat pipeline: set 0 = 4 terrain samplers, set 1 = shadow.
+	r.terrainPipeline, r.terrainPipelineLayout, err = createTerrainPipeline(r.deviceDriver, r.renderPass, r.sc.extent, r.terrainSetLayout, r.shadow.descriptorSetLayout, r.msaaSamples)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create terrain pipeline: %w", err)
+	}
+	r.onInit(func() {
+		r.deviceDriver.DestroyPipeline(r.terrainPipeline, nil)
+		r.deviceDriver.DestroyPipelineLayout(r.terrainPipelineLayout, nil)
+	})
+
+	r.overlayPipeline, err = createOverlayPipeline(r.deviceDriver, r.renderPass, r.pipelineLayout, r.sc.extent, r.msaaSamples)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create overlay pipeline: %w", err)
+	}
+	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.overlayPipeline, nil) })
+
+	r.starsPipeline, err = createStarsPipeline(r.deviceDriver, r.renderPass, r.pipelineLayout, r.sc.extent, r.msaaSamples)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create stars pipeline: %w", err)
+	}
+	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.starsPipeline, nil) })
+
+	r.skyPipeline, err = createSkyPipeline(r.deviceDriver, r.renderPass, r.pipelineLayout, r.sc.extent, r.msaaSamples)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create sky pipeline: %w", err)
+	}
+	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.skyPipeline, nil) })
+
+	r.msdfPipeline, err = createMSDFPipeline(r.deviceDriver, r.renderPass, r.pipelineLayout, r.sc.extent, r.msaaSamples)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create MSDF pipeline: %w", err)
+	}
+	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.msdfPipeline, nil) })
+
+	r.uiPipeline, err = createUIPipeline(r.deviceDriver, r.renderPass, r.pipelineLayout, r.sc.extent, r.msaaSamples)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create UI pipeline: %w", err)
+	}
+	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.uiPipeline, nil) })
+
+	r.skinnedPipelineLayout, err = createSkinnedPipelineLayout(r.deviceDriver, r.descriptorSetLayout, r.jointDescriptorSetLayout, r.shadow.descriptorSetLayout)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create skinned pipeline layout: %w", err)
+	}
+	r.onInit(func() { r.deviceDriver.DestroyPipelineLayout(r.skinnedPipelineLayout, nil) })
+
+	r.skinnedPipeline, err = createSkinnedPipeline(r.deviceDriver, r.renderPass, r.skinnedPipelineLayout, r.sc.extent, r.msaaSamples)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create skinned pipeline: %w", err)
+	}
+	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.skinnedPipeline, nil) })
+
+	r.grassPipeline, err = createGrassPipeline(r.deviceDriver, r.renderPass, r.litPipelineLayout, r.sc.extent, r.msaaSamples)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create grass pipeline: %w", err)
+	}
+	// The GrassSystem itself is created later by InitGrass, if ever.
+	r.onInit(func() {
+		if r.grass != nil {
+			r.grass.Destroy(r.deviceDriver)
+		}
+		r.deviceDriver.DestroyPipeline(r.grassPipeline, nil)
+	})
+
+	r.particlePipeline, err = createParticlePipeline(r.deviceDriver, r.renderPass, r.pipelineLayout, r.sc.extent, r.msaaSamples)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create particle pipeline: %w", err)
+	}
+	// Likewise the ParticleSystem, created later by InitParticles.
+	r.onInit(func() {
+		if r.particles != nil {
+			r.particles.Destroy(r.deviceDriver)
+		}
+		r.deviceDriver.DestroyPipeline(r.particlePipeline, nil)
+	})
+
+	// Step 9: Framebuffers + command buffers
+	var msaaViews []core1_0.ImageView
+	if r.msaa != nil {
+		msaaViews = r.msaa.views
+	}
+	r.framebuffers, err = createFramebuffers(r.deviceDriver, r.renderPass, r.sc.imageViews, r.depth.views, msaaViews, r.sc.extent)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create framebuffers: %w", err)
+	}
+	r.onInit(func() {
+		for _, fb := range r.framebuffers {
+			r.deviceDriver.DestroyFramebuffer(fb, nil)
+		}
+	})
+
+	r.commandPool, err = createCommandPool(r.deviceDriver, r.indices.graphicsFamily)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create command pool: %w", err)
+	}
+	// Destroying the pool frees the command buffers allocated from it.
+	r.onInit(func() { r.deviceDriver.DestroyCommandPool(r.commandPool, nil) })
+
+	// Step 9b: the cube shadow maps are sampled every frame but only rendered
+	// when a point light casts, so give them defined contents and a legal
+	// layout up front. Needs the command pool, which is why it is here rather
+	// than in createShadowResources. No teardown step — this only changes the
+	// state of images the shadow resources already own.
+	if err = r.shadow.initCubeShadowLayout(r); err != nil {
+		return nil, fmt.Errorf("renderer: initialize cube shadow layout: %w", err)
+	}
+
+	cmdBufs, err := createCommandBuffers(r.deviceDriver, r.commandPool, maxFramesInFlight)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: allocate command buffers: %w", err)
+	}
+	copy(r.commandBuffers[:], cmdBufs)
+
+	// Step 10: Sync objects
+	r.sync, err = createSyncObjects(r.deviceDriver)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create sync objects: %w", err)
+	}
+	r.onInit(func() {
+		for i := 0; i < maxFramesInFlight; i++ {
+			r.deviceDriver.DestroySemaphore(r.sync.imageAvailable[i], nil)
+			r.deviceDriver.DestroySemaphore(r.sync.renderFinished[i], nil)
+			r.deviceDriver.DestroyFence(r.sync.inFlight[i], nil)
+		}
+	})
+
+	// Step 11: Fallback texture (1x1 white, needs command pool for staging upload)
+	r.fallbackTexture, err = r.createFallbackTexture()
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create fallback texture: %w", err)
+	}
+
+	log.Println("Renderer initialized successfully")
+	return r, nil
+}
+
+// FallbackTexture returns the 1x1 white texture used when no texture is assigned.
+func (r *Renderer) FallbackTexture() *Texture { return r.fallbackTexture }
+
+// InitGrass loads glTF flora models and scatters instances across the
+// heightmap, weighted by each spec's spawn weight. If densityMask is non-nil,
+// flora is thinned/cleared based on the mask values.
+func (r *Renderer) InitGrass(hm GrassHeightmap, originX, originZ, worldW, worldD float32, specs []GrassModelSpec, densityMask *GrassDensityMask) {
+	var models []*Model
+	var weights []float32
+	for _, spec := range specs {
+		m, err := r.LoadGLTF(spec.Path)
+		if err != nil {
+			log.Printf("Failed to load flora model %s: %v", spec.Path, err)
+			continue
+		}
+		models = append(models, m)
+		weights = append(weights, spec.Weight)
+	}
+	if len(models) == 0 {
+		log.Println("Flora: no models loaded, skipping")
+		return
+	}
+
+	gs, err := CreateGrassFromModels(r, models, weights, hm, originX, originZ, worldW, worldD, densityMask)
+	if err != nil {
+		log.Printf("Failed to create flora: %v", err)
+		return
+	}
+	r.grass = gs
+}
+
+// InitParticles allocates the GPU particle system with the given max instance count.
+func (r *Renderer) InitParticles(maxInstances int) {
+	ps, err := CreateParticleSystem(r, maxInstances)
+	if err != nil {
+		log.Printf("Failed to create particle system: %v", err)
+		return
+	}
+	r.particles = ps
+	log.Printf("Particle system initialized (max %d instances)", maxInstances)
+}
+
+// UpdateParticleInstances uploads new particle instance data to the GPU.
+func (r *Renderer) UpdateParticleInstances(instances []ParticleInstance) {
+	if r.particles == nil {
+		return
+	}
+	r.particles.UpdateInstances(r, instances)
+}
+
+// Aspect returns the swapchain aspect ratio.
+func (r *Renderer) Aspect() float32 {
+	return float32(r.sc.extent.Width) / float32(r.sc.extent.Height)
+}
+
+// Extent returns the swapchain pixel dimensions.
+func (r *Renderer) Extent() (int, int) {
+	return r.sc.extent.Width, r.sc.extent.Height
+}
+
+// NotifyResize flags that the framebuffer was resized so the swapchain is
+// recreated before the next frame.
+func (r *Renderer) NotifyResize() {
+	r.framebufferResized = true
+}
+
+// DeferDestroy queues a destruction callback that will execute after all
+// in-flight frames have finished referencing the resource.
+func (r *Renderer) DeferDestroy(fn func()) {
+	r.deferredDestroys = append(r.deferredDestroys, deferredDestroy{
+		framesLeft: maxFramesInFlight,
+		fn:         fn,
+	})
+}
+
+// flushDeferredDestroys ticks down pending destructions and executes any that
+// have waited long enough for all in-flight frames to complete.
+func (r *Renderer) flushDeferredDestroys() {
+	n := 0
+	for i := range r.deferredDestroys {
+		r.deferredDestroys[i].framesLeft--
+		if r.deferredDestroys[i].framesLeft <= 0 {
+			r.deferredDestroys[i].fn()
+		} else {
+			r.deferredDestroys[n] = r.deferredDestroys[i]
+			n++
+		}
+	}
+	r.deferredDestroys = r.deferredDestroys[:n]
+}
+
+// Minimized returns true when the framebuffer is zero-sized (window minimized).
+func (r *Renderer) Minimized() bool {
+	w, h := r.win.GetFramebufferSize()
+	return w == 0 || h == 0
+}
+
+// recreateSwapchain tears down and rebuilds the swapchain, depth buffer, and
+// framebuffers after a resize or when the surface becomes out of date.
+func (r *Renderer) recreateSwapchain() error {
+	// Skip while minimized — caller should poll and retry next frame.
+	width, height := r.win.GetFramebufferSize()
+	if width == 0 || height == 0 {
+		return nil
+	}
+
+	r.deviceDriver.DeviceWaitIdle()
+
+	// Destroy old resources
+	for _, fb := range r.framebuffers {
+		r.deviceDriver.DestroyFramebuffer(fb, nil)
+	}
+
+	r.depth.destroy(r.deviceDriver, len(r.depth.views))
+
+	if r.msaa != nil {
+		r.msaa.destroy(r.deviceDriver, len(r.msaa.views))
+	}
+
+	for _, iv := range r.sc.imageViews {
+		r.deviceDriver.DestroyImageView(iv, nil)
+	}
+
+	r.swapchainExt.DestroySwapchain(r.sc.swapchain, nil)
+
+	// Recreate swapchain, depth, MSAA, framebuffers
+	var err error
+	r.sc, r.swapchainExt, err = createSwapchain(r.deviceDriver, r.surfaceExt, r.surface, r.physicalDevice, r.indices, width, height, r.vsync)
+	if err != nil {
+		return err
+	}
+
+	r.depth, err = createDepthResources(r.instanceDriver, r.deviceDriver, r.physicalDevice, r.sc.extent, len(r.sc.imageViews), r.msaaSamples)
+	if err != nil {
+		return err
+	}
+
+	if r.msaaSamples != core1_0.Samples1 {
+		r.msaa, err = createMSAAResources(r.instanceDriver, r.deviceDriver, r.physicalDevice, r.sc.extent, r.sc.imageFormat, r.msaaSamples, len(r.sc.imageViews))
+		if err != nil {
+			return err
+		}
+	} else {
+		r.msaa = nil
+	}
+
+	var msaaViews []core1_0.ImageView
+	if r.msaa != nil {
+		msaaViews = r.msaa.views
+	}
+	r.framebuffers, err = createFramebuffers(r.deviceDriver, r.renderPass, r.sc.imageViews, r.depth.views, msaaViews, r.sc.extent)
+	if err != nil {
+		return err
+	}
+
+	log.Printf("Swapchain recreated: %dx%d", r.sc.extent.Width, r.sc.extent.Height)
+	return nil
+}
+
+// DrawFrame records and submits one frame: waits for the in-flight fence, acquires
+// a swapchain image, records draw commands, submits to the GPU, and presents.
+func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, uiOverlays []UIRenderObject, msdfOverlays []RenderObject, lighting SceneLighting) error {
+	f := r.currentFrame
+
+	// Wait for this in-flight frame's previous submission to finish
+	_, err := r.deviceDriver.WaitForFences(true, common.NoTimeout, r.sync.inFlight[f])
+	if err != nil {
+		return err
+	}
+
+	// Safe to destroy resources queued for deferred destruction now that
+	// a fence has been waited on.
+	r.flushDeferredDestroys()
+
+	// Acquire the next swapchain image
+	imageIndex, result, err := r.swapchainExt.AcquireNextImage(r.sc.swapchain, common.NoTimeout, &r.sync.imageAvailable[f], nil)
+	if err != nil {
+		if result == khr_swapchain.VKErrorOutOfDate {
+			return r.recreateSwapchain()
+		}
+		return err
+	}
+
+	// Only reset the fence after a successful acquire
+	_, err = r.deviceDriver.ResetFences(r.sync.inFlight[f])
+	if err != nil {
+		return err
+	}
+
+	// Copy staged joint matrices, particle instances, and dynamic mesh data
+	// into this frame's buffers now that its fence has signaled (the GPU is
+	// done reading them).
+	r.flushJointUploads(f)
+	if r.particles != nil {
+		r.particles.flushUploads(f)
+	}
+	r.flushDynamicMeshes(f)
+
+	// Always upload the cascade VP matrices so the fragment shader never reads
+	// stale data. When shadows are disabled, the VPs are zero matrices, causing
+	// all fragments to project to the shadow map origin where depth=1.0
+	// (cleared) → fully lit.
+	r.shadow.uploadCascadeVPs(f, lighting.CascadeVPs)
+	r.shadow.uploadPointLights(f, &lighting.PointLights, lighting.PointLightCount)
+
+	// Reset and record this frame's command buffer
+	cmdBuf := r.commandBuffers[f]
+	_, err = r.deviceDriver.ResetCommandBuffer(cmdBuf, 0)
+	if err != nil {
+		return err
+	}
+	err = recordCommandBuffer(r.deviceDriver, cmdBuf, r.renderPass, r.framebuffers[imageIndex], r.pipeline, r.litDoubleSidedPipeline, r.overlayPipeline, r.skyPipeline, r.starsPipeline, r.uiPipeline, r.msdfPipeline, r.skinnedPipeline, r.grassPipeline, r.particlePipeline, r.terrainPipeline, r.pipelineLayout, r.litPipelineLayout, r.skinnedPipelineLayout, r.terrainPipelineLayout, r.sc.extent, draws, overlays, uiOverlays, msdfOverlays, lighting, r.fallbackTexture, r.shadow, r.grass, r.particles, f, r.msaa != nil)
+	if err != nil {
+		return err
+	}
+
+	// Submit
+	fence := r.sync.inFlight[f]
+	_, err = r.deviceDriver.QueueSubmit(r.graphicsQueue, &fence, core1_0.SubmitInfo{
+		WaitSemaphores:   []core1_0.Semaphore{r.sync.imageAvailable[f]},
+		WaitDstStageMask: []core1_0.PipelineStageFlags{core1_0.PipelineStageColorAttachmentOutput},
+		CommandBuffers:   []core1_0.CommandBuffer{cmdBuf},
+		SignalSemaphores: []core1_0.Semaphore{r.sync.renderFinished[f]},
+	})
+	if err != nil {
+		return err
+	}
+
+	// Present
+	presentResult, err := r.swapchainExt.QueuePresent(r.presentQueue, khr_swapchain.PresentInfo{
+		WaitSemaphores: []core1_0.Semaphore{r.sync.renderFinished[f]},
+		Swapchains:     []khr_swapchain.Swapchain{r.sc.swapchain},
+		ImageIndices:   []int{imageIndex},
+	})
+	if err != nil && presentResult != khr_swapchain.VKErrorOutOfDate {
+		return err
+	}
+	if presentResult == khr_swapchain.VKErrorOutOfDate || presentResult == khr_swapchain.VKSuboptimal || r.framebufferResized {
+		r.framebufferResized = false
+		return r.recreateSwapchain()
+	}
+
+	r.currentFrame = (f + 1) % maxFramesInFlight
+	return nil
+}
+
+// Destroy waits for the GPU to idle, releases everything the application
+// created through the Renderer (textures, meshes, the lazy triangle pipeline),
+// then unwinds the init stack recorded by New.
+//
+// Teardown order lives in exactly one place — the order the steps were pushed
+// in New — so it cannot drift away from creation order the way a hand-written
+// reverse listing does.
+//
+// Safe to call more than once.
+func (r *Renderer) Destroy() {
+	if r.destroyed {
+		return
+	}
+	r.destroyed = true
+
+	if r.deviceDriver == nil {
+		// New failed before the logical device existed and already unwound.
+		return
+	}
+	r.deviceDriver.DeviceWaitIdle()
+
+	// Flush deferred destroys now that the GPU is idle.
+	r.flushAllDeferred()
+
+	// Application-owned resources, which are created after New and so are not
+	// on the init stack.
+	r.destroyTrianglePipeline()
+	for _, t := range r.textures {
+		r.DestroyTexture(t)
+	}
+	r.textures = nil
+	for _, m := range r.meshes {
+		r.DestroyMesh(m)
+	}
+	r.meshes = nil
+
+	// Dynamic meshes queue their buffer destruction via DeferDestroy; the GPU
+	// is already idle, so run anything queued during the loop above.
+	r.flushAllDeferred()
+
+	r.unwindInit()
+
+	log.Println("Renderer destroyed")
+}
+
+// flushAllDeferred runs every pending deferred destroy immediately, ignoring
+// the frame countdown. Only valid once the GPU is known to be idle.
+func (r *Renderer) flushAllDeferred() {
+	for _, dd := range r.deferredDestroys {
+		dd.fn()
+	}
+	r.deferredDestroys = nil
+}
