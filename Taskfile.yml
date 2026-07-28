@@ -50,6 +50,26 @@ tasks:
     generates:
       - shaders/*.spv
 
+  # ───────────────────────── fonts ─────────────────────────
+
+  font:
+    desc: Regenerate the MSDF font atlas for example 10-text
+    cmds:
+      # cmd/msdfatlas is pure Go, so this needs no C++ toolchain and no
+      # msdf-atlas-gen install -- that is the point of having it in-tree.
+      # -range 8 rather than the default 4: the example renders down to 13px,
+      # and a glyph needs at least ~2 screen pixels of distance field to
+      # resolve its edge. See the note on Options.Range.
+      - >-
+        go run ./cmd/msdfatlas
+        -builtin -range 8 -out examples/10-text/assets/fonts/goregular
+    sources:
+      - msdf/*.go
+      - cmd/msdfatlas/*.go
+    generates:
+      - examples/10-text/assets/fonts/goregular.png
+      - examples/10-text/assets/fonts/goregular.json
+
   # ───────────────────────── quality ─────────────────────────
 
   build:
@@ -104,6 +124,7 @@ tasks:
       - go run ./06-skinned -frames 60
       - go run ./08-grass -frames 60
       - go run ./07-terrain -frames 60
+      - go run ./10-text -frames 60
 
   validate:
     desc: "Run every example under the Vulkan validation layer; fails on leaked objects"
@@ -122,7 +143,7 @@ tasks:
       # because they surface at vkDestroyDevice rather than during rendering.
       - |
         status=0
-        for ex in 01-triangle 02-cube 03-physics 04-first-person 05-textures 06-skinned 07-terrain 08-grass; do
+        for ex in 01-triangle 02-cube 03-physics 04-first-person 05-textures 06-skinned 07-terrain 08-grass 10-text; do
           out=$(go run ./$ex -frames 30 2>&1) || { echo "$ex: FAILED TO RUN"; echo "$out"; status=1; continue; }
           msgs=$(echo "$out" | grep -cE "VULKAN (ERROR|WARNING)" || true)
           leaks=$(echo "$out" | grep -c "has not been destroyed" || true)
@@ -147,6 +168,7 @@ tasks:
       - go run ./06-skinned -demo -frames 200 -screenshot ../docs/images/06-skinned.png
       - go run ./07-terrain -frames 150 -screenshot ../docs/images/07-terrain.png
       - go run ./08-grass -frames 150 -screenshot ../docs/images/08-grass.png
+      - go run ./10-text -frames 90 -screenshot ../docs/images/10-text.png
 
   ci:
     desc: Run everything CI runs

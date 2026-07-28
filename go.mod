@@ -18,4 +18,5 @@ require (
 	github.com/kr/text v0.2.0 // indirect
 	github.com/markus-wa/quickhull-go/v2 v2.2.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
+	golang.org/x/image v0.44.0 // indirect
 )

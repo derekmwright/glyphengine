@@ -24,9 +24,21 @@ Direct dependencies:
 - `github.com/golang/geo` — geometry primitives, used by convex hull generation
 - `github.com/markus-wa/quickhull-go/v2` — convex hull generation
 - `gopkg.in/yaml.v3` — YAML UI parsing
+- `golang.org/x/image` — TrueType/OpenType outline parsing for `msdf`, and the Go
+  Regular typeface that `cmd/msdfatlas -builtin` generates from (BSD 3-Clause)
 
 A full per-dependency license audit is part of launch polish and is not
 complete. If you are shipping a product on this engine, do your own.
+
+## Fonts
+
+`examples/10-text` ships a generated MSDF atlas, not a font file. It is
+produced from Go Regular, which arrives through `golang.org/x/image` under the
+same BSD 3-Clause license as the Go standard library — chosen over the usual
+OFL-licensed candidates so that nothing in this repository carries a copyleft
+or attribution obligation. See `examples/10-text/assets/ASSETS.md`.
+
+Atlases you generate from your own fonts inherit those fonts' licenses.
 
 ## Shaders
 

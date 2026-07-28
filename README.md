@@ -161,6 +161,7 @@ bit-identical results at 60Hz and at 300Hz.
 | `glyphengine/ui` | Immediate-mode widgets |
 | `glyphengine/ui/yamlui` | Declarative YAML UI with data bindings |
 | `glyphengine/shaders` | Embedded SPIR-V, overridable via `renderer.ShaderSet` |
+| `glyphengine/msdf` | MSDF font atlas generation in pure Go; CLI at `cmd/msdfatlas` |
 
 ## Examples
 
