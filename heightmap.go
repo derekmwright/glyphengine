@@ -3,8 +3,8 @@ package glyphengine
 import (
 	"encoding/binary"
 	"fmt"
+	"io/fs"
 	"math"
-	"os"
 )
 
 // Heightmap stores a grid of height values for terrain collision.
@@ -50,12 +50,14 @@ func (h *Heightmap) Bounds() (minX, minZ, maxX, maxZ float32) {
 	return h.OriginX, h.OriginZ, h.OriginX + h.WorldW, h.OriginZ + h.WorldD
 }
 
-// LoadHeightmap reads a .heightmap binary file.
-// Format: gridW(u32) gridH(u32) worldW(f32) worldD(f32) originX(f32) originZ(f32) heights(f32 * gridW * gridH)
-func LoadHeightmap(path string) (*Heightmap, error) {
-	f, err := os.Open(path)
+// LoadHeightmap reads a .heightmap binary file from fsys.
+//
+// Format: gridW(u32) gridH(u32) worldW(f32) worldD(f32) originX(f32)
+// originZ(f32) then gridW*gridH little-endian f32 heights.
+func LoadHeightmap(fsys fs.FS, name string) (*Heightmap, error) {
+	f, err := fsys.Open(name)
 	if err != nil {
-		return nil, fmt.Errorf("open heightmap: %w", err)
+		return nil, fmt.Errorf("open heightmap %q: %w", name, err)
 	}
 	defer f.Close()
 

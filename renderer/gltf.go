@@ -7,9 +7,9 @@ import (
 	"image/draw"
 	_ "image/jpeg"
 	_ "image/png"
+	"io/fs"
 	"log"
-	"os"
-	"path/filepath"
+	"path"
 
 	"github.com/go-gl/mathgl/mgl32"
 	"github.com/qmuntal/gltf"
@@ -32,15 +32,45 @@ type Model struct {
 	Meshes []ModelMesh
 }
 
-// LoadGLTF loads a glTF or GLB file and returns a Model with GPU-uploaded meshes and textures.
-func (r *Renderer) LoadGLTF(path string) (*Model, error) {
-	doc, err := gltf.Open(path)
+// openGLTF opens a glTF or GLB document from fsys and returns it along with an
+// fs.FS rooted at the document's own directory.
+//
+// glTF references external buffers and images by URI relative to itself, so a
+// model at "models/rock.gltf" naming "rock.bin" means "models/rock.bin". The
+// decoder resolves those against the FS it is given, which therefore has to be
+// the subtree containing the document rather than the caller's root.
+func openGLTF(fsys fs.FS, name string) (*gltf.Document, fs.FS, error) {
+	f, err := fsys.Open(name)
 	if err != nil {
-		return nil, fmt.Errorf("open gltf: %w", err)
+		return nil, nil, fmt.Errorf("open gltf %q: %w", name, err)
+	}
+	defer f.Close()
+
+	base := fsys
+	if dir := path.Dir(name); dir != "." {
+		base, err = fs.Sub(fsys, dir)
+		if err != nil {
+			return nil, nil, fmt.Errorf("gltf %q: resolve %q: %w", name, dir, err)
+		}
+	}
+
+	doc := new(gltf.Document)
+	if err := gltf.NewDecoderFS(f, base).Decode(doc); err != nil {
+		return nil, nil, fmt.Errorf("decode gltf %q: %w", name, err)
+	}
+	return doc, base, nil
+}
+
+// LoadGLTF reads a glTF or GLB document from fsys and returns a Model with
+// GPU-uploaded meshes and textures.
+func (r *Renderer) LoadGLTF(fsys fs.FS, name string) (*Model, error) {
+	doc, base, err := openGLTF(fsys, name)
+	if err != nil {
+		return nil, err
 	}
 
 	// Load all images referenced by the document
-	textures, err := r.loadGLTFImages(doc, filepath.Dir(path))
+	textures, err := r.loadGLTFImages(doc, base)
 	if err != nil {
 		return nil, fmt.Errorf("load gltf images: %w", err)
 	}
@@ -186,7 +216,7 @@ func (r *Renderer) extractPrimitive(doc *gltf.Document, prim *gltf.Primitive) ([
 
 // loadGLTFImages decodes all images in the document and uploads them as GPU textures.
 // Returns a map from image index to Texture.
-func (r *Renderer) loadGLTFImages(doc *gltf.Document, baseDir string) (map[int]*Texture, error) {
+func (r *Renderer) loadGLTFImages(doc *gltf.Document, base fs.FS) (map[int]*Texture, error) {
 	textures := make(map[int]*Texture)
 
 	for i, img := range doc.Images {
@@ -205,12 +235,11 @@ func (r *Renderer) loadGLTFImages(doc *gltf.Document, baseDir string) (map[int]*
 				return nil, fmt.Errorf("decode embedded image %d: %w", i, err)
 			}
 		} else if img.URI != "" {
-			// External image file relative to the glTF
-			imgPath := filepath.Join(baseDir, img.URI)
+			// External image, named relative to the glTF document.
 			var err error
-			imgBytes, err = os.ReadFile(imgPath)
+			imgBytes, err = fs.ReadFile(base, img.URI)
 			if err != nil {
-				return nil, fmt.Errorf("read external image %d (%s): %w", i, imgPath, err)
+				return nil, fmt.Errorf("read external image %d (%s): %w", i, img.URI, err)
 			}
 		} else {
 			continue
@@ -308,14 +337,15 @@ func (r *Renderer) resolveBaseColorTexture(doc *gltf.Document, textures map[int]
 	return textures[int(*gltfTex.Source)]
 }
 
-// LoadGLTFSkinned loads a glTF/GLB file with skin and animation data.
-func (r *Renderer) LoadGLTFSkinned(path string) (*SkinnedModel, error) {
-	doc, err := gltf.Open(path)
+// LoadGLTFSkinned reads a glTF or GLB document from fsys with its skin and
+// animation data.
+func (r *Renderer) LoadGLTFSkinned(fsys fs.FS, name string) (*SkinnedModel, error) {
+	doc, base, err := openGLTF(fsys, name)
 	if err != nil {
-		return nil, fmt.Errorf("open gltf: %w", err)
+		return nil, err
 	}
 
-	textures, err := r.loadGLTFImages(doc, filepath.Dir(path))
+	textures, err := r.loadGLTFImages(doc, base)
 	if err != nil {
 		return nil, fmt.Errorf("load gltf images: %w", err)
 	}

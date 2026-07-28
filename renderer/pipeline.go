@@ -5,8 +5,6 @@ import (
 
 	"github.com/vkngwrapper/core/v3/core1_0"
 	"github.com/vkngwrapper/extensions/v3/khr_swapchain"
-
-	"github.com/derekmwright/glyphengine/shaders"
 )
 
 // createRenderPass builds a single-subpass render pass. When samples > Samples1,
@@ -147,14 +145,14 @@ func createNonLitPipelineLayout(deviceDriver core1_0.DeviceDriver, texSetLayout 
 // createGraphicsPipeline creates the main scene pipeline with depth testing,
 // back-face culling, and push constants for per-object MVP + tint + lighting.
 // The litPipelineLayout uses: set 0 = texture, set 1 = shadow (UBO + sampler).
-func createGraphicsPipeline(deviceDriver core1_0.DeviceDriver, renderPass core1_0.RenderPass, extent core1_0.Extent2D, texSetLayout core1_0.DescriptorSetLayout, shadowSetLayout core1_0.DescriptorSetLayout, samples core1_0.SampleCountFlags, cullMode ...core1_0.CullModeFlags) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
+func createGraphicsPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, extent core1_0.Extent2D, texSetLayout core1_0.DescriptorSetLayout, shadowSetLayout core1_0.DescriptorSetLayout, samples core1_0.SampleCountFlags, cullMode ...core1_0.CullModeFlags) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
 	cull := core1_0.CullModeBack
 	if len(cullMode) > 0 {
 		cull = cullMode[0]
 	}
 	// Create shader modules (lit shaders for scene rendering)
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
-		Code: bytesToUint32Slice(shaders.LitVertSpv),
+		Code: bytesToUint32Slice(sh.LitVert),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, core1_0.PipelineLayout{}, err
@@ -162,7 +160,7 @@ func createGraphicsPipeline(deviceDriver core1_0.DeviceDriver, renderPass core1_
 	defer deviceDriver.DestroyShaderModule(vertModule, nil)
 
 	fragModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
-		Code: bytesToUint32Slice(shaders.LitFragSpv),
+		Code: bytesToUint32Slice(sh.LitFrag),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, core1_0.PipelineLayout{}, err
@@ -267,9 +265,9 @@ func createGraphicsPipeline(deviceDriver core1_0.DeviceDriver, renderPass core1_
 // vertex format, depth, and culling as the lit pipeline, but a fragment stage
 // that blends multiple detail textures by a splat map. Layout: set 0 = terrain
 // material (4 samplers), set 1 = shadow.
-func createTerrainPipeline(deviceDriver core1_0.DeviceDriver, renderPass core1_0.RenderPass, extent core1_0.Extent2D, terrainSetLayout core1_0.DescriptorSetLayout, shadowSetLayout core1_0.DescriptorSetLayout, samples core1_0.SampleCountFlags) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
+func createTerrainPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, extent core1_0.Extent2D, terrainSetLayout core1_0.DescriptorSetLayout, shadowSetLayout core1_0.DescriptorSetLayout, samples core1_0.SampleCountFlags) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
-		Code: bytesToUint32Slice(shaders.LitVertSpv),
+		Code: bytesToUint32Slice(sh.LitVert),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, core1_0.PipelineLayout{}, err
@@ -277,7 +275,7 @@ func createTerrainPipeline(deviceDriver core1_0.DeviceDriver, renderPass core1_0
 	defer deviceDriver.DestroyShaderModule(vertModule, nil)
 
 	fragModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
-		Code: bytesToUint32Slice(shaders.TerrainFragSpv),
+		Code: bytesToUint32Slice(sh.TerrainFrag),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, core1_0.PipelineLayout{}, err
@@ -354,9 +352,9 @@ func createTerrainPipeline(deviceDriver core1_0.DeviceDriver, renderPass core1_0
 
 // createOverlayPipeline creates a pipeline for HUD/overlay geometry with no
 // depth testing and no back-face culling, sharing the same pipeline layout.
-func createOverlayPipeline(deviceDriver core1_0.DeviceDriver, renderPass core1_0.RenderPass, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
+func createOverlayPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
-		Code: bytesToUint32Slice(shaders.MeshVertSpv),
+		Code: bytesToUint32Slice(sh.MeshVert),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, err
@@ -364,7 +362,7 @@ func createOverlayPipeline(deviceDriver core1_0.DeviceDriver, renderPass core1_0
 	defer deviceDriver.DestroyShaderModule(vertModule, nil)
 
 	fragModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
-		Code: bytesToUint32Slice(shaders.MeshFragSpv),
+		Code: bytesToUint32Slice(sh.MeshFrag),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, err
@@ -433,9 +431,9 @@ func createOverlayPipeline(deviceDriver core1_0.DeviceDriver, renderPass core1_0
 
 // createStarsPipeline creates a pipeline for procedural starfield rendering:
 // no vertex input, no depth test, additive blending.
-func createStarsPipeline(deviceDriver core1_0.DeviceDriver, renderPass core1_0.RenderPass, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
+func createStarsPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
-		Code: bytesToUint32Slice(shaders.StarsVertSpv),
+		Code: bytesToUint32Slice(sh.StarsVert),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, err
@@ -443,7 +441,7 @@ func createStarsPipeline(deviceDriver core1_0.DeviceDriver, renderPass core1_0.R
 	defer deviceDriver.DestroyShaderModule(vertModule, nil)
 
 	fragModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
-		Code: bytesToUint32Slice(shaders.StarsFragSpv),
+		Code: bytesToUint32Slice(sh.StarsFrag),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, err
@@ -515,9 +513,9 @@ func createStarsPipeline(deviceDriver core1_0.DeviceDriver, renderPass core1_0.R
 
 // createSkyPipeline creates a pipeline for procedural sky dome rendering:
 // no vertex input, no depth test, opaque blending (replaces clear color).
-func createSkyPipeline(deviceDriver core1_0.DeviceDriver, renderPass core1_0.RenderPass, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
+func createSkyPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
-		Code: bytesToUint32Slice(shaders.SkyVertSpv),
+		Code: bytesToUint32Slice(sh.SkyVert),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, err
@@ -525,7 +523,7 @@ func createSkyPipeline(deviceDriver core1_0.DeviceDriver, renderPass core1_0.Ren
 	defer deviceDriver.DestroyShaderModule(vertModule, nil)
 
 	fragModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
-		Code: bytesToUint32Slice(shaders.SkyFragSpv),
+		Code: bytesToUint32Slice(sh.SkyFrag),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, err
@@ -591,9 +589,9 @@ func createSkyPipeline(deviceDriver core1_0.DeviceDriver, renderPass core1_0.Ren
 
 // createMSDFPipeline creates a pipeline for MSDF text rendering: no depth test,
 // no culling, alpha blending enabled, using msdf.vert + msdf.frag shaders.
-func createMSDFPipeline(deviceDriver core1_0.DeviceDriver, renderPass core1_0.RenderPass, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
+func createMSDFPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
-		Code: bytesToUint32Slice(shaders.MsdfVertSpv),
+		Code: bytesToUint32Slice(sh.MsdfVert),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, err
@@ -601,7 +599,7 @@ func createMSDFPipeline(deviceDriver core1_0.DeviceDriver, renderPass core1_0.Re
 	defer deviceDriver.DestroyShaderModule(vertModule, nil)
 
 	fragModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
-		Code: bytesToUint32Slice(shaders.MsdfFragSpv),
+		Code: bytesToUint32Slice(sh.MsdfFrag),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, err
@@ -678,9 +676,9 @@ func createMSDFPipeline(deviceDriver core1_0.DeviceDriver, renderPass core1_0.Re
 // depth tested, using grass.vert + grass.frag with alpha-to-coverage so distant
 // blades dissolve via MSAA coverage. Two vertex bindings: binding 0 = Vertex
 // (per-vertex), binding 1 = GrassInstance (per-instance).
-func createGrassPipeline(deviceDriver core1_0.DeviceDriver, renderPass core1_0.RenderPass, litPipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
+func createGrassPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, litPipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
-		Code: bytesToUint32Slice(shaders.GrassVertSpv),
+		Code: bytesToUint32Slice(sh.GrassVert),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, err
@@ -688,7 +686,7 @@ func createGrassPipeline(deviceDriver core1_0.DeviceDriver, renderPass core1_0.R
 	defer deviceDriver.DestroyShaderModule(vertModule, nil)
 
 	fragModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
-		Code: bytesToUint32Slice(shaders.GrassFragSpv),
+		Code: bytesToUint32Slice(sh.GrassFrag),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, err
@@ -780,9 +778,9 @@ func createGrassPipeline(deviceDriver core1_0.DeviceDriver, renderPass core1_0.R
 // createParticlePipeline creates a pipeline for instanced billboard particles:
 // additive blend, depth test ON / write OFF, no culling.
 // Two vertex bindings: binding 0 = Vertex (per-vertex quad), binding 1 = ParticleInstance (per-instance).
-func createParticlePipeline(deviceDriver core1_0.DeviceDriver, renderPass core1_0.RenderPass, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
+func createParticlePipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
-		Code: bytesToUint32Slice(shaders.ParticleVertSpv),
+		Code: bytesToUint32Slice(sh.ParticleVert),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, err
@@ -790,7 +788,7 @@ func createParticlePipeline(deviceDriver core1_0.DeviceDriver, renderPass core1_
 	defer deviceDriver.DestroyShaderModule(vertModule, nil)
 
 	fragModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
-		Code: bytesToUint32Slice(shaders.ParticleFragSpv),
+		Code: bytesToUint32Slice(sh.ParticleFrag),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, err
@@ -912,9 +910,9 @@ func createSkinnedPipelineLayout(deviceDriver core1_0.DeviceDriver, texSetLayout
 // createSkinnedPipeline creates the pipeline for skinned meshes: same as the main
 // lit pipeline but using the skinned vertex shader, skinned vertex input layout,
 // and skinned_lit.frag (shadow sampler at set 2 instead of set 1).
-func createSkinnedPipeline(deviceDriver core1_0.DeviceDriver, renderPass core1_0.RenderPass, skinnedPipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
+func createSkinnedPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, skinnedPipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
-		Code: bytesToUint32Slice(shaders.SkinnedLitVertSpv),
+		Code: bytesToUint32Slice(sh.SkinnedLitVert),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, err
@@ -922,7 +920,7 @@ func createSkinnedPipeline(deviceDriver core1_0.DeviceDriver, renderPass core1_0
 	defer deviceDriver.DestroyShaderModule(vertModule, nil)
 
 	fragModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
-		Code: bytesToUint32Slice(shaders.SkinnedLitFragSpv),
+		Code: bytesToUint32Slice(sh.SkinnedLitFrag),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, err
@@ -992,9 +990,9 @@ func createSkinnedPipeline(deviceDriver core1_0.DeviceDriver, renderPass core1_0
 
 // createUIPipeline creates a pipeline for textured UI panels: no depth test,
 // no culling, alpha blending enabled, using ui.vert + ui.frag shaders.
-func createUIPipeline(deviceDriver core1_0.DeviceDriver, renderPass core1_0.RenderPass, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
+func createUIPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
-		Code: bytesToUint32Slice(shaders.UIVertSpv),
+		Code: bytesToUint32Slice(sh.UIVert),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, err
@@ -1002,7 +1000,7 @@ func createUIPipeline(deviceDriver core1_0.DeviceDriver, renderPass core1_0.Rend
 	defer deviceDriver.DestroyShaderModule(vertModule, nil)
 
 	fragModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
-		Code: bytesToUint32Slice(shaders.UIFragSpv),
+		Code: bytesToUint32Slice(sh.UIFrag),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, err

@@ -71,12 +71,10 @@ Heights are `[z*GridW + x]`, row-major. The grid covers the world rectangle
 from `(OriginX, OriginZ)` to `(OriginX+WorldW, OriginZ+WorldD)`. Grid spacing is
 `WorldW/(GridW-1)` by `WorldD/(GridH-1)`.
 
-`LoadHeightmap` reads the same structure from a binary file:
+`LoadHeightmap(fsys, name)` reads the same structure from a binary file:
 `gridW(u32) gridH(u32) worldW(f32) worldD(f32) originX(f32) originZ(f32)` then
-`gridW*gridH` little-endian `f32` heights.
-
-> Loading is currently a path-relative `os.Open`. An `fs.FS`-based asset layer
-> lands in a later phase; until then the working directory matters.
+`gridW*gridH` little-endian `f32` heights. Like every loader in the engine it
+takes an `fs.FS`, so an embedded heightmap and one on disk are the same call.
 
 ## Terrain generation is a game concern
 

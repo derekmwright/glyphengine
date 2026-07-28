@@ -4,8 +4,6 @@ import (
 	"github.com/vkngwrapper/core/v3/common"
 	"github.com/vkngwrapper/core/v3/core1_0"
 	"github.com/vkngwrapper/extensions/v3/khr_swapchain"
-
-	"github.com/derekmwright/glyphengine/shaders"
 )
 
 // This file implements the classic Vulkan "hello triangle" as a self-contained
@@ -28,8 +26,7 @@ import (
 // the diagnostic triangle, reusing the renderer's main render pass and MSAA
 // sample count so it exercises the real swapchain configuration.
 func createTrianglePipeline(
-	deviceDriver core1_0.DeviceDriver,
-	renderPass core1_0.RenderPass,
+	deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass,
 	extent core1_0.Extent2D,
 	samples core1_0.SampleCountFlags,
 ) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
@@ -37,7 +34,7 @@ func createTrianglePipeline(
 	var nilLayout core1_0.PipelineLayout
 
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
-		Code: bytesToUint32Slice(shaders.TriangleVertSpv),
+		Code: bytesToUint32Slice(sh.TriangleVert),
 	})
 	if err != nil {
 		return nilPipeline, nilLayout, err
@@ -45,7 +42,7 @@ func createTrianglePipeline(
 	defer deviceDriver.DestroyShaderModule(vertModule, nil)
 
 	fragModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
-		Code: bytesToUint32Slice(shaders.TriangleFragSpv),
+		Code: bytesToUint32Slice(sh.TriangleFrag),
 	})
 	if err != nil {
 		return nilPipeline, nilLayout, err
@@ -131,7 +128,7 @@ func createTrianglePipeline(
 // programs that never call this pay nothing for it.
 func (r *Renderer) DrawTriangle() error {
 	if r.trianglePipeline == nil {
-		pipeline, layout, err := createTrianglePipeline(r.deviceDriver, r.renderPass, r.sc.extent, r.msaaSamples)
+		pipeline, layout, err := createTrianglePipeline(r.deviceDriver, r.shaders, r.renderPass, r.sc.extent, r.msaaSamples)
 		if err != nil {
 			return err
 		}

@@ -6,7 +6,7 @@ import (
 	"image"
 	"image/draw"
 	"image/png"
-	"os"
+	"io/fs"
 )
 
 // Font holds a parsed MSDF font atlas and its glyph metrics.
@@ -122,12 +122,12 @@ func (f *Font) WrapText(text string, fontSize, maxWidth float32) []string {
 	return lines
 }
 
-// LoadFont parses an msdf-atlas-gen JSON file and loads the PNG atlas as a linear texture.
-func LoadFont(r *Renderer, jsonPath, pngPath string) (*Font, error) {
+// LoadFont parses an msdf-atlas-gen JSON descriptor and its PNG atlas from fsys.
+func LoadFont(r *Renderer, fsys fs.FS, jsonName, pngName string) (*Font, error) {
 	// Parse JSON
-	jsonData, err := os.ReadFile(jsonPath)
+	jsonData, err := fs.ReadFile(fsys, jsonName)
 	if err != nil {
-		return nil, fmt.Errorf("read font json: %w", err)
+		return nil, fmt.Errorf("read font json %q: %w", jsonName, err)
 	}
 
 	var fj fontJSON
@@ -136,9 +136,9 @@ func LoadFont(r *Renderer, jsonPath, pngPath string) (*Font, error) {
 	}
 
 	// Load PNG
-	pngFile, err := os.Open(pngPath)
+	pngFile, err := fsys.Open(pngName)
 	if err != nil {
-		return nil, fmt.Errorf("open font atlas: %w", err)
+		return nil, fmt.Errorf("open font atlas %q: %w", pngName, err)
 	}
 	defer pngFile.Close()
 

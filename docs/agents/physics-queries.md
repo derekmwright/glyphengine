@@ -61,7 +61,7 @@ For shapes an AABB approximates badly — angled walls, rocks, arches — add a
 narrow phase.
 
 ```go
-points, err := glyphengine.ExtractGLTFPositions("models/rock.glb")
+points, err := glyphengine.ExtractGLTFPositions(assetsFS, "models/rock.glb")
 if err != nil {
 	return err
 }

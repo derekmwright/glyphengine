@@ -1,7 +1,7 @@
 package yamlui
 
 import (
-	"os"
+	"io/fs"
 
 	"gopkg.in/yaml.v3"
 )
@@ -63,9 +63,9 @@ type WidgetDef struct {
 	Children []WidgetDef `yaml:"children"`
 }
 
-// ParseFile reads and parses a YAML widget definition from a file.
-func ParseFile(path string) (*WidgetDef, error) {
-	data, err := os.ReadFile(path)
+// ParseFS reads and parses a YAML widget definition from fsys.
+func ParseFS(fsys fs.FS, name string) (*WidgetDef, error) {
+	data, err := fs.ReadFile(fsys, name)
 	if err != nil {
 		return nil, err
 	}

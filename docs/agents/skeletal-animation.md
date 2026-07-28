@@ -31,7 +31,7 @@ verified: 2026-07-28
 # Play skeletal animation clips
 
 ```go
-model, err := e.Renderer().LoadGLTFSkinned("models/character.glb")
+model, err := e.Renderer().LoadGLTFSkinned(assetsFS, "models/character.glb")
 if err != nil {
 	return err
 }
@@ -56,9 +56,6 @@ e.PlayClip(ent, "idle", true)
 `Engine.Run` calls `TickAnimations` once per rendered frame, which advances
 time, samples the pose, blends if a cross-fade is active, and uploads the joint
 matrices. You never call it yourself.
-
-> Model loading is currently a path-relative `os.Open`. An `fs.FS`-based asset
-> layer lands in a later phase; until then the working directory matters.
 
 ## Starting clips
 

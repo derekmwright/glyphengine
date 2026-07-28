@@ -6,8 +6,8 @@ import (
 	"image/draw"
 	_ "image/jpeg"
 	"image/png"
+	"io/fs"
 	"math/bits"
-	"os"
 	"unsafe"
 
 	"github.com/vkngwrapper/core/v3/core1_0"
@@ -1015,18 +1015,18 @@ func (r *Renderer) CreateTextureNearest(pixels []byte, width, height int) (*Text
 	return tex, nil
 }
 
-// LoadTextureNearest loads a PNG file from disk and creates a nearest-neighbor
+// LoadTextureNearest reads a PNG from fsys and creates a nearest-neighbor
 // filtered texture. Used for pixel-art UI assets.
-func (r *Renderer) LoadTextureNearest(path string) (*Texture, error) {
-	f, err := os.Open(path)
+func (r *Renderer) LoadTextureNearest(fsys fs.FS, name string) (*Texture, error) {
+	f, err := fsys.Open(name)
 	if err != nil {
-		return nil, fmt.Errorf("open texture: %w", err)
+		return nil, fmt.Errorf("open texture %q: %w", name, err)
 	}
 	defer f.Close()
 
 	img, err := png.Decode(f)
 	if err != nil {
-		return nil, fmt.Errorf("decode texture: %w", err)
+		return nil, fmt.Errorf("decode texture %q: %w", name, err)
 	}
 
 	bounds := img.Bounds()
@@ -1037,18 +1037,18 @@ func (r *Renderer) LoadTextureNearest(path string) (*Texture, error) {
 	return r.CreateTextureNearest(rgba.Pix, w, h)
 }
 
-// LoadTextureLinear loads a PNG file from disk and creates a linearly-filtered
+// LoadTextureLinear reads a PNG from fsys and creates a linearly-filtered
 // texture. Used for photographic or high-res UI assets.
-func (r *Renderer) LoadTextureLinear(path string) (*Texture, error) {
-	f, err := os.Open(path)
+func (r *Renderer) LoadTextureLinear(fsys fs.FS, name string) (*Texture, error) {
+	f, err := fsys.Open(name)
 	if err != nil {
-		return nil, fmt.Errorf("open texture: %w", err)
+		return nil, fmt.Errorf("open texture %q: %w", name, err)
 	}
 	defer f.Close()
 
 	img, err := png.Decode(f)
 	if err != nil {
-		return nil, fmt.Errorf("decode texture: %w", err)
+		return nil, fmt.Errorf("decode texture %q: %w", name, err)
 	}
 
 	bounds := img.Bounds()
@@ -1059,18 +1059,18 @@ func (r *Renderer) LoadTextureLinear(path string) (*Texture, error) {
 	return r.CreateTextureLinear(rgba.Pix, w, h)
 }
 
-// LoadTexture loads an image file (PNG or JPEG) from disk and creates a linearly-filtered,
+// LoadTexture reads an image (PNG or JPEG) from fsys and creates a linearly-filtered,
 // repeat-sampled sRGB texture. Used for tiling world textures like terrain grass.
-func (r *Renderer) LoadTexture(path string) (*Texture, error) {
-	f, err := os.Open(path)
+func (r *Renderer) LoadTexture(fsys fs.FS, name string) (*Texture, error) {
+	f, err := fsys.Open(name)
 	if err != nil {
-		return nil, fmt.Errorf("open texture: %w", err)
+		return nil, fmt.Errorf("open texture %q: %w", name, err)
 	}
 	defer f.Close()
 
 	img, _, err := image.Decode(f)
 	if err != nil {
-		return nil, fmt.Errorf("decode texture: %w", err)
+		return nil, fmt.Errorf("decode texture %q: %w", name, err)
 	}
 
 	bounds := img.Bounds()

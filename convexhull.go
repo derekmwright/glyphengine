@@ -3,7 +3,9 @@ package glyphengine
 import (
 	"encoding/binary"
 	"fmt"
+	"io/fs"
 	"math"
+	"path"
 
 	"github.com/go-gl/mathgl/mgl32"
 	"github.com/golang/geo/r3"
@@ -37,12 +39,13 @@ type HullColliderInfo struct {
 // glTF vertex extraction (no renderer dependency)
 // ---------------------------------------------------------------------------
 
-// ExtractGLTFPositions opens a glTF/GLB file and returns all vertex positions
-// across all meshes and primitives. No GPU or Renderer required.
-func ExtractGLTFPositions(path string) ([][3]float32, error) {
-	doc, err := gltf.Open(path)
+// ExtractGLTFPositions reads a glTF/GLB document from fsys and returns all
+// vertex positions across all meshes and primitives. No GPU or Renderer
+// required, so hull generation can run as a build step.
+func ExtractGLTFPositions(fsys fs.FS, name string) ([][3]float32, error) {
+	doc, err := openGLTFDoc(fsys, name)
 	if err != nil {
-		return nil, fmt.Errorf("open gltf %q: %w", path, err)
+		return nil, err
 	}
 
 	var positions [][3]float32
@@ -60,7 +63,7 @@ func ExtractGLTFPositions(path string) ([][3]float32, error) {
 		}
 	}
 	if len(positions) == 0 {
-		return nil, fmt.Errorf("no vertex positions found in %q", path)
+		return nil, fmt.Errorf("no vertex positions found in %q", name)
 	}
 	return positions, nil
 }
@@ -68,6 +71,30 @@ func ExtractGLTFPositions(path string) ([][3]float32, error) {
 // ---------------------------------------------------------------------------
 // Quickhull — compute convex hull from point cloud
 // ---------------------------------------------------------------------------
+
+// openGLTFDoc decodes a glTF document from fsys, resolving its external
+// buffers against the document's own directory. The renderer has an
+// equivalent; this one exists so hull generation stays GPU-free.
+func openGLTFDoc(fsys fs.FS, name string) (*gltf.Document, error) {
+	f, err := fsys.Open(name)
+	if err != nil {
+		return nil, fmt.Errorf("open gltf %q: %w", name, err)
+	}
+	defer f.Close()
+
+	base := fsys
+	if dir := path.Dir(name); dir != "." {
+		if base, err = fs.Sub(fsys, dir); err != nil {
+			return nil, fmt.Errorf("gltf %q: resolve %q: %w", name, dir, err)
+		}
+	}
+
+	doc := new(gltf.Document)
+	if err := gltf.NewDecoderFS(f, base).Decode(doc); err != nil {
+		return nil, fmt.Errorf("decode gltf %q: %w", name, err)
+	}
+	return doc, nil
+}
 
 // ComputeConvexHull computes the convex hull of a 3D point cloud.
 // Uses the quickhull-go library for a correct, closed mesh.

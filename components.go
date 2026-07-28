@@ -7,6 +7,13 @@ import (
 	"github.com/derekmwright/glyphengine/renderer"
 )
 
+// Entity is a handle to a thing in the world.
+//
+// Aliased from the ecs package so a game that only touches the engine's own
+// API does not have to import ecs for a single type. It is the same type, so
+// the two are interchangeable wherever both are in scope.
+type Entity = ecs.Entity
+
 // Transform holds position, rotation, and scale for an entity.
 type Transform struct {
 	Position mgl32.Vec3

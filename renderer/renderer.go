@@ -3,6 +3,7 @@ package renderer
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"unsafe"
 
@@ -89,6 +90,9 @@ type Renderer struct {
 
 	// vsync selects the swapchain present mode; see WithVSync.
 	vsync bool
+
+	// shaders holds the SPIR-V every pipeline is built from; see WithShaders.
+	shaders ShaderSet
 
 	// Validation layer plumbing; nil unless validation is enabled.
 	validation bool
@@ -178,6 +182,15 @@ func WithVSync(enabled bool) Option {
 	return func(r *Renderer) { r.vsync = enabled }
 }
 
+// WithShaders replaces the SPIR-V the renderer builds its pipelines from.
+// Fields left nil fall back to the engine's embedded shader for that stage,
+// so a game can override one pipeline without supplying all of them.
+//
+// See ShaderSet for what a replacement has to match.
+func WithShaders(set ShaderSet) Option {
+	return func(r *Renderer) { r.shaders = set }
+}
+
 // WithMSAASamples requests an MSAA sample count (1, 2, 4, or 8). Invalid
 // values are ignored; the value is clamped to what the device supports for
 // both color and depth once the physical device is selected.
@@ -213,11 +226,14 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 		win:           w,
 		msaaSamples:   core1_0.Samples2,
 		vsync:         true, // see WithVSync
+		shaders:       DefaultShaders(),
 		dynamicMeshes: make(map[*Mesh]*dynamicMesh),
 	}
 	for _, o := range opts {
 		o(r)
 	}
+	// An override may set only the stages it cares about.
+	r.shaders = r.shaders.withDefaults()
 
 	// Unwind on any failure below. Every `return nil, err` therefore leaves
 	// the process in the state it was in before New was called.
@@ -373,7 +389,7 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	r.onInit(func() { r.deviceDriver.DestroyDescriptorSetLayout(r.jointDescriptorSetLayout, nil) })
 
 	// Step 7b: Shadow resources (needs descriptor pool)
-	r.shadow, err = createShadowResources(r.instanceDriver, r.deviceDriver, r.physicalDevice, r.descriptorPool, r.jointDescriptorSetLayout)
+	r.shadow, err = createShadowResources(r.instanceDriver, r.deviceDriver, r.shaders, r.physicalDevice, r.descriptorPool, r.jointDescriptorSetLayout)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create shadow resources: %w", err)
 	}
@@ -394,7 +410,7 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	r.onInit(func() { r.deviceDriver.DestroyPipelineLayout(r.pipelineLayout, nil) })
 
 	// Lit pipeline layout (set 0 = texture, set 1 = shadow) and lit pipeline
-	r.pipeline, r.litPipelineLayout, err = createGraphicsPipeline(r.deviceDriver, r.renderPass, r.sc.extent, r.descriptorSetLayout, r.shadow.descriptorSetLayout, r.msaaSamples)
+	r.pipeline, r.litPipelineLayout, err = createGraphicsPipeline(r.deviceDriver, r.shaders, r.renderPass, r.sc.extent, r.descriptorSetLayout, r.shadow.descriptorSetLayout, r.msaaSamples)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create lit pipeline: %w", err)
 	}
@@ -406,7 +422,7 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	// call returns its own. Discarding it with _ leaked a VkPipelineLayout for
 	// the life of the process — invisible without validation, since nothing
 	// else depends on it. Keep it and destroy it.
-	r.litDoubleSidedPipeline, r.litDoubleSidedPipelineLayout, err = createGraphicsPipeline(r.deviceDriver, r.renderPass, r.sc.extent, r.descriptorSetLayout, r.shadow.descriptorSetLayout, r.msaaSamples, 0)
+	r.litDoubleSidedPipeline, r.litDoubleSidedPipelineLayout, err = createGraphicsPipeline(r.deviceDriver, r.shaders, r.renderPass, r.sc.extent, r.descriptorSetLayout, r.shadow.descriptorSetLayout, r.msaaSamples, 0)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create double-sided lit pipeline: %w", err)
 	}
@@ -416,7 +432,7 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	})
 
 	// Terrain splat pipeline: set 0 = 4 terrain samplers, set 1 = shadow.
-	r.terrainPipeline, r.terrainPipelineLayout, err = createTerrainPipeline(r.deviceDriver, r.renderPass, r.sc.extent, r.terrainSetLayout, r.shadow.descriptorSetLayout, r.msaaSamples)
+	r.terrainPipeline, r.terrainPipelineLayout, err = createTerrainPipeline(r.deviceDriver, r.shaders, r.renderPass, r.sc.extent, r.terrainSetLayout, r.shadow.descriptorSetLayout, r.msaaSamples)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create terrain pipeline: %w", err)
 	}
@@ -425,31 +441,31 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 		r.deviceDriver.DestroyPipelineLayout(r.terrainPipelineLayout, nil)
 	})
 
-	r.overlayPipeline, err = createOverlayPipeline(r.deviceDriver, r.renderPass, r.pipelineLayout, r.sc.extent, r.msaaSamples)
+	r.overlayPipeline, err = createOverlayPipeline(r.deviceDriver, r.shaders, r.renderPass, r.pipelineLayout, r.sc.extent, r.msaaSamples)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create overlay pipeline: %w", err)
 	}
 	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.overlayPipeline, nil) })
 
-	r.starsPipeline, err = createStarsPipeline(r.deviceDriver, r.renderPass, r.pipelineLayout, r.sc.extent, r.msaaSamples)
+	r.starsPipeline, err = createStarsPipeline(r.deviceDriver, r.shaders, r.renderPass, r.pipelineLayout, r.sc.extent, r.msaaSamples)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create stars pipeline: %w", err)
 	}
 	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.starsPipeline, nil) })
 
-	r.skyPipeline, err = createSkyPipeline(r.deviceDriver, r.renderPass, r.pipelineLayout, r.sc.extent, r.msaaSamples)
+	r.skyPipeline, err = createSkyPipeline(r.deviceDriver, r.shaders, r.renderPass, r.pipelineLayout, r.sc.extent, r.msaaSamples)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create sky pipeline: %w", err)
 	}
 	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.skyPipeline, nil) })
 
-	r.msdfPipeline, err = createMSDFPipeline(r.deviceDriver, r.renderPass, r.pipelineLayout, r.sc.extent, r.msaaSamples)
+	r.msdfPipeline, err = createMSDFPipeline(r.deviceDriver, r.shaders, r.renderPass, r.pipelineLayout, r.sc.extent, r.msaaSamples)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create MSDF pipeline: %w", err)
 	}
 	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.msdfPipeline, nil) })
 
-	r.uiPipeline, err = createUIPipeline(r.deviceDriver, r.renderPass, r.pipelineLayout, r.sc.extent, r.msaaSamples)
+	r.uiPipeline, err = createUIPipeline(r.deviceDriver, r.shaders, r.renderPass, r.pipelineLayout, r.sc.extent, r.msaaSamples)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create UI pipeline: %w", err)
 	}
@@ -461,13 +477,13 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	}
 	r.onInit(func() { r.deviceDriver.DestroyPipelineLayout(r.skinnedPipelineLayout, nil) })
 
-	r.skinnedPipeline, err = createSkinnedPipeline(r.deviceDriver, r.renderPass, r.skinnedPipelineLayout, r.sc.extent, r.msaaSamples)
+	r.skinnedPipeline, err = createSkinnedPipeline(r.deviceDriver, r.shaders, r.renderPass, r.skinnedPipelineLayout, r.sc.extent, r.msaaSamples)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create skinned pipeline: %w", err)
 	}
 	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.skinnedPipeline, nil) })
 
-	r.grassPipeline, err = createGrassPipeline(r.deviceDriver, r.renderPass, r.litPipelineLayout, r.sc.extent, r.msaaSamples)
+	r.grassPipeline, err = createGrassPipeline(r.deviceDriver, r.shaders, r.renderPass, r.litPipelineLayout, r.sc.extent, r.msaaSamples)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create grass pipeline: %w", err)
 	}
@@ -479,7 +495,7 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 		r.deviceDriver.DestroyPipeline(r.grassPipeline, nil)
 	})
 
-	r.particlePipeline, err = createParticlePipeline(r.deviceDriver, r.renderPass, r.pipelineLayout, r.sc.extent, r.msaaSamples)
+	r.particlePipeline, err = createParticlePipeline(r.deviceDriver, r.shaders, r.renderPass, r.pipelineLayout, r.sc.extent, r.msaaSamples)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create particle pipeline: %w", err)
 	}
@@ -554,14 +570,14 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 // FallbackTexture returns the 1x1 white texture used when no texture is assigned.
 func (r *Renderer) FallbackTexture() *Texture { return r.fallbackTexture }
 
-// InitGrass loads glTF flora models and scatters instances across the
+// InitGrass loads glTF flora models from fsys and scatters instances across the
 // heightmap, weighted by each spec's spawn weight. If densityMask is non-nil,
 // flora is thinned/cleared based on the mask values.
-func (r *Renderer) InitGrass(hm GrassHeightmap, originX, originZ, worldW, worldD float32, specs []GrassModelSpec, densityMask *GrassDensityMask) {
+func (r *Renderer) InitGrass(fsys fs.FS, hm GrassHeightmap, originX, originZ, worldW, worldD float32, specs []GrassModelSpec, densityMask *GrassDensityMask) {
 	var models []*Model
 	var weights []float32
 	for _, spec := range specs {
-		m, err := r.LoadGLTF(spec.Path)
+		m, err := r.LoadGLTF(fsys, spec.Path)
 		if err != nil {
 			log.Printf("Failed to load flora model %s: %v", spec.Path, err)
 			continue

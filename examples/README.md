@@ -14,6 +14,7 @@ Each is a complete, self-contained `main()` — copy one and start editing.
 | 02 | `02-cube` | `Game`, `Scene`, entities and components, orbit camera, day/night | none |
 | 03 | `03-physics` | Colliders, gravity and ground snapping, spatial grids, mouse picking | none |
 | 04 | `04-first-person` | First-person camera, `MoveIntent`, character controller, wall collision | none |
+| 05 | `05-textures` | Loading assets from an `fs.FS` — embedded or on disk | 1 generated PNG |
 | 07 | `07-terrain` | Procedural heightmap as both collision and geometry, walking over terrain | none |
 
 More land as the extraction proceeds — glTF loading, skinned animation,

@@ -2,6 +2,7 @@ package yamlui
 
 import (
 	"fmt"
+	"io/fs"
 	"strconv"
 
 	"github.com/derekmwright/glyphengine/renderer"
@@ -63,11 +64,11 @@ type WidgetTree struct {
 	cursorTick  int
 }
 
-// Load parses a YAML file and builds a widget tree.
-func Load(path string) (*WidgetTree, error) {
-	def, err := ParseFile(path)
+// Load parses a YAML widget definition from fsys and builds a widget tree.
+func Load(fsys fs.FS, name string) (*WidgetTree, error) {
+	def, err := ParseFS(fsys, name)
 	if err != nil {
-		return nil, fmt.Errorf("yamlui: load %s: %w", path, err)
+		return nil, fmt.Errorf("yamlui: load %s: %w", name, err)
 	}
 	t := &WidgetTree{
 		index:         make(map[string]*Node),

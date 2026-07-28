@@ -58,7 +58,7 @@ func TestResolveFloat(t *testing.T) {
 	}
 }
 
-func TestParseFile(t *testing.T) {
+func TestParseFS(t *testing.T) {
 	yaml := `widget: panel
 width: 280
 height: 90
@@ -83,7 +83,7 @@ children:
 		t.Fatal(err)
 	}
 
-	def, err := ParseFile(path)
+	def, err := ParseFS(os.DirFS(filepath.Dir(path)), filepath.Base(path))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ children:
 		t.Fatal(err)
 	}
 
-	tree, err := Load(path)
+	tree, err := Load(os.DirFS(filepath.Dir(path)), filepath.Base(path))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -448,7 +448,7 @@ children:
 		t.Fatal(err)
 	}
 
-	def, err := ParseFile(path)
+	def, err := ParseFS(os.DirFS(filepath.Dir(path)), filepath.Base(path))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -544,7 +544,7 @@ func TestSetChildren(t *testing.T) {
 func TestParseKitchenSink(t *testing.T) {
 	path := filepath.Join("testdata", "kitchen_sink.yaml")
 
-	def, err := ParseFile(path)
+	def, err := ParseFS(os.DirFS(filepath.Dir(path)), filepath.Base(path))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -558,7 +558,7 @@ func TestParseKitchenSink(t *testing.T) {
 		t.Errorf("root size = %fx%f, want 640x480", def.Width, def.Height)
 	}
 
-	tree, err := Load(path)
+	tree, err := Load(os.DirFS(filepath.Dir(path)), filepath.Base(path))
 	if err != nil {
 		t.Fatal(err)
 	}

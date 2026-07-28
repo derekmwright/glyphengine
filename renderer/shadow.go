@@ -9,8 +9,6 @@ import (
 
 	"github.com/go-gl/mathgl/mgl32"
 	"github.com/vkngwrapper/core/v3/core1_0"
-
-	"github.com/derekmwright/glyphengine/shaders"
 )
 
 const ShadowMapSize = 2048
@@ -80,6 +78,7 @@ type shadowResources struct {
 func createShadowResources(
 	instanceDriver core1_0.CoreInstanceDriver,
 	deviceDriver core1_0.CoreDeviceDriver,
+	sh ShaderSet,
 	physicalDevice core1_0.PhysicalDevice,
 	descriptorPool core1_0.DescriptorPool,
 	jointSetLayout core1_0.DescriptorSetLayout,
@@ -426,13 +425,13 @@ func createShadowResources(
 	}
 
 	// Create shadow pipelines
-	s.pipeline, err = createShadowPipeline(deviceDriver, s.renderPass, s.pipelineLayout, false)
+	s.pipeline, err = createShadowPipeline(deviceDriver, sh, s.renderPass, s.pipelineLayout, false)
 	if err != nil {
 		s.destroy(deviceDriver)
 		return nil, fmt.Errorf("shadow pipeline: %w", err)
 	}
 
-	s.skinnedPipeline, err = createShadowPipeline(deviceDriver, s.renderPass, s.skinnedPipelineLayout, true)
+	s.skinnedPipeline, err = createShadowPipeline(deviceDriver, sh, s.renderPass, s.skinnedPipelineLayout, true)
 	if err != nil {
 		s.destroy(deviceDriver)
 		return nil, fmt.Errorf("skinned shadow pipeline: %w", err)
@@ -620,12 +619,12 @@ func createShadowResources(
 }
 
 // createShadowPipeline creates a depth-only pipeline for the shadow pass.
-func createShadowPipeline(deviceDriver core1_0.DeviceDriver, renderPass core1_0.RenderPass, layout core1_0.PipelineLayout, skinned bool) (core1_0.Pipeline, error) {
+func createShadowPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, layout core1_0.PipelineLayout, skinned bool) (core1_0.Pipeline, error) {
 	var vertSpv []byte
 	if skinned {
-		vertSpv = shaders.ShadowSkinnedVertSpv
+		vertSpv = sh.ShadowSkinnedVert
 	} else {
-		vertSpv = shaders.ShadowVertSpv
+		vertSpv = sh.ShadowVert
 	}
 
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
@@ -637,7 +636,7 @@ func createShadowPipeline(deviceDriver core1_0.DeviceDriver, renderPass core1_0.
 	defer deviceDriver.DestroyShaderModule(vertModule, nil)
 
 	fragModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
-		Code: bytesToUint32Slice(shaders.ShadowFragSpv),
+		Code: bytesToUint32Slice(sh.ShadowFrag),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, err
