@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Windows is the supported platform, so it is the one that gates.
+  #
+  # Note this builds and tests but does not render: GitHub runners have no GPU,
+  # so `task smoke` and `task validate` stay local until a lavapipe job exists
+  # (blocked on Linux, see below).
+  windows:
+    name: build + test (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Every package that imports the renderer links against the Vulkan
+      # loader (`#cgo LDFLAGS: -lvulkan`), so even `go test` needs it present.
+      # Only the headers and loader are built, not the whole SDK.
+      - name: Install Vulkan loader
+        uses: humbletim/setup-vulkan-sdk@v1.2.0
+        with:
+          vulkan-query-version: 1.3.268.0
+          vulkan-components: Vulkan-Headers, Vulkan-Loader
+          vulkan-use-cache: true
+
+      - name: Install go-task
+        run: go install github.com/go-task/task/v3/cmd/task@latest
+
+      - name: Lint
+        run: task lint
+
+      - name: Build
+        run: task build
+
+      - name: Test
+        run: task test
+
+      # The parallel movement phase is only correct because of a collision
+      # snapshot and store locking; without the detector a regression there is
+      # invisible until it corrupts a player's position in production.
+      - name: Test (race)
+        run: task test:race
+
+  # Linux does not compile yet, and that is not our bug: vkngwrapper/core
+  # v3.1.1 is missing an `unsafe` import in system_nonwindows.go. The fix is
+  # merged upstream but has never been tagged.
+  #
+  # This job exists to notice the day that changes rather than to gate merges,
+  # so it is allowed to fail. When it starts passing, drop continue-on-error,
+  # bump the dependency, and add the lavapipe render job this unblocks.
+  linux-tracker:
+    name: build (linux, expected to fail upstream)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libvulkan-dev libgl1-mesa-dev xorg-dev
+
+      - name: Build
+        run: go build ./...
