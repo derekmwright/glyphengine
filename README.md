@@ -188,6 +188,8 @@ task example:07-terrain       # heightmap as both collision and geometry
 task example:08-grass         # instanced flora scattered across terrain
 task example:09-water         # animated lake: waves, refraction, Fresnel reflection
 task example:10-text          # MSDF text, one atlas from caption to headline size
+task example:11-lights        # point lights, cube shadow maps, emissive markers
+task example:12-particles     # CPU-simulated emitters, one instanced draw
 task example:15-kitchen-sink  # all of the above at once
 ```
 
