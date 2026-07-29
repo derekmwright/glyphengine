@@ -3,15 +3,20 @@
 
 layout(location = 0) in vec2 fragUV;
 
+// Offsets match the lit shaders' block exactly. pointPos through cameraPos are
+// unused here and declared only so fog lands where every other shader reads it
+// from -- one packing convention beats a per-shader one nobody can keep in step.
 layout(push_constant) uniform PushConstants {
     mat4 invVP;    // inverse view-projection
     mat4 model;    // [0].xyz = camera position
     vec4 tint;     // x = time, y = nightFactor, z = cloud raymarch steps
-    vec4 sunDir;
-    vec4 sunColor;
+    vec4 sunDir;   // xyz = direction toward the body lighting the scene
+    vec4 sunColor; // rgb, w = the real sun's elevation
     vec4 pointPos;
     vec4 pointColor;
     vec4 ambient;
+    vec4 cameraPos;
+    vec4 fog;      // zw = the real sun's horizontal direction
 } pc;
 
 layout(location = 0) out vec4 outColor;
@@ -118,6 +123,12 @@ void main() {
     // the moon, which is high when the sky should be darkest.
     float sunElevation = pc.sunColor.w;
 
+    // And the real sun's *direction*, for the same reason. sunDir above stays
+    // the lighting body, which is what the clouds below want -- they are lit by
+    // the moon at night and their palette already accounts for that. Only the
+    // scattering halo has to follow the sun itself.
+    vec3 realSunDir = atmSunDirFrom(sunElevation, pc.fog.zw);
+
     vec3 zenith, horizon;
     atmSkyPalette(sunElevation, zenith, horizon);
 
@@ -127,7 +138,7 @@ void main() {
     float t = pow(smoothstep(-0.08, 0.75, elevation), 0.65);
     vec3 skyColor = mix(horizon, zenith, t);
 
-    skyColor += atmSunGlow(dir, sunDir, sunCol, sunElevation);
+    skyColor += atmSunGlow(dir, realSunDir, sunCol, sunElevation);
 
     // Below-horizon: darken toward ground
     if (elevation < 0.0) {

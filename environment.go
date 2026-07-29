@@ -45,13 +45,20 @@ type EnvironmentState struct {
 	SunDir   [3]float32
 	SunColor [3]float32
 
-	// SunElevation is the height of the real sun, -1 to 1, and is what the
-	// atmosphere derives its palette from.
+	// RealSunDir points toward the real sun, and SunElevation is its height,
+	// -1 to 1. Together they are what the atmosphere derives its palette and
+	// its scattering from.
 	//
-	// It is separate from SunDir because SunDir is whichever body is currently
-	// lighting the scene. At night that is the moon, which rides highest
-	// exactly when the sky should be darkest, so driving the sky from the
-	// light direction paints a noon sky at midnight.
+	// They are separate from SunDir because SunDir is whichever body is
+	// currently lighting the scene. At night that is the moon, which rides
+	// highest exactly when the sky should be darkest, so driving the sky from
+	// the light direction paints a noon sky at midnight — and hangs the warm
+	// sunset halo on the moon, which is the other half of the same mistake.
+	//
+	// SunElevation is RealSunDir's y. It stays a separate field because most
+	// of the atmosphere only needs the height, and because a fixed sun can set
+	// an elevation for the sky without the two having to agree.
+	RealSunDir   [3]float32
 	SunElevation float32
 
 	// Ambient is uniform fill light.
@@ -293,7 +300,10 @@ func (env *Environment) State() EnvironmentState {
 
 	if dn := env.Cycle; dn != nil {
 		s.SunDir, s.SunColor = dn.PrimaryLight()
-		s.SunElevation = dn.SunDir()[1]
+		// Derived from RealSunDir rather than fetched again, so the elevation
+		// the palette uses and the direction the glow uses cannot disagree.
+		s.RealSunDir = dn.SunDir()
+		s.SunElevation = s.RealSunDir[1]
 		s.Ambient = dn.AmbientColor()
 		s.StarFade = dn.StarVisibility()
 		s.CastShadows = dn.SunAboveHorizon()
@@ -304,6 +314,9 @@ func (env *Environment) State() EnvironmentState {
 		if env.Sun != nil {
 			s.SunDir = env.Sun.Direction
 			s.SunColor = env.Sun.Color
+			// Without a cycle there is no sun/moon handover, so the light and
+			// the real sun are the same thing.
+			s.RealSunDir = env.Sun.Direction
 			s.CastShadows = s.SunColor[0]+s.SunColor[1]+s.SunColor[2] > 0
 		}
 		if env.Ambient != nil {

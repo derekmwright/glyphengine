@@ -38,7 +38,7 @@ layout(push_constant) uniform PushConstants {
     vec4 pointColor;// rgb, w = roughness
     vec4 ambient;   // rgb, w = metallic
     vec4 cameraPos; // xyz = eye position
-    vec4 fog;       // x = height falloff, y = base height
+    vec4 fog;       // x = height falloff, y = base height, zw = real sun horizontal
 } pc;
 
 layout(location = 0) out vec4 outColor;

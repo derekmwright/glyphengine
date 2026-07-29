@@ -248,3 +248,51 @@ func TestFogHeightFlowsThrough(t *testing.T) {
 		t.Errorf("density changed with Height set: %v vs %v", height.FogDensity, uniform.FogDensity)
 	}
 }
+
+// TestRealSunDirTracksTheSunNotTheLight guards the split that keeps the sunset
+// glow off the midnight moon.
+//
+// EnvironmentState carries two directions on purpose: SunDir is whichever body
+// lights the scene, and RealSunDir is the sun itself. From dusk to dawn those
+// point opposite ways, and the atmosphere must follow the second. Collapsing
+// RealSunDir onto SunDir in Environment.State fails the midnight case here.
+func TestRealSunDirTracksTheSunNotTheLight(t *testing.T) {
+	env := &Environment{Cycle: &DayNight{}, Sky: DefaultSky()}
+
+	// Midnight: the moon is the primary light, so the two directions disagree
+	// and RealSunDir has to be the one pointing below the horizon.
+	env.Cycle.TimeOfDay = 0.0
+	s := env.State()
+	if s.RealSunDir[1] >= 0 {
+		t.Errorf("midnight: RealSunDir.y = %g, want below the horizon", s.RealSunDir[1])
+	}
+	if s.SunDir[1] <= 0 {
+		t.Fatalf("midnight: SunDir.y = %g, expected the moon to be the primary light", s.SunDir[1])
+	}
+	if s.RealSunDir == s.SunDir {
+		t.Error("midnight: RealSunDir equals SunDir, so the glow would follow the moon")
+	}
+
+	// SunElevation is documented as RealSunDir's y; if they can drift, the glow
+	// gets positioned by one and shaped by the other.
+	if s.SunElevation != s.RealSunDir[1] {
+		t.Errorf("SunElevation = %g but RealSunDir.y = %g", s.SunElevation, s.RealSunDir[1])
+	}
+
+	// Noon: the sun is the primary light, so the two agree and nothing about
+	// daytime scattering changes.
+	env.Cycle.TimeOfDay = 0.5
+	s = env.State()
+	if s.RealSunDir[1] <= 0 {
+		t.Errorf("noon: RealSunDir.y = %g, want above the horizon", s.RealSunDir[1])
+	}
+	if s.RealSunDir != s.SunDir {
+		t.Errorf("noon: RealSunDir %v and SunDir %v should be the same body", s.RealSunDir, s.SunDir)
+	}
+
+	// A fixed sun has no handover, so the light is the sun.
+	fixed := &Environment{Sun: &DirectionalLight{Direction: [3]float32{0, 1, 0}, Color: [3]float32{1, 1, 1}}}
+	if fs := fixed.State(); fs.RealSunDir != fs.SunDir {
+		t.Errorf("fixed sun: RealSunDir %v != SunDir %v", fs.RealSunDir, fs.SunDir)
+	}
+}

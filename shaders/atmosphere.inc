@@ -12,6 +12,21 @@
 // exactly the moment there should have been most of it, and dusk had no shape
 // at all beyond a straight crossfade between a day palette and a night one.
 
+// atmSunDirFrom rebuilds the real sun's direction from the two places the push
+// constant block has room for it: its elevation, which is the y component and
+// rides in sunColor.w, and its horizontal pair in fog.zw.
+//
+// It exists because pc.sunDir is NOT the sun. It is whichever body currently
+// lights the scene, which from dusk to dawn is the moon. Handing that to
+// atmSunGlow hangs a warm sunset halo on the moon at midnight — the same
+// mistake as driving the palette from sunDir.y, one step further along.
+//
+// The result is already unit length when the caller's sun direction was, since
+// both components come from the same vector.
+vec3 atmSunDirFrom(float elevation, vec2 horizontal) {
+    return vec3(horizontal.x, elevation, horizontal.y);
+}
+
 // atmDaylight is the day/night blend. The lower edge sits below the horizon
 // because the sky stays lit for a while after the sun has gone.
 float atmDaylight(float sunY) {

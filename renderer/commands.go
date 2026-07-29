@@ -41,6 +41,15 @@ type SceneLighting struct {
 	// light direction paints a noon sky at midnight.
 	SunElevation float32
 
+	// RealSunDir is the same value as a direction rather than just a height,
+	// for the parts of the atmosphere that need to know *where* the sun is and
+	// not only how high: the scattering halo and the sunset wash.
+	//
+	// Its y is SunElevation, so only x and z have to be sent; see the layout
+	// note above pushConstantSize. Feeding those from SunDir instead is what
+	// used to paint an orange sunset halo around the midnight moon.
+	RealSunDir [3]float32
+
 	// DrawSky draws the procedural dome; when false the frame keeps its clear
 	// colour. DrawStars adds the star layer.
 	DrawSky   bool
@@ -137,6 +146,11 @@ func (d *RenderObject) worldBoundSphere() (cx, cy, cz, r float32) {
 // pushConstantSize is the total push constant block size in bytes.
 // Layout: mvp(64) + model(64) + tint(16) + sunDir(16) + sunColor(16) +
 // pointPos(16) + pointColor(16) + ambient(16) + cameraPos(16) + fog(16) = 256
+//
+// Several vec4s carry a scalar in their w rather than padding, because there is
+// nowhere else to put one: sunColor.w is the real sun's elevation, pointColor.w
+// is roughness, ambient.w is metallic, cameraPos.w is fog density, and fog.zw
+// is the real sun's horizontal direction.
 //
 // This is the whole budget on a device that reports 256, which many do, and
 // the engine already required more than Vulkan's guaranteed 128. New per-frame
@@ -242,6 +256,12 @@ func packLightingPC(pc *[64]float32, lighting SceneLighting) {
 	// fog vec4 at [60..63]
 	pc[60] = lighting.FogHeight
 	pc[61] = lighting.FogBaseHeight
+	// fog.zw = the real sun's horizontal direction. Its y is already in
+	// sunColor.w, so the shader rebuilds the full vector from the two rather
+	// than spending a vec4 the push constant block does not have on a third
+	// copy of the same information. See atmSunDirFrom in atmosphere.inc.
+	pc[62] = lighting.RealSunDir[0]
+	pc[63] = lighting.RealSunDir[2]
 }
 
 // recordCommandBuffer records the shadow depth pass followed by the main render pass
@@ -769,6 +789,12 @@ func recordCommandBuffer(
 		pc[41] = lighting.SunColor[1]
 		pc[42] = lighting.SunColor[2]
 		pc[43] = lighting.SunElevation
+		// fog.zw, at the same offsets every other shader reads it from: the real
+		// sun's horizontal direction. sky.frag declares the intervening cameraPos
+		// and fog members solely to land on these offsets, so that there is one
+		// convention rather than a per-shader packing to get wrong.
+		pc[62] = lighting.RealSunDir[0]
+		pc[63] = lighting.RealSunDir[2]
 		pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
 		deviceDriver.CmdPushConstants(cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
 		deviceDriver.CmdDraw(cmdBuf, 3, 1, 0, 0)

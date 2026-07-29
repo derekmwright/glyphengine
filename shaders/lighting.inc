@@ -61,9 +61,11 @@ float calcPointShadow(vec3 fragPos, vec3 lightPos, float range) {
 // It shares the model rather than reimplementing it. The two used to be
 // separate copies of the same constants, kept in step by a comment.
 vec3 fogColor(vec3 viewDir) {
-    vec3 sunDir = normalize(pc.sunDir.xyz);
-    // pc.sunColor.w is the real sun's elevation; pc.sunDir may be the moon.
+    // The scattering has to come from the real sun, not from pc.sunDir -- that
+    // is the moon after dusk, and glowing warm around it puts a sunset on the
+    // wrong side of the sky at the wrong time of night.
     float sunY = pc.sunColor.w;
+    vec3 sunDir = atmSunDirFrom(sunY, pc.fog.zw);
     vec3 zenith, horizon;
     atmSkyPalette(sunY, zenith, horizon);
     return horizon + atmSunGlow(viewDir, sunDir, pc.sunColor.rgb, sunY);
