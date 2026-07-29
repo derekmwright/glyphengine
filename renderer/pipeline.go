@@ -169,17 +169,17 @@ func createNonLitPipelineLayout(deviceDriver core1_0.DeviceDriver, texSetLayout 
 	return layout, nil
 }
 
-// createGraphicsPipeline creates the main scene pipeline with depth testing,
-// back-face culling, and push constants for per-object MVP + tint + lighting.
-// The litPipelineLayout uses: set 0 = texture, set 1 = shadow (UBO + sampler).
-func createGraphicsPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, extent core1_0.Extent2D, texSetLayout core1_0.DescriptorSetLayout, shadowSetLayout core1_0.DescriptorSetLayout, samples core1_0.SampleCountFlags, cullMode ...core1_0.CullModeFlags) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
-	cull := core1_0.CullModeBack
-	if len(cullMode) > 0 {
-		cull = cullMode[0]
-	}
-	// Create shader modules (lit shaders for scene rendering)
+// createLitVariantPipeline builds one of the pipelines that share lit.vert: the
+// same vertex format, depth state, blend state, and shadow set, differing only
+// in the fragment stage and in what set 0 binds.
+//
+// The plain lit, terrain-splat, and material pipelines were three copies of this
+// function that had to agree on reverse-Z, culling, and the push constant range.
+// They are one pipeline with a different material concept plugged into set 0, and
+// a fourth copy is how one of them quietly ends up with the wrong compare op.
+func createLitVariantPipeline(deviceDriver core1_0.DeviceDriver, vertSpv, fragSpv []byte, label string, renderPass core1_0.RenderPass, extent core1_0.Extent2D, set0Layout, shadowSetLayout core1_0.DescriptorSetLayout, samples core1_0.SampleCountFlags, cull core1_0.CullModeFlags) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
-		Code: bytesToUint32Slice(sh.LitVert),
+		Code: bytesToUint32Slice(vertSpv),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, core1_0.PipelineLayout{}, err
@@ -187,16 +187,16 @@ func createGraphicsPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, ren
 	defer deviceDriver.DestroyShaderModule(vertModule, nil)
 
 	fragModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
-		Code: bytesToUint32Slice(sh.LitFrag),
+		Code: bytesToUint32Slice(fragSpv),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, core1_0.PipelineLayout{}, err
 	}
 	defer deviceDriver.DestroyShaderModule(fragModule, nil)
 
-	// Lit pipeline layout: set 0 = texture sampler, set 1 = shadow (UBO + sampler)
+	// set 0 = this variant's material, set 1 = shadow (UBO + samplers)
 	pipelineLayout, _, err := deviceDriver.CreatePipelineLayout(nil, core1_0.PipelineLayoutCreateInfo{
-		SetLayouts: []core1_0.DescriptorSetLayout{texSetLayout, shadowSetLayout},
+		SetLayouts: []core1_0.DescriptorSetLayout{set0Layout, shadowSetLayout},
 		PushConstantRanges: []core1_0.PushConstantRange{
 			{
 				StageFlags: core1_0.StageVertex | core1_0.StageFragment,
@@ -211,16 +211,8 @@ func createGraphicsPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, ren
 
 	pipelines, _, err := deviceDriver.CreateGraphicsPipelines(nil, nil, core1_0.GraphicsPipelineCreateInfo{
 		Stages: []core1_0.PipelineShaderStageCreateInfo{
-			{
-				Stage:  core1_0.StageVertex,
-				Module: vertModule,
-				Name:   "main",
-			},
-			{
-				Stage:  core1_0.StageFragment,
-				Module: fragModule,
-				Name:   "main",
-			},
+			{Stage: core1_0.StageVertex, Module: vertModule, Name: "main"},
+			{Stage: core1_0.StageFragment, Module: fragModule, Name: "main"},
 		},
 		VertexInputState: &core1_0.PipelineVertexInputStateCreateInfo{
 			VertexBindingDescriptions:   []core1_0.VertexInputBindingDescription{vertexBindingDescription()},
@@ -230,22 +222,8 @@ func createGraphicsPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, ren
 			Topology: core1_0.PrimitiveTopologyTriangleList,
 		},
 		ViewportState: &core1_0.PipelineViewportStateCreateInfo{
-			Viewports: []core1_0.Viewport{
-				{
-					X:        0,
-					Y:        0,
-					Width:    float32(extent.Width),
-					Height:   float32(extent.Height),
-					MinDepth: 0,
-					MaxDepth: 1,
-				},
-			},
-			Scissors: []core1_0.Rect2D{
-				{
-					Offset: core1_0.Offset2D{X: 0, Y: 0},
-					Extent: extent,
-				},
-			},
+			Viewports: []core1_0.Viewport{{X: 0, Y: 0, Width: float32(extent.Width), Height: float32(extent.Height), MinDepth: 0, MaxDepth: 1}},
+			Scissors:  []core1_0.Rect2D{{Offset: core1_0.Offset2D{X: 0, Y: 0}, Extent: extent}},
 		},
 		RasterizationState: &core1_0.PipelineRasterizationStateCreateInfo{
 			PolygonMode: core1_0.PolygonModeFill,
@@ -284,8 +262,20 @@ func createGraphicsPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, ren
 		return core1_0.Pipeline{}, core1_0.PipelineLayout{}, err
 	}
 
-	log.Println("Graphics pipeline created")
+	log.Printf("%s pipeline created", label)
 	return pipelines[0], pipelineLayout, nil
+}
+
+// createGraphicsPipeline creates the main scene pipeline with depth testing,
+// back-face culling, and push constants for per-object MVP + tint + lighting.
+// The litPipelineLayout uses: set 0 = texture, set 1 = shadow (UBO + sampler).
+func createGraphicsPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, extent core1_0.Extent2D, texSetLayout core1_0.DescriptorSetLayout, shadowSetLayout core1_0.DescriptorSetLayout, samples core1_0.SampleCountFlags, cullMode ...core1_0.CullModeFlags) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
+	cull := core1_0.CullModeBack
+	if len(cullMode) > 0 {
+		cull = cullMode[0]
+	}
+	return createLitVariantPipeline(deviceDriver, sh.LitVert, sh.LitFrag, "Graphics",
+		renderPass, extent, texSetLayout, shadowSetLayout, samples, cull)
 }
 
 // createTerrainPipeline creates the terrain splat pipeline: same vertex stage,
@@ -293,88 +283,20 @@ func createGraphicsPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, ren
 // that blends multiple detail textures by a splat map. Layout: set 0 = terrain
 // material (4 samplers), set 1 = shadow.
 func createTerrainPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, extent core1_0.Extent2D, terrainSetLayout core1_0.DescriptorSetLayout, shadowSetLayout core1_0.DescriptorSetLayout, samples core1_0.SampleCountFlags) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
-	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
-		Code: bytesToUint32Slice(sh.LitVert),
-	})
-	if err != nil {
-		return core1_0.Pipeline{}, core1_0.PipelineLayout{}, err
-	}
-	defer deviceDriver.DestroyShaderModule(vertModule, nil)
+	return createLitVariantPipeline(deviceDriver, sh.LitVert, sh.TerrainFrag, "Terrain",
+		renderPass, extent, terrainSetLayout, shadowSetLayout, samples, core1_0.CullModeBack)
+}
 
-	fragModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
-		Code: bytesToUint32Slice(sh.TerrainFrag),
-	})
-	if err != nil {
-		return core1_0.Pipeline{}, core1_0.PipelineLayout{}, err
+// createMaterialPipeline creates the material pipeline: the lit path with normal,
+// metallic-roughness, and occlusion maps. Layout: set 0 = material (4 samplers +
+// a per-material UBO), set 1 = shadow.
+func createMaterialPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, extent core1_0.Extent2D, materialSetLayout core1_0.DescriptorSetLayout, shadowSetLayout core1_0.DescriptorSetLayout, samples core1_0.SampleCountFlags, cullMode ...core1_0.CullModeFlags) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
+	cull := core1_0.CullModeBack
+	if len(cullMode) > 0 {
+		cull = cullMode[0]
 	}
-	defer deviceDriver.DestroyShaderModule(fragModule, nil)
-
-	pipelineLayout, _, err := deviceDriver.CreatePipelineLayout(nil, core1_0.PipelineLayoutCreateInfo{
-		SetLayouts: []core1_0.DescriptorSetLayout{terrainSetLayout, shadowSetLayout},
-		PushConstantRanges: []core1_0.PushConstantRange{
-			{
-				StageFlags: core1_0.StageVertex | core1_0.StageFragment,
-				Offset:     0,
-				Size:       pushConstantSize,
-			},
-		},
-	})
-	if err != nil {
-		return core1_0.Pipeline{}, core1_0.PipelineLayout{}, err
-	}
-
-	pipelines, _, err := deviceDriver.CreateGraphicsPipelines(nil, nil, core1_0.GraphicsPipelineCreateInfo{
-		Stages: []core1_0.PipelineShaderStageCreateInfo{
-			{Stage: core1_0.StageVertex, Module: vertModule, Name: "main"},
-			{Stage: core1_0.StageFragment, Module: fragModule, Name: "main"},
-		},
-		VertexInputState: &core1_0.PipelineVertexInputStateCreateInfo{
-			VertexBindingDescriptions:   []core1_0.VertexInputBindingDescription{vertexBindingDescription()},
-			VertexAttributeDescriptions: vertexAttributeDescriptions(),
-		},
-		InputAssemblyState: &core1_0.PipelineInputAssemblyStateCreateInfo{
-			Topology: core1_0.PrimitiveTopologyTriangleList,
-		},
-		ViewportState: &core1_0.PipelineViewportStateCreateInfo{
-			Viewports: []core1_0.Viewport{{X: 0, Y: 0, Width: float32(extent.Width), Height: float32(extent.Height), MinDepth: 0, MaxDepth: 1}},
-			Scissors:  []core1_0.Rect2D{{Offset: core1_0.Offset2D{X: 0, Y: 0}, Extent: extent}},
-		},
-		RasterizationState: &core1_0.PipelineRasterizationStateCreateInfo{
-			PolygonMode: core1_0.PolygonModeFill,
-			CullMode:    core1_0.CullModeBack,
-			FrontFace:   core1_0.FrontFaceClockwise,
-			LineWidth:   1.0,
-		},
-		MultisampleState: &core1_0.PipelineMultisampleStateCreateInfo{
-			RasterizationSamples: samples,
-		},
-		DepthStencilState: &core1_0.PipelineDepthStencilStateCreateInfo{
-			DepthTestEnable:  true,
-			DepthWriteEnable: true,
-			DepthCompareOp:   core1_0.CompareOpGreater,
-		},
-		ColorBlendState: &core1_0.PipelineColorBlendStateCreateInfo{
-			Attachments: []core1_0.PipelineColorBlendAttachmentState{
-				{
-					ColorWriteMask: core1_0.ColorComponentRed | core1_0.ColorComponentGreen | core1_0.ColorComponentBlue | core1_0.ColorComponentAlpha,
-					BlendEnabled:   false,
-				},
-			},
-		},
-		DynamicState: &core1_0.PipelineDynamicStateCreateInfo{
-			DynamicStates: []core1_0.DynamicState{core1_0.DynamicStateViewport, core1_0.DynamicStateScissor},
-		},
-		Layout:     pipelineLayout,
-		RenderPass: renderPass,
-		Subpass:    0,
-	})
-	if err != nil {
-		deviceDriver.DestroyPipelineLayout(pipelineLayout, nil)
-		return core1_0.Pipeline{}, core1_0.PipelineLayout{}, err
-	}
-
-	log.Println("Terrain pipeline created")
-	return pipelines[0], pipelineLayout, nil
+	return createLitVariantPipeline(deviceDriver, sh.LitVert, sh.LitMaterialFrag, "Material",
+		renderPass, extent, materialSetLayout, shadowSetLayout, samples, cull)
 }
 
 // createOverlayPipeline creates a pipeline for HUD/overlay geometry with no

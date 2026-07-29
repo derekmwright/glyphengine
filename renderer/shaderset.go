@@ -25,6 +25,7 @@ type ShaderSet struct {
 	TriangleVert, TriangleFrag []byte // diagnostic tri-color triangle
 	MeshVert, MeshFrag         []byte // unlit textured mesh
 	LitVert, LitFrag           []byte // lit static geometry
+	LitMaterialFrag            []byte // lit + normal/roughness/AO maps (shares LitVert)
 	TerrainFrag                []byte // terrain splat blend (shares LitVert)
 	SkinnedLitVert             []byte // GPU-skinned lit geometry
 	SkinnedLitFrag             []byte
@@ -50,6 +51,7 @@ func DefaultShaders() ShaderSet {
 		MeshFrag:          shaders.MeshFragSpv,
 		LitVert:           shaders.LitVertSpv,
 		LitFrag:           shaders.LitFragSpv,
+		LitMaterialFrag:   shaders.LitMaterialFragSpv,
 		TerrainFrag:       shaders.TerrainFragSpv,
 		SkinnedLitVert:    shaders.SkinnedLitVertSpv,
 		SkinnedLitFrag:    shaders.SkinnedLitFragSpv,
@@ -85,6 +87,7 @@ func (s ShaderSet) withDefaults() ShaderSet {
 		{&s.TriangleVert, d.TriangleVert}, {&s.TriangleFrag, d.TriangleFrag},
 		{&s.MeshVert, d.MeshVert}, {&s.MeshFrag, d.MeshFrag},
 		{&s.LitVert, d.LitVert}, {&s.LitFrag, d.LitFrag},
+		{&s.LitMaterialFrag, d.LitMaterialFrag},
 		{&s.TerrainFrag, d.TerrainFrag},
 		{&s.SkinnedLitVert, d.SkinnedLitVert}, {&s.SkinnedLitFrag, d.SkinnedLitFrag},
 		{&s.ShadowVert, d.ShadowVert}, {&s.ShadowFrag, d.ShadowFrag},

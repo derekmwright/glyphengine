@@ -57,11 +57,25 @@ type Color struct {
 	R, G, B float32
 }
 
-// MaterialRef links an entity to a GPU texture for textured rendering.
-// Terrain, when set, routes the entity through the terrain splat pipeline
-// (multi-texture blend) instead of the single-texture lit pipeline.
+// MaterialRef links an entity to the GPU resources that describe its surface.
+// Exactly one of the three is used, in the order they are listed here.
 type MaterialRef struct {
+	// PBR routes the entity through the material pipeline: albedo plus normal,
+	// metallic-roughness, and occlusion maps. Build one with
+	// Renderer.CreateMaterial. It takes precedence over Texture, whose job the
+	// material's own albedo slot does.
+	//
+	// MeshRef.Metallic and .Roughness still apply — the maps multiply them, so
+	// they keep working as per-object factors.
+	//
+	// Ignored on skinned meshes; see renderer.RenderObject.Material.
+	PBR *renderer.Material
+
+	// Texture is a single albedo map, lit as one uniform material.
 	Texture *renderer.Texture
+
+	// Terrain routes the entity through the terrain splat pipeline
+	// (multi-texture blend) instead of the single-texture lit pipeline.
 	Terrain *renderer.TerrainMaterial
 }
 

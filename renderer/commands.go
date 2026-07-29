@@ -97,6 +97,15 @@ type RenderObject struct {
 	Joints       *JointBuffer     // non-nil = skinned mesh
 	TerrainMat   *TerrainMaterial // non-nil = render via the terrain splat pipeline
 	Water        *WaterParams     // non-nil = render via the water pipeline
+
+	// Material, when set, renders via the material pipeline: the lit path plus
+	// normal, metallic-roughness, and occlusion maps. It supersedes Texture,
+	// whose job the material's own albedo slot takes over.
+	//
+	// Ignored on skinned draws. The skinned pipeline spends set 1 on joint
+	// matrices, so a material's set 0 has nowhere to sit alongside them without
+	// a fourth descriptor set and a skinned material shader.
+	Material *Material
 }
 
 // WaterParams are the per-surface constants the water shader needs. They
@@ -110,7 +119,8 @@ type WaterParams struct {
 }
 
 // SortKey groups draws to minimize state switches in the main pass: pipeline
-// variant (skinned / double-sided) first, then texture descriptor.
+// variant (skinned / double-sided / material) first, then the descriptor the
+// draw binds at set 0.
 func (d *RenderObject) SortKey() uint64 {
 	var key uint64
 	if d.Joints != nil {
@@ -119,8 +129,15 @@ func (d *RenderObject) SortKey() uint64 {
 	if d.DoubleSided {
 		key |= 1 << 62
 	}
+	// Material draws use a different pipeline from plain textured ones, so they
+	// have to sort apart from them rather than interleave by descriptor handle.
+	if d.Material != nil && d.Joints == nil {
+		key |= 1 << 61
+		key |= uint64(uintptr(d.Material.DescriptorSet.Handle())) & (1<<61 - 1)
+		return key
+	}
 	if d.Texture != nil {
-		key |= uint64(uintptr(d.Texture.DescriptorSet.Handle())) & (1<<62 - 1)
+		key |= uint64(uintptr(d.Texture.DescriptorSet.Handle())) & (1<<61 - 1)
 	}
 	return key
 }
@@ -264,6 +281,19 @@ func packLightingPC(pc *[64]float32, lighting SceneLighting) {
 	pc[63] = lighting.RealSunDir[2]
 }
 
+// materialPipelines groups the material variant's pipelines with their layouts.
+//
+// Grouped rather than passed loose because recordCommandBuffer's parameter list
+// is already long enough that four more positional handles of two repeated types
+// would be easy to transpose, and transposing a pipeline with its layout is a
+// mistake only the validation layer would catch.
+type materialPipelines struct {
+	pipeline          core1_0.Pipeline
+	layout            core1_0.PipelineLayout
+	doubleSided       core1_0.Pipeline
+	doubleSidedLayout core1_0.PipelineLayout
+}
+
 // recordCommandBuffer records the shadow depth pass followed by the main render pass
 // that draws all scene objects and overlays.
 func recordCommandBuffer(
@@ -288,6 +318,7 @@ func recordCommandBuffer(
 	swapchainImage core1_0.Image,
 	particlePipeline core1_0.Pipeline,
 	terrainPipeline core1_0.Pipeline,
+	mat materialPipelines,
 	pipelineLayout core1_0.PipelineLayout,
 	litPipelineLayout core1_0.PipelineLayout,
 	skinnedPipelineLayout core1_0.PipelineLayout,
@@ -601,7 +632,9 @@ func recordCommandBuffer(
 	// so consecutive draws usually share bindings.
 	var lastTex *Texture
 	var lastJoints *JointBuffer
+	var lastMaterial *Material
 	bindValid := false
+	currentMaterial := false
 
 	for i := range draws {
 		d := &draws[i]
@@ -615,21 +648,30 @@ func recordCommandBuffer(
 			continue // drawn by the water pipeline, after everything opaque
 		}
 		skinned := d.Joints != nil
+		// See RenderObject.Material: the skinned pipeline already spends set 1
+		// on joints, so a material has nowhere to bind there.
+		material := d.Material != nil && !skinned
 
 		// Switch pipeline if needed
 		doubleSided := d.DoubleSided
-		if skinned != currentSkinned || doubleSided != currentDoubleSided {
-			if skinned {
+		if skinned != currentSkinned || doubleSided != currentDoubleSided || material != currentMaterial {
+			switch {
+			case skinned:
 				deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, skinnedPipeline)
-			} else if doubleSided {
+			case material && doubleSided:
+				deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, mat.doubleSided)
+			case material:
+				deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, mat.pipeline)
+			case doubleSided:
 				deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, litDoubleSidedPipeline)
-			} else {
+			default:
 				deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, pipeline)
 			}
 			deviceDriver.CmdSetViewport(cmdBuf, viewport)
 			deviceDriver.CmdSetScissor(cmdBuf, scissor)
 			currentSkinned = skinned
 			currentDoubleSided = doubleSided
+			currentMaterial = material
 			bindValid = false
 		}
 
@@ -639,7 +681,19 @@ func recordCommandBuffer(
 		}
 
 		activeLayout := litPipelineLayout
-		if skinned {
+		if material {
+			// The material's own descriptor set replaces the plain texture at
+			// set 0; the shadow set stays where every lit variant expects it.
+			activeLayout = mat.layout
+			if doubleSided {
+				activeLayout = mat.doubleSidedLayout
+			}
+			if !bindValid || d.Material != lastMaterial {
+				deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, activeLayout, 0, []core1_0.DescriptorSet{d.Material.DescriptorSet, shadowDS}, nil)
+				lastMaterial = d.Material
+				bindValid = true
+			}
+		} else if skinned {
 			activeLayout = skinnedPipelineLayout
 			if !bindValid || tex != lastTex || d.Joints != lastJoints {
 				// Skinned: set 0=tex, set 1=joints, set 2=shadow

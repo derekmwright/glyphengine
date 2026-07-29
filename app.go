@@ -833,9 +833,11 @@ func (e *Engine) buildDrawList(vp mgl32.Mat4, shadowEnabled bool, lightVP mgl32.
 
 		var tex *renderer.Texture
 		var terrainMat *renderer.TerrainMaterial
+		var pbr *renderer.Material
 		if mat, ok := c.MaterialRef.Get(entity); ok {
 			tex = mat.Texture
 			terrainMat = mat.Terrain
+			pbr = mat.PBR
 		}
 
 		var water *renderer.WaterParams
@@ -870,6 +872,7 @@ func (e *Engine) buildDrawList(vp mgl32.Mat4, shadowEnabled bool, lightVP mgl32.
 			Joints:       joints,
 			TerrainMat:   terrainMat,
 			Water:        water,
+			Material:     pbr,
 		})
 	})
 

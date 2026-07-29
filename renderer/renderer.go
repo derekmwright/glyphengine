@@ -77,6 +77,22 @@ type Renderer struct {
 	fallbackTexture     *Texture
 	textures            []*Texture
 
+	// Material maps: set 0 = albedo/normal/metallic-roughness/occlusion
+	// samplers plus a per-material uniform buffer. fallbackNormal is the flat
+	// tangent-space normal bound to slots a material leaves unsupplied.
+	//
+	// Two pipelines for the same reason the lit path has two: without a
+	// double-sided variant, a Material on a DoubleSided entity would silently
+	// cull its back faces. Each carries its own layout because
+	// createLitVariantPipeline builds one per call.
+	materialSetLayout                 core1_0.DescriptorSetLayout
+	materialPipelineLayout            core1_0.PipelineLayout
+	materialPipeline                  core1_0.Pipeline
+	materialDoubleSidedPipelineLayout core1_0.PipelineLayout
+	materialDoubleSidedPipeline       core1_0.Pipeline
+	fallbackNormal                    *Texture
+	materials                         []*Material
+
 	// Diagnostic tri-color triangle (see triangle.go). Built lazily on the
 	// first DrawTriangle call; nil for programs that never use it.
 	trianglePipeline       *core1_0.Pipeline
@@ -391,6 +407,12 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	}
 	r.onInit(func() { r.deviceDriver.DestroyDescriptorSetLayout(r.terrainSetLayout, nil) })
 
+	r.materialSetLayout, err = createMaterialDescriptorSetLayout(r.deviceDriver)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create material descriptor set layout: %w", err)
+	}
+	r.onInit(func() { r.deviceDriver.DestroyDescriptorSetLayout(r.materialSetLayout, nil) })
+
 	r.descriptorPool, err = createDescriptorPool(r.deviceDriver, 512)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create descriptor pool: %w", err)
@@ -454,6 +476,25 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	r.onInit(func() {
 		r.deviceDriver.DestroyPipeline(r.terrainPipeline, nil)
 		r.deviceDriver.DestroyPipelineLayout(r.terrainPipelineLayout, nil)
+	})
+
+	// Material pipeline: set 0 = material (4 maps + a UBO), set 1 = shadow.
+	r.materialPipeline, r.materialPipelineLayout, err = createMaterialPipeline(r.deviceDriver, r.shaders, r.renderPass, r.sc.extent, r.materialSetLayout, r.shadow.descriptorSetLayout, r.msaaSamples)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create material pipeline: %w", err)
+	}
+	r.onInit(func() {
+		r.deviceDriver.DestroyPipeline(r.materialPipeline, nil)
+		r.deviceDriver.DestroyPipelineLayout(r.materialPipelineLayout, nil)
+	})
+
+	r.materialDoubleSidedPipeline, r.materialDoubleSidedPipelineLayout, err = createMaterialPipeline(r.deviceDriver, r.shaders, r.renderPass, r.sc.extent, r.materialSetLayout, r.shadow.descriptorSetLayout, r.msaaSamples, 0)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create double-sided material pipeline: %w", err)
+	}
+	r.onInit(func() {
+		r.deviceDriver.DestroyPipeline(r.materialDoubleSidedPipeline, nil)
+		r.deviceDriver.DestroyPipelineLayout(r.materialDoubleSidedPipelineLayout, nil)
 	})
 
 	r.overlayPipeline, err = createOverlayPipeline(r.deviceDriver, r.shaders, r.renderPass, r.pipelineLayout, r.sc.extent, r.msaaSamples)
@@ -620,6 +661,15 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	r.fallbackTexture, err = r.createFallbackTexture()
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create fallback texture: %w", err)
+	}
+
+	// The flat normal a Material binds where the caller supplied none. Created
+	// here rather than lazily so it shares the fallback texture's lifetime and
+	// the shutdown sweep over r.textures, and because it needs the same command
+	// pool for its staging upload.
+	r.fallbackNormal, err = r.createFallbackNormalTexture()
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create fallback normal texture: %w", err)
 	}
 
 	log.Println("Renderer initialized successfully")
@@ -863,7 +913,7 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, uiOv
 	if err != nil {
 		return err
 	}
-	err = recordCommandBuffer(r.deviceDriver, cmdBuf, r.renderPass, r.framebuffers[imageIndex], r.pipeline, r.litDoubleSidedPipeline, r.overlayPipeline, r.skyPipeline, r.starsPipeline, r.uiPipeline, r.msdfPipeline, r.skinnedPipeline, r.grassPipeline, r.waterPipeline, r.godRayPipeline, r.waterRenderPass, waterFB, r.sceneColor, r.sc.images[imageIndex], r.particlePipeline, r.terrainPipeline, r.pipelineLayout, r.litPipelineLayout, r.skinnedPipelineLayout, r.terrainPipelineLayout, r.sc.extent, draws, overlays, uiOverlays, msdfOverlays, lighting, r.fallbackTexture, r.shadow, r.grass, r.particles, f, r.msaa != nil)
+	err = recordCommandBuffer(r.deviceDriver, cmdBuf, r.renderPass, r.framebuffers[imageIndex], r.pipeline, r.litDoubleSidedPipeline, r.overlayPipeline, r.skyPipeline, r.starsPipeline, r.uiPipeline, r.msdfPipeline, r.skinnedPipeline, r.grassPipeline, r.waterPipeline, r.godRayPipeline, r.waterRenderPass, waterFB, r.sceneColor, r.sc.images[imageIndex], r.particlePipeline, r.terrainPipeline, r.materialPipelines(), r.pipelineLayout, r.litPipelineLayout, r.skinnedPipelineLayout, r.terrainPipelineLayout, r.sc.extent, draws, overlays, uiOverlays, msdfOverlays, lighting, r.fallbackTexture, r.shadow, r.grass, r.particles, f, r.msaa != nil)
 	if err != nil {
 		return err
 	}
@@ -932,7 +982,13 @@ func (r *Renderer) Destroy() {
 	// shifts the backing array under the loop index -- which silently skips
 	// every second entry and leaks it.
 	textures, meshes, joints := r.textures, r.meshes, r.jointBuffers
-	r.textures, r.meshes, r.jointBuffers = nil, nil, nil
+	materials := r.materials
+	r.textures, r.meshes, r.jointBuffers, r.materials = nil, nil, nil, nil
+	// Materials before textures: a material holds views and samplers the
+	// textures own, and its descriptor set has to stop referencing them first.
+	for _, m := range materials {
+		r.DestroyMaterial(m)
+	}
 	for _, t := range textures {
 		r.DestroyTexture(t)
 	}

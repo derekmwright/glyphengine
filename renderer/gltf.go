@@ -25,6 +25,15 @@ type ModelMesh struct {
 	BaseColor   [3]float32 // material base color factor (default white)
 	Metallic    float32    // 0 = dielectric, 1 = metal (from glTF PBR)
 	Roughness   float32    // 0 = mirror, 1 = matte (from glTF PBR)
+
+	// Material is non-nil when the glTF material carried a normal,
+	// metallic-roughness, or occlusion map. Set it on MaterialRef.PBR to get
+	// them; Texture alone ignores them and lights the surface as one uniform
+	// material.
+	//
+	// Metallic and Roughness above stay meaningful either way — the maps
+	// multiply them.
+	Material *Material
 }
 
 // Model holds all meshes loaded from a single glTF/GLB file.
@@ -76,6 +85,7 @@ func (r *Renderer) LoadGLTF(fsys fs.FS, name string) (*Model, error) {
 	}
 
 	var model Model
+	materialCache := make(map[int]*Material)
 
 	for _, mesh := range doc.Meshes {
 		for _, prim := range mesh.Primitives {
@@ -110,6 +120,7 @@ func (r *Renderer) LoadGLTF(fsys fs.FS, name string) (*Model, error) {
 
 			// Resolve texture and PBR material from glTF
 			var tex *Texture
+			var material *Material
 			baseColor := [3]float32{1, 1, 1}
 			var metallic, roughness float32
 			var doubleSided bool
@@ -118,11 +129,16 @@ func (r *Renderer) LoadGLTF(fsys fs.FS, name string) (*Model, error) {
 				tex = r.resolveBaseColorTexture(doc, textures, *prim.Material)
 				baseColor, metallic, roughness = resolveMaterial(doc, int(*prim.Material))
 				doubleSided = doc.Materials[*prim.Material].DoubleSided
+				material, err = r.resolveMaterialMaps(doc, textures, materialCache, int(*prim.Material))
+				if err != nil {
+					return nil, err
+				}
 			}
 
 			model.Meshes = append(model.Meshes, ModelMesh{
 				Mesh:        gpuMesh,
 				Texture:     tex,
+				Material:    material,
 				DoubleSided: doubleSided,
 				BaseColor:   baseColor,
 				Metallic:    metallic,
@@ -214,10 +230,47 @@ func (r *Renderer) extractPrimitive(doc *gltf.Document, prim *gltf.Primitive) ([
 	return vertices, indices, nil
 }
 
+// dataImageIndices returns the set of image indices the document uses as data
+// rather than as colour: normal, metallic-roughness, and occlusion maps.
+//
+// This has to be decided before upload, because sRGB is a property of the image
+// and not of the sampler. glTF only says which encoding an image wants
+// indirectly, through the slot a material binds it to — so the materials have to
+// be walked first. Uploading a normal map as sRGB is silent: it samples fine and
+// every normal leans the same wrong way.
+//
+// An image bound to both a colour and a data slot is pathological and does not
+// occur in practice; if it did, data wins here, which is the safer error — a
+// slightly dark albedo rather than corrupt lighting.
+func dataImageIndices(doc *gltf.Document) map[int]bool {
+	data := make(map[int]bool)
+	mark := func(texIdx int) {
+		if texIdx < 0 || texIdx >= len(doc.Textures) {
+			return
+		}
+		if src := doc.Textures[texIdx].Source; src != nil {
+			data[int(*src)] = true
+		}
+	}
+	for _, mat := range doc.Materials {
+		if mat.NormalTexture != nil && mat.NormalTexture.Index != nil {
+			mark(int(*mat.NormalTexture.Index))
+		}
+		if mat.OcclusionTexture != nil && mat.OcclusionTexture.Index != nil {
+			mark(int(*mat.OcclusionTexture.Index))
+		}
+		if pbr := mat.PBRMetallicRoughness; pbr != nil && pbr.MetallicRoughnessTexture != nil {
+			mark(pbr.MetallicRoughnessTexture.Index)
+		}
+	}
+	return data
+}
+
 // loadGLTFImages decodes all images in the document and uploads them as GPU textures.
 // Returns a map from image index to Texture.
 func (r *Renderer) loadGLTFImages(doc *gltf.Document, base fs.FS) (map[int]*Texture, error) {
 	textures := make(map[int]*Texture)
+	dataImages := dataImageIndices(doc)
 
 	for i, img := range doc.Images {
 		var imgBytes []byte
@@ -250,7 +303,12 @@ func (r *Renderer) loadGLTFImages(doc *gltf.Document, base fs.FS) (map[int]*Text
 			return nil, fmt.Errorf("decode image %d (%s): %w", i, img.Name, err)
 		}
 
-		tex, err := r.CreateTexture(decoded.pixels, decoded.width, decoded.height)
+		var tex *Texture
+		if dataImages[i] {
+			tex, err = r.CreateDataTexture(decoded.pixels, decoded.width, decoded.height)
+		} else {
+			tex, err = r.CreateTexture(decoded.pixels, decoded.width, decoded.height)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("upload texture %d (%s): %w", i, img.Name, err)
 		}
@@ -311,6 +369,72 @@ func resolveMaterial(doc *gltf.Document, materialIdx int) (baseColor [3]float32,
 		roughness = float32(*pbr.RoughnessFactor)
 	}
 	return
+}
+
+// textureFor resolves a glTF texture index to an uploaded Texture, or nil.
+func textureFor(doc *gltf.Document, textures map[int]*Texture, texIdx int) *Texture {
+	if texIdx < 0 || texIdx >= len(doc.Textures) {
+		return nil
+	}
+	src := doc.Textures[texIdx].Source
+	if src == nil {
+		return nil
+	}
+	return textures[int(*src)]
+}
+
+// resolveMaterialMaps builds a Material for a glTF material that carries any of
+// normal, metallic-roughness, or occlusion.
+//
+// Returns nil when the material has none of them, which keeps every model that
+// only has a base colour on the plain textured path — same pipeline, same
+// descriptor set, same pixels as before this existed.
+//
+// The cache is keyed by glTF material index because primitives share materials:
+// a model with twenty primitives and two materials should allocate two
+// descriptor sets, not twenty. See maxMaterials for the budget.
+func (r *Renderer) resolveMaterialMaps(doc *gltf.Document, textures map[int]*Texture, cache map[int]*Material, materialIdx int) (*Material, error) {
+	if materialIdx < 0 || materialIdx >= len(doc.Materials) {
+		return nil, nil
+	}
+	if m, ok := cache[materialIdx]; ok {
+		return m, nil
+	}
+	mat := doc.Materials[materialIdx]
+
+	var opts MaterialOptions
+	if mat.NormalTexture != nil && mat.NormalTexture.Index != nil {
+		opts.Normal = textureFor(doc, textures, int(*mat.NormalTexture.Index))
+		if mat.NormalTexture.Scale != nil {
+			opts.NormalScale = float32(*mat.NormalTexture.Scale)
+		}
+	}
+	if mat.OcclusionTexture != nil && mat.OcclusionTexture.Index != nil {
+		opts.Occlusion = textureFor(doc, textures, int(*mat.OcclusionTexture.Index))
+		if mat.OcclusionTexture.Strength != nil {
+			opts.OcclusionStrength = float32(*mat.OcclusionTexture.Strength)
+		}
+	}
+	if pbr := mat.PBRMetallicRoughness; pbr != nil && pbr.MetallicRoughnessTexture != nil {
+		opts.MetallicRoughness = textureFor(doc, textures, pbr.MetallicRoughnessTexture.Index)
+	}
+
+	if opts.Normal == nil && opts.Occlusion == nil && opts.MetallicRoughness == nil {
+		cache[materialIdx] = nil
+		return nil, nil
+	}
+
+	// glTF normal maps are green-up, which is what the shader assumes, so no
+	// FlipGreen here. A model authored for DirectX needs the flag set by hand;
+	// the format carries no way to say which convention was used.
+	opts.Albedo = r.resolveBaseColorTexture(doc, textures, materialIdx)
+
+	m, err := r.CreateMaterial(opts)
+	if err != nil {
+		return nil, fmt.Errorf("create material %d (%s): %w", materialIdx, mat.Name, err)
+	}
+	cache[materialIdx] = m
+	return m, nil
 }
 
 // resolveBaseColorTexture finds the base color texture for a material, if any.

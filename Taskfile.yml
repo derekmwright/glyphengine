@@ -145,6 +145,7 @@ tasks:
       - go run ./12-particles -frames 60
       - go run ./13-ui -frames 60
       - go run ./10-text -frames 60
+      - go run ./16-materials -frames 60
       - go run ./15-kitchen-sink -demo -frames 60
 
   validate:
@@ -164,7 +165,7 @@ tasks:
       # because they surface at vkDestroyDevice rather than during rendering.
       - |
         status=0
-        for ex in 01-triangle 02-cube 03-physics 04-first-person 05-textures 06-skinned 07-terrain 08-grass 09-water 10-text 11-lights 12-particles 13-ui 15-kitchen-sink; do
+        for ex in 01-triangle 02-cube 03-physics 04-first-person 05-textures 06-skinned 07-terrain 08-grass 09-water 10-text 11-lights 12-particles 13-ui 16-materials 15-kitchen-sink; do
           out=$(go run ./$ex -frames 30 2>&1) || { echo "$ex: FAILED TO RUN"; echo "$out"; status=1; continue; }
           msgs=$(echo "$out" | grep -cE "VULKAN (ERROR|WARNING)" || true)
           leaks=$(echo "$out" | grep -c "has not been destroyed" || true)
@@ -194,6 +195,7 @@ tasks:
       - go run ./12-particles -frames 150 -screenshot ../docs/images/12-particles.png
       - go run ./13-ui -frames 90 -screenshot ../docs/images/13-ui.png
       - go run ./10-text -frames 90 -screenshot ../docs/images/10-text.png
+      - go run ./16-materials -frames 60 -screenshot ../docs/images/16-materials.png
       - go run ./15-kitchen-sink -demo -frames 260 -screenshot ../docs/images/15-kitchen-sink.png
 
   ci:

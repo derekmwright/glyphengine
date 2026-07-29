@@ -20,6 +20,9 @@ var LitVertSpv []byte
 //go:embed lit.frag.spv
 var LitFragSpv []byte
 
+//go:embed lit_material.frag.spv
+var LitMaterialFragSpv []byte
+
 //go:embed terrain.frag.spv
 var TerrainFragSpv []byte
 

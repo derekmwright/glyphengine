@@ -152,11 +152,15 @@ vec3 brdfSpecular(vec3 L, vec3 V, vec3 N, vec3 F0, float shininess) {
     return F * D;
 }
 
-// Evaluate all light sources and return final lit color.
-// shadowPos is the normal-offset world position used for shadow lookups.
-vec3 evalLighting(vec3 diffuseColor, vec3 F0, float shininess,
-                  vec3 N, vec3 V,
-                  vec3 worldPos, vec3 shadowPos) {
+// evalLightingAO is evalLighting with an ambient occlusion factor.
+//
+// ao scales the ambient term and nothing else. Baked occlusion describes how
+// much of the sky a crevice can see, so it has no business dimming a light that
+// can actually reach the surface -- applying it to direct light is what makes
+// AO-mapped geometry read as dirty rather than as shaped.
+vec3 evalLightingAO(vec3 diffuseColor, vec3 F0, float shininess,
+                    vec3 N, vec3 V,
+                    vec3 worldPos, vec3 shadowPos, float ao) {
     // --- Directional (sun) light ---
     vec3 L = normalize(pc.sunDir.xyz);
     float NdotL = clamp(dot(N, L), 0.0, 1.0);
@@ -207,8 +211,20 @@ vec3 evalLighting(vec3 diffuseColor, vec3 F0, float shininess,
         }
     }
 
-    vec3 ambientTerm = diffuseColor * pc.ambient.rgb;
+    vec3 ambientTerm = diffuseColor * pc.ambient.rgb * ao;
     return ambientTerm + sunDiffuse + sunSpecular + pointDiffuse + pointSpecular + uDiffuse + uSpecular;
+}
+
+// Evaluate all light sources and return final lit color.
+// shadowPos is the normal-offset world position used for shadow lookups.
+//
+// Unoccluded; the material path calls evalLightingAO directly with a sampled
+// occlusion factor. Named separately rather than overloaded to match how
+// evalLightingDiffuse below already distinguishes itself.
+vec3 evalLighting(vec3 diffuseColor, vec3 F0, float shininess,
+                  vec3 N, vec3 V,
+                  vec3 worldPos, vec3 shadowPos) {
+    return evalLightingAO(diffuseColor, F0, shininess, N, V, worldPos, shadowPos, 1.0);
 }
 
 // evalLightingDiffuse evaluates all light sources diffuse-only — no specular,
