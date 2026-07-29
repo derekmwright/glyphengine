@@ -16,6 +16,10 @@
 //             so the attribute is free (see WaterOptions in water.go)
 //   inUV.x    still-water depth at this vertex, in world units, baked from the
 //             heightmap at build time
+//   inUV.y    the surface grid's vertex spacing in world units, also baked at
+//             build time. The shader cannot otherwise know how far apart its
+//             own vertices are, and that is what decides which wave components
+//             this mesh is fine enough to carry.
 
 layout(location = 0) in vec3 inPosition;
 layout(location = 1) in vec3 inColor;
@@ -55,10 +59,36 @@ const float WAVE_LEN[4]   = float[4](1.00, 0.61, 0.37, 0.23);
 const float WAVE_AMP[4]   = float[4](1.00, 0.52, 0.28, 0.14);
 const float WAVE_SPEED[4] = float[4](1.00, 1.27, 1.63, 2.11);
 
-// Steepness. Above roughly 1.0 the horizontal term overtakes the spacing
-// between vertices and the surface folds through itself, so this stays well
-// under it.
+// Steepness: how far the horizontal term pulls vertices toward each crest.
 const float STEEPNESS = 0.55;
+
+// FOLD_LIMIT bounds sum(Q*k*A) over the wave sum.
+//
+// Gerstner's horizontal map x -> x + Q*A*dir*cos(phase) has Jacobian
+// 1 - sum(Q*k*A*sin(phase)), so it stops being invertible once sum(Q*k*A)
+// reaches one: adjacent vertices swap order and the surface passes through
+// itself. It shows up as hard flat shards tearing out of the wave field, with
+// shading that does not match the water around them -- because the same sum
+// appears as `1.0 - fold` in the normal below, and goes negative there too,
+// turning those facets inside out.
+//
+// STEEPNESS alone does not bound this. The sum also carries k and A, which come
+// from the caller's WaveLength and WaveAmplitude, so a steepness "well under
+// 1.0" folds anyway once the waves are tall enough relative to their length.
+// With the engine's defaults the sum reaches 0.16 and there was no problem to
+// see; at WaveAmplitude 0.6 it reaches 0.95 and the surface is visibly torn.
+const float FOLD_LIMIT = 0.85;
+
+// MIN_SAMPLES is how many vertices a wavelength needs before it is a wave on
+// this mesh rather than noise on it.
+//
+// Below two samples per wavelength a sinusoid is not representable at all --
+// the grid reconstructs a lower-frequency beat pattern instead, which is a shape
+// no wave in the sum has. Fading such a component out is the geometric
+// equivalent of picking a coarser mip: better to omit detail than to render
+// something the sampling invented.
+const float MIN_SAMPLES = 1.2;
+const float FULL_SAMPLES = 2.0;
 
 void main() {
     float time      = pc.tint.x;
@@ -66,6 +96,38 @@ void main() {
     float baseLen   = max(pc.tint.z, 0.001);
 
     vec3 pos = inPosition;
+
+    // Shallow water flattens: a wave cannot be taller than the water it sits
+    // in, and this also hides the seam where the surface mesh meets the shore,
+    // since the amplitude reaches zero exactly as the depth does.
+    float shoal = clamp(inUV.x * 0.7, 0.0, 1.0);
+    float spacing = inUV.y;
+
+    // Resolve each component's amplitude first, then how steep the sum is
+    // allowed to be. Both bounds depend on the whole sum rather than on any one
+    // wave, so neither can be applied inside the displacement loop.
+    float amps[4];
+    float kaSum = 0.0;
+    for (int i = 0; i < 4; i++) {
+        float len = baseLen * WAVE_LEN[i];
+        float amp = amplitude * WAVE_AMP[i] * shoal;
+
+        // Drop what this grid is too coarse to carry. See MIN_SAMPLES.
+        if (spacing > 0.0) {
+            amp *= smoothstep(MIN_SAMPLES, FULL_SAMPLES, len / spacing);
+        }
+
+        amps[i] = amp;
+        kaSum += (6.2831853 / len) * amp;
+    }
+
+    // See FOLD_LIMIT: the horizontal term is only invertible while
+    // STEEPNESS * kaSum stays below one, and that depends on the caller's
+    // amplitude and wavelength rather than on STEEPNESS alone.
+    float steep = STEEPNESS;
+    if (kaSum > 0.0) {
+        steep = min(STEEPNESS, FOLD_LIMIT / kaSum);
+    }
 
     // Accumulate the partial derivatives alongside the displacement; the
     // normal falls out of them analytically, so it costs no extra sampling and
@@ -77,7 +139,7 @@ void main() {
     for (int i = 0; i < 4; i++) {
         vec2  dir = normalize(WAVE_DIR[i]);
         float len = baseLen * WAVE_LEN[i];
-        float amp = amplitude * WAVE_AMP[i];
+        float amp = amps[i];
         float k   = 6.2831853 / len;
 
         // Deep-water dispersion: long waves travel faster than short ones, so
@@ -89,18 +151,12 @@ void main() {
         float s = sin(phase);
         float c = cos(phase);
 
-        // Shallow water flattens: a wave cannot be taller than the water it
-        // sits in, and this also hides the seam where the surface mesh meets
-        // the shore, since the amplitude reaches zero exactly as the depth does.
-        float shoal = clamp(inUV.x * 0.7, 0.0, 1.0);
-        amp *= shoal;
-
         pos.y   += amp * s;
-        pos.xz  += STEEPNESS * amp * dir * c;
+        pos.xz  += steep * amp * dir * c;
 
         dhdx += dir.x * k * amp * c;
         dhdz += dir.y * k * amp * c;
-        fold += STEEPNESS * k * amp * s;
+        fold += steep * k * amp * s;
     }
 
     fragNormal = normalize(vec3(-dhdx, 1.0 - fold, -dhdz));

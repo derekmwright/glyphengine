@@ -17,8 +17,24 @@ type WaterOptions struct {
 
 	// Resolution is the number of grid divisions along each axis. Waves are
 	// displaced per vertex, so this bounds the shortest wavelength the surface
-	// can actually show: too coarse and the Gerstner sum turns into visible
-	// faceting. 160 is comfortable for a lake a couple of hundred units wide.
+	// can actually show. 160 is comfortable for a lake a couple of hundred
+	// units wide.
+	//
+	// It interacts with WaveLength, and the interaction is worth knowing about.
+	// The shortest of the four wave components is WaveLength * 0.23, and a
+	// wavelength needs at least two vertices across it to be a wave at all
+	// rather than a beat pattern the grid invented. Below that the shader fades
+	// the component out rather than rendering it, so asking for short waves on a
+	// coarse grid gets smooth water rather than choppy water — never faceted
+	// water, which is what it used to get.
+	//
+	// The rule, given a surface w world units wide:
+	//
+	//	WaveLength * 0.23 >= 2 * w / Resolution
+	//
+	// The defaults sit just below that, so the finest component is faded at
+	// Resolution 160 over a 200-unit lake. Raise Resolution to about 256 to get
+	// it as a real wave.
 	Resolution int
 
 	// ShallowColor and DeepColor are the water's own colour at the surface and
@@ -37,10 +53,16 @@ type WaterOptions struct {
 	// WaveAmplitude is the height of the largest wave component, in world
 	// units. Waves are scaled down in shallow water so they vanish at the
 	// shoreline rather than cutting through it.
+	//
+	// Amplitude tall relative to WaveLength is self-limiting: a Gerstner surface
+	// stops being a function once its crests would fold over, and the shader
+	// clamps steepness to keep it just short of that. Past roughly
+	// WaveLength / 11 the crests stop getting sharper and only get taller.
 	WaveAmplitude float32
 
 	// WaveLength is the wavelength of the largest wave component, in world
-	// units. Three shorter components ride on top of it.
+	// units. Three shorter components ride on top of it, at 0.61, 0.37 and 0.23
+	// of it. See Resolution for the shortest wavelength a given grid can carry.
 	WaveLength float32
 
 	// RefractStrength scales how far the surface displaces the view of the
@@ -120,6 +142,11 @@ func WaterMesh(h *Heightmap, opts WaterOptions) ([]renderer.Vertex, []uint32, er
 		indices  []uint32
 	)
 
+	// The coarser of the two steps, so a non-square grid is judged by its worst
+	// direction. The shader needs it to know which wave components this mesh is
+	// too coarse to represent; see water.vert.
+	spacing := max32(stepX, stepZ)
+
 	emit := func(ix, iz int) uint32 {
 		gi := iz*(n+1) + ix
 		if index[gi] >= 0 {
@@ -135,7 +162,7 @@ func WaterMesh(h *Heightmap, opts WaterOptions) ([]renderer.Vertex, []uint32, er
 			// attribute is free and carries the shallow colour instead. See
 			// water.vert, which documents the same trade from the other side.
 			Normal: opts.ShallowColor,
-			UV:     [2]float32{depth[gi], 0},
+			UV:     [2]float32{depth[gi], spacing},
 		})
 		return uint32(index[gi])
 	}

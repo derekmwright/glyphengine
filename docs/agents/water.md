@@ -19,7 +19,7 @@ requires:
 assets: none
 example: examples/09-water
 run: go run ./09-water
-verified: 2026-07-28
+verified: 2026-07-29
 ---
 
 # Water
@@ -137,3 +137,31 @@ so they carry water data instead and avoid a second vertex format:
 Both `water.vert` and `WaterMesh` document this from their own side. Changing
 one without the other produces a surface that renders but is coloured wrong,
 with no error.
+
+## Wave detail is bounded by the grid, not by taste
+
+Two limits decide what the surface can actually show, and both used to be
+silent. Exceeding either produced hard flat facets tearing out of the wave
+field, with shading that did not match the water around them.
+
+**Sampling.** The shortest of the four components is `WaveLength * 0.23`, and it
+needs at least two vertices across it to be a wave rather than a beat pattern
+the grid invented. Given a surface `w` units wide:
+
+```
+WaveLength * 0.23 >= 2 * w / Resolution
+```
+
+Below that the shader fades the component out. Asking for short waves on a coarse
+grid therefore gets smooth water rather than choppy water — the detail is
+dropped rather than faked, the same trade a mip level makes.
+
+`DefaultWaterOptions` at `Resolution` 160 over a 200-unit lake sits just under
+the limit, so its finest component is faded. `Resolution` 256 carries it.
+
+**Folding.** Gerstner's horizontal displacement is invertible only while
+`sum(steepness * k * amplitude)` stays below one. Past that adjacent vertices
+swap order and the surface passes through itself; the same sum also appears in
+the analytic normal, so those facets shade inside out. The shader clamps
+steepness against the real sum, so this cannot happen — but it means crests stop
+sharpening past roughly `WaveAmplitude = WaveLength / 11` and only get taller.
