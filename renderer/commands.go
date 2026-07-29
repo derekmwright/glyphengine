@@ -46,6 +46,9 @@ type SceneLighting struct {
 	DrawSky   bool
 	DrawStars bool
 
+	// CloudSteps is the volumetric cloud sample count; zero draws none.
+	CloudSteps int
+
 	VP            [16]float32                // camera view-projection matrix (for instanced grass)
 	CameraRight   [3]float32                 // camera right vector (for billboard particles)
 	CameraUp      [3]float32                 // camera up vector (for billboard particles)
@@ -503,51 +506,6 @@ func recordCommandBuffer(
 		Extent: extent,
 	}
 
-	// Draw procedural sky dome (opaque, replaces clear color)
-	if lighting.DrawSky {
-		deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, skyPipeline)
-		deviceDriver.CmdSetViewport(cmdBuf, viewport)
-		deviceDriver.CmdSetScissor(cmdBuf, scissor)
-		deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, []core1_0.DescriptorSet{fallbackTexture.DescriptorSet}, nil)
-
-		var pc [60]float32
-		copy(pc[:16], lighting.InvVP[:])
-		pc[16] = lighting.CameraPos[0]
-		pc[17] = lighting.CameraPos[1]
-		pc[18] = lighting.CameraPos[2]
-		pc[32] = lighting.Time
-		pc[33] = lighting.NightFactor
-		pc[36] = lighting.SunDir[0]
-		pc[37] = lighting.SunDir[1]
-		pc[38] = lighting.SunDir[2]
-		pc[40] = lighting.SunColor[0]
-		pc[41] = lighting.SunColor[1]
-		pc[42] = lighting.SunColor[2]
-		pc[43] = lighting.SunElevation
-		pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
-		deviceDriver.CmdPushConstants(cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
-		deviceDriver.CmdDraw(cmdBuf, 3, 1, 0, 0)
-	}
-
-	// Draw procedural stars (additive blend, no vertex buffer)
-	if lighting.DrawStars {
-		deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, starsPipeline)
-		deviceDriver.CmdSetViewport(cmdBuf, viewport)
-		deviceDriver.CmdSetScissor(cmdBuf, scissor)
-		deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, []core1_0.DescriptorSet{fallbackTexture.DescriptorSet}, nil)
-
-		var pc [60]float32
-		copy(pc[:16], lighting.InvVP[:])
-		pc[16] = lighting.CameraPos[0]
-		pc[17] = lighting.CameraPos[1]
-		pc[18] = lighting.CameraPos[2]
-		pc[32] = lighting.Time
-		pc[33] = lighting.NightFactor
-		pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
-		deviceDriver.CmdPushConstants(cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
-		deviceDriver.CmdDraw(cmdBuf, 3, 1, 0, 0)
-	}
-
 	// Draw lit scene geometry (static, double-sided, and skinned)
 	deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, pipeline)
 	deviceDriver.CmdSetViewport(cmdBuf, viewport)
@@ -756,6 +714,62 @@ func recordCommandBuffer(
 				deviceDriver.CmdDrawIndexed(cmdBuf, v.Mesh.IndexCount, tile.Count, 0, 0, uint32(tile.FirstInstance))
 			}
 		}
+	}
+
+	// Draw the sky and stars, after everything that writes depth.
+	//
+	// The sky is a fullscreen triangle, so drawn first it shades every pixel on
+	// screen and the terrain then paints over most of them. That is affordable
+	// for a gradient and ruinous for anything raymarched: the cost is paid for
+	// pixels the player never sees. Drawn last with a depth test instead, it
+	// only shades where nothing else landed.
+	//
+	// The test is GreaterOrEqual rather than Greater because depth is reversed
+	// -- cleared to 0, which is the far plane -- and the sky sits exactly there.
+	// Greater would reject it everywhere.
+	if lighting.DrawSky {
+		deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, skyPipeline)
+		deviceDriver.CmdSetViewport(cmdBuf, viewport)
+		deviceDriver.CmdSetScissor(cmdBuf, scissor)
+		deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, []core1_0.DescriptorSet{fallbackTexture.DescriptorSet}, nil)
+
+		var pc [60]float32
+		copy(pc[:16], lighting.InvVP[:])
+		pc[16] = lighting.CameraPos[0]
+		pc[17] = lighting.CameraPos[1]
+		pc[18] = lighting.CameraPos[2]
+		pc[32] = lighting.Time
+		pc[33] = lighting.NightFactor
+		pc[34] = float32(lighting.CloudSteps)
+		pc[36] = lighting.SunDir[0]
+		pc[37] = lighting.SunDir[1]
+		pc[38] = lighting.SunDir[2]
+		pc[40] = lighting.SunColor[0]
+		pc[41] = lighting.SunColor[1]
+		pc[42] = lighting.SunColor[2]
+		pc[43] = lighting.SunElevation
+		pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
+		deviceDriver.CmdPushConstants(cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
+		deviceDriver.CmdDraw(cmdBuf, 3, 1, 0, 0)
+	}
+
+	// Draw procedural stars (additive blend, no vertex buffer)
+	if lighting.DrawStars {
+		deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, starsPipeline)
+		deviceDriver.CmdSetViewport(cmdBuf, viewport)
+		deviceDriver.CmdSetScissor(cmdBuf, scissor)
+		deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, []core1_0.DescriptorSet{fallbackTexture.DescriptorSet}, nil)
+
+		var pc [60]float32
+		copy(pc[:16], lighting.InvVP[:])
+		pc[16] = lighting.CameraPos[0]
+		pc[17] = lighting.CameraPos[1]
+		pc[18] = lighting.CameraPos[2]
+		pc[32] = lighting.Time
+		pc[33] = lighting.NightFactor
+		pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
+		deviceDriver.CmdPushConstants(cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
+		deviceDriver.CmdDraw(cmdBuf, 3, 1, 0, 0)
 	}
 
 	// Draw instanced billboard particles (additive blend, depth test only)

@@ -65,6 +65,7 @@ type game struct {
 	refract    bool
 	pitch      float32
 	tod        float32
+	clouds     int
 }
 
 func (g *game) Init(e *glyph.Engine) error {
@@ -138,6 +139,10 @@ func (g *game) Init(e *glyph.Engine) error {
 		e.SetDayCycleSpeed(0)
 	}
 	e.SetFogDensity(0.005)
+
+	if sky, ok := e.Scene.Env.(*glyph.Environment); ok && sky.Sky != nil {
+		sky.Sky.CloudSteps = g.clouds
+	}
 
 	g.camera = glyph.NewFPCamera()
 	g.camera.EyeHeight = 0.7
@@ -327,6 +332,8 @@ func main() {
 	refract := flag.Bool("refraction", true, "distort the lake bed through the surface (costs a second render pass)")
 	pitch := flag.Float64("pitch", 0, "initial camera pitch in radians; positive looks down")
 	msaa := flag.Int("msaa", 4, "MSAA sample count (1 disables it)")
+	novsync := flag.Bool("novsync", false, "disable vsync, for measuring frame cost")
+	clouds := flag.Int("clouds", glyph.CloudsHigh, "volumetric cloud raymarch steps (0 disables)")
 	tod := flag.Float64("time", -1, "freeze time of day in [0,1): 0=midnight, 0.25=sunrise, 0.5=noon, 0.75=sunset")
 	shot := flag.String("screenshot", "", "write a PNG of the last frame to this path")
 	flag.Parse()
@@ -336,6 +343,9 @@ func main() {
 		glyph.WithWindowSize(*width, *height),
 		glyph.WithMSAA(*msaa),
 		glyph.WithProjection(50, 0.1, 800),
+	}
+	if *novsync {
+		opts = append(opts, glyph.WithVSync(false))
 	}
 	if *fullscreen {
 		opts = append(opts, glyph.WithFullscreen())
@@ -347,7 +357,7 @@ func main() {
 		opts = append(opts, glyph.WithScreenshot(*shot))
 	}
 
-	e, err := glyph.New(&game{seed: *seed, refract: *refract, pitch: float32(*pitch), tod: float32(*tod)}, opts...)
+	e, err := glyph.New(&game{seed: *seed, refract: *refract, pitch: float32(*pitch), tod: float32(*tod), clouds: *clouds}, opts...)
 	if err != nil {
 		log.Fatalf("create engine: %v", err)
 	}

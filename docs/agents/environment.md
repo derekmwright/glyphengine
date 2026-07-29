@@ -75,6 +75,31 @@ Useful combinations:
   skybox. The light works; nothing is drawn.
 - `Sky` with `SunDisc: false` — sky colour and light without a visible sun.
 
+## Clouds are a graphics setting
+
+`Sky.CloudSteps` controls the volumetric cloud raymarch and is the most
+expensive thing the engine draws per pixel. It exists to be wired to a settings
+menu, not left at a constant. Measured at 1280x720, MSAA 4x, on a Radeon RX
+7900 XTX, whole frame:
+
+| Setting | Frame | FPS |
+|---|---|---|
+| `CloudsOff` | 0.28 ms | 3593 |
+| `CloudsLow` (16) | 0.76 ms | 1323 |
+| `CloudsHigh` (32) | 1.11 ms | 898 |
+
+Those are one GPU's numbers; the ratios transfer better than the absolutes.
+Any integer works, not just the presets.
+
+It is safe to change every frame — the value is read when the environment
+resolves, so a slider takes effect on the next frame with nothing to rebuild.
+
+The sky is drawn **after** opaque geometry and depth-tested against the far
+plane, so none of this runs for a pixel the terrain covers. That reordering is
+worth about 12% on its own and is what makes a raymarched sky affordable at
+all; before it, a fullscreen sky shaded every pixel and the world painted over
+most of them.
+
 ## Replacing it entirely
 
 Implement `EnvironmentSource`:

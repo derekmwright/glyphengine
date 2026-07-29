@@ -186,3 +186,41 @@ func TestDefaultEnvironmentMatchesOldBehaviour(t *testing.T) {
 		t.Errorf("default fog %v; want %v", got.FogDensity, DefaultFogDensity)
 	}
 }
+
+// TestCloudStepsFlowThrough checks the quality knob actually reaches the
+// resolved state, including the off case.
+//
+// It is the one setting here with a measured frame-time cost attached to it, so
+// a game turning clouds off has to actually get a sky without them rather than
+// a sky that quietly ignores the request.
+func TestCloudStepsFlowThrough(t *testing.T) {
+	for _, steps := range []int{CloudsOff, CloudsLow, CloudsHigh, 7} {
+		env := &Environment{Sky: &Sky{CloudSteps: steps}}
+		if got := env.State().CloudSteps; got != steps {
+			t.Errorf("CloudSteps %d resolved to %d", steps, got)
+		}
+	}
+	// No sky at all means no clouds, whatever the field said.
+	env := &Environment{}
+	if got := env.State().CloudSteps; got != 0 {
+		t.Errorf("CloudSteps %d with no Sky", got)
+	}
+	if DefaultSky().CloudSteps != CloudsHigh {
+		t.Errorf("DefaultSky has CloudSteps %d, want CloudsHigh", DefaultSky().CloudSteps)
+	}
+
+	// Changing it between frames has to take effect without rebuilding
+	// anything, because a graphics-settings slider will do exactly that.
+	live := &Environment{Sky: DefaultSky()}
+	if got := live.State().CloudSteps; got != CloudsHigh {
+		t.Fatalf("CloudSteps %d before change", got)
+	}
+	live.Sky.CloudSteps = CloudsOff
+	if got := live.State().CloudSteps; got != CloudsOff {
+		t.Errorf("CloudSteps %d after setting CloudsOff at runtime", got)
+	}
+	live.Sky.CloudSteps = CloudsLow
+	if got := live.State().CloudSteps; got != CloudsLow {
+		t.Errorf("CloudSteps %d after setting CloudsLow at runtime", got)
+	}
+}

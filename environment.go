@@ -81,6 +81,9 @@ type EnvironmentState struct {
 	SunDiscColor [3]float32
 	MoonDiscDir  [3]float32
 
+	// CloudSteps is the volumetric cloud sample count; zero draws none.
+	CloudSteps int
+
 	// CastShadows enables the shadow pass. Turning it off when the only light
 	// is a dim moon saves the cascades for shadows nobody can see.
 	CastShadows bool
@@ -148,11 +151,42 @@ type Sky struct {
 	// Cycle, from -1 to 1. It picks the palette: 0.6 is a high bright sky, 0
 	// is sunset, -0.5 is night.
 	FixedSunElevation float32
+
+	// CloudSteps is how many samples the volumetric cloud raymarch takes.
+	// Zero draws no clouds at all.
+	//
+	// This is the most expensive thing the engine draws per pixel, and it is
+	// meant to be a graphics setting a game exposes rather than a constant.
+	// Measured at 1280x720, MSAA 4x, on a Radeon RX 7900 XTX, whole frame:
+	//
+	//	CloudsOff    0.28 ms   3593 fps
+	//	CloudsLow    0.76 ms   1323 fps
+	//	CloudsHigh   1.11 ms    898 fps
+	//
+	// Those are one GPU's numbers and the absolute values will not transfer,
+	// but the ratios roughly do: clouds cost about three times the rest of a
+	// simple scene at CloudsHigh, and about half that at CloudsLow.
+	//
+	// Safe to change at runtime, every frame if you like — the value is read
+	// when the environment resolves, so a settings slider takes effect on the
+	// next frame with nothing to rebuild.
+	CloudSteps int
 }
 
-// DefaultSky is a full sky: dome, stars, and both discs.
+// Cloud quality presets for Sky.CloudSteps.
+const (
+	// CloudsOff draws no clouds. The sky keeps its gradient and sun glow.
+	CloudsOff = 0
+	// CloudsLow is a coarse march: cloud shapes read correctly, edges are
+	// softer and thin wisps can shimmer as the camera moves.
+	CloudsLow = 16
+	// CloudsHigh is the default.
+	CloudsHigh = 32
+)
+
+// DefaultSky is a full sky: dome, volumetric clouds, stars, and both discs.
 func DefaultSky() *Sky {
-	return &Sky{Stars: true, SunDisc: true, MoonDisc: true}
+	return &Sky{Stars: true, SunDisc: true, MoonDisc: true, CloudSteps: CloudsHigh}
 }
 
 // DirectionalLight is a fixed sun: one direction, one colour, no clock.
@@ -241,6 +275,7 @@ func (env *Environment) State() EnvironmentState {
 
 	if env.Sky != nil {
 		s.DrawSky = true
+		s.CloudSteps = env.Sky.CloudSteps
 		s.DrawStars = env.Sky.Stars && s.StarFade > 0
 		// The discs are the cycle's bodies; without one there is nothing to
 		// place them by.

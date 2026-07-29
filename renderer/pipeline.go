@@ -519,7 +519,7 @@ func createStarsPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, render
 }
 
 // createSkyPipeline creates a pipeline for procedural sky dome rendering:
-// no vertex input, no depth test, opaque blending (replaces clear color).
+// no vertex input, depth-tested against the far plane, opaque.
 func createSkyPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
 		Code: bytesToUint32Slice(sh.SkyVert),
@@ -567,8 +567,11 @@ func createSkyPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPa
 			RasterizationSamples: samples,
 		},
 		DepthStencilState: &core1_0.PipelineDepthStencilStateCreateInfo{
-			DepthTestEnable:  false,
+			// Depth-tested so the sky only shades pixels no geometry
+			// reached; see the draw order in recordCommandBuffer.
+			DepthTestEnable:  true,
 			DepthWriteEnable: false,
+			DepthCompareOp:   core1_0.CompareOpGreaterOrEqual,
 		},
 		ColorBlendState: &core1_0.PipelineColorBlendStateCreateInfo{
 			Attachments: []core1_0.PipelineColorBlendAttachmentState{{

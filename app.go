@@ -719,6 +719,7 @@ func (e *Engine) renderFrame() {
 		FogDensity:    env.FogDensity,
 		DrawSky:       env.DrawSky,
 		DrawStars:     env.DrawStars,
+		CloudSteps:    env.CloudSteps,
 	}
 
 	pls := e.Scene.pointLights
