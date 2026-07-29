@@ -155,7 +155,7 @@ bit-identical results at 60Hz and at 300Hz.
 
 | Package | What it does |
 |---|---|
-| `glyphengine` | Root. `Engine` (window, frame loop), `Scene` (simulation), components, physics, terrain, cameras, character controller |
+| `glyphengine` | Root. `Engine` (window, frame loop), `Scene` (simulation), components, physics, terrain, water, environment, cameras, character controller |
 | `glyphengine/ecs` | Generic ECS — typed `Store[T]`, `Query2/3/4` |
 | `glyphengine/renderer` | Vulkan renderer: forward + reverse-Z, cascaded shadows, GPU skinning, MSDF text, instanced grass, water, particles |
 | `glyphengine/window` | GLFW window and Vulkan surface |

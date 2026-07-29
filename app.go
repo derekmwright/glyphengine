@@ -300,8 +300,6 @@ type Engine struct {
 	drawBuf     []renderer.RenderObject // reused each frame to avoid allocs
 	animScratch renderer.AnimScratch    // reused each frame by TickAnimations
 
-	fogDensity float32 // exp² distance fog density (0 disables)
-
 	tickDuration time.Duration
 	maxCatchUp   time.Duration
 	maxFrames    int
@@ -321,10 +319,6 @@ func resolveMaxCatchUp(requested, tickDuration time.Duration) time.Duration {
 	}
 	return requested
 }
-
-// defaultFogDensity gives ~35% fog at the 80-unit grass cull distance and
-// ~75% at 150 units, softening the horizon without smothering the midground.
-const defaultFogDensity = 0.0075
 
 // New creates the window, renderer, and input system, then calls g.Init so the
 // game can build its scene. Call Destroy when Run returns.
@@ -397,7 +391,6 @@ func New(g Game, opts ...Option) (*Engine, error) {
 		fov:          cfg.fov,
 		near:         cfg.near,
 		far:          cfg.far,
-		fogDensity:   defaultFogDensity,
 		tickDuration: time.Second / time.Duration(cfg.tickRate),
 		maxCatchUp:   resolveMaxCatchUp(cfg.maxCatchUp, time.Second/time.Duration(cfg.tickRate)),
 		maxFrames:    cfg.maxFrames,
@@ -467,11 +460,23 @@ func (e *Engine) InterpolatedTransform(entity ecs.Entity) (Transform, bool) {
 // Elapsed returns the running wall-clock time in seconds since Run started.
 func (e *Engine) Elapsed() float32 { return e.elapsed }
 
-// SetFogDensity overrides the exp² distance fog density (0 disables fog).
-func (e *Engine) SetFogDensity(d float32) { e.fogDensity = d }
+// SetFogDensity sets the environment's fog density (0 disables fog).
+//
+// A shortcut for the common case. It does nothing when the scene uses a custom
+// EnvironmentSource, which owns its own fog — reach through Scene.Env instead.
+func (e *Engine) SetFogDensity(d float32) {
+	env, ok := e.Scene.Env.(*Environment)
+	if !ok || env == nil {
+		return
+	}
+	if env.Fog == nil {
+		env.Fog = &Fog{}
+	}
+	env.Fog.Density = d
+}
 
 // FogDensity returns the current fog density.
-func (e *Engine) FogDensity() float32 { return e.fogDensity }
+func (e *Engine) FogDensity() float32 { return e.Scene.Environment().FogDensity }
 
 // SetOverlays sets the overlay render objects drawn on top of the 3D scene.
 func (e *Engine) SetOverlays(overlays []renderer.RenderObject) { e.overlays = overlays }
@@ -665,26 +670,28 @@ func (e *Engine) renderFrame() {
 	// Compute cascade VPs first so buildDrawList can include shadow casters
 	// that are outside the camera frustum. The far cascade's frustum is a
 	// superset of the near one, so it alone decides shadow-only inclusion.
-	dn := &e.Scene.dayNight
-	shadowEnabled := dn.SunAboveHorizon()
+	// Resolve the environment once for the whole frame. Asking it twice could
+	// return different answers -- a custom EnvironmentSource is free to be as
+	// stateful as it likes -- and half a frame lit by one sky and half by
+	// another is a hard bug to find.
+	env := e.Scene.Environment()
+
+	shadowEnabled := env.CastShadows
 	var cascadeVPs [renderer.ShadowCascades]mgl32.Mat4
 	if shadowEnabled {
-		cascadeVPs = renderer.ComputeCascadeVPs(dn.SunDir(), e.cameraCenter)
+		cascadeVPs = renderer.ComputeCascadeVPs(env.SunDir, e.cameraCenter)
 	}
 
 	draws := e.buildDrawList(vp, shadowEnabled, cascadeVPs[renderer.ShadowCascades-1])
 
-	// Celestial billboards fade near the horizon instead of cutting out.
-	if sd := dn.SunDir(); sd[1] > -0.15 {
-		draws = append(draws, e.buildSunObject(vp))
+	// Celestial billboards fade near the horizon instead of cutting out; the
+	// environment decides whether they exist at all.
+	if env.DrawSun {
+		draws = append(draws, e.buildSunObject(vp, env))
 	}
-	if md := dn.MoonDir(); md[1] > -0.15 {
-		draws = append(draws, e.buildMoonObject(vp))
+	if env.DrawMoon {
+		draws = append(draws, e.buildMoonObject(vp, env))
 	}
-
-	// One directional light, handed over from sun to moon where both are near
-	// zero rather than at a clock boundary -- see DayNight.PrimaryLight.
-	sunDir, sunColor := dn.PrimaryLight()
 
 	// Camera basis for billboard particles.
 	camForward := e.cameraCenter.Sub(e.cameraEye).Normalize()
@@ -695,21 +702,23 @@ func (e *Engine) renderFrame() {
 		VP:            vp,
 		CameraRight:   [3]float32{camRight.X(), camRight.Y(), camRight.Z()},
 		CameraUp:      [3]float32{camUp.X(), camUp.Y(), camUp.Z()},
-		SunDir:        sunDir,
-		SunColor:      sunColor,
+		SunDir:        env.SunDir,
+		SunColor:      env.SunColor,
 		PointPos:      e.Scene.pointPos,
 		PointRange:    e.Scene.pointRange,
 		PointColor:    e.Scene.pointColor,
-		Ambient:       dn.AmbientColor(),
-		SkyColor:      dn.SkyColor(),
+		Ambient:       env.Ambient,
+		SkyColor:      [4]float32{env.ClearColor[0], env.ClearColor[1], env.ClearColor[2], 1},
 		InvVP:         vp.Inv(),
 		CameraPos:     [3]float32{e.cameraEye.X(), e.cameraEye.Y(), e.cameraEye.Z()},
 		Time:          e.elapsed,
-		NightFactor:   dn.StarVisibility(),
-		SunElevation:  dn.SunDir()[1],
+		NightFactor:   env.StarFade,
+		SunElevation:  env.SunElevation,
 		CascadeVPs:    cascadeVPs,
 		ShadowEnabled: shadowEnabled,
-		FogDensity:    e.fogDensity,
+		FogDensity:    env.FogDensity,
+		DrawSky:       env.DrawSky,
+		DrawStars:     env.DrawStars,
 	}
 
 	pls := e.Scene.pointLights
@@ -898,14 +907,14 @@ func horizonFade(dir [3]float32) float32 {
 	return (y + 0.15) / 0.25
 }
 
-func (e *Engine) buildSunObject(vp mgl32.Mat4) renderer.RenderObject {
-	sd := e.Scene.dayNight.SunDir()
+func (e *Engine) buildSunObject(vp mgl32.Mat4, env EnvironmentState) renderer.RenderObject {
+	sd := env.SunDiscDir
 	pos := e.cameraEye.Add(mgl32.Vec3{sd[0], sd[1], sd[2]}.Mul(80))
 	model := e.buildBillboard(pos, celestialScale(sd))
 
 	// SunDiscColor already fades with elevation; fading again here would
 	// make the sun vanish well before it reaches the horizon.
-	sc := e.Scene.dayNight.SunDiscColor()
+	sc := env.SunDiscColor
 
 	return renderer.RenderObject{
 		Mesh:     e.sunMesh,
@@ -916,8 +925,8 @@ func (e *Engine) buildSunObject(vp mgl32.Mat4) renderer.RenderObject {
 	}
 }
 
-func (e *Engine) buildMoonObject(vp mgl32.Mat4) renderer.RenderObject {
-	md := e.Scene.dayNight.MoonDir()
+func (e *Engine) buildMoonObject(vp mgl32.Mat4, env EnvironmentState) renderer.RenderObject {
+	md := env.MoonDiscDir
 	pos := e.cameraEye.Add(mgl32.Vec3{md[0], md[1], md[2]}.Mul(80))
 	model := e.buildBillboard(pos, celestialScale(md))
 

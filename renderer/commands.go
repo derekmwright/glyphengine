@@ -41,6 +41,11 @@ type SceneLighting struct {
 	// light direction paints a noon sky at midnight.
 	SunElevation float32
 
+	// DrawSky draws the procedural dome; when false the frame keeps its clear
+	// colour. DrawStars adds the star layer.
+	DrawSky   bool
+	DrawStars bool
+
 	VP            [16]float32                // camera view-projection matrix (for instanced grass)
 	CameraRight   [3]float32                 // camera right vector (for billboard particles)
 	CameraUp      [3]float32                 // camera up vector (for billboard particles)
@@ -499,7 +504,7 @@ func recordCommandBuffer(
 	}
 
 	// Draw procedural sky dome (opaque, replaces clear color)
-	{
+	if lighting.DrawSky {
 		deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, skyPipeline)
 		deviceDriver.CmdSetViewport(cmdBuf, viewport)
 		deviceDriver.CmdSetScissor(cmdBuf, scissor)
@@ -525,7 +530,7 @@ func recordCommandBuffer(
 	}
 
 	// Draw procedural stars (additive blend, no vertex buffer)
-	if lighting.NightFactor > 0 {
+	if lighting.DrawStars {
 		deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, starsPipeline)
 		deviceDriver.CmdSetViewport(cmdBuf, viewport)
 		deviceDriver.CmdSetScissor(cmdBuf, scissor)

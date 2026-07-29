@@ -22,7 +22,8 @@ api:
   - glyphengine.DayNight.AmbientColor
   - glyphengine.Engine.SetTimeOfDay
   - glyphengine.Engine.SetDayCycleSpeed
-requires: []
+requires:
+  - environment
 assets: none
 example: examples/09-water
 run: go run ./09-water -time 0.78
@@ -31,10 +32,17 @@ verified: 2026-07-28
 
 # Day/night cycle
 
+The cycle is one piece of the scene's `Environment`, and optional like the
+rest — see [environment](environment.md). A scene with no `Cycle` has no
+passage of time; a scene with no `Env` at all has no sky or sun either.
+
 ```go
 e.SetTimeOfDay(0.30)          // 0=midnight, 0.25=sunrise, 0.5=noon, 0.75=sunset
 e.SetDayCycleSpeed(1.0 / 300) // one full cycle every 300 seconds; 0 freezes it
 ```
+
+These reach through to the built-in `Environment` and are no-ops under a custom
+`EnvironmentSource`. `Scene.DayNight()` returns nil there.
 
 `examples/09-water -time 0.78` freezes the clock at a chosen point, which is
 how to inspect or screenshot a specific hour reproducibly.
@@ -94,15 +102,14 @@ dusk that never finishes rather than night.
 Moonlight is correspondingly weak. It started at roughly a sixth of the sun's
 intensity, which is where that inversion came from.
 
-## `SkyColor()` is not the sky
+## Changing the sky's appearance
 
-`SkyColor()` returns the render pass clear colour. The sky dome is opaque and
-drawn first, so in a normal frame it is never seen. The visible sky comes from
-`shaders/atmosphere.inc` via `sky.frag`.
+The visible sky comes from `shaders/atmosphere.inc` via `sky.frag`;
+`atmSkyPalette` is the place. To replace it wholesale, swap the sky shaders
+through `renderer.WithShaders`.
 
-The keyframes are kept in step with the dome anyway, so a game that disables
-the dome still gets a sky rather than whatever they last happened to say. If
-you are trying to change the sky's appearance, `atmSkyPalette` is the place.
+The clear colour behind it is `Environment.ClearColor`, and is only seen when
+`Sky` is nil — the dome is opaque and drawn first.
 
 ## Failure modes
 

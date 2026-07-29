@@ -35,7 +35,14 @@ type Scene struct {
 	// structs; the engine never sees them.
 	C *Components
 
-	dayNight DayNight
+	// Env is the sky, light and air around the scene. It is an interface so a
+	// game can replace the whole model; see EnvironmentSource. Nil means an
+	// empty world -- no sky, no directional light, no fog.
+	Env EnvironmentSource
+
+	// envState is Env resolved for the current frame, refreshed once per Tick
+	// and once before drawing, so a frame never sees it change under it.
+	envState EnvironmentState
 
 	// tickCount is the simulation clock; see TickCount.
 	tickCount uint64
@@ -92,10 +99,10 @@ type Scene struct {
 func NewScene() *Scene {
 	w := ecs.NewWorld()
 	return &Scene{
-		world:    w,
-		C:        NewComponents(w),
-		dayNight: DayNight{TimeOfDay: 0.25}, // start at sunrise
-		Gravity:  DefaultGravity,
+		world:   w,
+		C:       NewComponents(w),
+		Env:     DefaultEnvironment(),
+		Gravity: DefaultGravity,
 	}
 }
 
@@ -143,7 +150,9 @@ func (s *Scene) Tick(dt float32) {
 		s.snapshotTransforms()
 	}
 
-	s.dayNight.Advance(dt)
+	if s.Env != nil {
+		s.Env.Advance(dt)
+	}
 	IntegrateBodies(s, dt)
 	if s.PathFinder != nil {
 		s.PathFinder.Tick()
@@ -155,25 +164,56 @@ func (s *Scene) Tick(dt float32) {
 
 // ─────────────────────────── day/night ───────────────────────────
 
-// DayNight returns a pointer to the scene's day/night cycle for direct
-// configuration and querying.
-func (s *Scene) DayNight() *DayNight { return &s.dayNight }
-
-// TimeOfDay returns the current time of day (0=midnight, 0.5=noon).
-func (s *Scene) TimeOfDay() float32 { return s.dayNight.TimeOfDay }
-
-// SetTimeOfDay sets the current time of day directly (0=midnight, 0.5=noon).
-// Values outside [0,1) wrap.
-func (s *Scene) SetTimeOfDay(t float32) {
-	s.dayNight.TimeOfDay = t - float32(math.Floor(float64(t)))
+// Environment returns the scene's environment, resolved for this frame.
+func (s *Scene) Environment() EnvironmentState {
+	if s.Env == nil {
+		return EnvironmentState{}
+	}
+	return s.Env.State()
 }
 
-// SetDayCycleSpeed sets the day/night cycle speed in full cycles per second
-// (e.g. 1.0/120 for a two-minute day). Zero freezes the cycle.
-func (s *Scene) SetDayCycleSpeed(speed float32) { s.dayNight.Speed = speed }
+// DayNight returns the scene's day/night cycle, or nil.
+//
+// It is nil whenever the environment does not have one: a custom
+// EnvironmentSource, an interior with fixed lighting, or no environment at
+// all. Callers that only want to set the time should use SetTimeOfDay, which
+// handles the nil case.
+func (s *Scene) DayNight() *DayNight {
+	env, ok := s.Env.(*Environment)
+	if !ok || env == nil {
+		return nil
+	}
+	return env.Cycle
+}
+
+// TimeOfDay returns the current time of day (0=midnight, 0.5=noon), or 0 when
+// the environment has no cycle.
+func (s *Scene) TimeOfDay() float32 {
+	if dn := s.DayNight(); dn != nil {
+		return dn.TimeOfDay
+	}
+	return 0
+}
+
+// SetTimeOfDay sets the current time of day (0=midnight, 0.5=noon). Values
+// outside [0,1) wrap. It does nothing when the environment has no cycle.
+func (s *Scene) SetTimeOfDay(t float32) {
+	if dn := s.DayNight(); dn != nil {
+		dn.TimeOfDay = t - float32(math.Floor(float64(t)))
+	}
+}
+
+// SetDayCycleSpeed sets the cycle speed in full cycles per second (e.g.
+// 1.0/120 for a two-minute day). Zero freezes it. It does nothing when the
+// environment has no cycle.
+func (s *Scene) SetDayCycleSpeed(speed float32) {
+	if dn := s.DayNight(); dn != nil {
+		dn.Speed = speed
+	}
+}
 
 // StarVisibility returns a 0–1 factor for night visibility (0=day, 1=night).
-func (s *Scene) StarVisibility() float32 { return s.dayNight.StarVisibility() }
+func (s *Scene) StarVisibility() float32 { return s.Environment().StarFade }
 
 // ─────────────────────────── lighting ───────────────────────────
 
