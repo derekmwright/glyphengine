@@ -190,6 +190,7 @@ task example:09-water         # animated lake: waves, refraction, Fresnel reflec
 task example:10-text          # MSDF text, one atlas from caption to headline size
 task example:11-lights        # point lights, cube shadow maps, emissive markers
 task example:12-particles     # CPU-simulated emitters, one instanced draw
+task example:13-ui            # immediate-mode HUD: panels, bars, MSDF labels
 task example:15-kitchen-sink  # all of the above at once
 ```
 
