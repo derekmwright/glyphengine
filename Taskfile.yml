@@ -50,6 +50,14 @@ tasks:
     generates:
       - shaders/*.spv
 
+  shaders:verify:
+    desc: Assert the committed .spv match their GLSL (needs VULKAN_SDK)
+    cmds:
+      # The check itself lives in a Go test so it runs under `task ci` and in
+      # CI without depending on which shell or coreutils are present. This is
+      # just a named entry point for it.
+      - go test ./shaders/ -run TestCommittedSPIRVMatchesGLSL -count=1 -v
+
   # ───────────────────────── fonts ─────────────────────────
 
   font:
