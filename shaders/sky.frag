@@ -1,4 +1,5 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 
 layout(location = 0) in vec2 fragUV;
 
@@ -14,6 +15,8 @@ layout(push_constant) uniform PushConstants {
 } pc;
 
 layout(location = 0) out vec4 outColor;
+
+#include "atmosphere.inc"
 
 // ----- Hash / Noise -----
 float hash2D(vec2 p) {
@@ -60,36 +63,25 @@ void main() {
 
     // ----- Sky gradient -----
     float elevation = dir.y;
-    float t = smoothstep(-0.1, 0.6, elevation);
+    // The real sun's elevation, not the current light's: at night pc.sunDir is
+    // the moon, which is high when the sky should be darkest.
+    float sunElevation = pc.sunColor.w;
 
-    // Daytime colors
-    vec3 zenithDay = vec3(0.18, 0.35, 0.78);
-    vec3 horizonDay = vec3(0.65, 0.78, 0.95);
+    vec3 zenith, horizon;
+    atmSkyPalette(sunElevation, zenith, horizon);
 
-    // Night colors
-    vec3 zenithNight = vec3(0.01, 0.01, 0.04);
-    vec3 horizonNight = vec3(0.03, 0.04, 0.08);
-
-    vec3 zenith = mix(zenithDay, zenithNight, nightFactor);
-    vec3 horizon = mix(horizonDay, horizonNight, nightFactor);
-
+    // Rayleigh-ish falloff rather than a linear ramp: most of the colour
+    // change happens in the first part of the climb from the horizon, which is
+    // what gives the sky depth instead of a flat wash.
+    float t = pow(smoothstep(-0.08, 0.75, elevation), 0.65);
     vec3 skyColor = mix(horizon, zenith, t);
 
-    // Sunrise/sunset tint near horizon when sun is low
-    float sunElevation = sunDir.y;
-    float sunsetStrength = smoothstep(0.3, 0.0, sunElevation) * (1.0 - nightFactor);
-    float horizonMask = exp(-3.0 * abs(elevation));
-    // Tint toward sun direction
-    float sunProximity = max(dot(dir, sunDir), 0.0);
-    float sunGlow = pow(sunProximity, 4.0) * sunsetStrength;
-    vec3 sunsetTint = mix(sunCol, vec3(1.0, 0.4, 0.1), 0.5);
-    skyColor += sunsetTint * sunGlow * 0.6;
-    skyColor += sunsetTint * horizonMask * sunsetStrength * 0.25;
+    skyColor += atmSunGlow(dir, sunDir, sunCol, sunElevation);
 
     // Below-horizon: darken toward ground
     if (elevation < 0.0) {
         float belowFade = smoothstep(0.0, -0.3, elevation);
-        vec3 groundColor = mix(horizon, vec3(0.15, 0.18, 0.12), belowFade) * (1.0 - nightFactor * 0.7);
+        vec3 groundColor = mix(horizon, vec3(0.15, 0.18, 0.12), belowFade) * mix(0.3, 1.0, atmDaylight(sunElevation));
         skyColor = mix(skyColor, groundColor, belowFade);
     }
 
@@ -109,7 +101,7 @@ void main() {
         float density = fbm(cloudUV * 3.0);
 
         // Coverage threshold — fewer clouds at night
-        float coverage = mix(0.42, 0.55, nightFactor);
+        float coverage = mix(0.55, 0.42, atmDaylight(sunElevation));
         density = smoothstep(coverage, coverage + 0.25, density);
 
         // Fade clouds near horizon to avoid harsh cutoff
@@ -117,7 +109,7 @@ void main() {
         density *= horizonFade;
 
         // Fade clouds at night
-        density *= mix(1.0, 0.3, nightFactor);
+        density *= mix(0.3, 1.0, atmDaylight(sunElevation));
 
         // Beer's law light attenuation
         float absorb = 2.5;
@@ -127,10 +119,12 @@ void main() {
         float HG = pow(max(dot(dir, sunDir), 0.0), 3.0) * 0.4;
 
         // Cloud color: shadow to sun-lit
-        vec3 cloudShadow = mix(vec3(0.45, 0.48, 0.55), vec3(0.08, 0.08, 0.12), nightFactor);
-        vec3 cloudLit = mix(vec3(1.0, 0.98, 0.95), vec3(0.15, 0.15, 0.2), nightFactor);
+        vec3 cloudShadow = mix(vec3(0.06, 0.07, 0.11), vec3(0.45, 0.48, 0.55), atmDaylight(sunElevation));
+        vec3 cloudLit = mix(vec3(0.13, 0.13, 0.19), vec3(1.0, 0.98, 0.95), atmDaylight(sunElevation));
         // Add sun color tinting for sunset/sunrise
-        cloudLit = mix(cloudLit, sunsetTint * 1.1, sunsetStrength * 0.5);
+        // Undersides catch the low sun long after the ground has lost it,
+        // which is most of what makes a sunset sky worth looking at.
+        cloudLit = mix(cloudLit, vec3(1.0, 0.55, 0.28), atmTwilight(sunElevation) * 0.75);
 
         vec3 cloudColor = mix(cloudShadow, cloudLit, beer + HG);
 

@@ -34,6 +34,12 @@ type SceneLighting struct {
 	CameraPos   [3]float32  // camera eye position for stars
 	Time        float32     // elapsed time for star twinkling
 	NightFactor float32     // 0=day, 1=night for star visibility
+	// SunElevation is the real sun's height, independent of which body is
+	// currently the scene's directional light. The atmosphere is derived from
+	// it, so it must not follow the sun/moon handover -- the moon rides high
+	// exactly when the sky should be darkest, and driving the palette from the
+	// light direction paints a noon sky at midnight.
+	SunElevation float32
 
 	VP            [16]float32                // camera view-projection matrix (for instanced grass)
 	CameraRight   [3]float32                 // camera right vector (for billboard particles)
@@ -187,7 +193,7 @@ func packLightingPC(pc *[60]float32, lighting SceneLighting) {
 	pc[40] = lighting.SunColor[0]
 	pc[41] = lighting.SunColor[1]
 	pc[42] = lighting.SunColor[2]
-	pc[43] = lighting.NightFactor
+	pc[43] = lighting.SunElevation // sunColor.w
 	// pointPos vec4 at [44..47] (xyz = pos, w = range)
 	pc[44] = lighting.PointPos[0]
 	pc[45] = lighting.PointPos[1]
@@ -512,6 +518,7 @@ func recordCommandBuffer(
 		pc[40] = lighting.SunColor[0]
 		pc[41] = lighting.SunColor[1]
 		pc[42] = lighting.SunColor[2]
+		pc[43] = lighting.SunElevation
 		pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
 		deviceDriver.CmdPushConstants(cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
 		deviceDriver.CmdDraw(cmdBuf, 3, 1, 0, 0)

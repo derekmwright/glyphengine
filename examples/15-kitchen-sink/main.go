@@ -210,7 +210,9 @@ func (g *game) Init(e *glyph.Engine) error {
 	// ── world ──
 	e.SetDayCycleSpeed(1.0 / 300.0)
 	e.SetTimeOfDay(0.30) // morning sun: long shadows across the grass
-	e.SetFogDensity(0.013)
+	// Enough haze to hide where the grass stops, not so much that the far side
+	// of the island turns into sky.
+	e.SetFogDensity(0.0075)
 
 	// Third person, pitched down. Grass blades stand about chest-high on this
 	// character, so a level camera buries it in them -- looking down over its

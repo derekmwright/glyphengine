@@ -682,12 +682,9 @@ func (e *Engine) renderFrame() {
 		draws = append(draws, e.buildMoonObject(vp))
 	}
 
-	sunDir := dn.SunDir()
-	sunColor := dn.SunColor()
-	if !dn.SunAboveHorizon() && dn.MoonVisible() {
-		sunDir = dn.MoonDir()
-		sunColor = dn.MoonColor()
-	}
+	// One directional light, handed over from sun to moon where both are near
+	// zero rather than at a clock boundary -- see DayNight.PrimaryLight.
+	sunDir, sunColor := dn.PrimaryLight()
 
 	// Camera basis for billboard particles.
 	camForward := e.cameraCenter.Sub(e.cameraEye).Normalize()
@@ -709,6 +706,7 @@ func (e *Engine) renderFrame() {
 		CameraPos:     [3]float32{e.cameraEye.X(), e.cameraEye.Y(), e.cameraEye.Z()},
 		Time:          e.elapsed,
 		NightFactor:   dn.StarVisibility(),
+		SunElevation:  dn.SunDir()[1],
 		CascadeVPs:    cascadeVPs,
 		ShadowEnabled: shadowEnabled,
 		FogDensity:    e.fogDensity,
@@ -905,14 +903,15 @@ func (e *Engine) buildSunObject(vp mgl32.Mat4) renderer.RenderObject {
 	pos := e.cameraEye.Add(mgl32.Vec3{sd[0], sd[1], sd[2]}.Mul(80))
 	model := e.buildBillboard(pos, celestialScale(sd))
 
-	fade := horizonFade(sd)
+	// SunDiscColor already fades with elevation; fading again here would
+	// make the sun vanish well before it reaches the horizon.
 	sc := e.Scene.dayNight.SunDiscColor()
 
 	return renderer.RenderObject{
 		Mesh:     e.sunMesh,
 		MVP:      vp.Mul4(model),
 		Model:    model,
-		Color:    [3]float32{sc[0] * fade, sc[1] * fade, sc[2] * fade},
+		Color:    sc,
 		Emissive: true,
 	}
 }

@@ -8,6 +8,8 @@
 // are multiplied by irradiance. This structurally prevents specular from
 // leaking through surfaces where NdotL <= 0.
 
+#include "atmosphere.inc"
+
 const int NumCascades = 2;
 
 // calcShadow selects the first cascade whose frustum contains the (normal-
@@ -53,34 +55,39 @@ float calcPointShadow(vec3 fragPos, vec3 lightPos, float range) {
     return faceDepth - bias > closestZ ? 0.35 : 1.0;
 }
 
-// fogColor replicates sky.frag's horizon color (gradient endpoints + sunset
-// glow toward the sun) so fogged geometry melts into the sky at the horizon.
-// nightFactor rides in pc.sunColor.w.
+// fogColor returns the same horizon colour sky.frag draws, so fogged geometry
+// melts into the sky rather than into a colour that merely resembles it.
+//
+// It shares the model rather than reimplementing it. The two used to be
+// separate copies of the same constants, kept in step by a comment.
 vec3 fogColor(vec3 viewDir) {
-    float nightFactor = pc.sunColor.w;
-    vec3 horizon = mix(vec3(0.65, 0.78, 0.95), vec3(0.03, 0.04, 0.08), nightFactor);
-
     vec3 sunDir = normalize(pc.sunDir.xyz);
-    float sunsetStrength = smoothstep(0.3, 0.0, sunDir.y) * (1.0 - nightFactor);
-    float sunGlow = pow(max(dot(viewDir, sunDir), 0.0), 4.0) * sunsetStrength;
-    vec3 sunsetTint = mix(pc.sunColor.rgb, vec3(1.0, 0.4, 0.1), 0.5);
-    horizon += sunsetTint * sunGlow * 0.6;
-    horizon += sunsetTint * sunsetStrength * 0.25; // sky.frag horizonMask ≈ 1 at horizon
-    return horizon;
+    // pc.sunColor.w is the real sun's elevation; pc.sunDir may be the moon.
+    float sunY = pc.sunColor.w;
+    vec3 zenith, horizon;
+    atmSkyPalette(sunY, zenith, horizon);
+    return horizon + atmSunGlow(viewDir, sunDir, pc.sunColor.rgb, sunY);
 }
 
-// applyFog blends toward the horizon color with exp² distance falloff.
+// applyFog blends toward the horizon color with exp² distance falloff, then
+// applies the night shift.
+//
+// The night shift lives here because every lit shader calls applyFog exactly
+// once as its last step, so this is the one place that cannot miss a surface.
+// Both are the same kind of thing: what the atmosphere does to a colour on its
+// way to the eye.
+//
 // Density rides in pc.cameraPos.w; zero disables fog.
 vec3 applyFog(vec3 color, vec3 worldPos) {
     float density = pc.cameraPos.w;
     if (density <= 0.0) {
-        return color;
+        return atmNightShift(color, pc.sunColor.w);
     }
     vec3 toFrag = worldPos - pc.cameraPos.xyz;
     float dist = length(toFrag);
     float d = dist * density;
     float f = 1.0 - exp(-d * d);
-    return mix(color, fogColor(toFrag / max(dist, 0.001)), f);
+    return atmNightShift(mix(color, fogColor(toFrag / max(dist, 0.001)), f), pc.sunColor.w);
 }
 
 // Blinn-Phong specular BRDF (returns unscaled specular color).
