@@ -34,6 +34,7 @@ type ShaderSet struct {
 	StarsVert, StarsFrag       []byte // star field
 	GrassVert, GrassFrag       []byte // instanced grass
 	WaterVert, WaterFrag       []byte // animated water surface
+	GodRayFrag                 []byte // screen-space light shafts (uses SkyVert)
 	ParticleVert, ParticleFrag []byte // billboard particles
 	MsdfVert, MsdfFrag         []byte // MSDF text
 	UIVert, UIFrag             []byte // 9-slice UI panels
@@ -63,6 +64,7 @@ func DefaultShaders() ShaderSet {
 		GrassFrag:         shaders.GrassFragSpv,
 		WaterVert:         shaders.WaterVertSpv,
 		WaterFrag:         shaders.WaterFragSpv,
+		GodRayFrag:        shaders.GodRayFragSpv,
 		ParticleVert:      shaders.ParticleVertSpv,
 		ParticleFrag:      shaders.ParticleFragSpv,
 		MsdfVert:          shaders.MsdfVertSpv,
@@ -91,6 +93,7 @@ func (s ShaderSet) withDefaults() ShaderSet {
 		{&s.StarsVert, d.StarsVert}, {&s.StarsFrag, d.StarsFrag},
 		{&s.GrassVert, d.GrassVert}, {&s.GrassFrag, d.GrassFrag},
 		{&s.WaterVert, d.WaterVert}, {&s.WaterFrag, d.WaterFrag},
+		{&s.GodRayFrag, d.GodRayFrag},
 		{&s.ParticleVert, d.ParticleVert}, {&s.ParticleFrag, d.ParticleFrag},
 		{&s.MsdfVert, d.MsdfVert}, {&s.MsdfFrag, d.MsdfFrag},
 		{&s.UIVert, d.UIVert}, {&s.UIFrag, d.UIFrag},

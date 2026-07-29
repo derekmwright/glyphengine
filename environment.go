@@ -89,6 +89,9 @@ type EnvironmentState struct {
 	// CloudSteps is the volumetric cloud sample count; zero draws none.
 	CloudSteps int
 
+	// LightShafts is the god-ray strength; zero disables them.
+	LightShafts float32
+
 	// CastShadows enables the shadow pass. Turning it off when the only light
 	// is a dim moon saves the cascades for shadows nobody can see.
 	CastShadows bool
@@ -176,6 +179,20 @@ type Sky struct {
 	// when the environment resolves, so a settings slider takes effect on the
 	// next frame with nothing to rebuild.
 	CloudSteps int
+
+	// LightShafts is the strength of screen-space light shafts, or god rays:
+	// the smear of brightness radiating from the sun past whatever occludes
+	// it. Zero disables them. Around 0.5 is visible without being a haze;
+	// above roughly 1.5 it stops reading as light and starts reading as a
+	// dirty lens.
+	//
+	// They are screen-space, so they only exist while the sun is on screen,
+	// and they fade as it approaches the edge rather than popping out. That is
+	// a property of the technique, not a tuning failure — there is nothing to
+	// smear from once the sun leaves the frame.
+	//
+	// Costs one fullscreen pass with 48 taps, and only when the sun is up.
+	LightShafts float32
 }
 
 // Cloud quality presets for Sky.CloudSteps.
@@ -191,7 +208,7 @@ const (
 
 // DefaultSky is a full sky: dome, volumetric clouds, stars, and both discs.
 func DefaultSky() *Sky {
-	return &Sky{Stars: true, SunDisc: true, MoonDisc: true, CloudSteps: CloudsHigh}
+	return &Sky{Stars: true, SunDisc: true, MoonDisc: true, CloudSteps: CloudsHigh, LightShafts: 0.35}
 }
 
 // DirectionalLight is a fixed sun: one direction, one colour, no clock.
@@ -300,6 +317,10 @@ func (env *Environment) State() EnvironmentState {
 	if env.Sky != nil {
 		s.DrawSky = true
 		s.CloudSteps = env.Sky.CloudSteps
+		// Shafts come from the sun disc in the drawn sky, so they need one.
+		if s.SunElevation > 0 {
+			s.LightShafts = env.Sky.LightShafts
+		}
 		s.DrawStars = env.Sky.Stars && s.StarFade > 0
 		// The discs are the cycle's bodies; without one there is nothing to
 		// place them by.

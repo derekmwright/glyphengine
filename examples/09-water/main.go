@@ -67,6 +67,9 @@ type game struct {
 	tod        float32
 	clouds     int
 	fogHeight  float32
+	yaw        float32
+	shafts     float32
+	pillars    bool
 }
 
 func (g *game) Init(e *glyph.Engine) error {
@@ -104,6 +107,27 @@ func (g *game) Init(e *glyph.Engine) error {
 	e.C.MeshRef.Set(g.water, &glyph.MeshRef{Mesh: surface})
 	e.C.Water.Set(g.water, &glyph.Water{Options: opts})
 	e.C.Static.Set(g.water, &glyph.Static{})
+
+	// Optional hard occluders. Light shafts are built from the gaps between
+	// things silhouetted against the sun, and rolling terrain has no gaps --
+	// its edge is one smooth curve. A row of pillars gives the effect
+	// something to be interrupted by.
+	if g.pillars {
+		pillar, err := e.Renderer().CreateCube(1.0)
+		if err != nil {
+			return err
+		}
+		for i := -3; i <= 3; i++ {
+			p := e.Spawn()
+			e.C.Transform.Set(p, &glyph.Transform{
+				Position: mgl32.Vec3{-16 + float32(i)*0.2, 7, 44 + float32(i)*3.1},
+				Scale:    mgl32.Vec3{1.1, 13, 1.1},
+			})
+			e.C.MeshRef.Set(p, &glyph.MeshRef{Mesh: pillar, Roughness: 0.85})
+			e.C.Color.Set(p, &glyph.Color{R: 0.30, G: 0.28, B: 0.26})
+			e.C.Static.Set(p, &glyph.Static{})
+		}
+	}
 
 	// ── player ──
 	// Walk outward from the middle of the basin until the ground clears the
@@ -144,6 +168,9 @@ func (g *game) Init(e *glyph.Engine) error {
 	if env, ok := e.Scene.Env.(*glyph.Environment); ok {
 		if env.Sky != nil {
 			env.Sky.CloudSteps = g.clouds
+			if g.shafts >= 0 {
+				env.Sky.LightShafts = g.shafts
+			}
 		}
 		if g.fogHeight > 0 && env.Fog != nil {
 			// Pool the mist on the water rather than spreading it evenly
@@ -155,7 +182,7 @@ func (g *game) Init(e *glyph.Engine) error {
 
 	g.camera = glyph.NewFPCamera()
 	g.camera.EyeHeight = 0.7
-	g.camera.Yaw = 0 // face back toward the lake
+	g.camera.Yaw = g.yaw // 0 faces back toward the lake
 	g.camera.Pitch = g.pitch
 	e.Input().SetCursorLocked(true)
 
@@ -344,6 +371,9 @@ func main() {
 	novsync := flag.Bool("novsync", false, "disable vsync, for measuring frame cost")
 	clouds := flag.Int("clouds", glyph.CloudsHigh, "volumetric cloud raymarch steps (0 disables)")
 	fogHeight := flag.Float64("fogheight", 0, "height fog falloff in world units (0 = uniform density)")
+	yaw := flag.Float64("yaw", 0, "initial camera yaw in radians")
+	shafts := flag.Float64("shafts", -1, "light shaft strength (0 disables; -1 keeps the default)")
+	pillars := flag.Bool("pillars", false, "spawn pillars between the spawn point and the setting sun")
 	tod := flag.Float64("time", -1, "freeze time of day in [0,1): 0=midnight, 0.25=sunrise, 0.5=noon, 0.75=sunset")
 	shot := flag.String("screenshot", "", "write a PNG of the last frame to this path")
 	flag.Parse()
@@ -367,7 +397,7 @@ func main() {
 		opts = append(opts, glyph.WithScreenshot(*shot))
 	}
 
-	e, err := glyph.New(&game{seed: *seed, refract: *refract, pitch: float32(*pitch), tod: float32(*tod), clouds: *clouds, fogHeight: float32(*fogHeight)}, opts...)
+	e, err := glyph.New(&game{seed: *seed, refract: *refract, pitch: float32(*pitch), tod: float32(*tod), clouds: *clouds, fogHeight: float32(*fogHeight), yaw: float32(*yaw), shafts: float32(*shafts), pillars: *pillars}, opts...)
 	if err != nil {
 		log.Fatalf("create engine: %v", err)
 	}

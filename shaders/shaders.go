@@ -79,3 +79,6 @@ var WaterVertSpv []byte
 
 //go:embed water.frag.spv
 var WaterFragSpv []byte
+
+//go:embed godray.frag.spv
+var GodRayFragSpv []byte

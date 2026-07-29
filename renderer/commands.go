@@ -49,6 +49,11 @@ type SceneLighting struct {
 	// CloudSteps is the volumetric cloud sample count; zero draws none.
 	CloudSteps int
 
+	// LightShafts is the god-ray strength; zero disables them. SunScreenPos is
+	// where the sun lands in UV space, which is what the effect radiates from.
+	LightShafts  float32
+	SunScreenPos [2]float32
+
 	// FogHeight is the altitude over which fog density falls to 1/e. Zero
 	// selects the uniform-density falloff instead.
 	FogHeight float32
@@ -256,6 +261,7 @@ func recordCommandBuffer(
 	skinnedPipeline core1_0.Pipeline,
 	grassPipeline core1_0.Pipeline,
 	waterPipeline core1_0.Pipeline,
+	godRayPipeline core1_0.Pipeline,
 	waterRenderPass core1_0.RenderPass,
 	waterFramebuffer core1_0.Framebuffer,
 	sceneColor *sceneColorTarget,
@@ -942,9 +948,9 @@ func recordCommandBuffer(
 
 	// Water needs the finished opaque frame as a texture, so it runs in a
 	// second pass. Scenes without water skip it entirely.
-	if sceneColor != nil && hasWater(draws) {
+	if sceneColor != nil && (hasWater(draws) || lighting.LightShafts > 0) {
 		if err := recordWaterPass(deviceDriver, cmdBuf, waterRenderPass, waterFramebuffer,
-			waterPipeline, litPipelineLayout, extent, draws, lighting,
+			waterPipeline, godRayPipeline, pipelineLayout, litPipelineLayout, extent, draws, lighting,
 			sceneColor, swapchainImage, shadowDS, msaaEnabled); err != nil {
 			return err
 		}
@@ -976,6 +982,8 @@ func recordWaterPass(
 	waterRenderPass core1_0.RenderPass,
 	framebuffer core1_0.Framebuffer,
 	waterPipeline core1_0.Pipeline,
+	godRayPipeline core1_0.Pipeline,
+	pipelineLayout core1_0.PipelineLayout,
 	litPipelineLayout core1_0.PipelineLayout,
 	extent core1_0.Extent2D,
 	draws []RenderObject,

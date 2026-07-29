@@ -53,6 +53,7 @@ type Renderer struct {
 	skinnedPipeline              core1_0.Pipeline
 	grassPipeline                core1_0.Pipeline
 	waterPipeline                core1_0.Pipeline
+	godRayPipeline               core1_0.Pipeline
 	waterRenderPass              core1_0.RenderPass
 	waterFramebuffers            []core1_0.Framebuffer
 	sceneColor                   *sceneColorTarget
@@ -521,6 +522,12 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	}
 	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.waterPipeline, nil) })
 
+	r.godRayPipeline, err = createGodRayPipeline(r.deviceDriver, r.shaders, r.waterRenderPass, r.pipelineLayout, r.sc.extent, r.msaaSamples)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create god ray pipeline: %w", err)
+	}
+	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.godRayPipeline, nil) })
+
 	r.particlePipeline, err = createParticlePipeline(r.deviceDriver, r.shaders, r.renderPass, r.pipelineLayout, r.sc.extent, r.msaaSamples)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create particle pipeline: %w", err)
@@ -856,7 +863,7 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, uiOv
 	if err != nil {
 		return err
 	}
-	err = recordCommandBuffer(r.deviceDriver, cmdBuf, r.renderPass, r.framebuffers[imageIndex], r.pipeline, r.litDoubleSidedPipeline, r.overlayPipeline, r.skyPipeline, r.starsPipeline, r.uiPipeline, r.msdfPipeline, r.skinnedPipeline, r.grassPipeline, r.waterPipeline, r.waterRenderPass, waterFB, r.sceneColor, r.sc.images[imageIndex], r.particlePipeline, r.terrainPipeline, r.pipelineLayout, r.litPipelineLayout, r.skinnedPipelineLayout, r.terrainPipelineLayout, r.sc.extent, draws, overlays, uiOverlays, msdfOverlays, lighting, r.fallbackTexture, r.shadow, r.grass, r.particles, f, r.msaa != nil)
+	err = recordCommandBuffer(r.deviceDriver, cmdBuf, r.renderPass, r.framebuffers[imageIndex], r.pipeline, r.litDoubleSidedPipeline, r.overlayPipeline, r.skyPipeline, r.starsPipeline, r.uiPipeline, r.msdfPipeline, r.skinnedPipeline, r.grassPipeline, r.waterPipeline, r.godRayPipeline, r.waterRenderPass, waterFB, r.sceneColor, r.sc.images[imageIndex], r.particlePipeline, r.terrainPipeline, r.pipelineLayout, r.litPipelineLayout, r.skinnedPipelineLayout, r.terrainPipelineLayout, r.sc.extent, draws, overlays, uiOverlays, msdfOverlays, lighting, r.fallbackTexture, r.shadow, r.grass, r.particles, f, r.msaa != nil)
 	if err != nil {
 		return err
 	}

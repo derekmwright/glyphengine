@@ -693,6 +693,23 @@ func (e *Engine) renderFrame() {
 		draws = append(draws, e.buildMoonObject(vp, env))
 	}
 
+	// Project the sun to screen space for the light shafts. It sits at a fixed
+	// distance along its direction, the same place the disc is drawn, so the
+	// shafts radiate from the disc rather than from a point near it.
+	var sunScreen [2]float32
+	shaftStrength := env.LightShafts
+	if shaftStrength > 0 {
+		sp := e.cameraEye.Add(mgl32.Vec3{env.SunDiscDir[0], env.SunDiscDir[1], env.SunDiscDir[2]}.Mul(80))
+		clip := vp.Mul4x1(mgl32.Vec4{sp.X(), sp.Y(), sp.Z(), 1})
+		if clip.W() > 0 {
+			ndc := mgl32.Vec3{clip.X() / clip.W(), clip.Y() / clip.W(), clip.Z() / clip.W()}
+			sunScreen = [2]float32{ndc.X()*0.5 + 0.5, ndc.Y()*0.5 + 0.5}
+		} else {
+			// Behind the camera: there is nothing on screen to radiate from.
+			shaftStrength = 0
+		}
+	}
+
 	// Camera basis for billboard particles.
 	camForward := e.cameraCenter.Sub(e.cameraEye).Normalize()
 	camRight := camForward.Cross(mgl32.Vec3{0, 1, 0}).Normalize()
@@ -722,6 +739,8 @@ func (e *Engine) renderFrame() {
 		DrawSky:       env.DrawSky,
 		DrawStars:     env.DrawStars,
 		CloudSteps:    env.CloudSteps,
+		LightShafts:   shaftStrength,
+		SunScreenPos:  sunScreen,
 	}
 
 	pls := e.Scene.pointLights
