@@ -11,11 +11,14 @@ runtime that loads your game.
 
 > **Status: v0.x.** APIs break without notice. Pin a commit if you build on it.
 
-![A skinned character walking past shadow-casting pillars](docs/images/06-skinned.png)
+![A rigged character running across procedural terrain through instanced grass, with a text overlay](docs/images/15-kitchen-sink.png)
 
-*`task example:06-skinned` — a rigged glTF character, GPU skinning, cascaded
-shadow maps, and a day/night sky. Every image in this README is captured by the
-engine itself with `-screenshot`, not taken by hand.*
+*`task example:15-kitchen-sink` — a rigged glTF character with GPU skinning,
+running over a procedural heightmap that is both the collision surface and the
+geometry, through instanced grass scattered from that same heightmap, under
+cascaded shadow maps and a day/night sky, with MSDF text over the top. Every
+image in this README is captured by the engine itself with `-screenshot`, not
+taken by hand.*
 
 ## Install
 
@@ -171,7 +174,8 @@ takes `-screenshot out.png` to capture its last frame.
 | | |
 |---|---|
 | ![](docs/images/02-cube.png) `02-cube` | ![](docs/images/03-physics.png) `03-physics` |
-| ![](docs/images/05-textures.png) `05-textures` | ![](docs/images/08-grass.png) `08-grass` |
+| ![](docs/images/05-textures.png) `05-textures` | ![](docs/images/06-skinned.png) `06-skinned` |
+| ![](docs/images/08-grass.png) `08-grass` | ![](docs/images/10-text.png) `10-text` |
 
 ```
 task example:01-triangle      # window, renderer, input loop
@@ -182,6 +186,8 @@ task example:05-textures      # loading assets from an embedded filesystem
 task example:06-skinned       # rigged glTF character, GPU skinning, clip blending
 task example:07-terrain       # heightmap as both collision and geometry
 task example:08-grass         # instanced flora scattered across terrain
+task example:10-text          # MSDF text, one atlas from caption to headline size
+task example:15-kitchen-sink  # all of the above at once
 ```
 
 ## Building

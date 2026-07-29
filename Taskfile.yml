@@ -63,12 +63,17 @@ tasks:
       - >-
         go run ./cmd/msdfatlas
         -builtin -range 8 -out examples/10-text/assets/fonts/goregular
+      - >-
+        go run ./cmd/msdfatlas
+        -builtin -range 8 -out examples/15-kitchen-sink/assets/fonts/goregular
     sources:
       - msdf/*.go
       - cmd/msdfatlas/*.go
     generates:
       - examples/10-text/assets/fonts/goregular.png
       - examples/10-text/assets/fonts/goregular.json
+      - examples/15-kitchen-sink/assets/fonts/goregular.png
+      - examples/15-kitchen-sink/assets/fonts/goregular.json
 
   # ───────────────────────── quality ─────────────────────────
 
@@ -125,6 +130,7 @@ tasks:
       - go run ./08-grass -frames 60
       - go run ./07-terrain -frames 60
       - go run ./10-text -frames 60
+      - go run ./15-kitchen-sink -demo -frames 60
 
   validate:
     desc: "Run every example under the Vulkan validation layer; fails on leaked objects"
@@ -143,7 +149,7 @@ tasks:
       # because they surface at vkDestroyDevice rather than during rendering.
       - |
         status=0
-        for ex in 01-triangle 02-cube 03-physics 04-first-person 05-textures 06-skinned 07-terrain 08-grass 10-text; do
+        for ex in 01-triangle 02-cube 03-physics 04-first-person 05-textures 06-skinned 07-terrain 08-grass 10-text 15-kitchen-sink; do
           out=$(go run ./$ex -frames 30 2>&1) || { echo "$ex: FAILED TO RUN"; echo "$out"; status=1; continue; }
           msgs=$(echo "$out" | grep -cE "VULKAN (ERROR|WARNING)" || true)
           leaks=$(echo "$out" | grep -c "has not been destroyed" || true)
@@ -169,6 +175,7 @@ tasks:
       - go run ./07-terrain -frames 150 -screenshot ../docs/images/07-terrain.png
       - go run ./08-grass -frames 150 -screenshot ../docs/images/08-grass.png
       - go run ./10-text -frames 90 -screenshot ../docs/images/10-text.png
+      - go run ./15-kitchen-sink -demo -frames 260 -screenshot ../docs/images/15-kitchen-sink.png
 
   ci:
     desc: Run everything CI runs
