@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-gl/mathgl/mgl32"
 	"github.com/vkngwrapper/core/v3/core1_0"
+	"github.com/vkngwrapper/extensions/v3/khr_swapchain"
 )
 
 // MaxPointLights is the maximum number of unshadowed point lights supported.
@@ -61,6 +62,17 @@ type RenderObject struct {
 	ShadowOnly   bool             // in light frustum but not camera frustum — shadow pass only
 	Joints       *JointBuffer     // non-nil = skinned mesh
 	TerrainMat   *TerrainMaterial // non-nil = render via the terrain splat pipeline
+	Water        *WaterParams     // non-nil = render via the water pipeline
+}
+
+// WaterParams are the per-surface constants the water shader needs. They
+// mirror the fields of the engine's WaterOptions that the shader reads; the
+// rest are baked into the mesh at build time.
+type WaterParams struct {
+	Amplitude       float32
+	WaveLength      float32
+	AbsorptionDepth float32
+	RefractStrength float32
 }
 
 // SortKey groups draws to minimize state switches in the main pass: pipeline
@@ -214,6 +226,11 @@ func recordCommandBuffer(
 	msdfPipeline core1_0.Pipeline,
 	skinnedPipeline core1_0.Pipeline,
 	grassPipeline core1_0.Pipeline,
+	waterPipeline core1_0.Pipeline,
+	waterRenderPass core1_0.RenderPass,
+	waterFramebuffer core1_0.Framebuffer,
+	sceneColor *sceneColorTarget,
+	swapchainImage core1_0.Image,
 	particlePipeline core1_0.Pipeline,
 	terrainPipeline core1_0.Pipeline,
 	pipelineLayout core1_0.PipelineLayout,
@@ -278,7 +295,7 @@ func recordCommandBuffer(
 
 			for i := range draws {
 				d := &draws[i]
-				if d.Emissive || d.NoCastShadow {
+				if d.Emissive || d.NoCastShadow || d.Water != nil {
 					continue // skip emissive (celestial bodies) and non-shadow-casters (ground)
 				}
 
@@ -353,7 +370,7 @@ func recordCommandBuffer(
 		casters := make([]cubeCaster, 0, len(draws))
 		for i := range draws {
 			d := &draws[i]
-			if d.Emissive || d.NoCastShadow {
+			if d.Emissive || d.NoCastShadow || d.Water != nil {
 				continue
 			}
 			cx, cy, cz, cr := d.worldBoundSphere()
@@ -582,6 +599,9 @@ func recordCommandBuffer(
 		}
 		if d.TerrainMat != nil {
 			continue // already drawn in the terrain pass
+		}
+		if d.Water != nil {
+			continue // drawn by the water pipeline, after everything opaque
 		}
 		skinned := d.Joints != nil
 
@@ -879,6 +899,169 @@ func recordCommandBuffer(
 
 	deviceDriver.CmdEndRenderPass(cmdBuf)
 
+	// Water needs the finished opaque frame as a texture, so it runs in a
+	// second pass. Scenes without water skip it entirely.
+	if sceneColor != nil && hasWater(draws) {
+		if err := recordWaterPass(deviceDriver, cmdBuf, waterRenderPass, waterFramebuffer,
+			waterPipeline, litPipelineLayout, extent, draws, lighting,
+			sceneColor, swapchainImage, shadowDS, msaaEnabled); err != nil {
+			return err
+		}
+	}
+
 	_, err = deviceDriver.EndCommandBuffer(cmdBuf)
 	return err
+}
+
+// hasWater reports whether any draw needs the refraction pass.
+func hasWater(draws []RenderObject) bool {
+	for i := range draws {
+		if draws[i].Water != nil && !draws[i].ShadowOnly {
+			return true
+		}
+	}
+	return false
+}
+
+// recordWaterPass copies the opaque scene into a sampled image and draws the
+// water surfaces against it in a second render pass.
+//
+// The copy is the only way a fragment shader can read what is already on
+// screen; the alternative, an input attachment, can only read the pixel being
+// written, and refraction is precisely a read of a *different* pixel.
+func recordWaterPass(
+	deviceDriver core1_0.DeviceDriver,
+	cmdBuf core1_0.CommandBuffer,
+	waterRenderPass core1_0.RenderPass,
+	framebuffer core1_0.Framebuffer,
+	waterPipeline core1_0.Pipeline,
+	litPipelineLayout core1_0.PipelineLayout,
+	extent core1_0.Extent2D,
+	draws []RenderObject,
+	lighting SceneLighting,
+	sceneColor *sceneColorTarget,
+	swapchainImage core1_0.Image,
+	shadowDS core1_0.DescriptorSet,
+	msaa bool,
+) error {
+	colorRange := core1_0.ImageSubresourceRange{
+		AspectMask: core1_0.ImageAspectColor,
+		LevelCount: 1, LayerCount: 1,
+	}
+
+	// The first pass left the presentable image in PresentSrc. Borrow it as a
+	// transfer source, copy it, and leave it in a layout the water pass expects.
+	deviceDriver.CmdPipelineBarrier(cmdBuf,
+		core1_0.PipelineStageColorAttachmentOutput, core1_0.PipelineStageTransfer, 0, nil, nil,
+		[]core1_0.ImageMemoryBarrier{
+			{
+				OldLayout:           khr_swapchain.ImageLayoutPresentSrc,
+				NewLayout:           core1_0.ImageLayoutTransferSrcOptimal,
+				SrcQueueFamilyIndex: -1, DstQueueFamilyIndex: -1,
+				Image:            swapchainImage,
+				SubresourceRange: colorRange,
+				SrcAccessMask:    core1_0.AccessColorAttachmentWrite,
+				DstAccessMask:    core1_0.AccessTransferRead,
+			},
+			{
+				// Previous contents are irrelevant; the whole image is rewritten.
+				OldLayout:           core1_0.ImageLayoutUndefined,
+				NewLayout:           core1_0.ImageLayoutTransferDstOptimal,
+				SrcQueueFamilyIndex: -1, DstQueueFamilyIndex: -1,
+				Image:            sceneColor.image,
+				SubresourceRange: colorRange,
+				SrcAccessMask:    0,
+				DstAccessMask:    core1_0.AccessTransferWrite,
+			},
+		})
+
+	layers := core1_0.ImageSubresourceLayers{
+		AspectMask: core1_0.ImageAspectColor,
+		LayerCount: 1,
+	}
+	deviceDriver.CmdCopyImage(cmdBuf,
+		swapchainImage, core1_0.ImageLayoutTransferSrcOptimal,
+		sceneColor.image, core1_0.ImageLayoutTransferDstOptimal,
+		core1_0.ImageCopy{
+			SrcSubresource: layers,
+			DstSubresource: layers,
+			Extent:         core1_0.Extent3D{Width: extent.Width, Height: extent.Height, Depth: 1},
+		})
+
+	deviceDriver.CmdPipelineBarrier(cmdBuf,
+		core1_0.PipelineStageTransfer, core1_0.PipelineStageFragmentShader, 0, nil, nil,
+		[]core1_0.ImageMemoryBarrier{{
+			OldLayout:           core1_0.ImageLayoutTransferDstOptimal,
+			NewLayout:           core1_0.ImageLayoutShaderReadOnlyOptimal,
+			SrcQueueFamilyIndex: -1, DstQueueFamilyIndex: -1,
+			Image:            sceneColor.image,
+			SubresourceRange: colorRange,
+			SrcAccessMask:    core1_0.AccessTransferWrite,
+			DstAccessMask:    core1_0.AccessShaderRead,
+		}})
+
+	// No barrier back for the swapchain image. With MSAA the water pass
+	// declares its resolve target Undefined and rewrites it wholesale; without
+	// MSAA it declares TransferSrc, matching the copy. Either way the render
+	// pass performs the transition, and a manual barrier to Undefined is not a
+	// legal layout transition to ask for.
+	_ = msaa
+
+	err := deviceDriver.CmdBeginRenderPass(cmdBuf, core1_0.SubpassContentsInline, core1_0.RenderPassBeginInfo{
+		RenderPass:  waterRenderPass,
+		Framebuffer: framebuffer,
+		RenderArea: core1_0.Rect2D{
+			Offset: core1_0.Offset2D{X: 0, Y: 0},
+			Extent: extent,
+		},
+	})
+	if err != nil {
+		return err
+	}
+
+	viewport := core1_0.Viewport{
+		Width: float32(extent.Width), Height: float32(extent.Height),
+		MinDepth: 0, MaxDepth: 1,
+	}
+	scissor := core1_0.Rect2D{Extent: extent}
+
+	for i := range draws {
+		d := &draws[i]
+		if d.Water == nil || d.ShadowOnly {
+			continue
+		}
+		deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, waterPipeline)
+		deviceDriver.CmdSetViewport(cmdBuf, viewport)
+		deviceDriver.CmdSetScissor(cmdBuf, scissor)
+
+		// Set 0 is the opaque scene rather than a material texture.
+		deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, litPipelineLayout, 0,
+			[]core1_0.DescriptorSet{sceneColor.texture.DescriptorSet, shadowDS}, nil)
+
+		var pc [60]float32
+		copy(pc[:16], d.MVP[:])
+		copy(pc[16:32], d.Model[:])
+		// tint carries the wave parameters; the water shader has no use for a
+		// colour there, since both of its colours are per-vertex.
+		pc[32] = lighting.Time
+		pc[33] = d.Water.Amplitude
+		pc[34] = d.Water.WaveLength
+		pc[35] = d.Water.RefractStrength
+		packLightingPC(&pc, lighting)
+		pc[51] = d.Water.AbsorptionDepth // pointColor.w
+		pc[55] = 0
+		pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
+		deviceDriver.CmdPushConstants(cmdBuf, litPipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
+
+		deviceDriver.CmdBindVertexBuffers(cmdBuf, 0, []core1_0.Buffer{d.Mesh.vertexBuffer}, []int{0})
+		if d.Mesh.IndexCount > 0 {
+			deviceDriver.CmdBindIndexBuffer(cmdBuf, d.Mesh.indexBuffer, 0, d.Mesh.indexType)
+			deviceDriver.CmdDrawIndexed(cmdBuf, d.Mesh.IndexCount, 1, 0, 0, 0)
+		} else {
+			deviceDriver.CmdDraw(cmdBuf, d.Mesh.VertexCount, 1, 0, 0)
+		}
+	}
+
+	deviceDriver.CmdEndRenderPass(cmdBuf)
+	return nil
 }

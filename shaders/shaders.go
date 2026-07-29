@@ -73,3 +73,9 @@ var ShadowSkinnedVertSpv []byte
 
 //go:embed shadow.frag.spv
 var ShadowFragSpv []byte
+
+//go:embed water.vert.spv
+var WaterVertSpv []byte
+
+//go:embed water.frag.spv
+var WaterFragSpv []byte

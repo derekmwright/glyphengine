@@ -52,6 +52,10 @@ type Renderer struct {
 	skinnedPipelineLayout        core1_0.PipelineLayout // skinned: set 0=tex, set 1=joints, set 2=shadow
 	skinnedPipeline              core1_0.Pipeline
 	grassPipeline                core1_0.Pipeline
+	waterPipeline                core1_0.Pipeline
+	waterRenderPass              core1_0.RenderPass
+	waterFramebuffers            []core1_0.Framebuffer
+	sceneColor                   *sceneColorTarget
 	grass                        *GrassSystem
 	terrainSetLayout             core1_0.DescriptorSetLayout // set 0 = 4 terrain samplers
 	terrainPipelineLayout        core1_0.PipelineLayout      // terrain: set 0=4 tex, set 1=shadow
@@ -497,6 +501,18 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 		r.deviceDriver.DestroyPipeline(r.grassPipeline, nil)
 	})
 
+	r.waterRenderPass, err = createWaterRenderPass(r.deviceDriver, r.sc.imageFormat, r.depth.format, r.msaaSamples)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create water render pass: %w", err)
+	}
+	r.onInit(func() { r.deviceDriver.DestroyRenderPass(r.waterRenderPass, nil) })
+
+	r.waterPipeline, err = createWaterPipeline(r.deviceDriver, r.shaders, r.waterRenderPass, r.litPipelineLayout, r.sc.extent, r.msaaSamples)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create water pipeline: %w", err)
+	}
+	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.waterPipeline, nil) })
+
 	r.particlePipeline, err = createParticlePipeline(r.deviceDriver, r.shaders, r.renderPass, r.pipelineLayout, r.sc.extent, r.msaaSamples)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create particle pipeline: %w", err)
@@ -522,6 +538,32 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 		for _, fb := range r.framebuffers {
 			r.deviceDriver.DestroyFramebuffer(fb, nil)
 		}
+	})
+
+	// Water pass targets. Refraction needs the presented image as a copy
+	// source, so a device that cannot mark its swapchain images TRANSFER_SRC
+	// simply does not get refraction — the water shader falls back to alpha
+	// blending, which is why this is a warning rather than an error.
+	if r.sc.captureCapable {
+		r.sceneColor, err = createSceneColorTarget(r.instanceDriver, r.deviceDriver, r.physicalDevice,
+			r.descriptorPool, r.descriptorSetLayout, r.sc.extent, r.sc.imageFormat, r.maxAnisotropy)
+		if err != nil {
+			return nil, fmt.Errorf("renderer: create scene color target: %w", err)
+		}
+		r.waterFramebuffers, err = createWaterFramebuffers(r.deviceDriver, r.waterRenderPass, r.sc.imageViews, r.depth.views, msaaViews, r.sc.extent)
+		if err != nil {
+			return nil, fmt.Errorf("renderer: create water framebuffers: %w", err)
+		}
+	} else {
+		log.Println("Swapchain images are not transfer-capable: water refraction disabled")
+	}
+	r.onInit(func() {
+		for _, fb := range r.waterFramebuffers {
+			r.deviceDriver.DestroyFramebuffer(fb, nil)
+		}
+		r.waterFramebuffers = nil
+		r.sceneColor.destroy(r.deviceDriver)
+		r.sceneColor = nil
 	})
 
 	r.commandPool, err = createCommandPool(r.deviceDriver, r.indices.graphicsFamily)
@@ -681,6 +723,12 @@ func (r *Renderer) recreateSwapchain() error {
 	for _, fb := range r.framebuffers {
 		r.deviceDriver.DestroyFramebuffer(fb, nil)
 	}
+	for _, fb := range r.waterFramebuffers {
+		r.deviceDriver.DestroyFramebuffer(fb, nil)
+	}
+	r.waterFramebuffers = nil
+	r.sceneColor.destroy(r.deviceDriver)
+	r.sceneColor = nil
 
 	r.depth.destroy(r.deviceDriver, len(r.depth.views))
 
@@ -722,6 +770,18 @@ func (r *Renderer) recreateSwapchain() error {
 	r.framebuffers, err = createFramebuffers(r.deviceDriver, r.renderPass, r.sc.imageViews, r.depth.views, msaaViews, r.sc.extent)
 	if err != nil {
 		return err
+	}
+
+	if r.sc.captureCapable {
+		r.sceneColor, err = createSceneColorTarget(r.instanceDriver, r.deviceDriver, r.physicalDevice,
+			r.descriptorPool, r.descriptorSetLayout, r.sc.extent, r.sc.imageFormat, r.maxAnisotropy)
+		if err != nil {
+			return err
+		}
+		r.waterFramebuffers, err = createWaterFramebuffers(r.deviceDriver, r.waterRenderPass, r.sc.imageViews, r.depth.views, msaaViews, r.sc.extent)
+		if err != nil {
+			return err
+		}
 	}
 
 	log.Printf("Swapchain recreated: %dx%d", r.sc.extent.Width, r.sc.extent.Height)
@@ -774,13 +834,21 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, uiOv
 	r.shadow.uploadCascadeVPs(f, lighting.CascadeVPs)
 	r.shadow.uploadPointLights(f, &lighting.PointLights, lighting.PointLightCount)
 
+	// The water pass is optional: a device without TRANSFER_SRC on its
+	// swapchain images cannot supply the refraction source, and scenes with no
+	// water never begin the pass at all.
+	var waterFB core1_0.Framebuffer
+	if r.sceneColor != nil && imageIndex < len(r.waterFramebuffers) {
+		waterFB = r.waterFramebuffers[imageIndex]
+	}
+
 	// Reset and record this frame's command buffer
 	cmdBuf := r.commandBuffers[f]
 	_, err = r.deviceDriver.ResetCommandBuffer(cmdBuf, 0)
 	if err != nil {
 		return err
 	}
-	err = recordCommandBuffer(r.deviceDriver, cmdBuf, r.renderPass, r.framebuffers[imageIndex], r.pipeline, r.litDoubleSidedPipeline, r.overlayPipeline, r.skyPipeline, r.starsPipeline, r.uiPipeline, r.msdfPipeline, r.skinnedPipeline, r.grassPipeline, r.particlePipeline, r.terrainPipeline, r.pipelineLayout, r.litPipelineLayout, r.skinnedPipelineLayout, r.terrainPipelineLayout, r.sc.extent, draws, overlays, uiOverlays, msdfOverlays, lighting, r.fallbackTexture, r.shadow, r.grass, r.particles, f, r.msaa != nil)
+	err = recordCommandBuffer(r.deviceDriver, cmdBuf, r.renderPass, r.framebuffers[imageIndex], r.pipeline, r.litDoubleSidedPipeline, r.overlayPipeline, r.skyPipeline, r.starsPipeline, r.uiPipeline, r.msdfPipeline, r.skinnedPipeline, r.grassPipeline, r.waterPipeline, r.waterRenderPass, waterFB, r.sceneColor, r.sc.images[imageIndex], r.particlePipeline, r.terrainPipeline, r.pipelineLayout, r.litPipelineLayout, r.skinnedPipelineLayout, r.terrainPipelineLayout, r.sc.extent, draws, overlays, uiOverlays, msdfOverlays, lighting, r.fallbackTexture, r.shadow, r.grass, r.particles, f, r.msaa != nil)
 	if err != nil {
 		return err
 	}

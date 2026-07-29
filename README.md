@@ -157,7 +157,7 @@ bit-identical results at 60Hz and at 300Hz.
 |---|---|
 | `glyphengine` | Root. `Engine` (window, frame loop), `Scene` (simulation), components, physics, terrain, cameras, character controller |
 | `glyphengine/ecs` | Generic ECS — typed `Store[T]`, `Query2/3/4` |
-| `glyphengine/renderer` | Vulkan renderer: forward + reverse-Z, cascaded shadows, GPU skinning, MSDF text, instanced grass, particles |
+| `glyphengine/renderer` | Vulkan renderer: forward + reverse-Z, cascaded shadows, GPU skinning, MSDF text, instanced grass, water, particles |
 | `glyphengine/window` | GLFW window and Vulkan surface |
 | `glyphengine/input` | Keyboard, mouse, cursor capture |
 | `glyphengine/audio` | 3D positional audio (miniaudio) |
@@ -175,7 +175,7 @@ takes `-screenshot out.png` to capture its last frame.
 |---|---|
 | ![](docs/images/02-cube.png) `02-cube` | ![](docs/images/03-physics.png) `03-physics` |
 | ![](docs/images/05-textures.png) `05-textures` | ![](docs/images/06-skinned.png) `06-skinned` |
-| ![](docs/images/08-grass.png) `08-grass` | ![](docs/images/10-text.png) `10-text` |
+| ![](docs/images/08-grass.png) `08-grass` | ![](docs/images/09-water.png) `09-water` |
 
 ```
 task example:01-triangle      # window, renderer, input loop
@@ -186,6 +186,7 @@ task example:05-textures      # loading assets from an embedded filesystem
 task example:06-skinned       # rigged glTF character, GPU skinning, clip blending
 task example:07-terrain       # heightmap as both collision and geometry
 task example:08-grass         # instanced flora scattered across terrain
+task example:09-water         # animated lake: waves, refraction, Fresnel reflection
 task example:10-text          # MSDF text, one atlas from caption to headline size
 task example:15-kitchen-sink  # all of the above at once
 ```

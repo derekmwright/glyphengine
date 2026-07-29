@@ -18,22 +18,29 @@ func createRenderPass(deviceDriver core1_0.DeviceDriver, imageFormat core1_0.For
 	if msaa {
 		attachments = []core1_0.AttachmentDescription{
 			// Attachment 0: Multisample color (render target)
+			//
+			// Stored rather than discarded so the water pass can load the
+			// opaque scene and blend onto it. Without water in the frame this
+			// costs a write of a buffer nobody reads.
 			{
 				Format:         imageFormat,
 				Samples:        samples,
 				LoadOp:         core1_0.AttachmentLoadOpClear,
-				StoreOp:        core1_0.AttachmentStoreOpDontCare,
+				StoreOp:        core1_0.AttachmentStoreOpStore,
 				StencilLoadOp:  core1_0.AttachmentLoadOpDontCare,
 				StencilStoreOp: core1_0.AttachmentStoreOpDontCare,
 				InitialLayout:  core1_0.ImageLayoutUndefined,
 				FinalLayout:    core1_0.ImageLayoutColorAttachmentOptimal,
 			},
 			// Attachment 1: Depth (multisample)
+			//
+			// Also stored: the water pass depth-tests against it so a hill in
+			// front of a lake still hides the lake.
 			{
 				Format:         depthFormat,
 				Samples:        samples,
 				LoadOp:         core1_0.AttachmentLoadOpClear,
-				StoreOp:        core1_0.AttachmentStoreOpDontCare,
+				StoreOp:        core1_0.AttachmentStoreOpStore,
 				StencilLoadOp:  core1_0.AttachmentLoadOpDontCare,
 				StencilStoreOp: core1_0.AttachmentStoreOpDontCare,
 				InitialLayout:  core1_0.ImageLayoutUndefined,
@@ -81,7 +88,7 @@ func createRenderPass(deviceDriver core1_0.DeviceDriver, imageFormat core1_0.For
 				Format:         depthFormat,
 				Samples:        core1_0.Samples1,
 				LoadOp:         core1_0.AttachmentLoadOpClear,
-				StoreOp:        core1_0.AttachmentStoreOpDontCare,
+				StoreOp:        core1_0.AttachmentStoreOpStore,
 				StencilLoadOp:  core1_0.AttachmentLoadOpDontCare,
 				StencilStoreOp: core1_0.AttachmentStoreOpDontCare,
 				InitialLayout:  core1_0.ImageLayoutUndefined,
@@ -1070,5 +1077,105 @@ func createUIPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPas
 	}
 
 	log.Println("UI pipeline created")
+	return pipelines[0], nil
+}
+
+// createWaterPipeline creates the pipeline for animated water surfaces.
+//
+// It reuses the lit pipeline layout, so the water shader gets the shadow
+// cascades and light buffer for free, and set 0 carries the scene colour it
+// refracts through instead of a material texture.
+//
+// Depth is tested but not written. Water is the last opaque-ish thing drawn and
+// nothing needs to depth-test against it, while writing would make two water
+// fragments at the same depth fight over which wave crest wins.
+//
+// Blending stays enabled even when the shader composites the refracted scene
+// itself: the surface still fades out at the shoreline, and that fade has to
+// reach the framebuffer somehow.
+func createWaterPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, litPipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
+	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
+		Code: bytesToUint32Slice(sh.WaterVert),
+	})
+	if err != nil {
+		return core1_0.Pipeline{}, err
+	}
+	defer deviceDriver.DestroyShaderModule(vertModule, nil)
+
+	fragModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
+		Code: bytesToUint32Slice(sh.WaterFrag),
+	})
+	if err != nil {
+		return core1_0.Pipeline{}, err
+	}
+	defer deviceDriver.DestroyShaderModule(fragModule, nil)
+
+	pipelines, _, err := deviceDriver.CreateGraphicsPipelines(nil, nil, core1_0.GraphicsPipelineCreateInfo{
+		Stages: []core1_0.PipelineShaderStageCreateInfo{
+			{Stage: core1_0.StageVertex, Module: vertModule, Name: "main"},
+			{Stage: core1_0.StageFragment, Module: fragModule, Name: "main"},
+		},
+		VertexInputState: &core1_0.PipelineVertexInputStateCreateInfo{
+			VertexBindingDescriptions:   []core1_0.VertexInputBindingDescription{vertexBindingDescription()},
+			VertexAttributeDescriptions: vertexAttributeDescriptions(),
+		},
+		InputAssemblyState: &core1_0.PipelineInputAssemblyStateCreateInfo{
+			Topology: core1_0.PrimitiveTopologyTriangleList,
+		},
+		ViewportState: &core1_0.PipelineViewportStateCreateInfo{
+			Viewports: []core1_0.Viewport{{
+				X: 0, Y: 0,
+				Width: float32(extent.Width), Height: float32(extent.Height),
+				MinDepth: 0, MaxDepth: 1,
+			}},
+			Scissors: []core1_0.Rect2D{{
+				Offset: core1_0.Offset2D{X: 0, Y: 0},
+				Extent: extent,
+			}},
+		},
+		RasterizationState: &core1_0.PipelineRasterizationStateCreateInfo{
+			PolygonMode: core1_0.PolygonModeFill,
+			// Two-sided: waves tilt steeply enough that a crest seen from a low
+			// camera can present its back face, and a hole in the lake is far
+			// more obvious than the cost of drawing both sides.
+			CullMode:  0,
+			FrontFace: core1_0.FrontFaceClockwise,
+			LineWidth: 1.0,
+		},
+		MultisampleState: &core1_0.PipelineMultisampleStateCreateInfo{
+			RasterizationSamples: samples,
+		},
+		DepthStencilState: &core1_0.PipelineDepthStencilStateCreateInfo{
+			DepthTestEnable:  true,
+			DepthWriteEnable: false,
+			DepthCompareOp:   core1_0.CompareOpGreater,
+		},
+		ColorBlendState: &core1_0.PipelineColorBlendStateCreateInfo{
+			Attachments: []core1_0.PipelineColorBlendAttachmentState{{
+				ColorWriteMask:      core1_0.ColorComponentRed | core1_0.ColorComponentGreen | core1_0.ColorComponentBlue | core1_0.ColorComponentAlpha,
+				BlendEnabled:        true,
+				SrcColorBlendFactor: core1_0.BlendFactorSrcAlpha,
+				DstColorBlendFactor: core1_0.BlendFactorOneMinusSrcAlpha,
+				ColorBlendOp:        core1_0.BlendOpAdd,
+				SrcAlphaBlendFactor: core1_0.BlendFactorOne,
+				DstAlphaBlendFactor: core1_0.BlendFactorZero,
+				AlphaBlendOp:        core1_0.BlendOpAdd,
+			}},
+		},
+		DynamicState: &core1_0.PipelineDynamicStateCreateInfo{
+			DynamicStates: []core1_0.DynamicState{
+				core1_0.DynamicStateViewport,
+				core1_0.DynamicStateScissor,
+			},
+		},
+		Layout:     litPipelineLayout,
+		RenderPass: renderPass,
+		Subpass:    0,
+	})
+	if err != nil {
+		return core1_0.Pipeline{}, err
+	}
+
+	log.Println("Water pipeline created")
 	return pipelines[0], nil
 }

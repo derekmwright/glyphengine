@@ -65,6 +65,14 @@ type MaterialRef struct {
 	Terrain *renderer.TerrainMaterial
 }
 
+// Water routes an entity's mesh through the water pipeline: Gerstner wave
+// displacement, a Fresnel-weighted sky reflection, and refraction of whatever
+// was drawn behind it. Build the mesh with Engine.CreateWaterMesh, and pass the
+// same options here so the shader agrees with the geometry.
+type Water struct {
+	Options WaterOptions
+}
+
 // Emissive is a tag component that bypasses lighting (always full-bright).
 type Emissive struct{}
 
@@ -113,6 +121,7 @@ type Components struct {
 	AnimationState *ecs.Store[AnimationState]
 	SkeletonRef    *ecs.Store[SkeletonRef]
 	MeshRef        *ecs.Store[MeshRef]
+	Water          *ecs.Store[Water]
 	MaterialRef    *ecs.Store[MaterialRef]
 	Color          *ecs.Store[Color]
 
@@ -138,6 +147,7 @@ func NewComponents(w *ecs.World) *Components {
 		AnimationState:      ecs.NewStore[AnimationState](w),
 		SkeletonRef:         ecs.NewStore[SkeletonRef](w),
 		MeshRef:             ecs.NewStore[MeshRef](w),
+		Water:               ecs.NewStore[Water](w),
 		MaterialRef:         ecs.NewStore[MaterialRef](w),
 		Color:               ecs.NewStore[Color](w),
 		Hidden:              ecs.NewStore[Hidden](w),
