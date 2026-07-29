@@ -504,16 +504,25 @@ func (e *Engine) SetCamera(eye, center, up mgl32.Vec3) {
 // CameraEye returns the current camera eye position.
 func (e *Engine) CameraEye() mgl32.Vec3 { return e.cameraEye }
 
-// ViewProjection returns the current view-projection matrix.
+// reverseZProjection builds the engine's projection matrix: reverse-Z (near maps
+// to 1, far to 0) with a flipped Y for Vulkan's clip space. Geometry authored
+// for a conventional 0→1 depth range fails the depth test and silently draws
+// nothing.
 //
-// The projection is reverse-Z (near maps to 1, far to 0) with a flipped Y for
-// Vulkan's clip space. Geometry authored for a conventional 0→1 depth range
-// fails the depth test and silently draws nothing.
-func (e *Engine) ViewProjection() mgl32.Mat4 {
-	proj := mgl32.Perspective(mgl32.DegToRad(e.fov), e.renderer.Aspect(), e.near, e.far)
-	proj[10] = e.near / (e.far - e.near)
-	proj[14] = (e.far * e.near) / (e.far - e.near)
+// Split out of ViewProjection so the depth range can be checked without a
+// device — Aspect() needs a live swapchain, and the questions worth asking about
+// reverse-Z are all about near and far.
+func reverseZProjection(fovDegrees, aspect, near, far float32) mgl32.Mat4 {
+	proj := mgl32.Perspective(mgl32.DegToRad(fovDegrees), aspect, near, far)
+	proj[10] = near / (far - near)
+	proj[14] = (far * near) / (far - near)
 	proj[5] *= -1
+	return proj
+}
+
+// ViewProjection returns the current view-projection matrix.
+func (e *Engine) ViewProjection() mgl32.Mat4 {
+	proj := reverseZProjection(e.fov, e.renderer.Aspect(), e.near, e.far)
 	view := mgl32.LookAtV(e.cameraEye, e.cameraCenter, e.cameraUp)
 	return proj.Mul4(view)
 }
@@ -699,7 +708,7 @@ func (e *Engine) renderFrame() {
 	var sunScreen [2]float32
 	shaftStrength := env.LightShafts
 	if shaftStrength > 0 {
-		sp := e.cameraEye.Add(mgl32.Vec3{env.SunDiscDir[0], env.SunDiscDir[1], env.SunDiscDir[2]}.Mul(80))
+		sp := e.cameraEye.Add(mgl32.Vec3{env.SunDiscDir[0], env.SunDiscDir[1], env.SunDiscDir[2]}.Mul(e.celestialDistance()))
 		clip := vp.Mul4x1(mgl32.Vec4{sp.X(), sp.Y(), sp.Z(), 1})
 		if clip.W() > 0 {
 			ndc := mgl32.Vec3{clip.X() / clip.W(), clip.Y() / clip.W(), clip.Z() / clip.W()}
@@ -731,6 +740,7 @@ func (e *Engine) renderFrame() {
 		Time:          e.elapsed,
 		NightFactor:   env.StarFade,
 		SunElevation:  env.SunElevation,
+		RealSunDir:    env.RealSunDir,
 		CascadeVPs:    cascadeVPs,
 		ShadowEnabled: shadowEnabled,
 		FogDensity:    env.FogDensity,
@@ -916,6 +926,38 @@ func celestialScale(dir [3]float32) float32 {
 	return 1.0 - 0.45*elevation
 }
 
+// celestialTunedDistance is the distance the celestialScale sizes were chosen
+// at. Disc scale is expressed relative to it, so moving the billboards does not
+// change how large they look.
+const celestialTunedDistance = 80.0
+
+// celestialDistance is how far from the camera the sun and moon billboards sit:
+// just inside the far clip plane.
+//
+// They stand in for bodies at infinity, and the depth buffer gives them exactly
+// one correct home — the farthest depth still distinguishable from the far plane
+// itself. Both bounds are load-bearing:
+//
+//   - Nearer, and a disc occludes the world. These used to sit at a fixed 80
+//     units, which put the sun in front of every piece of terrain further away
+//     than that: the disc drew over the mountains it should have been behind.
+//   - At the far plane exactly, the sky erases them. The sky draws after all
+//     opaque geometry with CompareOpGreaterOrEqual, so a disc sharing the far
+//     plane's depth loses that tie and never appears.
+//
+// Deriving it from e.far rather than hardcoding a distance also means a game
+// that shortens its far plane cannot accidentally push the discs outside it.
+func (e *Engine) celestialDistance() float32 { return e.far * 0.98 }
+
+// celestialModel returns the billboard transform for a celestial body in
+// direction dir, sized so its apparent radius is independent of where
+// celestialDistance puts it.
+func (e *Engine) celestialModel(dir [3]float32) mgl32.Mat4 {
+	dist := e.celestialDistance()
+	pos := e.cameraEye.Add(mgl32.Vec3{dir[0], dir[1], dir[2]}.Mul(dist))
+	return e.buildBillboard(pos, celestialScale(dir)*dist/celestialTunedDistance)
+}
+
 // horizonFade returns a 0–1 multiplier that fades a celestial body as it dips
 // below the horizon.
 func horizonFade(dir [3]float32) float32 {
@@ -931,8 +973,7 @@ func horizonFade(dir [3]float32) float32 {
 
 func (e *Engine) buildSunObject(vp mgl32.Mat4, env EnvironmentState) renderer.RenderObject {
 	sd := env.SunDiscDir
-	pos := e.cameraEye.Add(mgl32.Vec3{sd[0], sd[1], sd[2]}.Mul(80))
-	model := e.buildBillboard(pos, celestialScale(sd))
+	model := e.celestialModel(sd)
 
 	// SunDiscColor already fades with elevation; fading again here would
 	// make the sun vanish well before it reaches the horizon.
@@ -949,8 +990,7 @@ func (e *Engine) buildSunObject(vp mgl32.Mat4, env EnvironmentState) renderer.Re
 
 func (e *Engine) buildMoonObject(vp mgl32.Mat4, env EnvironmentState) renderer.RenderObject {
 	md := env.MoonDiscDir
-	pos := e.cameraEye.Add(mgl32.Vec3{md[0], md[1], md[2]}.Mul(80))
-	model := e.buildBillboard(pos, celestialScale(md))
+	model := e.celestialModel(md)
 
 	fade := horizonFade(md)
 

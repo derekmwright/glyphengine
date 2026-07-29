@@ -130,6 +130,26 @@ func createRenderPass(deviceDriver core1_0.DeviceDriver, imageFormat core1_0.For
 	return renderPass, nil
 }
 
+// farPlaneDepthState is the depth configuration for everything that draws at the
+// far plane after all opaque geometry: the sky dome and the starfield.
+//
+// Both are the fullscreen triangle from sky.vert at NDC z = 0. Depth is
+// reversed, so 0 is the far plane and the test has to be GreaterOrEqual —
+// Greater would reject them everywhere, since a cleared depth buffer holds
+// exactly 0. Neither writes depth: they are backdrops, and the layers after
+// them still need to see the world's depth rather than the sky's.
+//
+// Shared rather than written twice because it drifted: the starfield was created
+// with no depth test at all, so it painted over the silhouette of any terrain
+// that reached up into the sky. Two copies of a subtle rule is one copy too many.
+func farPlaneDepthState() *core1_0.PipelineDepthStencilStateCreateInfo {
+	return &core1_0.PipelineDepthStencilStateCreateInfo{
+		DepthTestEnable:  true,
+		DepthWriteEnable: false,
+		DepthCompareOp:   core1_0.CompareOpGreaterOrEqual,
+	}
+}
+
 // createNonLitPipelineLayout creates a pipeline layout with set 0 = texture sampler only.
 // Used by non-lit pipelines (sky, stars, overlay, msdf, ui).
 func createNonLitPipelineLayout(deviceDriver core1_0.DeviceDriver, texSetLayout core1_0.DescriptorSetLayout) (core1_0.PipelineLayout, error) {
@@ -437,7 +457,7 @@ func createOverlayPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, rend
 }
 
 // createStarsPipeline creates a pipeline for procedural starfield rendering:
-// no vertex input, no depth test, additive blending.
+// no vertex input, depth-tested against the far plane, additive blending.
 func createStarsPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
 		Code: bytesToUint32Slice(sh.StarsVert),
@@ -484,10 +504,10 @@ func createStarsPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, render
 		MultisampleState: &core1_0.PipelineMultisampleStateCreateInfo{
 			RasterizationSamples: samples,
 		},
-		DepthStencilState: &core1_0.PipelineDepthStencilStateCreateInfo{
-			DepthTestEnable:  false,
-			DepthWriteEnable: false,
-		},
+		// The starfield decides where a star goes purely from the reconstructed
+		// view ray, so it has no idea a mountain is in the way. Without this it
+		// drew over the silhouette of anything reaching up into the sky.
+		DepthStencilState: farPlaneDepthState(),
 		ColorBlendState: &core1_0.PipelineColorBlendStateCreateInfo{
 			Attachments: []core1_0.PipelineColorBlendAttachmentState{{
 				ColorWriteMask:      core1_0.ColorComponentRed | core1_0.ColorComponentGreen | core1_0.ColorComponentBlue | core1_0.ColorComponentAlpha,
@@ -566,13 +586,9 @@ func createSkyPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPa
 		MultisampleState: &core1_0.PipelineMultisampleStateCreateInfo{
 			RasterizationSamples: samples,
 		},
-		DepthStencilState: &core1_0.PipelineDepthStencilStateCreateInfo{
-			// Depth-tested so the sky only shades pixels no geometry
-			// reached; see the draw order in recordCommandBuffer.
-			DepthTestEnable:  true,
-			DepthWriteEnable: false,
-			DepthCompareOp:   core1_0.CompareOpGreaterOrEqual,
-		},
+		// Depth-tested so the sky only shades pixels no geometry reached; see
+		// the draw order in recordCommandBuffer.
+		DepthStencilState: farPlaneDepthState(),
 		ColorBlendState: &core1_0.PipelineColorBlendStateCreateInfo{
 			Attachments: []core1_0.PipelineColorBlendAttachmentState{{
 				ColorWriteMask: core1_0.ColorComponentRed | core1_0.ColorComponentGreen | core1_0.ColorComponentBlue | core1_0.ColorComponentAlpha,
