@@ -61,6 +61,11 @@ type EnvironmentState struct {
 	// disables it.
 	FogDensity float32
 
+	// FogHeight and FogBaseHeight describe the vertical falloff; see Fog.
+	// A zero FogHeight selects uniform density.
+	FogHeight     float32
+	FogBaseHeight float32
+
 	// ClearColor is used when DrawSky is false. With a sky it is unused: the
 	// dome is opaque and drawn first.
 	ClearColor [3]float32
@@ -201,11 +206,28 @@ type AmbientLight struct {
 	Color [3]float32
 }
 
-// Fog blends geometry toward the horizon colour with an exp-squared falloff.
+// Fog blends geometry toward the horizon colour with distance.
 type Fog struct {
 	// Density in inverse world units. Around 0.008 fades over a few hundred
 	// units; zero is the same as no Fog at all.
 	Density float32
+
+	// Height is the altitude over which density falls to 1/e of its value at
+	// BaseHeight. Zero means uniform fog at every altitude.
+	//
+	// Real fog settles, and a uniform one cannot express that at any density:
+	// a valley floor has the same haze as the ridge above it, so nothing reads
+	// as low-lying. With a Height set, mist pools in the low ground and peaks
+	// rise out of it.
+	//
+	// Sensible values are on the order of the terrain's vertical scale — a
+	// Height of 8 over a 15-unit landscape puts most of the fog in the bottom
+	// third of it.
+	Height float32
+
+	// BaseHeight is the world Y at which density equals Density. Above it fog
+	// thins, below it thickens. Usually the ground or water level.
+	BaseHeight float32
 }
 
 // DefaultEnvironment is a lit outdoor world: full sky, a day/night cycle
@@ -248,6 +270,8 @@ func (env *Environment) State() EnvironmentState {
 	s.ClearColor = env.ClearColor
 	if env.Fog != nil {
 		s.FogDensity = env.Fog.Density
+		s.FogHeight = env.Fog.Height
+		s.FogBaseHeight = env.Fog.BaseHeight
 	}
 
 	if dn := env.Cycle; dn != nil {

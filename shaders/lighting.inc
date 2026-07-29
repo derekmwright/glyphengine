@@ -69,13 +69,34 @@ vec3 fogColor(vec3 viewDir) {
     return horizon + atmSunGlow(viewDir, sunDir, pc.sunColor.rgb, sunY);
 }
 
-// applyFog blends toward the horizon color with exp² distance falloff, then
-// applies the night shift.
+// applyFog blends toward the horizon colour, then applies the night shift.
+//
+// Two modes, chosen by pc.fog.x:
+//
+// Uniform (fog.x == 0) is the original: density is the same at every altitude,
+// so the only thing that thickens fog is distance. It is cheap and it is what
+// every existing scene was tuned against, so it stays the default.
+//
+// Height fog (fog.x > 0) makes density fall off exponentially with altitude,
+// which is what real fog does — it settles. That gives a valley floor thicker
+// air than the ridge above it, and a mountain that emerges from haze as it
+// rises, neither of which a distance-only fog can express no matter how it is
+// tuned.
+//
+// The integral along the view ray has a closed form, so this costs two
+// exponentials rather than a raymarch:
+//
+//	density(y) = D * exp(-(y - y0) / H)
+//	tau        = integral of density along the ray
+//	           = D*H*L/(dy) * (exp(-(Py-y0)/H) - exp(-(Qy-y0)/H))
+//
+// where L is the ray length and dy its vertical extent. As dy approaches zero
+// that expression is 0/0, and a horizontal ray is not an edge case — it is
+// where the camera spends most of its time — so it falls back to the constant
+// density at eye height.
 //
 // The night shift lives here because every lit shader calls applyFog exactly
 // once as its last step, so this is the one place that cannot miss a surface.
-// Both are the same kind of thing: what the atmosphere does to a colour on its
-// way to the eye.
 //
 // Density rides in pc.cameraPos.w; zero disables fog.
 vec3 applyFog(vec3 color, vec3 worldPos) {
@@ -83,11 +104,40 @@ vec3 applyFog(vec3 color, vec3 worldPos) {
     if (density <= 0.0) {
         return atmNightShift(color, pc.sunColor.w);
     }
+
     vec3 toFrag = worldPos - pc.cameraPos.xyz;
     float dist = length(toFrag);
-    float d = dist * density;
+    vec3 viewDir = toFrag / max(dist, 0.001);
+
+    float heightFalloff = pc.fog.x;
+
+    // How much of the nominal density this ray actually passes through. One
+    // for uniform fog; less when the ray spends its length above the base
+    // height, more when it runs along the bottom.
+    float amount = 1.0;
+    if (heightFalloff > 0.0) {
+        float invH = 1.0 / heightFalloff;
+        float camRel = (pc.cameraPos.y - pc.fog.y) * invH;
+        float fragRel = (worldPos.y - pc.fog.y) * invH;
+        float dy = fragRel - camRel;
+
+        if (abs(dy) < 1e-4) {
+            amount = exp(-camRel);
+        } else {
+            amount = (exp(-camRel) - exp(-fragRel)) / dy;
+        }
+        amount = max(amount, 0.0);
+    }
+
+    // Both modes share the same exp-squared curve, so Density means the same
+    // thing either way and Height only redistributes fog vertically. Making
+    // the height mode a plain Beer term instead -- which is what the integral
+    // naturally gives -- is linear in distance where the other is quadratic,
+    // and turning Height on then thickens every scene at the same Density.
+    float d = dist * density * amount;
     float f = 1.0 - exp(-d * d);
-    return atmNightShift(mix(color, fogColor(toFrag / max(dist, 0.001)), f), pc.sunColor.w);
+
+    return atmNightShift(mix(color, fogColor(viewDir), clamp(f, 0.0, 1.0)), pc.sunColor.w);
 }
 
 // Blinn-Phong specular BRDF (returns unscaled specular color).

@@ -66,6 +66,7 @@ type game struct {
 	pitch      float32
 	tod        float32
 	clouds     int
+	fogHeight  float32
 }
 
 func (g *game) Init(e *glyph.Engine) error {
@@ -140,8 +141,16 @@ func (g *game) Init(e *glyph.Engine) error {
 	}
 	e.SetFogDensity(0.005)
 
-	if sky, ok := e.Scene.Env.(*glyph.Environment); ok && sky.Sky != nil {
-		sky.Sky.CloudSteps = g.clouds
+	if env, ok := e.Scene.Env.(*glyph.Environment); ok {
+		if env.Sky != nil {
+			env.Sky.CloudSteps = g.clouds
+		}
+		if g.fogHeight > 0 && env.Fog != nil {
+			// Pool the mist on the water rather than spreading it evenly
+			// through the air above the island.
+			env.Fog.Height = g.fogHeight
+			env.Fog.BaseHeight = waterLevel
+		}
 	}
 
 	g.camera = glyph.NewFPCamera()
@@ -334,6 +343,7 @@ func main() {
 	msaa := flag.Int("msaa", 4, "MSAA sample count (1 disables it)")
 	novsync := flag.Bool("novsync", false, "disable vsync, for measuring frame cost")
 	clouds := flag.Int("clouds", glyph.CloudsHigh, "volumetric cloud raymarch steps (0 disables)")
+	fogHeight := flag.Float64("fogheight", 0, "height fog falloff in world units (0 = uniform density)")
 	tod := flag.Float64("time", -1, "freeze time of day in [0,1): 0=midnight, 0.25=sunrise, 0.5=noon, 0.75=sunset")
 	shot := flag.String("screenshot", "", "write a PNG of the last frame to this path")
 	flag.Parse()
@@ -357,7 +367,7 @@ func main() {
 		opts = append(opts, glyph.WithScreenshot(*shot))
 	}
 
-	e, err := glyph.New(&game{seed: *seed, refract: *refract, pitch: float32(*pitch), tod: float32(*tod), clouds: *clouds}, opts...)
+	e, err := glyph.New(&game{seed: *seed, refract: *refract, pitch: float32(*pitch), tod: float32(*tod), clouds: *clouds, fogHeight: float32(*fogHeight)}, opts...)
 	if err != nil {
 		log.Fatalf("create engine: %v", err)
 	}

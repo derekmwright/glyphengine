@@ -41,6 +41,7 @@ layout(push_constant) uniform PushConstants {
     vec4 pointColor; // w = roughness
     vec4 ambient;    // w = metallic
     vec4 cameraPos;
+    vec4 fog;       // x = height falloff, y = base height
 } pc;
 
 layout(location = 0) out vec4 outColor;

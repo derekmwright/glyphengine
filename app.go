@@ -717,6 +717,8 @@ func (e *Engine) renderFrame() {
 		CascadeVPs:    cascadeVPs,
 		ShadowEnabled: shadowEnabled,
 		FogDensity:    env.FogDensity,
+		FogHeight:     env.FogHeight,
+		FogBaseHeight: env.FogBaseHeight,
 		DrawSky:       env.DrawSky,
 		DrawStars:     env.DrawStars,
 		CloudSteps:    env.CloudSteps,

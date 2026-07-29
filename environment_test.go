@@ -224,3 +224,27 @@ func TestCloudStepsFlowThrough(t *testing.T) {
 		t.Errorf("CloudSteps %d after setting CloudsLow at runtime", got)
 	}
 }
+
+// TestFogHeightFlowsThrough checks the vertical falloff reaches the resolved
+// state, and that leaving it unset keeps the uniform behaviour every existing
+// scene was tuned against.
+func TestFogHeightFlowsThrough(t *testing.T) {
+	uniform := (&Environment{Fog: &Fog{Density: 0.01}}).State()
+	if uniform.FogHeight != 0 {
+		t.Errorf("FogHeight %v with no Height set; zero selects uniform density", uniform.FogHeight)
+	}
+	if uniform.FogDensity != 0.01 {
+		t.Errorf("FogDensity %v", uniform.FogDensity)
+	}
+
+	height := (&Environment{Fog: &Fog{Density: 0.01, Height: 6, BaseHeight: 3}}).State()
+	if height.FogHeight != 6 || height.FogBaseHeight != 3 {
+		t.Errorf("height fog resolved to H=%v base=%v", height.FogHeight, height.FogBaseHeight)
+	}
+	// Density must not change meaning between the two modes: the shader
+	// applies the same exp-squared curve either way, and Height only
+	// redistributes fog vertically.
+	if height.FogDensity != uniform.FogDensity {
+		t.Errorf("density changed with Height set: %v vs %v", height.FogDensity, uniform.FogDensity)
+	}
+}

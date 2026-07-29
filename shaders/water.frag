@@ -41,6 +41,7 @@ layout(push_constant) uniform PushConstants {
     vec4 pointColor;// w = absorption depth
     vec4 ambient;
     vec4 cameraPos; // xyz = eye, w = fog density
+    vec4 fog;       // x = height falloff, y = base height
 } pc;
 
 layout(location = 0) out vec4 outColor;

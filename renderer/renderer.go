@@ -307,6 +307,14 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	// Clamp the requested MSAA level to what the device supports for both
 	// color and depth framebuffers, halving until a supported count is found.
 	if props, err := instanceDriver.GetPhysicalDeviceProperties(r.physicalDevice); err == nil {
+		// The push constant block is shared by every pipeline and is already
+		// larger than Vulkan's guaranteed 128 bytes, so check it rather than
+		// discovering the limit as a pipeline that will not create.
+		if lim := props.Limits.MaxPushConstantsSize; lim < pushConstantSize {
+			return nil, fmt.Errorf("renderer: device allows %d bytes of push constants, engine needs %d",
+				lim, pushConstantSize)
+		}
+		log.Printf("Push constants: %d bytes used of %d available", pushConstantSize, props.Limits.MaxPushConstantsSize)
 		supported := props.Limits.FramebufferColorSampleCounts & props.Limits.FramebufferDepthSampleCounts
 		requested := r.msaaSamples
 		for r.msaaSamples > core1_0.Samples1 && supported&r.msaaSamples == 0 {

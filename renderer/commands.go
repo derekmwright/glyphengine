@@ -49,6 +49,12 @@ type SceneLighting struct {
 	// CloudSteps is the volumetric cloud sample count; zero draws none.
 	CloudSteps int
 
+	// FogHeight is the altitude over which fog density falls to 1/e. Zero
+	// selects the uniform-density falloff instead.
+	FogHeight float32
+	// FogBaseHeight is the world Y at which density equals FogDensity.
+	FogBaseHeight float32
+
 	VP            [16]float32                // camera view-projection matrix (for instanced grass)
 	CameraRight   [3]float32                 // camera right vector (for billboard particles)
 	CameraUp      [3]float32                 // camera up vector (for billboard particles)
@@ -124,8 +130,14 @@ func (d *RenderObject) worldBoundSphere() (cx, cy, cz, r float32) {
 }
 
 // pushConstantSize is the total push constant block size in bytes.
-// Layout: mvp(64) + model(64) + tint(16) + sunDir(16) + sunColor(16) + pointPos(16) + pointColor(16) + ambient(16) + cameraPos(16) = 240
-const pushConstantSize = 240
+// Layout: mvp(64) + model(64) + tint(16) + sunDir(16) + sunColor(16) +
+// pointPos(16) + pointColor(16) + ambient(16) + cameraPos(16) + fog(16) = 256
+//
+// This is the whole budget on a device that reports 256, which many do, and
+// the engine already required more than Vulkan's guaranteed 128. New per-frame
+// values should go in a uniform buffer rather than here; there is no room left.
+// Renderer.New checks the device limit and fails with a clear message.
+const pushConstantSize = 256
 
 // createFramebuffers creates one framebuffer per swapchain image view, each
 // referencing its own color and depth attachments.
@@ -190,7 +202,7 @@ func createCommandBuffers(deviceDriver core1_0.DeviceDriver, pool core1_0.Comman
 
 // packLightingPC fills push constant floats [36..59] with lighting + camera data.
 // Metallic/roughness are per-object and packed by the caller at [51] and [55].
-func packLightingPC(pc *[60]float32, lighting SceneLighting) {
+func packLightingPC(pc *[64]float32, lighting SceneLighting) {
 	// tint is at [32..35], filled by caller
 	// sunDir vec4 at [36..39]
 	pc[36] = lighting.SunDir[0]
@@ -222,6 +234,9 @@ func packLightingPC(pc *[60]float32, lighting SceneLighting) {
 	pc[57] = lighting.CameraPos[1]
 	pc[58] = lighting.CameraPos[2]
 	pc[59] = lighting.FogDensity
+	// fog vec4 at [60..63]
+	pc[60] = lighting.FogHeight
+	pc[61] = lighting.FogBaseHeight
 }
 
 // recordCommandBuffer records the shadow depth pass followed by the main render pass
@@ -534,7 +549,7 @@ func recordCommandBuffer(
 		deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, terrainPipelineLayout, 0, []core1_0.DescriptorSet{d.TerrainMat.DescriptorSet, shadowDS}, nil)
 		deviceDriver.CmdBindVertexBuffers(cmdBuf, 0, []core1_0.Buffer{d.Mesh.vertexBuffer}, []int{0})
 
-		var pc [60]float32
+		var pc [64]float32
 		copy(pc[:16], d.MVP[:])
 		copy(pc[16:32], d.Model[:])
 		pc[32], pc[33], pc[34], pc[35] = d.Color[0], d.Color[1], d.Color[2], 0.0
@@ -616,7 +631,7 @@ func recordCommandBuffer(
 
 		deviceDriver.CmdBindVertexBuffers(cmdBuf, 0, []core1_0.Buffer{d.Mesh.vertexBuffer}, []int{0})
 
-		var pc [60]float32
+		var pc [64]float32
 		copy(pc[:16], d.MVP[:])
 		copy(pc[16:32], d.Model[:])
 		pc[32] = d.Color[0]
@@ -653,7 +668,7 @@ func recordCommandBuffer(
 		deviceDriver.CmdSetScissor(cmdBuf, scissor)
 
 		// Push constants shared across all variants
-		var pc [60]float32
+		var pc [64]float32
 		copy(pc[:16], lighting.VP[:])
 		// model = identity
 		pc[16] = 1
@@ -733,7 +748,7 @@ func recordCommandBuffer(
 		deviceDriver.CmdSetScissor(cmdBuf, scissor)
 		deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, []core1_0.DescriptorSet{fallbackTexture.DescriptorSet}, nil)
 
-		var pc [60]float32
+		var pc [64]float32
 		copy(pc[:16], lighting.InvVP[:])
 		pc[16] = lighting.CameraPos[0]
 		pc[17] = lighting.CameraPos[1]
@@ -760,7 +775,7 @@ func recordCommandBuffer(
 		deviceDriver.CmdSetScissor(cmdBuf, scissor)
 		deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, []core1_0.DescriptorSet{fallbackTexture.DescriptorSet}, nil)
 
-		var pc [60]float32
+		var pc [64]float32
 		copy(pc[:16], lighting.InvVP[:])
 		pc[16] = lighting.CameraPos[0]
 		pc[17] = lighting.CameraPos[1]
@@ -780,7 +795,7 @@ func recordCommandBuffer(
 		deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, []core1_0.DescriptorSet{fallbackTexture.DescriptorSet}, nil)
 
 		// Push constants: VP at [0..15], cameraRight packed into model col 0, cameraUp into model col 1
-		var pc [60]float32
+		var pc [64]float32
 		copy(pc[:16], lighting.VP[:])
 		// model column 0 = cameraRight
 		pc[16] = lighting.CameraRight[0]
@@ -815,7 +830,7 @@ func recordCommandBuffer(
 			deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, []core1_0.DescriptorSet{tex.DescriptorSet}, nil)
 			deviceDriver.CmdBindVertexBuffers(cmdBuf, 0, []core1_0.Buffer{d.Mesh.vertexBuffer}, []int{0})
 
-			var pc [60]float32
+			var pc [64]float32
 			copy(pc[:16], d.MVP[:])
 			// model = identity
 			pc[16] = 1
@@ -856,7 +871,7 @@ func recordCommandBuffer(
 			deviceDriver.CmdBindVertexBuffers(cmdBuf, 0, []core1_0.Buffer{d.Mesh.vertexBuffer}, []int{0})
 
 			// Overlay: MVP + identity model + tint, lighting zeroed
-			var pc [60]float32
+			var pc [64]float32
 			copy(pc[:16], d.MVP[:])
 			// model = identity
 			pc[16] = 1
@@ -899,7 +914,7 @@ func recordCommandBuffer(
 			deviceDriver.CmdBindVertexBuffers(cmdBuf, 0, []core1_0.Buffer{d.Mesh.vertexBuffer}, []int{0})
 
 			// Push constants: MVP + identity model + tint(rgb=color, w=screenPxRange)
-			var pc [60]float32
+			var pc [64]float32
 			copy(pc[:16], d.MVP[:])
 			// model = identity
 			pc[16] = 1
@@ -1064,7 +1079,7 @@ func recordWaterPass(
 		deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, litPipelineLayout, 0,
 			[]core1_0.DescriptorSet{sceneColor.texture.DescriptorSet, shadowDS}, nil)
 
-		var pc [60]float32
+		var pc [64]float32
 		copy(pc[:16], d.MVP[:])
 		copy(pc[16:32], d.Model[:])
 		// tint carries the wave parameters; the water shader has no use for a

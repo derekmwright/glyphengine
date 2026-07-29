@@ -100,6 +100,35 @@ worth about 12% on its own and is what makes a raymarched sky affordable at
 all; before it, a fullscreen sky shaded every pixel and the world painted over
 most of them.
 
+## Fog settles, if you ask it to
+
+`Fog.Density` alone gives uniform fog: the only thing that thickens it is
+distance, so a valley floor has exactly the haze of the ridge above it. Set
+`Fog.Height` and density falls off exponentially with altitude instead, which
+is what real fog does.
+
+```go
+env.Fog = &glyph.Fog{
+    Density:    0.005,
+    Height:     4,          // density falls to 1/e over 4 units
+    BaseHeight: waterLevel, // where density equals Density
+}
+```
+
+Mist then pools in the low ground and elevated terrain rises out of it. The
+visible difference is mostly on the *distant* hills: uniform fog washes them
+out along with everything else, while height fog leaves them clear because the
+sightline to them spends most of its length above the haze.
+
+The integral along the view ray has a closed form, so this costs two
+exponentials rather than a raymarch. `Density` means the same thing in both
+modes — the shader applies the same exp-squared curve either way and `Height`
+only redistributes fog vertically. Getting that wrong is easy and was the first
+version of this: a plain Beer term is linear in distance where the uniform mode
+is quadratic, so turning `Height` on thickened every scene at the same density.
+
+Sensible `Height` values are on the order of the terrain's vertical scale.
+
 ## Replacing it entirely
 
 Implement `EnvironmentSource`:
