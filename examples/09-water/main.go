@@ -64,6 +64,7 @@ type game struct {
 	jumpQueued bool
 	refract    bool
 	pitch      float32
+	tod        float32
 }
 
 func (g *game) Init(e *glyph.Engine) error {
@@ -130,6 +131,12 @@ func (g *game) Init(e *glyph.Engine) error {
 
 	e.SetDayCycleSpeed(1.0 / 300.0)
 	e.SetTimeOfDay(0.32)
+	if g.tod >= 0 {
+		// Freeze the clock so a given time of day can be inspected, and
+		// screenshots of it are reproducible.
+		e.SetTimeOfDay(g.tod)
+		e.SetDayCycleSpeed(0)
+	}
 	e.SetFogDensity(0.005)
 
 	g.camera = glyph.NewFPCamera()
@@ -320,6 +327,7 @@ func main() {
 	refract := flag.Bool("refraction", true, "distort the lake bed through the surface (costs a second render pass)")
 	pitch := flag.Float64("pitch", 0, "initial camera pitch in radians; positive looks down")
 	msaa := flag.Int("msaa", 4, "MSAA sample count (1 disables it)")
+	tod := flag.Float64("time", -1, "freeze time of day in [0,1): 0=midnight, 0.25=sunrise, 0.5=noon, 0.75=sunset")
 	shot := flag.String("screenshot", "", "write a PNG of the last frame to this path")
 	flag.Parse()
 
@@ -339,7 +347,7 @@ func main() {
 		opts = append(opts, glyph.WithScreenshot(*shot))
 	}
 
-	e, err := glyph.New(&game{seed: *seed, refract: *refract, pitch: float32(*pitch)}, opts...)
+	e, err := glyph.New(&game{seed: *seed, refract: *refract, pitch: float32(*pitch), tod: float32(*tod)}, opts...)
 	if err != nil {
 		log.Fatalf("create engine: %v", err)
 	}

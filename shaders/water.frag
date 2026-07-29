@@ -93,7 +93,19 @@ void main() {
     float travel = fragDepth / NdotV;
     float absorbed = 1.0 - exp(-travel / absorption);
 
-    vec3 bodyColor = mix(fragShallowColor, fragDeepColor, clamp(absorbed, 0.0, 1.0));
+    vec3 albedo = mix(fragShallowColor, fragDeepColor, clamp(absorbed, 0.0, 1.0));
+
+    // The body colour is albedo, not emission: it is light that entered the
+    // water, scattered, and came back out. Lighting it is the difference
+    // between a lake and a light source -- emitted directly it keeps its full
+    // daytime colour at midnight, and the water glows teal against black land.
+    //
+    // The refracted scene is not lit here. It arrives already shaded from the
+    // opaque pass, and lighting it a second time would double every lamp.
+    vec3 L = normalize(pc.sunDir.xyz);
+    float NdotL = clamp(dot(N, L), 0.0, 1.0);
+    float sunShadow = calcShadow(fragShadowPos, NdotL);
+    vec3 bodyColor = albedo * (pc.ambient.rgb + pc.sunColor.rgb * NdotL * sunShadow);
 
     // ── refraction ──
     vec3 throughWater;
@@ -139,19 +151,9 @@ void main() {
     vec3 color = mix(throughWater, skyColor, fresnel);
 
     // ── sun glint ──
-    vec3 L = normalize(pc.sunDir.xyz);
-    float NdotL = clamp(dot(N, L), 0.0, 1.0);
-    float sunShadow = calcShadow(fragShadowPos, NdotL);
     vec3 H = normalize(L + V);
     float spec = pow(max(dot(N, H), 0.0), 220.0);
     color += pc.sunColor.rgb * spec * sunShadow * 1.4;
-
-    // Shadows falling across the water darken it, or the shore's shadow would
-    // stop dead at the waterline.
-    color *= mix(0.72, 1.0, sunShadow);
-
-    // Ambient keeps the water from going black at night.
-    color += bodyColor * pc.ambient.rgb * 0.5;
 
     outColor = vec4(applyFog(color, fragWorldPos), alpha);
 }
