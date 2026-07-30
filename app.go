@@ -51,8 +51,8 @@ type Game interface {
 // latch here:
 //
 //	func (g *game) Update(e *glyphengine.Engine, dt float32) {
-//		g.intent.Forward = axis(e.Input(), input.KeyW, input.KeyS)
-//		if e.Input().KeyPressed(input.KeySpace) {
+//		g.intent.Right, g.intent.Forward = g.binds.Direction(g.move)
+//		if g.binds.Pressed(g.jump) {
 //			g.jumpQueued = true // latch the edge
 //		}
 //	}
