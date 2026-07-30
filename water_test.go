@@ -89,7 +89,7 @@ func TestDefaultWaterOptionsStayInsideTheFoldLimit(t *testing.T) {
 	}
 
 	floats := func(name string) []float64 {
-		m := regexp.MustCompile(name + `\[4\]\s*=\s*float\[4\]\(([^)]*)\)`).FindSubmatch(src)
+		m := regexp.MustCompile(name + `\[\d+\]\s*=\s*float\[\d+\]\(([^)]*)\)`).FindSubmatch(src)
 		if m == nil {
 			t.Fatalf("water.vert no longer declares %s; this check is unanchored", name)
 		}
@@ -120,8 +120,19 @@ func TestDefaultWaterOptionsStayInsideTheFoldLimit(t *testing.T) {
 	steepness := constant("STEEPNESS")
 	foldLimit := constant("FOLD_LIMIT")
 
-	if len(waveLen) != 4 || len(waveAmp) != 4 {
-		t.Fatalf("expected 4 wave components, got %d lengths and %d amplitudes", len(waveLen), len(waveAmp))
+	if len(waveLen) == 0 || len(waveLen) != len(waveAmp) {
+		t.Fatalf("got %d wavelengths and %d amplitudes; the tables must pair up", len(waveLen), len(waveAmp))
+	}
+
+	// WaveAmplitude is documented as the surface's maximum crest height, which
+	// is only true while the amplitude table sums to one. Letting it drift makes
+	// the option silently mean something else.
+	var ampSum float64
+	for _, a := range waveAmp {
+		ampSum += a
+	}
+	if d := ampSum - 1.0; d > 0.005 || d < -0.005 {
+		t.Errorf("WAVE_AMP sums to %.3f, want 1.0: WaveAmplitude no longer means peak crest height", ampSum)
 	}
 	if foldLimit >= 1 {
 		t.Errorf("FOLD_LIMIT = %g, must be below 1: at 1 the surface folds through itself", foldLimit)

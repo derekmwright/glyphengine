@@ -116,6 +116,7 @@ type WaterParams struct {
 	WaveLength      float32
 	AbsorptionDepth float32
 	RefractStrength float32
+	WaveNoise       float32
 }
 
 // SortKey groups draws to minimize state switches in the main pass: pipeline
@@ -1179,6 +1180,9 @@ func recordWaterPass(
 		packLightingPC(&pc, lighting)
 		pc[51] = d.Water.AbsorptionDepth // pointColor.w
 		pc[55] = 0
+		// sunDir.w, which packLightingPC leaves as padding and only the grass
+		// pipeline otherwise claims. It is the last free scalar in this block.
+		pc[39] = d.Water.WaveNoise
 		pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
 		deviceDriver.CmdPushConstants(cmdBuf, litPipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
 

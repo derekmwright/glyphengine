@@ -144,12 +144,12 @@ Two limits decide what the surface can actually show, and both used to be
 silent. Exceeding either produced hard flat facets tearing out of the wave
 field, with shading that did not match the water around them.
 
-**Sampling.** The shortest of the four components is `WaveLength * 0.23`, and it
+**Sampling.** The shortest of the five components is `WaveLength * 0.26`, and it
 needs at least two vertices across it to be a wave rather than a beat pattern
 the grid invented. Given a surface `w` units wide:
 
 ```
-WaveLength * 0.23 >= 2 * w / Resolution
+WaveLength * 0.26 >= 2 * w / Resolution
 ```
 
 Below that the shader fades the component out. Asking for short waves on a coarse
@@ -165,3 +165,20 @@ swap order and the surface passes through itself; the same sum also appears in
 the analytic normal, so those facets shade inside out. The shader clamps
 steepness against the real sum, so this cannot happen — but it means crests stop
 sharpening past roughly `WaveAmplitude = WaveLength / 11` and only get taller.
+
+## Breaking up the periodicity
+
+A sum of sinusoids is exactly periodic, so on their own the surface tiles visibly:
+the same crest pattern marching away to the horizon, most obvious looking down
+at the field from a shallow angle. `WaveNoise` adds drifting fractal noise to the
+height — patches of chop, stretches of calm, crests that do not all agree.
+
+It is a fraction of `WaveAmplitude`, so it scales with the sea state. Zero
+restores the pure Gerstner sum. Its octaves are bounded by the grid exactly as
+the wave components are, so raising it on a coarse mesh makes the water lumpier
+rather than faceted.
+
+The noise is added to the height rather than to the wave phases so that its
+gradient can be differenced from the same function the displacement uses. That
+keeps the analytic normal exactly consistent with the geometry; perturbing phases
+instead would leave the normal describing a surface that is not the one drawn.

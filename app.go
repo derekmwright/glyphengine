@@ -847,6 +847,7 @@ func (e *Engine) buildDrawList(vp mgl32.Mat4, shadowEnabled bool, lightVP mgl32.
 				WaveLength:      w.Options.WaveLength,
 				AbsorptionDepth: w.Options.AbsorptionDepth,
 				RefractStrength: w.Options.RefractStrength,
+				WaveNoise:       w.Options.WaveNoise,
 			}
 		}
 

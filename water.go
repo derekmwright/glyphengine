@@ -21,7 +21,7 @@ type WaterOptions struct {
 	// units wide.
 	//
 	// It interacts with WaveLength, and the interaction is worth knowing about.
-	// The shortest of the four wave components is WaveLength * 0.23, and a
+	// The shortest of the five wave components is WaveLength * 0.26, and a
 	// wavelength needs at least two vertices across it to be a wave at all
 	// rather than a beat pattern the grid invented. Below that the shader fades
 	// the component out rather than rendering it, so asking for short waves on a
@@ -30,7 +30,7 @@ type WaterOptions struct {
 	//
 	// The rule, given a surface w world units wide:
 	//
-	//	WaveLength * 0.23 >= 2 * w / Resolution
+	//	WaveLength * 0.26 >= 2 * w / Resolution
 	//
 	// The defaults sit just below that, so the finest component is faded at
 	// Resolution 160 over a 200-unit lake. Raise Resolution to about 256 to get
@@ -50,9 +50,10 @@ type WaterOptions struct {
 	// physical process.
 	AbsorptionDepth float32
 
-	// WaveAmplitude is the height of the largest wave component, in world
-	// units. Waves are scaled down in shallow water so they vanish at the
-	// shoreline rather than cutting through it.
+	// WaveAmplitude is the surface's maximum crest height above still water, in
+	// world units — the five components' amplitudes sum to it. Waves are scaled
+	// down in shallow water so they vanish at the shoreline rather than cutting
+	// through it.
 	//
 	// Amplitude tall relative to WaveLength is self-limiting: a Gerstner surface
 	// stops being a function once its crests would fold over, and the shader
@@ -60,10 +61,23 @@ type WaterOptions struct {
 	// WaveLength / 11 the crests stop getting sharper and only get taller.
 	WaveAmplitude float32
 
-	// WaveLength is the wavelength of the largest wave component, in world
-	// units. Three shorter components ride on top of it, at 0.61, 0.37 and 0.23
-	// of it. See Resolution for the shortest wavelength a given grid can carry.
+	// WaveLength is the wavelength of the longest wave component, in world
+	// units. Four shorter ones ride on top of it, down to 0.26 of it. See
+	// Resolution for the shortest wavelength a given grid can carry.
 	WaveLength float32
+
+	// WaveNoise is how much of WaveAmplitude arrives as drifting fractal noise
+	// rather than as one of the five wave components, from 0 to about 1.
+	//
+	// A sum of sinusoids is exactly periodic, so without this the surface tiles
+	// at a glancing angle — the same crest pattern marching away from you to the
+	// horizon. The noise gives the field variation no sum of sinusoids can:
+	// patches of chop, stretches of calm, and crests that do not all agree.
+	//
+	// Zero disables it and restores the pure Gerstner sum. Its octaves are
+	// bounded by the grid exactly as the wave components are, so raising it on a
+	// coarse mesh makes the water lumpier, never faceted.
+	WaveNoise float32
 
 	// RefractStrength scales how far the surface displaces the view of the
 	// lake bed. Zero disables refraction entirely and falls back to ordinary
@@ -79,8 +93,12 @@ func DefaultWaterOptions(level float32) WaterOptions {
 		ShallowColor:    [3]float32{0.30, 0.52, 0.52},
 		DeepColor:       [3]float32{0.02, 0.10, 0.17},
 		AbsorptionDepth: 6.0,
-		WaveAmplitude:   0.10,
+		// A lake, not an ocean: calm enough that the wave sum reads as ripples
+		// rather than as swell, which is also what keeps its periodicity from
+		// announcing itself.
+		WaveAmplitude:   0.13,
 		WaveLength:      7.0,
+		WaveNoise:       0.6,
 		RefractStrength: 1.0,
 	}
 }
