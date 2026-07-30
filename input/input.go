@@ -25,6 +25,14 @@ type Input struct {
 	charBuf []rune
 
 	cursorLocked bool
+
+	// Gamepad state, snapshotted once per frame in Update so that button edges
+	// work the same way keyboard edges do. padSrc is an interface only so tests
+	// can supply state without a controller plugged in.
+	padSrc   padSource
+	pads     [MaxPads]padState
+	prevPads [MaxPads]padState
+	deadzone float32
 }
 
 // New creates an Input and registers GLFW callbacks on the window.
@@ -36,6 +44,8 @@ func New(handle *glfw.Window) *Input {
 		mouseY:     y,
 		prevMouseX: x,
 		prevMouseY: y,
+		padSrc:     glfwPads{},
+		deadzone:   DefaultDeadzone,
 	}
 
 	handle.SetKeyCallback(func(_ *glfw.Window, key glfw.Key, _ int, action glfw.Action, _ glfw.ModifierKey) {
@@ -89,6 +99,7 @@ func (inp *Input) Update() {
 	inp.prevMouseY = inp.mouseY
 	inp.scrollX = 0
 	inp.scrollY = 0
+	inp.pollPads()
 }
 
 // --- Keyboard queries ---
