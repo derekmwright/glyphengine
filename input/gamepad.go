@@ -202,19 +202,30 @@ func (inp *Input) PadReleased(p Pad, b Button) bool {
 // zone makes it impossible to walk slowly on a diagonal — the diagonal is
 // exactly where both axes are small.
 func (inp *Input) PadAxis(p Pad, a Axis) float32 {
-	if !inp.validPad(p) || a < 0 || a >= axisCount {
+	return inp.axisFrom(&inp.pads, p, a)
+}
+
+// padAxisPrev is PadAxis against last frame's snapshot. An analog axis bound as a
+// button has no press edge of its own, so the edge has to be derived from the
+// threshold crossing, which needs both frames.
+func (inp *Input) padAxisPrev(p Pad, a Axis) float32 {
+	return inp.axisFrom(&inp.prevPads, p, a)
+}
+
+func (inp *Input) axisFrom(states *[MaxPads]padState, p Pad, a Axis) float32 {
+	if p < 0 || p >= MaxPads || !states[p].present || a < 0 || a >= axisCount {
 		return 0
 	}
 
 	switch a {
 	case AxisLeftTrigger, AxisRightTrigger:
 		// Reported -1 at rest to +1 fully pressed; 0 to 1 is what callers want.
-		return clamp01((inp.pads[p].axes[a] + 1) * 0.5)
+		return clamp01((states[p].axes[a] + 1) * 0.5)
 	case AxisLeftX, AxisRightX:
-		x, _ := inp.PadStick(p, stickOf(a))
+		x, _ := inp.stickFrom(states, p, stickOf(a))
 		return x
 	default: // AxisLeftY, AxisRightY
-		_, y := inp.PadStick(p, stickOf(a))
+		_, y := inp.stickFrom(states, p, stickOf(a))
 		return y
 	}
 }
@@ -226,7 +237,11 @@ func (inp *Input) PadAxis(p Pad, a Axis) float32 {
 // stick does not jump to 0.18 the moment it starts responding. The direction is
 // preserved exactly; only the length is remapped.
 func (inp *Input) PadStick(p Pad, s Stick) (x, y float32) {
-	if !inp.validPad(p) {
+	return inp.stickFrom(&inp.pads, p, s)
+}
+
+func (inp *Input) stickFrom(states *[MaxPads]padState, p Pad, s Stick) (x, y float32) {
+	if p < 0 || p >= MaxPads || !states[p].present {
 		return 0, 0
 	}
 
@@ -234,9 +249,9 @@ func (inp *Input) PadStick(p Pad, s Stick) (x, y float32) {
 	if s == StickRight {
 		xi, yi = AxisRightX, AxisRightY
 	}
-	rx := inp.pads[p].axes[xi]
+	rx := states[p].axes[xi]
 	// Negated once, here: the underlying API points +Y down the screen.
-	ry := -inp.pads[p].axes[yi]
+	ry := -states[p].axes[yi]
 
 	return applyDeadzone(rx, ry, inp.deadzone)
 }
