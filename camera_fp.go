@@ -27,7 +27,18 @@ type FPCamera struct {
 	// LookSensitivity is radians of rotation per pixel of mouse movement.
 	LookSensitivity float32
 
-	// InvertY flips vertical look.
+	// StickLookRate is radians per second at full thumbstick deflection, used by
+	// LookStick.
+	//
+	// It is a rate where LookSensitivity is a ratio, and that difference is the
+	// whole reason the two are separate numbers. A mouse reports how far it moved
+	// since the last frame, so the frame's displacement is already the answer. A
+	// stick reports how far it is pushed, which says nothing about how long it has
+	// been pushed — turning that into rotation needs dt. Treating a stick like a
+	// mouse gives a camera that spins faster the higher the frame rate.
+	StickLookRate float32
+
+	// InvertY flips vertical look, for both mouse and stick.
 	InvertY bool
 
 	// MaxPitch clamps how far up and down the camera can look, in radians.
@@ -42,6 +53,7 @@ func NewFPCamera() *FPCamera {
 	return &FPCamera{
 		EyeHeight:       1.6,
 		LookSensitivity: 0.003,
+		StickLookRate:   2.6,
 	}
 }
 
@@ -60,6 +72,13 @@ func (c *FPCamera) Update(inp *input.Input) {
 	c.Yaw -= float32(dx) * c.LookSensitivity
 	c.Pitch += float32(dy) * c.LookSensitivity
 
+	c.clampPitch()
+	c.wrapYaw()
+}
+
+// clampPitch keeps the camera short of straight up and straight down, where the
+// yaw axis degenerates and the view flips.
+func (c *FPCamera) clampPitch() {
 	limit := c.MaxPitch
 	if limit <= 0 {
 		limit = math.Pi/2 - 0.01
@@ -70,12 +89,39 @@ func (c *FPCamera) Update(inp *input.Input) {
 	if c.Pitch < -limit {
 		c.Pitch = -limit
 	}
+}
 
-	// Keep yaw in [-π, π) so it stays precise over long sessions.
+// wrapYaw keeps yaw in [-π, π) so it stays precise over long sessions. A stick
+// held down for a few minutes accumulates far more turn than a mouse ever does,
+// which makes this matter more than it used to.
+func (c *FPCamera) wrapYaw() {
 	const twoPi = 2 * math.Pi
 	if c.Yaw > math.Pi || c.Yaw < -math.Pi {
 		c.Yaw -= twoPi * float32(math.Floor(float64(c.Yaw+math.Pi)/twoPi))
 	}
+}
+
+// LookStick applies one frame of thumbstick look, in the same convention
+// Bindings.Direction returns: +x turns right, +y looks up.
+//
+// Call it alongside Update rather than instead of it. Update handles the mouse and
+// LookStick handles the stick, so both work at once and a player can reach for
+// either without the game switching modes.
+//
+// dt is required because deflection is a rate; see StickLookRate.
+func (c *FPCamera) LookStick(x, y, dt float32) {
+	if x == 0 && y == 0 {
+		return
+	}
+	if c.InvertY {
+		y = -y
+	}
+
+	c.Yaw -= x * c.StickLookRate * dt
+	// Negated because positive pitch looks down while +y on a stick is up.
+	c.Pitch -= y * c.StickLookRate * dt
+	c.clampPitch()
+	c.wrapYaw()
 }
 
 // Follow anchors the camera to an entity transform.

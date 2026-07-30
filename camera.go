@@ -29,6 +29,16 @@ type Camera struct {
 	LookSensitivity float32 // radians per pixel of mouse delta
 	EditorMode      bool    // when true, only right-drag orbits (left-click reserved for editor)
 
+	// StickLookRate is radians per second at full thumbstick deflection, and
+	// ZoomRate is orbit units per second at full trigger or bumper deflection.
+	// Both are used by LookStick and ZoomBy.
+	//
+	// Rates, where LookSensitivity is a ratio: a mouse reports displacement since
+	// last frame, a stick reports only how far it is pushed. Scaling a stick like
+	// a mouse gives a camera that orbits faster the higher the frame rate.
+	StickLookRate float32
+	ZoomRate      float32
+
 	effectiveDistance float32 // clamped by collision; used for eye position
 	dragDistance      float32 // cumulative mouse movement during left-click
 }
@@ -40,7 +50,57 @@ func NewCamera(distance float32) *Camera {
 		LookOffset:        0.75, // look above player, placing character in lower screen
 		Pitch:             0.3,  // slightly above horizon
 		LookSensitivity:   0.003,
+		StickLookRate:     2.2,
+		ZoomRate:          8.0,
 		effectiveDistance: distance,
+	}
+}
+
+// LookStick applies one frame of thumbstick orbit, in the convention
+// Bindings.Direction returns: +x orbits right, +y raises the camera.
+//
+// Call it alongside Update, not instead of it, so mouse drag and stick both work.
+// dt is required because deflection is a rate; see StickLookRate.
+func (c *Camera) LookStick(x, y, dt float32) {
+	if x == 0 && y == 0 {
+		return
+	}
+	c.Yaw -= x * c.StickLookRate * dt
+	// Positive pitch looks up here — the opposite of FPCamera, which the type's
+	// own field comment records — so a stick pushed up raises the camera.
+	c.Pitch += y * c.StickLookRate * dt
+	c.clampPitch()
+}
+
+// ZoomBy changes the orbit distance at ZoomRate, for a trigger or bumper pair.
+// Positive pulls the camera in.
+//
+// Separate from the scroll wheel Update consumes, because a wheel delivers
+// discrete notches already scaled per frame while a held button is a rate.
+func (c *Camera) ZoomBy(amount, dt float32) {
+	if amount == 0 {
+		return
+	}
+	c.Distance -= amount * c.ZoomRate * dt
+	c.clampDistance()
+}
+
+func (c *Camera) clampPitch() {
+	const limit = math.Pi/2 - 0.01
+	if c.Pitch > limit {
+		c.Pitch = limit
+	}
+	if c.Pitch < -limit {
+		c.Pitch = -limit
+	}
+}
+
+func (c *Camera) clampDistance() {
+	if c.Distance < cameraMinDistance {
+		c.Distance = cameraMinDistance
+	}
+	if c.Distance > cameraMaxDistance {
+		c.Distance = cameraMaxDistance
 	}
 }
 
@@ -67,14 +127,7 @@ func (c *Camera) Update(inp *input.Input) {
 		dx, dy := inp.MouseDelta()
 		c.Yaw -= float32(dx) * c.LookSensitivity
 		c.Pitch += float32(dy) * c.LookSensitivity
-
-		const limit = math.Pi/2 - 0.01
-		if c.Pitch > limit {
-			c.Pitch = limit
-		}
-		if c.Pitch < -limit {
-			c.Pitch = -limit
-		}
+		c.clampPitch()
 
 		// Track cumulative drag distance for click-vs-drag detection.
 		if dx != 0 || dy != 0 {
@@ -88,12 +141,7 @@ func (c *Camera) Update(inp *input.Input) {
 	// Scroll wheel adjusts distance (consume so fixed-timestep doesn't double-apply).
 	_, sy := inp.ConsumeScroll()
 	c.Distance -= float32(sy) * cameraZoomSpeed
-	if c.Distance < cameraMinDistance {
-		c.Distance = cameraMinDistance
-	}
-	if c.Distance > cameraMaxDistance {
-		c.Distance = cameraMaxDistance
-	}
+	c.clampDistance()
 }
 
 // Raycaster is the world-query capability the camera needs to keep itself out
