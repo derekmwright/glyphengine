@@ -153,6 +153,44 @@ corrupted instead to exercise the test.
   to the water change and has no `16-materials.png` yet, though the Taskfile
   entry for it exists.
 
+- **Sliders in the examples, for live tuning.** Wanted, not started. The idea is
+  that `09-water` should let you drag wave amplitude around rather than editing a
+  constant and rebuilding, and the same for material and fog knobs.
+
+  Less missing than it sounds. `ui.UIManager` already hit-tests in z-order,
+  routes keyboard focus, reports whether the click was consumed so the game does
+  not also act on it, and — the part that matters — holds `activeClickable`
+  across frames until release, which is pointer capture. `Button`, `InputField`,
+  `ProgressBar`, `Label` and `Panel` exist, and `ui/yamlui` binds a declarative
+  tree to values.
+
+  What is actually absent is one method. `Clickable` has `OnMouseDown`,
+  `OnMouseUp` and `SetPressed` but nothing that tells a captured widget where the
+  mouse moved to, so no widget can track a drag. A `Draggable` interface with
+  `OnMouseMove(mx, my)`, called on `activeClickable` each frame in
+  `HandleInput`, plus a `ui/slider.go`, is the whole job.
+
+  Which knobs would feel good is decided by where the value lives, and that is
+  worth knowing before building the UI rather than after:
+
+  - **Free to drag** — anything packed per-draw into push constants. Water's
+    `WaveAmplitude`, `WaveLength`, `WaveNoise`, `RefractStrength` and
+    `AbsorptionDepth`; `MeshRef.Metallic` and `.Roughness`; fog density and
+    height; cloud steps; light shafts; time of day. No upload, no rebuild.
+  - **Needs a mesh rebuild** — water's `Resolution`, `Level`, `ShallowColor` and
+    `DeepColor`. `WaterMesh` bakes those into the vertices (the colours ride in
+    the Color and Normal attributes, depth and grid spacing in UV), so changing
+    one means rebuilding and re-uploading. Fine for a button, poor for a drag.
+  - **Needs a buffer rewrite that does not exist yet** — a material's
+    `NormalScale`, `FlipGreen` and `OcclusionStrength`. `CreateMaterial` maps its
+    32-byte UBO, writes once, and unmaps; there is no update path. Adding one
+    means either per-frame-in-flight copies the way `JointBuffer` does it, or a
+    `DeviceWaitIdle`, because the buffer may be in use by a frame still in
+    flight. Small, but it is real work rather than a slider.
+
+  So a first pass over the free list alone would cover wave amplitude, which is
+  what prompted this.
+
 - **Showcase scene for beauty shots.** Agreed but not started. Must live under
   `examples/` — that directory is its own module, so nothing in it ships to
   anyone running `go get`. Textures: ambientCG or Poly Haven, both CC0. Now that
