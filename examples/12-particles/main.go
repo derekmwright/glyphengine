@@ -22,7 +22,7 @@
 //	go run ./12-particles -frames 200  # render 200 frames, then exit
 //	go run ./12-particles -time 0.5    # midday, so the fireflies stay home
 //
-// Left-drag orbits, scroll zooms, Escape quits.
+// The camera orbits on its own. Escape quits.
 package main
 
 import (
@@ -46,6 +46,13 @@ func init() {
 // maxParticles bounds the instance buffer. It is allocated once, so this is a
 // ceiling on all emitters together, not a per-emitter budget.
 const maxParticles = 4096
+
+// autoOrbitRate circles the camera slowly, in radians per second.
+//
+// No mouse look: this example is about the three emitters, and camera
+// plumbing in front of that is just noise to read past. Orbiting on its own
+// also makes -frames screenshots repeatable.
+const autoOrbitRate = 0.15
 
 type game struct {
 	camera *glyph.Camera
@@ -128,13 +135,9 @@ func (g *game) Init(e *glyph.Engine) error {
 }
 
 func (g *game) Update(e *glyph.Engine, dt float32) {
-	if e.Input().KeyPressed(input.KeyEscape) {
-		e.Close()
-	}
 	g.t += dt
 
-	g.camera.Update(e.Input())
-	g.camera.Target = mgl32.Vec3{0, 1.6, 0}
+	g.camera.Yaw += autoOrbitRate * dt
 	e.SetCamera(g.camera.ViewVectors())
 
 	// The spark source wanders, so the trail it leaves is visible.
@@ -175,6 +178,7 @@ func main() {
 		glyph.WithTitle("GlyphEngine - 12 Particles"),
 		glyph.WithWindowSize(*width, *height),
 		glyph.WithMSAA(4),
+		glyph.WithQuitKey(input.KeyEscape),
 	}
 	if *fullscreen {
 		opts = append(opts, glyph.WithFullscreen())

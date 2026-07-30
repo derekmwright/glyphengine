@@ -46,6 +46,13 @@ func init() {
 	runtime.LockOSThread()
 }
 
+// autoOrbitRate circles the camera slowly, in radians per second.
+//
+// No mouse look: this example is about loading assets from an fs.FS, and camera
+// plumbing in front of that is just noise to read past. Orbiting on its own
+// also makes -frames screenshots repeatable.
+const autoOrbitRate = 0.15
+
 type game struct {
 	camera *glyph.Camera
 	assets fs.FS
@@ -106,16 +113,11 @@ func (g *game) Init(e *glyph.Engine) error {
 	g.camera.Target = mgl32.Vec3{0, 1, 0}
 	g.camera.Pitch = 0.25
 
-	log.Println("05-textures running. Left-drag orbits, scroll zooms, Escape quits.")
+	log.Println("05-textures running. The camera orbits on its own. Escape quits.")
 	return nil
 }
 
 func (g *game) Update(e *glyph.Engine, dt float32) {
-	in := e.Input()
-	if in.KeyPressed(input.KeyEscape) {
-		e.Close()
-	}
-
 	for _, c := range g.crates {
 		if t, ok := e.C.Transform.Get(c.entity); ok {
 			t.Rotation[1] += c.spin * dt
@@ -123,8 +125,7 @@ func (g *game) Update(e *glyph.Engine, dt float32) {
 		}
 	}
 
-	g.camera.Update(in)
-	g.camera.ResolveCollision(e.Scene, 0, dt)
+	g.camera.Yaw += autoOrbitRate * dt
 	e.SetCamera(g.camera.ViewVectors())
 }
 
@@ -148,6 +149,7 @@ func main() {
 		glyph.WithTitle("GlyphEngine - 05 Textures"),
 		glyph.WithWindowSize(*width, *height),
 		glyph.WithMSAA(4),
+		glyph.WithQuitKey(input.KeyEscape),
 	}
 	if *fullscreen {
 		opts = append(opts, glyph.WithFullscreen())

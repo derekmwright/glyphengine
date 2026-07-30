@@ -21,7 +21,7 @@
 //	go run ./11-lights -frames 200  # render 200 frames, then exit
 //	go run ./11-lights -static      # stop the lights moving
 //
-// Left-drag orbits, scroll zooms, Escape quits.
+// The camera orbits on its own. Escape quits.
 package main
 
 import (
@@ -46,6 +46,13 @@ const (
 	pillarRadius = 6.0
 	lanternRange = 22.0
 )
+
+// autoOrbitRate circles the camera slowly, in radians per second.
+//
+// No mouse look: this example is about how the two light types differ, and camera
+// plumbing in front of that is just noise to read past. Orbiting on its own
+// also makes -frames screenshots repeatable.
+const autoOrbitRate = 0.15
 
 type game struct {
 	camera  *glyph.Camera
@@ -139,14 +146,10 @@ var fillColors = [][3]float32{
 }
 
 func (g *game) Update(e *glyph.Engine, dt float32) {
-	if e.Input().KeyPressed(input.KeyEscape) {
-		e.Close()
-	}
 	if !g.static {
 		g.t += dt
 	}
-	g.camera.Update(e.Input())
-	g.camera.Target = mgl32.Vec3{0, 2, 0}
+	g.camera.Yaw += autoOrbitRate * dt
 	e.SetCamera(g.camera.ViewVectors())
 
 	// ── the shadow-casting light ──
@@ -204,6 +207,7 @@ func main() {
 		glyph.WithTitle("GlyphEngine - 11 Lights"),
 		glyph.WithWindowSize(*width, *height),
 		glyph.WithMSAA(4),
+		glyph.WithQuitKey(input.KeyEscape),
 	}
 	if *fullscreen {
 		opts = append(opts, glyph.WithFullscreen())

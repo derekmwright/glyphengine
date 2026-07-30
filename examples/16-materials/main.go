@@ -42,6 +42,13 @@ func init() {
 	runtime.LockOSThread()
 }
 
+// autoOrbitRate circles the camera slowly, in radians per second.
+//
+// No mouse look: this example is about what the material maps do, and camera
+// plumbing in front of that is just noise to read past. Orbiting on its own
+// also makes -frames screenshots repeatable.
+const autoOrbitRate = 0.15
+
 type game struct {
 	camera *glyph.Camera
 	flat   bool
@@ -317,17 +324,12 @@ func (g *game) Init(e *glyph.Engine) error {
 	g.camera.Target = mgl32.Vec3{0, 1.9, 0}
 	g.camera.Pitch = 0.12
 
-	log.Println("16-materials running. Left-drag orbits, scroll zooms, Escape quits.")
+	log.Println("16-materials running. The camera orbits on its own. Escape quits.")
 	return nil
 }
 
 func (g *game) Update(e *glyph.Engine, dt float32) {
-	in := e.Input()
-	if in.KeyPressed(input.KeyEscape) {
-		e.Close()
-	}
-	g.camera.Update(in)
-	g.camera.ResolveCollision(e.Scene, 0, dt)
+	g.camera.Yaw += autoOrbitRate * dt
 	e.SetCamera(g.camera.ViewVectors())
 }
 
@@ -344,6 +346,7 @@ func main() {
 		glyph.WithTitle("GlyphEngine - 16 Materials"),
 		glyph.WithWindowSize(*width, *height),
 		glyph.WithMSAA(4),
+		glyph.WithQuitKey(input.KeyEscape),
 	}
 	if *fullscreen {
 		opts = append(opts, glyph.WithFullscreen())

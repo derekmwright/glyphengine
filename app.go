@@ -113,6 +113,8 @@ type config struct {
 	screenshot string
 	fov        float32
 	near, far  float32
+	quitKey    input.Key
+	hasQuitKey bool
 }
 
 // WithScene injects an externally created Scene instead of building a fresh
@@ -260,6 +262,23 @@ func WithScreenshot(path string) Option {
 	return func(c *config) { c.screenshot = path }
 }
 
+// WithQuitKey closes the window when that key is pressed.
+//
+// The engine otherwise never reads input on the game's behalf, and this is a
+// deliberate exception rather than the start of a pattern: getting out of a
+// window is a harness concern, not a gameplay one. It is also not optional in
+// practice, because WithFullscreen leaves no close button, so every example
+// that offers fullscreen has to handle a quit key or trap whoever runs it.
+//
+// Hand-rolling it costs four lines and an import of the input package in every
+// example, which is four lines of noise in front of whatever the example is
+// actually there to show. A game that wants quitting to mean something more --
+// a confirmation prompt, saving first -- should leave this unset and bind its
+// own action.
+func WithQuitKey(key input.Key) Option {
+	return func(c *config) { c.quitKey, c.hasQuitKey = key, true }
+}
+
 // WithProjection overrides the vertical field of view in degrees and the near
 // and far clip planes. Defaults are 45°, 0.1, and 500.
 func WithProjection(fovDegrees, near, far float32) Option {
@@ -306,6 +325,10 @@ type Engine struct {
 	frameCount   int
 	screenshot   string
 	alpha        float32 // fraction between the last two ticks; see Alpha
+
+	// See WithQuitKey. hasQuitKey is separate because key zero is a real key.
+	quitKey    input.Key
+	hasQuitKey bool
 }
 
 // resolveMaxCatchUp applies the default and makes sure the budget can fit at
@@ -395,6 +418,8 @@ func New(g Game, opts ...Option) (*Engine, error) {
 		maxCatchUp:   resolveMaxCatchUp(cfg.maxCatchUp, time.Second/time.Duration(cfg.tickRate)),
 		maxFrames:    cfg.maxFrames,
 		screenshot:   cfg.screenshot,
+		quitKey:      cfg.quitKey,
+		hasQuitKey:   cfg.hasQuitKey,
 	}
 
 	// Celestial billboards are engine-owned meshes, not game assets.
@@ -596,6 +621,14 @@ func (e *Engine) Run() {
 
 		e.input.Update()
 		e.window.PollEvents()
+
+		// Checked here rather than in the game because it is the harness's job;
+		// see WithQuitKey. Sampled in the same place as every other device, so
+		// the edge cannot be missed or doubled the way one read from a fixed
+		// tick would be.
+		if e.hasQuitKey && e.input.KeyPressed(e.quitKey) {
+			e.Close()
+		}
 
 		if e.window.WasResized() {
 			e.renderer.NotifyResize()

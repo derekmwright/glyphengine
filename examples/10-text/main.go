@@ -44,6 +44,13 @@ func init() {
 	runtime.LockOSThread()
 }
 
+// autoOrbitRate circles the camera slowly, in radians per second.
+//
+// No mouse look: this example is about MSDF text at every size, and camera
+// plumbing in front of that is just noise to read past. Orbiting on its own
+// also makes -frames screenshots repeatable.
+const autoOrbitRate = 0.15
+
 type game struct {
 	camera *glyph.Camera
 	font   *renderer.Font
@@ -103,17 +110,11 @@ func (g *game) Init(e *glyph.Engine) error {
 }
 
 func (g *game) Update(e *glyph.Engine, dt float32) {
-	in := e.Input()
-	if in.KeyPressed(input.KeyEscape) {
-		e.Close()
-	}
-
 	if t, ok := e.C.Transform.Get(g.cube); ok {
 		t.Rotation[1] += 0.5 * dt
 	}
 
-	g.camera.Update(in)
-	g.camera.ResolveCollision(e.Scene, 0, dt)
+	g.camera.Yaw += autoOrbitRate * dt
 	e.SetCamera(g.camera.ViewVectors())
 
 	w, h := e.Renderer().Extent()
@@ -162,6 +163,7 @@ func main() {
 		glyph.WithTitle("GlyphEngine - 10 Text"),
 		glyph.WithWindowSize(*width, *height),
 		glyph.WithMSAA(4),
+		glyph.WithQuitKey(input.KeyEscape),
 	}
 	if *fullscreen {
 		opts = append(opts, glyph.WithFullscreen())

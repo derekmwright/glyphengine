@@ -49,6 +49,13 @@ func init() {
 // quad, so this is generous for a HUD.
 const uiMaxQuads = 512
 
+// autoOrbitRate circles the camera slowly, in radians per second.
+//
+// No mouse look: this example is about building a HUD, and camera
+// plumbing in front of that is just noise to read past. Orbiting on its own
+// also makes -frames screenshots repeatable.
+const autoOrbitRate = 0.15
+
 type game struct {
 	camera *glyph.Camera
 	cube   glyph.Entity
@@ -135,17 +142,12 @@ func (g *game) Init(e *glyph.Engine) error {
 }
 
 func (g *game) Update(e *glyph.Engine, dt float32) {
-	in := e.Input()
-	if in.KeyPressed(input.KeyEscape) {
-		e.Close()
-	}
 	g.t += dt
 
 	if t, ok := e.C.Transform.Get(g.cube); ok {
 		t.Rotation[1] += 0.4 * dt
 	}
-	g.camera.Update(in)
-	g.camera.Target = mgl32.Vec3{0, 1.2, 0}
+	g.camera.Yaw += autoOrbitRate * dt
 	e.SetCamera(g.camera.ViewVectors())
 
 	// Drift the values so the bars visibly track something.
@@ -235,6 +237,7 @@ func main() {
 		glyph.WithTitle("GlyphEngine - 13 UI"),
 		glyph.WithWindowSize(*width, *height),
 		glyph.WithMSAA(4),
+		glyph.WithQuitKey(input.KeyEscape),
 	}
 	if *fullscreen {
 		opts = append(opts, glyph.WithFullscreen())
