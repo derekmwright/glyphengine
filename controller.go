@@ -46,7 +46,12 @@ func NewCharacterController() CharacterController {
 // controller, or a decoded network packet all produce the same struct.
 type MoveIntent struct {
 	// Forward and Right are movement on the XZ plane in [-1, 1], relative to
-	// Yaw. Only the sign is used; the magnitude does not scale speed.
+	// Yaw.
+	//
+	// The magnitude scales speed, so a thumbstick at a third of its travel walks
+	// at a third of WalkSpeed. Digital sources pass ±1 and get full speed;
+	// diagonals are clamped to unit length, so holding two keys is not faster
+	// than holding one.
 	Forward float32
 	Right   float32
 
@@ -109,21 +114,21 @@ func (s *Scene) MoveCharacter(entity ecs.Entity, intent MoveIntent, dt float32) 
 	forward := mgl32.Vec3{-sin32(refYaw), 0, -cos32(refYaw)}
 	right := mgl32.Vec3{cos32(refYaw), 0, -sin32(refYaw)}
 
-	var moveDir mgl32.Vec3
-	if intent.Forward > 0 {
-		moveDir = moveDir.Add(forward)
+	// Scaled by the intent's magnitudes rather than by their signs, so a
+	// half-deflected stick walks at half speed. A digital source passing ±1 gets
+	// exactly the old behaviour: a single axis has length one already, and a
+	// diagonal has length √2, which the clamp below brings back to one just as
+	// the old unconditional Normalize did.
+	moveDir := forward.Mul(intent.Forward).Add(right.Mul(intent.Right))
+
+	// Clamp rather than normalize. Normalizing would push a light touch up to
+	// full speed, which is the bug this replaces; clamping only stops a
+	// caller — or a square-reporting stick's corner — from exceeding it.
+	if mag := moveDir.Len(); mag > 1 {
+		moveDir = moveDir.Mul(1 / mag)
 	}
-	if intent.Forward < 0 {
-		moveDir = moveDir.Sub(forward)
-	}
-	if intent.Right > 0 {
-		moveDir = moveDir.Add(right)
-	}
-	if intent.Right < 0 {
-		moveDir = moveDir.Sub(right)
-	}
+
 	if moveDir.Len() > 0 {
-		moveDir = moveDir.Normalize()
 		// Face the movement direction when moving forward, so observers see the
 		// correct heading. Backpedaling keeps the current facing to avoid an
 		// oscillation that flips the character 180° every tick. Pure strafing
@@ -143,6 +148,8 @@ func (s *Scene) MoveCharacter(entity ecs.Entity, intent MoveIntent, dt float32) 
 		speed *= intent.SpeedScale
 	}
 
+	// moveDir carries the magnitude, so this is speed times deflection in the
+	// direction asked for.
 	vel.Vec[0] = moveDir.X() * speed
 	vel.Vec[2] = moveDir.Z() * speed
 
