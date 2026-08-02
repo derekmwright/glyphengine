@@ -466,6 +466,46 @@ func (e *Engine) FPS() float64 {
 // FrameCount returns the number of frames rendered so far.
 func (e *Engine) FrameCount() int { return e.frameCount }
 
+// GPUTimings returns the most recent per-pass GPU cost in milliseconds.
+//
+// Measured with timestamp queries on the GPU's own clock, so the numbers are
+// real GPU time whether or not vsync is capping the frame. That is what makes
+// them the right tool for deciding where rendering time goes: whole-frame timing
+// has to run unlocked to show anything, and even then cannot say which pass to
+// look at.
+//
+// The reading is a couple of frames old — collecting a fresher one would need a
+// pipeline flush, which would change what was being measured. Check Valid: it is
+// false for the first frames and on devices without timestamp support.
+func (e *Engine) GPUTimings() renderer.GPUTimings { return e.renderer.GPUTimings() }
+
+// MeanGPUTimings averages every frame measured so far; see Renderer.MeanGPUTimings.
+func (e *Engine) MeanGPUTimings() renderer.GPUTimings { return e.renderer.MeanGPUTimings() }
+
+// LogGPUTimings prints one line per pass plus the measured frame total, averaged
+// over every frame collected.
+//
+// The passes are not expected to sum to the total. The GPU overlaps work across
+// pass boundaries, and a gap between two passes belongs to neither, so a total
+// well above the sum is a bubble worth knowing about rather than an error.
+func (e *Engine) LogGPUTimings() {
+	t := e.renderer.MeanGPUTimings()
+	if !t.Valid {
+		if !e.renderer.GPUTimingSupported() {
+			log.Println("gpu timings: unsupported on this device")
+		} else {
+			log.Println("gpu timings: not ready yet")
+		}
+		return
+	}
+	var sum float32
+	for p, ms := range t.Pass {
+		sum += ms
+		log.Printf("gpu %-10s %6.3f ms", renderer.Pass(p), ms)
+	}
+	log.Printf("gpu %-10s %6.3f ms  (passes sum to %.3f)", "FRAME", t.Total, sum)
+}
+
 // Alpha returns how far the current frame sits between the last simulation
 // tick and the next, in [0,1). Rendering uses it to blend transforms; games
 // need it only for their own interpolation of non-Transform state.

@@ -336,12 +336,19 @@ func recordCommandBuffer(
 	particles *ParticleSystem,
 	frame int,
 	msaaEnabled bool,
+	timer *gpuTimer,
 ) error {
 	_, err := deviceDriver.BeginCommandBuffer(cmdBuf, core1_0.CommandBufferBeginInfo{})
 	if err != nil {
 		return err
 	}
 
+	// Outside any render pass, which vkCmdResetQueryPool requires, and before
+	// the first timestamp is written into the slot being reset.
+	timer.reset(deviceDriver, cmdBuf, frame)
+	timer.begin(deviceDriver, cmdBuf, frame, frameQuery)
+
+	timer.begin(deviceDriver, cmdBuf, frame, PassShadow)
 	// ── Sun shadow depth passes (one per cascade) ──
 	// Always run each pass to ensure the depth layer is cleared to 1.0
 	// (fully lit). When shadows are disabled, we clear but skip drawing geometry.
@@ -589,6 +596,8 @@ func recordCommandBuffer(
 	// Shadow descriptor set for this frame
 	shadowDS := shadow.descriptorSets[frame]
 
+	timer.end(deviceDriver, cmdBuf, frame, PassShadow)
+	timer.begin(deviceDriver, cmdBuf, frame, PassTerrain)
 	// Terrain pass: splat-mapped ground via the dedicated terrain pipeline
 	// (set 0 = 4 detail/splat samplers, set 1 = shadow). Rendered before the
 	// general lit geometry so the lit bind-cache below starts clean.
@@ -629,6 +638,8 @@ func recordCommandBuffer(
 		}
 	}
 
+	timer.end(deviceDriver, cmdBuf, frame, PassTerrain)
+	timer.begin(deviceDriver, cmdBuf, frame, PassOpaque)
 	// Descriptor bind cache — draws arrive sorted by pipeline then texture,
 	// so consecutive draws usually share bindings.
 	var lastTex *Texture
@@ -742,6 +753,8 @@ func recordCommandBuffer(
 		}
 	}
 
+	timer.end(deviceDriver, cmdBuf, frame, PassOpaque)
+	timer.begin(deviceDriver, cmdBuf, frame, PassGrass)
 	// Draw instanced grass variants (two-sided, depth tested, lit)
 	if grass != nil && len(grass.Variants) > 0 {
 		deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, grassPipeline)
@@ -812,6 +825,8 @@ func recordCommandBuffer(
 		}
 	}
 
+	timer.end(deviceDriver, cmdBuf, frame, PassGrass)
+	timer.begin(deviceDriver, cmdBuf, frame, PassSky)
 	// Draw the sky and stars, after everything that writes depth.
 	//
 	// The sky is a fullscreen triangle, so drawn first it shades every pixel on
@@ -874,6 +889,8 @@ func recordCommandBuffer(
 		deviceDriver.CmdDraw(cmdBuf, 3, 1, 0, 0)
 	}
 
+	timer.end(deviceDriver, cmdBuf, frame, PassSky)
+	timer.begin(deviceDriver, cmdBuf, frame, PassParticles)
 	// Draw instanced billboard particles (additive blend, depth test only)
 	if particles != nil && particles.InstanceCount > 0 {
 		deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, particlePipeline)
@@ -900,6 +917,8 @@ func recordCommandBuffer(
 		deviceDriver.CmdDrawIndexed(cmdBuf, particles.QuadMesh.IndexCount, particles.InstanceCount, 0, 0, 0)
 	}
 
+	timer.end(deviceDriver, cmdBuf, frame, PassParticles)
+	timer.begin(deviceDriver, cmdBuf, frame, PassOverlay)
 	// Draw UI panels (alpha blended, textured, 9-slice)
 	if len(uiOverlays) > 0 {
 		deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, uiPipeline)
@@ -1029,6 +1048,9 @@ func recordCommandBuffer(
 
 	// Water needs the finished opaque frame as a texture, so it runs in a
 	// second pass. Scenes without water skip it entirely.
+	timer.end(deviceDriver, cmdBuf, frame, PassOverlay)
+
+	timer.begin(deviceDriver, cmdBuf, frame, PassWater)
 	if sceneColor != nil && (hasWater(draws) || lighting.LightShafts > 0) {
 		if err := recordWaterPass(deviceDriver, cmdBuf, waterRenderPass, waterFramebuffer,
 			waterPipeline, godRayPipeline, pipelineLayout, litPipelineLayout, extent, draws, lighting,
@@ -1036,6 +1058,9 @@ func recordCommandBuffer(
 			return err
 		}
 	}
+
+	timer.end(deviceDriver, cmdBuf, frame, PassWater)
+	timer.end(deviceDriver, cmdBuf, frame, frameQuery)
 
 	_, err = deviceDriver.EndCommandBuffer(cmdBuf)
 	return err

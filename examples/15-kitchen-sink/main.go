@@ -484,6 +484,7 @@ func main() {
 	seed := flag.Int64("seed", 4, "terrain generation seed")
 	shot := flag.String("screenshot", "", "write a PNG of the last frame to this path")
 	demo := flag.Bool("demo", false, "run a loop automatically, no input needed")
+	gputime := flag.Bool("gputime", false, "print mean per-pass GPU timings on exit")
 	flag.Parse()
 
 	opts := []glyph.Option{
@@ -510,5 +511,8 @@ func main() {
 	defer e.Destroy()
 
 	e.Run()
+	if *gputime {
+		e.LogGPUTimings()
+	}
 	log.Printf("rendered %d frames", e.FrameCount())
 }
