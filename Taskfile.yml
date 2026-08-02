@@ -200,6 +200,18 @@ tasks:
       - go run ./17-input -frames 60 -screenshot ../docs/images/17-input.png
       - go run ./15-kitchen-sink -demo -frames 260 -screenshot ../docs/images/15-kitchen-sink.png
 
+  bench:
+    desc: Run the benchmark scenes and print CPU/GPU cost per pass
+    cmds:
+      # Needs a GPU. Timings come from GPU timestamp queries and the engine's own
+      # per-phase CPU timer, so this does not need vsync off -- which is the
+      # point, since the old way of benchmarking pegged the card audibly.
+      #
+      # No committed baseline to compare against: frame cost depends on the GPU,
+      # the driver, the display mode and what else is running, so a stored number
+      # would be from someone else's machine. Run it before and after a change.
+      - go run ./cmd/bench {{.CLI_ARGS}}
+
   ci:
     desc: Run everything CI runs
     cmds:

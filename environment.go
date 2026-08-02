@@ -182,13 +182,16 @@ type Sky struct {
 	// but the ratios roughly do: clouds cost about three times the rest of a
 	// simple scene at CloudsHigh, and about half that at CloudsLow.
 	//
-	// Per pixel, still true. Per frame, only in a scene with nothing else in it:
-	// those figures are whole-frame differences from before the engine could time
-	// a pass. Renderer.MeanGPUTimings measures each pass directly now, and in
-	// 15-kitchen-sink the whole sky pass costs 1.17 ms against 4.29 ms of grass —
-	// grass overdraws itself while the sky is one layer deep and depth-rejected
-	// wherever terrain covers it. Measure the scene rather than assuming the
-	// per-pixel ranking carries over to it.
+	// Those numbers predate the engine being able to time a pass; they are
+	// whole-frame differences. task bench measures each pass directly now, and
+	// broadly confirms them: the sky pass is 83 to 93 percent of GPU time in
+	// 02-cube, 07-terrain, 09-water, 12-particles and 16-materials.
+	//
+	// The exception is flora. Grass overdraws itself heavily while the sky is one
+	// layer deep and depth-rejected wherever terrain covers it, so in 08-grass
+	// the split is grass 3.95 ms against sky 1.68 ms, and in 15-kitchen-sink
+	// 4.30 against 1.20. In a scene with ground cover, clouds are no longer what
+	// to reach for first -- so measure rather than assume, in either direction.
 	//
 	// Safe to change at runtime, every frame if you like — the value is read
 	// when the environment resolves, so a settings slider takes effect on the

@@ -1,9 +1,11 @@
 package glyphengine
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/go-gl/mathgl/mgl32"
@@ -506,6 +508,29 @@ func (e *Engine) LogTimings() {
 	e.LogGPUTimings()
 }
 
+// LogTimingsTSV prints one tab-separated line of every timing, for collecting
+// runs into a table.
+//
+// Deliberately one line rather than the human-readable block: a benchmark
+// comparing twelve scenes wants columns it can align, and a format that survives
+// being pasted into a spreadsheet or diffed between commits.
+func (e *Engine) LogTimingsTSV(label string) {
+	c := e.CPUTimings()
+	g := e.MeanGPUTimings()
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "BENCH	%s	%d", label, e.FrameCount())
+	fmt.Fprintf(&b, "	cpu_total	%.3f", c.Total)
+	for p, ms := range c.Phase {
+		fmt.Fprintf(&b, "	cpu_%s	%.3f", CPUPhase(p), ms)
+	}
+	fmt.Fprintf(&b, "	gpu_total	%.3f", g.Total)
+	for p, ms := range g.Pass {
+		fmt.Fprintf(&b, "	gpu_%s	%.3f", renderer.Pass(p), ms)
+	}
+	log.Println(b.String())
+}
+
 // LogGPUTimings prints one line per pass plus the measured frame total, averaged
 // over every frame collected.
 //
@@ -667,8 +692,15 @@ func (e *Engine) Run() {
 	// GLYPHENGINE_TIMING=1 reports on exit without the game having to add a
 	// flag, the same way GLYPHENGINE_VALIDATION works: the point of both is to
 	// get numbers out of a binary you did not compile.
-	if os.Getenv("GLYPHENGINE_TIMING") == "1" {
+	switch os.Getenv("GLYPHENGINE_TIMING") {
+	case "1":
 		defer e.LogTimings()
+	case "tsv":
+		label := os.Getenv("GLYPHENGINE_BENCH_LABEL")
+		if label == "" {
+			label = "run"
+		}
+		defer e.LogTimingsTSV(label)
 	}
 
 	for !e.window.ShouldClose() {
