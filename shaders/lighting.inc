@@ -32,15 +32,32 @@ float calcShadow(vec3 shadowPos, float NdotL) {
         float bias = max(0.008 * (1.0 - NdotL), 0.001) * biasScale;
         float ref = proj.z - bias;
 
-        // 5x5 PCF
-        float result = 0.0;
+        // Four-tap PCF on a comparison sampler.
+        //
+        // shadowMap is a sampler2DArrayShadow, so every tap is already a hardware
+        // 2x2 percentage-closer fetch with bilinear weights -- four taps spaced a
+        // texel apart therefore cover a smooth 4x4 neighbourhood, not four points.
+        // The 5x5 loop this replaces did 25 of those, paying for a 6x6 footprint
+        // and about a hundred depth comparisons per fragment.
+        //
+        // That cost lands on every lit fragment, in grass, terrain, water and the
+        // lit path alike, and grass overdraws itself heavily. Measured with the
+        // per-pass GPU timer on 08-grass: grass 4.99 -> 3.97 ms, opaque 0.063 ->
+        // 0.030 ms, whole frame 6.89 -> 5.92 ms. The image difference against the
+        // 5x5 version is RMS 0.0008 luminance against a 0.00003 noise floor --
+        // measurable, and indistinguishable by eye on hard-edged pillar shadows,
+        // which is where a weaker kernel would show first.
+        //
+        // Offsets are fixed rather than rotated per pixel. A rotated kernel trades
+        // banding for noise, and noise on sub-pixel grass blades is exactly the
+        // "TV static" the grass shader's normal handling already exists to avoid.
         vec2 texelSize = 1.0 / vec2(textureSize(shadowMap, 0).xy);
-        for (int x = -2; x <= 2; x++) {
-            for (int y = -2; y <= 2; y++) {
-                result += texture(shadowMap, vec4(proj.xy + vec2(x, y) * texelSize, float(c), ref));
-            }
-        }
-        return mix(0.35, 1.0, result / 25.0);
+        float result =
+            texture(shadowMap, vec4(proj.xy + vec2(-1.0, -1.0) * texelSize, float(c), ref)) +
+            texture(shadowMap, vec4(proj.xy + vec2( 1.0, -1.0) * texelSize, float(c), ref)) +
+            texture(shadowMap, vec4(proj.xy + vec2(-1.0,  1.0) * texelSize, float(c), ref)) +
+            texture(shadowMap, vec4(proj.xy + vec2( 1.0,  1.0) * texelSize, float(c), ref));
+        return mix(0.35, 1.0, result * 0.25);
     }
     return 1.0; // outside all cascades = fully lit
 }

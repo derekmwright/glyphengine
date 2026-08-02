@@ -250,12 +250,14 @@ func main() {
 	frames := flag.Int("frames", 0, "render N frames then exit (0 = run until closed)")
 	shot := flag.String("screenshot", "", "write a PNG of the last frame to this path")
 	seed := flag.Int64("seed", 1, "terrain generation seed")
+	gputime := flag.Bool("gputime", false, "print mean per-pass GPU timings on exit")
+	msaa := flag.Int("msaa", 4, "MSAA sample count (1 disables it)")
 	flag.Parse()
 
 	opts := []glyph.Option{
 		glyph.WithTitle("GlyphEngine - 08 Grass"),
 		glyph.WithWindowSize(*width, *height),
-		glyph.WithMSAA(4),
+		glyph.WithMSAA(*msaa),
 		glyph.WithProjection(55, 0.1, 600),
 	}
 	if *fullscreen {
@@ -275,5 +277,8 @@ func main() {
 	defer e.Destroy()
 
 	e.Run()
+	if *gputime {
+		e.LogGPUTimings()
+	}
 	log.Printf("rendered %d frames", e.FrameCount())
 }

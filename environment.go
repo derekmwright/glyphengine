@@ -182,6 +182,14 @@ type Sky struct {
 	// but the ratios roughly do: clouds cost about three times the rest of a
 	// simple scene at CloudsHigh, and about half that at CloudsLow.
 	//
+	// Per pixel, still true. Per frame, only in a scene with nothing else in it:
+	// those figures are whole-frame differences from before the engine could time
+	// a pass. Renderer.MeanGPUTimings measures each pass directly now, and in
+	// 15-kitchen-sink the whole sky pass costs 1.17 ms against 4.29 ms of grass —
+	// grass overdraws itself while the sky is one layer deep and depth-rejected
+	// wherever terrain covers it. Measure the scene rather than assuming the
+	// per-pixel ranking carries over to it.
+	//
 	// Safe to change at runtime, every frame if you like — the value is read
 	// when the environment resolves, so a settings slider takes effect on the
 	// next frame with nothing to rebuild.

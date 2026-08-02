@@ -29,6 +29,13 @@ type GrassInstance struct {
 
 // GrassTile is a contiguous instance-buffer range covering one world-space
 // tile, with a bounding sphere for frustum/distance culling.
+// tileDraw pairs a visible tile with its squared distance, so the draw order can
+// be sorted without recomputing it.
+type tileDraw struct {
+	tile  GrassTile
+	dist2 float32
+}
+
 type GrassTile struct {
 	FirstInstance int
 	Count         int
@@ -57,6 +64,10 @@ type GrassVariant struct {
 type GrassSystem struct {
 	Variants []GrassVariant
 	Texture  *Texture // shared grass texture (from glTF)
+
+	// visibleScratch is reused by the draw loop for the per-frame front-to-back
+	// tile sort, so sorting costs no allocation.
+	visibleScratch []tileDraw
 }
 
 // GrassHeightmap is the minimal interface needed for grass instance placement.

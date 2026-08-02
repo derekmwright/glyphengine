@@ -3,6 +3,7 @@ package renderer
 import (
 	"log"
 	"math"
+	"slices"
 	"unsafe"
 
 	"github.com/go-gl/mathgl/mgl32"
@@ -787,6 +788,7 @@ func recordCommandBuffer(
 		camX, camY, camZ := lighting.CameraPos[0], lighting.CameraPos[1], lighting.CameraPos[2]
 
 		var lastFloraTex *Texture
+		visible := grass.visibleScratch[:0]
 		for i := range grass.Variants {
 			v := &grass.Variants[i]
 			if v.InstanceCount == 0 {
@@ -809,20 +811,51 @@ func recordCommandBuffer(
 
 			deviceDriver.CmdBindVertexBuffers(cmdBuf, 0, []core1_0.Buffer{v.Mesh.vertexBuffer, v.InstanceBuffer}, []int{0, 0})
 			deviceDriver.CmdBindIndexBuffer(cmdBuf, v.Mesh.indexBuffer, 0, v.Mesh.indexType)
+
+			// Cull first, then draw nearest tile first.
+			//
+			// Order cannot change the image: grass depth-tests and writes depth,
+			// so whichever blade is nearest wins wherever two overlap. What order
+			// does change is how much work reaches the shader. Grass is dense and
+			// overlaps itself heavily, and every fragment that survives runs an
+			// alpha test, a 25-tap shadow lookup and the fog model before being
+			// thrown away by a nearer blade drawn later.
+			//
+			// Front to back lets early depth reject those before the shader runs.
+			// The alpha-test discard does not prevent that: it stops the hardware
+			// writing depth early, not testing it.
+			visible = visible[:0]
 			for _, tile := range v.Tiles {
 				dx := tile.Center[0] - camX
 				dy := tile.Center[1] - camY
 				dz := tile.Center[2] - camZ
+				d2 := dx*dx + dy*dy + dz*dz
 				maxDist := float32(GrassMaxDistance) + tile.Radius
-				if dx*dx+dy*dy+dz*dz > maxDist*maxDist {
+				if d2 > maxDist*maxDist {
 					continue
 				}
 				if !camFrustum.SphereInFrustum(tile.Center[0], tile.Center[1], tile.Center[2], tile.Radius) {
 					continue
 				}
+				visible = append(visible, tileDraw{tile: tile, dist2: d2})
+			}
+			slices.SortFunc(visible, func(a, b tileDraw) int {
+				switch {
+				case a.dist2 < b.dist2:
+					return -1
+				case a.dist2 > b.dist2:
+					return 1
+				default:
+					return 0
+				}
+			})
+
+			for _, vt := range visible {
+				tile := vt.tile
 				deviceDriver.CmdDrawIndexed(cmdBuf, v.Mesh.IndexCount, tile.Count, 0, 0, uint32(tile.FirstInstance))
 			}
 		}
+		grass.visibleScratch = visible
 	}
 
 	timer.end(deviceDriver, cmdBuf, frame, PassGrass)
