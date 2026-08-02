@@ -2,6 +2,7 @@ package glyphengine
 
 import (
 	"log"
+	"os"
 	"slices"
 	"time"
 
@@ -329,6 +330,9 @@ type Engine struct {
 	// See WithQuitKey. hasQuitKey is separate because key zero is a real key.
 	quitKey    input.Key
 	hasQuitKey bool
+
+	// cpu accumulates per-phase CPU cost; see cputimer.go.
+	cpu cpuTimer
 }
 
 // resolveMaxCatchUp applies the default and makes sure the budget can fit at
@@ -481,6 +485,26 @@ func (e *Engine) GPUTimings() renderer.GPUTimings { return e.renderer.GPUTimings
 
 // MeanGPUTimings averages every frame measured so far; see Renderer.MeanGPUTimings.
 func (e *Engine) MeanGPUTimings() renderer.GPUTimings { return e.renderer.MeanGPUTimings() }
+
+// LogTimings prints the CPU and GPU breakdowns together, which is the only way
+// to read either of them.
+//
+// A frame that is slow with a large gpuwait is GPU-bound or vsync-paced; the GPU
+// table says which pass. A frame that is slow with gpuwait near zero is CPU-bound
+// and the GPU table is a distraction. Printing one without the other invites
+// exactly the wrong conclusion.
+func (e *Engine) LogTimings() {
+	c := e.CPUTimings()
+	if c.Valid {
+		var sum float32
+		for p, ms := range c.Phase {
+			sum += ms
+			log.Printf("cpu %-10s %6.3f ms", CPUPhase(p), ms)
+		}
+		log.Printf("cpu %-10s %6.3f ms  (phases sum to %.3f)", "FRAME", c.Total, sum)
+	}
+	e.LogGPUTimings()
+}
 
 // LogGPUTimings prints one line per pass plus the measured frame total, averaged
 // over every frame collected.
@@ -640,6 +664,13 @@ func (e *Engine) Run() {
 	// the window closing.
 	defer e.captureIfRequested()
 
+	// GLYPHENGINE_TIMING=1 reports on exit without the game having to add a
+	// flag, the same way GLYPHENGINE_VALIDATION works: the point of both is to
+	// get numbers out of a binary you did not compile.
+	if os.Getenv("GLYPHENGINE_TIMING") == "1" {
+		defer e.LogTimings()
+	}
+
 	for !e.window.ShouldClose() {
 		frameStart := time.Now()
 		frameDelta := frameStart.Sub(prev)
@@ -659,6 +690,7 @@ func (e *Engine) Run() {
 			e.smoothDelta = e.smoothDelta*0.95 + dt*0.05
 		}
 
+		e.cpu.begin(CPUPoll)
 		e.input.Update()
 		e.window.PollEvents()
 
@@ -682,10 +714,12 @@ func (e *Engine) Run() {
 		// this frame is consumed by simulation on the same frame. Unity runs
 		// its FixedUpdate first, which costs up to a frame of input latency;
 		// this ordering does not.
+		e.cpu.begin(CPUUpdate)
 		e.game.Update(e, float32(dt))
 
 		// Fixed-timestep simulation. Runs zero or more times per frame — which
 		// is exactly why input belongs in Update above, not in here.
+		e.cpu.begin(CPUTick)
 		for accumulator >= e.tickDuration {
 			e.Scene.Tick(tickDt)
 			if e.fixedUpdate != nil {
@@ -706,22 +740,42 @@ func (e *Engine) Run() {
 		if animDt > 0.25 {
 			animDt = 0.25
 		}
+		e.cpu.begin(CPUAnimate)
 		e.TickAnimations(animDt)
 
 		// Last hook before rendering: transforms and poses are final, so a
 		// camera following its target here is never a tick behind.
+		e.cpu.begin(CPULateUpdate)
 		if e.lateUpdate != nil {
 			e.lateUpdate.LateUpdate(e, float32(dt))
 		}
 
 		// Skip rendering while minimized; game logic and networking continue.
 		if e.renderer.Minimized() {
+			e.cpu.stop()
 			time.Sleep(50 * time.Millisecond)
 			continue
 		}
 
 		e.elapsed += float32(frameDelta.Seconds())
 		e.renderFrame()
+
+		// The fence wait happens inside the renderer, so it is folded in rather
+		// than bracketed here, and subtracted from submit so the two do not
+		// double-count.
+		// DrawFrame is three different things: two waits on the presentation
+		// pipeline and the command recording between them. Charging the whole
+		// call to the CPU reports a saturated CPU on a frame that is simply
+		// waiting for vsync, which is the opposite of the truth.
+		wait := e.renderer.LastFenceWait()
+		record := e.renderer.LastRecord()
+		present := e.renderer.LastPresent()
+		e.cpu.add(CPUGPUWait, wait)
+		e.cpu.add(CPURecord, record)
+		e.cpu.add(CPUPresent, present)
+		e.cpu.add(CPUSubmit, -(wait + record + present))
+
+		e.cpu.endFrame(time.Since(frameStart))
 
 		e.frameCount++
 		if e.maxFrames > 0 && e.frameCount >= e.maxFrames {
@@ -764,6 +818,7 @@ func (e *Engine) renderFrame() {
 		cascadeVPs = renderer.ComputeCascadeVPs(env.SunDir, e.cameraCenter)
 	}
 
+	e.cpu.begin(CPUDrawList)
 	draws := e.buildDrawList(vp, shadowEnabled, cascadeVPs[renderer.ShadowCascades-1])
 
 	// Celestial billboards fade near the horizon instead of cutting out; the
@@ -839,6 +894,7 @@ func (e *Engine) renderFrame() {
 		}
 	}
 
+	e.cpu.begin(CPUSubmit)
 	if err := e.renderer.DrawFrame(draws, e.overlays, e.uiOverlays, e.msdfOverlays, lighting); err != nil {
 		log.Printf("glyphengine: draw error: %v", err)
 	}

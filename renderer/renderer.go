@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"time"
 	"unsafe"
 
 	"github.com/vkngwrapper/core/v3/common"
@@ -71,6 +72,19 @@ type Renderer struct {
 	depth                        *depthResources
 	msaa                         *msaaResources
 	msaaSamples                  core1_0.SampleCountFlags
+
+	// lastFenceWait is how long the previous DrawFrame blocked on the in-flight
+	// fence and on acquiring a swapchain image. The engine folds it into its own
+	// CPU breakdown, where it is the number that separates "the GPU is the
+	// limit" from "the CPU is".
+	lastFenceWait time.Duration
+
+	// lastRecord and lastPresent split what used to be lumped together as
+	// "submit". Presenting can block on the presentation engine exactly as
+	// acquiring can, so counting it as CPU work reports a busy CPU on a frame
+	// that is simply being paced.
+	lastRecord  time.Duration
+	lastPresent time.Duration
 
 	// gpuTimer measures per-pass GPU cost with timestamp queries; see gputimer.go.
 	// Non-nil always, but inert when the device cannot timestamp graphics work.
@@ -868,6 +882,8 @@ func (r *Renderer) recreateSwapchain() error {
 func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, uiOverlays []UIRenderObject, msdfOverlays []RenderObject, lighting SceneLighting) error {
 	f := r.currentFrame
 
+	waitStart := time.Now()
+
 	// Wait for this in-flight frame's previous submission to finish
 	_, err := r.deviceDriver.WaitForFences(true, common.NoTimeout, r.sync.inFlight[f])
 	if err != nil {
@@ -891,6 +907,10 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, uiOv
 		}
 		return err
 	}
+
+	// Both the fence and the acquire are waits on the presentation pipeline, so
+	// they count together: with vsync on it is the acquire that blocks.
+	r.lastFenceWait = time.Since(waitStart)
 
 	// Only reset the fence after a successful acquire
 	_, err = r.deviceDriver.ResetFences(r.sync.inFlight[f])
@@ -928,6 +948,7 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, uiOv
 	if err != nil {
 		return err
 	}
+	recordStart := time.Now()
 	err = recordCommandBuffer(r.deviceDriver, cmdBuf, r.renderPass, r.framebuffers[imageIndex], r.pipeline, r.litDoubleSidedPipeline, r.overlayPipeline, r.skyPipeline, r.starsPipeline, r.uiPipeline, r.msdfPipeline, r.skinnedPipeline, r.grassPipeline, r.waterPipeline, r.godRayPipeline, r.waterRenderPass, waterFB, r.sceneColor, r.sc.images[imageIndex], r.particlePipeline, r.terrainPipeline, r.materialPipelines(), r.pipelineLayout, r.litPipelineLayout, r.skinnedPipelineLayout, r.terrainPipelineLayout, r.sc.extent, draws, overlays, uiOverlays, msdfOverlays, lighting, r.fallbackTexture, r.shadow, r.grass, r.particles, f, r.msaa != nil, r.gpuTimer)
 	if err != nil {
 		return err
@@ -935,6 +956,8 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, uiOv
 
 	// Submit
 	fence := r.sync.inFlight[f]
+	r.lastRecord = time.Since(recordStart)
+
 	_, err = r.deviceDriver.QueueSubmit(r.graphicsQueue, &fence, core1_0.SubmitInfo{
 		WaitSemaphores:   []core1_0.Semaphore{r.sync.imageAvailable[f]},
 		WaitDstStageMask: []core1_0.PipelineStageFlags{core1_0.PipelineStageColorAttachmentOutput},
@@ -947,11 +970,13 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, uiOv
 
 	// Present
 	r.lastPresented = imageIndex
+	presentStart := time.Now()
 	presentResult, err := r.swapchainExt.QueuePresent(r.presentQueue, khr_swapchain.PresentInfo{
 		WaitSemaphores: []core1_0.Semaphore{r.sync.renderFinished[f]},
 		Swapchains:     []khr_swapchain.Swapchain{r.sc.swapchain},
 		ImageIndices:   []int{imageIndex},
 	})
+	r.lastPresent = time.Since(presentStart)
 	if err != nil && presentResult != khr_swapchain.VKErrorOutOfDate {
 		return err
 	}

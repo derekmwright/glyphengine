@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/vkngwrapper/core/v3/core1_0"
 )
@@ -279,6 +280,22 @@ func (r *Renderer) GPUTimings() GPUTimings {
 	}
 	return r.gpuTimer.latest
 }
+
+// LastRecord is how long the last DrawFrame spent building the command buffer.
+// Genuine CPU work, unlike the waits either side of it.
+func (r *Renderer) LastRecord() time.Duration { return r.lastRecord }
+
+// LastPresent is how long the last QueuePresent took. With vsync on it can block
+// for most of a frame, which is pacing rather than work.
+func (r *Renderer) LastPresent() time.Duration { return r.lastPresent }
+
+// LastFenceWait is how long the last DrawFrame spent blocked waiting for the GPU
+// and for a swapchain image.
+//
+// With vsync on this is mostly the pacing wait and a large value is healthy.
+// With it off, or when the frame is long, a small value means the CPU is the
+// limit rather than the GPU.
+func (r *Renderer) LastFenceWait() time.Duration { return r.lastFenceWait }
 
 // GPUTimingSupported reports whether the device can measure per-pass GPU time.
 func (r *Renderer) GPUTimingSupported() bool {
