@@ -321,6 +321,7 @@ func recordCommandBuffer(
 	particlePipeline core1_0.Pipeline,
 	terrainPipeline core1_0.Pipeline,
 	mat materialPipelines,
+	stats *RenderStats,
 	pipelineLayout core1_0.PipelineLayout,
 	litPipelineLayout core1_0.PipelineLayout,
 	skinnedPipelineLayout core1_0.PipelineLayout,
@@ -346,6 +347,7 @@ func recordCommandBuffer(
 
 	// Outside any render pass, which vkCmdResetQueryPool requires, and before
 	// the first timestamp is written into the slot being reset.
+	stats.reset()
 	timer.reset(deviceDriver, cmdBuf, frame)
 	timer.begin(deviceDriver, cmdBuf, frame, frameQuery)
 
@@ -429,6 +431,7 @@ func recordCommandBuffer(
 				pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&shadowPC[0])), 128)
 				deviceDriver.CmdPushConstants(cmdBuf, activeLayout, core1_0.StageVertex, 0, pcBytes)
 
+				stats.addDraw(1, d.Mesh.IndexCount, d.Mesh.VertexCount)
 				if d.Mesh.IndexCount > 0 {
 					deviceDriver.CmdBindIndexBuffer(cmdBuf, d.Mesh.indexBuffer, 0, d.Mesh.indexType)
 					deviceDriver.CmdDrawIndexed(cmdBuf, d.Mesh.IndexCount, 1, 0, 0, 0)
@@ -540,6 +543,7 @@ func recordCommandBuffer(
 				pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&cubePC[0])), 128)
 				deviceDriver.CmdPushConstants(cmdBuf, activeLayout, core1_0.StageVertex, 0, pcBytes)
 
+				stats.addDraw(1, d.Mesh.IndexCount, d.Mesh.VertexCount)
 				if d.Mesh.IndexCount > 0 {
 					deviceDriver.CmdBindIndexBuffer(cmdBuf, d.Mesh.indexBuffer, 0, d.Mesh.indexType)
 					deviceDriver.CmdDrawIndexed(cmdBuf, d.Mesh.IndexCount, 1, 0, 0, 0)
@@ -631,6 +635,7 @@ func recordCommandBuffer(
 		pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
 		deviceDriver.CmdPushConstants(cmdBuf, terrainPipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
 
+		stats.addDraw(1, d.Mesh.IndexCount, d.Mesh.VertexCount)
 		if d.Mesh.IndexCount > 0 {
 			deviceDriver.CmdBindIndexBuffer(cmdBuf, d.Mesh.indexBuffer, 0, d.Mesh.indexType)
 			deviceDriver.CmdDrawIndexed(cmdBuf, d.Mesh.IndexCount, 1, 0, 0, 0)
@@ -746,6 +751,7 @@ func recordCommandBuffer(
 		pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
 		deviceDriver.CmdPushConstants(cmdBuf, activeLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
 
+		stats.addDraw(1, d.Mesh.IndexCount, d.Mesh.VertexCount)
 		if d.Mesh.IndexCount > 0 {
 			deviceDriver.CmdBindIndexBuffer(cmdBuf, d.Mesh.indexBuffer, 0, d.Mesh.indexType)
 			deviceDriver.CmdDrawIndexed(cmdBuf, d.Mesh.IndexCount, 1, 0, 0, 0)
@@ -832,9 +838,11 @@ func recordCommandBuffer(
 				d2 := dx*dx + dy*dy + dz*dz
 				maxDist := float32(GrassMaxDistance) + tile.Radius
 				if d2 > maxDist*maxDist {
+					stats.GrassTilesCulled++
 					continue
 				}
 				if !camFrustum.SphereInFrustum(tile.Center[0], tile.Center[1], tile.Center[2], tile.Radius) {
+					stats.GrassTilesCulled++
 					continue
 				}
 				visible = append(visible, tileDraw{tile: tile, dist2: d2})
@@ -852,7 +860,22 @@ func recordCommandBuffer(
 
 			for _, vt := range visible {
 				tile := vt.tile
-				deviceDriver.CmdDrawIndexed(cmdBuf, v.Mesh.IndexCount, tile.Count, 0, 0, uint32(tile.FirstInstance))
+
+				// Thin distant tiles. Instances are shuffled within a tile at
+				// build time, so a prefix is a uniform sample of it and simply
+				// drawing fewer of them removes blades evenly rather than
+				// clearing one side.
+				count := tile.Count
+				if keep := grassKeepFraction(float32(math.Sqrt(float64(vt.dist2)))); keep < 1 {
+					count = int(float32(count) * keep)
+					if count < 1 {
+						count = 1
+					}
+				}
+
+				stats.GrassTilesDrawn++
+				stats.addDraw(count, v.Mesh.IndexCount, v.Mesh.VertexCount)
+				deviceDriver.CmdDrawIndexed(cmdBuf, v.Mesh.IndexCount, count, 0, 0, uint32(tile.FirstInstance))
 			}
 		}
 		grass.visibleScratch = visible
@@ -988,6 +1011,7 @@ func recordCommandBuffer(
 			pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
 			deviceDriver.CmdPushConstants(cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
 
+			stats.addDraw(1, d.Mesh.IndexCount, d.Mesh.VertexCount)
 			if d.Mesh.IndexCount > 0 {
 				deviceDriver.CmdBindIndexBuffer(cmdBuf, d.Mesh.indexBuffer, 0, d.Mesh.indexType)
 				deviceDriver.CmdDrawIndexed(cmdBuf, d.Mesh.IndexCount, 1, 0, 0, 0)
@@ -1025,6 +1049,7 @@ func recordCommandBuffer(
 			pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
 			deviceDriver.CmdPushConstants(cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
 
+			stats.addDraw(1, d.Mesh.IndexCount, d.Mesh.VertexCount)
 			if d.Mesh.IndexCount > 0 {
 				deviceDriver.CmdBindIndexBuffer(cmdBuf, d.Mesh.indexBuffer, 0, d.Mesh.indexType)
 				deviceDriver.CmdDrawIndexed(cmdBuf, d.Mesh.IndexCount, 1, 0, 0, 0)
@@ -1068,6 +1093,7 @@ func recordCommandBuffer(
 			pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
 			deviceDriver.CmdPushConstants(cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
 
+			stats.addDraw(1, d.Mesh.IndexCount, d.Mesh.VertexCount)
 			if d.Mesh.IndexCount > 0 {
 				deviceDriver.CmdBindIndexBuffer(cmdBuf, d.Mesh.indexBuffer, 0, d.Mesh.indexType)
 				deviceDriver.CmdDrawIndexed(cmdBuf, d.Mesh.IndexCount, 1, 0, 0, 0)
@@ -1085,7 +1111,7 @@ func recordCommandBuffer(
 
 	timer.begin(deviceDriver, cmdBuf, frame, PassWater)
 	if sceneColor != nil && (hasWater(draws) || lighting.LightShafts > 0) {
-		if err := recordWaterPass(deviceDriver, cmdBuf, waterRenderPass, waterFramebuffer,
+		if err := recordWaterPass(deviceDriver, stats, cmdBuf, waterRenderPass, waterFramebuffer,
 			waterPipeline, godRayPipeline, pipelineLayout, litPipelineLayout, extent, draws, lighting,
 			sceneColor, swapchainImage, shadowDS, msaaEnabled); err != nil {
 			return err
@@ -1117,6 +1143,7 @@ func hasWater(draws []RenderObject) bool {
 // written, and refraction is precisely a read of a *different* pixel.
 func recordWaterPass(
 	deviceDriver core1_0.DeviceDriver,
+	stats *RenderStats,
 	cmdBuf core1_0.CommandBuffer,
 	waterRenderPass core1_0.RenderPass,
 	framebuffer core1_0.Framebuffer,
@@ -1245,6 +1272,7 @@ func recordWaterPass(
 		deviceDriver.CmdPushConstants(cmdBuf, litPipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
 
 		deviceDriver.CmdBindVertexBuffers(cmdBuf, 0, []core1_0.Buffer{d.Mesh.vertexBuffer}, []int{0})
+		stats.addDraw(1, d.Mesh.IndexCount, d.Mesh.VertexCount)
 		if d.Mesh.IndexCount > 0 {
 			deviceDriver.CmdBindIndexBuffer(cmdBuf, d.Mesh.indexBuffer, 0, d.Mesh.indexType)
 			deviceDriver.CmdDrawIndexed(cmdBuf, d.Mesh.IndexCount, 1, 0, 0, 0)

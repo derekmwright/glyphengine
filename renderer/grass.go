@@ -4,11 +4,41 @@ import (
 	"encoding/binary"
 	"log"
 	"math"
+	"math/rand"
 	"sort"
 	"unsafe"
 
 	"github.com/vkngwrapper/core/v3/core1_0"
 )
+
+// Grass thinning: how much of a tile's instances are drawn, by distance.
+//
+// The flora are real meshes rather than cards -- about 340 triangles each -- so a
+// field is millions of triangles, and past a certain distance most of them are
+// smaller than a pixel. A sub-pixel triangle is the worst thing a rasterizer can
+// be given: it still shades a full 2x2 quad, so four fragments of work land on
+// something that covers less than one.
+//
+// Blades already shrink and dissolve over the same range (see grass.vert), so
+// removing some of them there costs far less than it saves. Full density is kept
+// close to the camera where it is actually legible.
+const (
+	grassThinNear = 30.0 // full density up to here
+	grassThinFar  = 70.0 // grassThinMin density from here out
+	grassThinMin  = 0.35
+)
+
+// grassKeepFraction is the share of a tile's instances to draw at that distance.
+func grassKeepFraction(dist float32) float32 {
+	if dist <= grassThinNear {
+		return 1
+	}
+	if dist >= grassThinFar {
+		return grassThinMin
+	}
+	t := (dist - grassThinNear) / (grassThinFar - grassThinNear)
+	return 1 - t*(1-grassThinMin)
+}
 
 // GrassMaxDistance is the hard cull distance for grass blades.
 // Must match the distance cull in grass.vert.
@@ -365,10 +395,21 @@ func buildGrassTiles(instances []GrassInstance, mesh *Mesh, originX, originZ flo
 	// plus a small margin for wind sway.
 	bladeMargin := mesh.BoundRadius*grassBladeScale + 0.5
 
+	// Shuffled with a fixed seed, which makes any prefix of a tile's instances a
+	// spatially uniform sample of it. That is what lets the draw loop thin distant
+	// tiles by simply drawing fewer instances -- see grassKeepFraction. Left in
+	// scatter order, a prefix would be whichever band of the tile the scatter
+	// happened to visit first, and thinning would eat the tile from one side.
+	//
+	// Fixed seed rather than time-based so a rebuild is reproducible, which the
+	// tile ordering above already goes out of its way to be.
+	shuffle := rand.New(rand.NewSource(0x5eed))
+
 	ordered := make([]GrassInstance, 0, len(instances))
 	tiles := make([]GrassTile, 0, len(keys))
 	for _, k := range keys {
 		bucket := buckets[k]
+		shuffle.Shuffle(len(bucket), func(i, j int) { bucket[i], bucket[j] = bucket[j], bucket[i] })
 		first := len(ordered)
 		ordered = append(ordered, bucket...)
 
