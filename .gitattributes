@@ -1,36 +1,9 @@
-# Normalize line endings; Go sources are LF in the repo.
-* text=auto eol=lf
-
-# Compiled SPIR-V is committed on purpose: shaders/shaders.go embeds it with
-# go:embed, so without these files the module does not build for anyone who
-# `go get`s it. glslc is therefore an authoring-only dependency.
-*.spv binary
-
-# Binary assets. Deliberately NOT tracked with Git LFS -- the Go module proxy
-# does not run LFS smudge, so consumers would receive pointer stubs where
-# go:embed and the asset loaders expect real content.
-*.png  binary
-*.jpg  binary
-*.glb  binary
-*.bin  binary
-*.wav  binary
-*.ogg  binary
-*.mp3  binary
-*.ttf  binary
-*.heightmap binary
-
-# ── GitHub language stats (Linguist) ──
+# docs/images is 45% of the engine module by size and is documentation, not
+# code. Excluding it from the archive keeps `go get` from downloading README
+# screenshots, while `git clone` still gets them and GitHub still renders them.
 #
-# miniaudio is a vendored single-header C library, and at ~4 MB it is six times
-# the size of all the Go in this repository. Linguist counts bytes, so without
-# this the project is reported as a C project. `vendored` is the accurate
-# label: it is third-party code we redistribute but do not maintain.
-audio/miniaudio.c linguist-vendored
-audio/miniaudio.h linguist-vendored
-
-# Compiled SPIR-V is a build artifact of the .vert/.frag sources beside it,
-# committed only so `go get` works. It is not hand-written source.
-*.spv linguist-generated
-
-# Shared GLSL includes; Linguist otherwise guesses from the .inc extension.
-shaders/*.inc linguist-language=GLSL
+# This works because cmd/go builds module zips with `git archive`, which honours
+# export-ignore from the tree being archived. Note "from the tree": an
+# uncommitted .gitattributes has no effect, which makes the obvious test of this
+# report no change at all.
+docs/images/** export-ignore

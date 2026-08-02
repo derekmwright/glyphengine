@@ -65,12 +65,8 @@ outran the vertex grid.
   itself does not bake anything in.
 - **`task screenshots` has not been run.** Six examples changed framing when
   their cameras became automatic, and `16-materials.png` and `17-input.png` do
-  not exist. Held because running it grows `docs/images/`, which is the open
-  question below.
-- **`docs/images/` is 45% of the engine module** — 4748 KB of 10551 KB, and it
-  grows with every example. Wants a decision: `.gitattributes` `export-ignore`
-  so the module proxy skips them while `git clone` keeps them, downscaling, or
-  hosting them elsewhere. Recommend export-ignore.
+  not exist. Nothing blocks it now — see the entry below — it just has not been
+  run, and it needs a GPU.
 - **Sky is now the top GPU pass in most scenes** — 83 to 93 percent in 02-cube,
   07-terrain, 09-water, 12-particles and 16-materials, and about 30 percent
   where there is grass. `CloudSteps` is already an exposed setting; the honest
@@ -140,6 +136,15 @@ outran the vertex grid.
 
 - **`-novsync` benchmarking is obsolete.** GPU timestamps measure GPU work with
   vsync on, so the coil whine is no longer a cost of measuring anything.
+
+- **`docs/images/` no longer ships to module consumers.** `.gitattributes`
+  marks it `export-ignore`, which cmd/go honours because it builds module zips
+  with `git archive`. Verified: the archive drops from 11690 KB to 7100 KB and
+  all fourteen images are gone, while `git clone` and GitHub still have them.
+
+  The obvious way to test this reports no change, which is worth knowing before
+  concluding it does not work: `git archive HEAD` reads `.gitattributes` from
+  the tree being archived, so an uncommitted one does nothing at all.
 
 - **The LSP in this workspace reports phantom errors** — undefined symbols for
   APIs that plainly exist. `go build ./...` is the authority.
