@@ -48,9 +48,15 @@ verified: 2026-07-28         # date the page was last checked against the code
 ### Field notes
 
 - **`id`** is a permanent identifier. Change `title` freely; never change `id`.
-- **`capability`** is the primary index key. Current values: `rendering`,
+- **`capability`** is the primary index key. Values in use: `rendering`,
   `windowing`, `input`, `ecs`, `physics`, `navigation`, `terrain`, `animation`,
-  `audio`, `ui`, `assets`, `meta`.
+  `water`, `lighting`, `environment`, `meta`. Reserved for pages not yet
+  written: `audio`, `ui`, `assets`.
+
+  Keep this list matching what the pages actually declare. It drifted once
+  already — `water`, `lighting` and `environment` were in use for a while
+  without appearing here, which makes the index look authoritative while being
+  incomplete.
 - **`status: planned`** pages are allowed and encouraged — they tell an agent
   that something does *not* exist yet, which prevents it from inventing an API.
   A planned page must not show code that cannot run.

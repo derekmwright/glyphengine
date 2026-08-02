@@ -104,6 +104,7 @@ entry point for a task, then read the body for working code.
 | `task lint` | gofmt, then `go vet -unsafeptr=false` |
 | `task smoke` | Renders real frames of every example, exits non-zero on failure |
 | `task validate` | Every example under the Vulkan validation layer; must be completely silent (needs a GPU and the SDK) |
+| `task bench` | Per-pass GPU and per-phase CPU cost over a fixed scene set (needs a GPU) |
 | `task ci` | Lint, build, test, race |
 
 `go vet` needs `-unsafeptr=false`: the GLFW-to-Vulkan surface handle bridge in
