@@ -196,7 +196,7 @@ tasks:
       - go run ./12-particles -frames 150 -screenshot ../docs/images/12-particles.png
       - go run ./13-ui -frames 90 -screenshot ../docs/images/13-ui.png
       - go run ./10-text -frames 90 -screenshot ../docs/images/10-text.png
-      - go run ./16-materials -frames 60 -screenshot ../docs/images/16-materials.png
+      - go run ./16-materials -frames 150 -screenshot ../docs/images/16-materials.png
       - go run ./17-input -frames 60 -screenshot ../docs/images/17-input.png
       - go run ./15-kitchen-sink -demo -frames 260 -screenshot ../docs/images/15-kitchen-sink.png
 
