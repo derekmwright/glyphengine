@@ -1,13 +1,14 @@
 // Command 16-materials shows what a material map does that an albedo texture
 // cannot.
 //
-// Four panels, left to right, adding one map at a time to the same geometry and
+// Five panels, left to right, adding one map at a time to the same geometry and
 // the same albedo:
 //
 //  1. albedo only        — flat, lit as one uniform material
 //  2. + normal           — relief appears; the geometry is still four triangles
 //  3. + metallic-roughness — the mortar goes matte while the tiles stay slick
 //  4. + occlusion        — ambient light stops reaching into the grooves
+//  5. + emissive         — the mortar glows, and keeps glowing after sunset
 //
 // Panel 1 is what the engine could do before: colour varies per pixel while the
 // surface still lights as a single perfectly smooth material, which is why the
@@ -15,8 +16,14 @@
 // normal map perturbs the shading normal per pixel, so the light that grazes
 // across it during the day cycle catches the edges.
 //
+// Panel 5 is emission, which is not lighting at all: it is radiance the surface
+// adds regardless of what reaches it. Its strength is 6, well above 1, which
+// only means anything because the scene renders into a half-float target — on
+// the old 8-bit path it would have clipped to white at the moment it was
+// written. Watch past sunset: panels 1 to 4 go dark and panel 5 does not.
+//
 // Every map is generated at startup from one height field, so this example
-// carries no asset files at all and the four maps cannot disagree with each
+// carries no asset files at all and the five maps cannot disagree with each
 // other. Watch a while: the sun moves, and the relief moves with it.
 //
 //	go run ./16-materials
@@ -257,6 +264,11 @@ func (g *game) Init(e *glyph.Engine) error {
 	if err != nil {
 		return err
 	}
+	// Emission is a colour, so this one is sRGB like the albedo.
+	emissive, err := r.CreateTexture(buildEmissive(), mapSize, mapSize)
+	if err != nil {
+		return err
+	}
 
 	// One material per panel, each adding a map to the one before it. Materials
 	// share the textures; they hold views and samplers rather than owning them.
@@ -265,6 +277,15 @@ func (g *game) Init(e *glyph.Engine) error {
 		{Albedo: albedo, Normal: normal},
 		{Albedo: albedo, Normal: normal, MetallicRoughness: metalRough},
 		{Albedo: albedo, Normal: normal, MetallicRoughness: metalRough, Occlusion: occlusion},
+		{
+			Albedo: albedo, Normal: normal, MetallicRoughness: metalRough, Occlusion: occlusion,
+			Emissive:       emissive,
+			EmissiveFactor: [3]float32{0.35, 0.75, 1.0},
+			// Above 1 on purpose. At strength 1 this is a pale blue tint on the
+			// mortar; at 6 it is a light source that survives the tonemap as a
+			// highlight rather than as a slightly brighter surface.
+			EmissiveStrength: 6,
+		},
 	}
 	if g.flat {
 		for i := range variants {
@@ -320,7 +341,16 @@ func (g *game) Init(e *glyph.Engine) error {
 	e.SetDayCycleSpeed(1.0 / 150.0)
 	e.SetTimeOfDay(0.30)
 
-	g.camera = glyph.NewCamera(13)
+	// Reinhard rather than the engine default of identity, because this is the
+	// one scene with a surface emitting above 1 and identity simply clips it:
+	// the glow comes out a flat white blob with the colour only surviving at the
+	// edges where the map falls off. The curve compresses (2.1, 4.5, 6.0) to
+	// roughly (0.72, 0.92, 1.0) instead, so it reads as bright blue light rather
+	// than as a hole in the image. White point 6 matches the strength.
+	r.SetTonemap(0, 1, 6)
+
+	// Far enough back for five panels. Four fitted at 13.
+	g.camera = glyph.NewCamera(16)
 	g.camera.Target = mgl32.Vec3{0, 1.9, 0}
 	g.camera.Pitch = 0.12
 
@@ -366,4 +396,37 @@ func main() {
 
 	e.Run()
 	log.Printf("rendered %d frames", e.FrameCount())
+}
+
+// buildEmissive lights the mortar and leaves the tile faces dark.
+//
+// It reuses the same height field as every other map, so the glow lands exactly
+// in the grooves the normal map carves and the occlusion map darkens — which is
+// the point of the panel: the same pixels are simultaneously in shadow from
+// ambient light and emitting their own.
+//
+// Full white in the grooves rather than the final colour, because the map
+// multiplies EmissiveFactor. Putting the colour here as well would square it.
+func buildEmissive() []byte {
+	pix := make([]byte, mapSize*mapSize*4)
+	for y := 0; y < mapSize; y++ {
+		for x := 0; x < mapSize; x++ {
+			u := (float64(x) + 0.5) / mapSize
+			v := (float64(y) + 0.5) / mapSize
+
+			// height() is 1 on a tile face and 0 in the mortar, so invert it and
+			// square to keep the glow inside the groove rather than bleeding up
+			// the bevel.
+			g := 1 - height(u, v)
+			g *= g
+
+			c := byte(g * 255)
+			i := (y*mapSize + x) * 4
+			pix[i+0] = c
+			pix[i+1] = c
+			pix[i+2] = c
+			pix[i+3] = 255
+		}
+	}
+	return pix
 }

@@ -1,12 +1,15 @@
 package renderer
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 	"unsafe"
+
+	"github.com/qmuntal/gltf"
 )
 
 // TestMaterialUniformMatchesShaderBlock asserts the Go struct written into the
@@ -111,4 +114,111 @@ func TestNewMaterialUniformFlagsFollowTheMaps(t *testing.T) {
 			t.Errorf("y scale = %g without FlipGreen, want +2", plain.Scale[1])
 		}
 	})
+}
+
+// TestNewMaterialUniformEmissive checks the term that is allowed to leave the
+// 0..1 range.
+//
+// Emission is the first thing in the engine meant to exceed 1, so the strength
+// multiply is the whole point rather than a detail: fold it in wrong and an
+// authored glow arrives merely bright, which looks plausible and is impossible
+// to spot without the number in front of you. The default of one matters for the
+// same reason -- glTF's default strength is 1, and treating an unset field as
+// zero would silently delete every emissive material that does not use the
+// extension.
+//
+// It has teeth: dropping the strength multiply fails the scaled case, defaulting
+// strength to 0 instead of 1 fails the unset case, and setting the map flag from
+// the wrong field fails the flag cases.
+func TestNewMaterialUniformEmissive(t *testing.T) {
+	tex := &Texture{}
+
+	t.Run("absent by default", func(t *testing.T) {
+		u := newMaterialUniform(MaterialOptions{Albedo: tex})
+		if u.Emissive != [4]float32{0, 0, 0, 0} {
+			t.Errorf("emissive = %v with nothing set, want all zero", u.Emissive)
+		}
+	})
+
+	t.Run("unset strength means one", func(t *testing.T) {
+		u := newMaterialUniform(MaterialOptions{EmissiveFactor: [3]float32{0.5, 0.25, 1}})
+		if want := [3]float32{0.5, 0.25, 1}; [3]float32{u.Emissive[0], u.Emissive[1], u.Emissive[2]} != want {
+			t.Errorf("emissive rgb = %v, want %v", u.Emissive[:3], want)
+		}
+	})
+
+	t.Run("strength scales the factor past one", func(t *testing.T) {
+		u := newMaterialUniform(MaterialOptions{
+			EmissiveFactor:   [3]float32{1, 0.5, 0},
+			EmissiveStrength: 8,
+		})
+		if want := [3]float32{8, 4, 0}; [3]float32{u.Emissive[0], u.Emissive[1], u.Emissive[2]} != want {
+			t.Errorf("emissive rgb = %v, want %v", u.Emissive[:3], want)
+		}
+		if u.Emissive[0] <= 1 {
+			t.Errorf("emissive red = %g, want above 1 -- the HDR range is the point", u.Emissive[0])
+		}
+	})
+
+	t.Run("map flag follows the map, not the factor", func(t *testing.T) {
+		withMap := newMaterialUniform(MaterialOptions{Emissive: tex})
+		if withMap.Emissive[3] != 1 {
+			t.Errorf("map flag = %g with an emissive map, want 1", withMap.Emissive[3])
+		}
+		factorOnly := newMaterialUniform(MaterialOptions{EmissiveFactor: [3]float32{1, 1, 1}})
+		if factorOnly.Emissive[3] != 0 {
+			t.Errorf("map flag = %g with a factor but no map, want 0", factorOnly.Emissive[3])
+		}
+	})
+
+	t.Run("emissive does not disturb the other maps", func(t *testing.T) {
+		u := newMaterialUniform(MaterialOptions{Emissive: tex, EmissiveStrength: 4})
+		for i, name := range []string{"normal", "metallic-roughness", "occlusion"} {
+			if u.Maps[i] != 0 {
+				t.Errorf("%s flag = %g, want 0", name, u.Maps[i])
+			}
+		}
+		if u.Scale[0] != 1 || u.Scale[1] != 1 {
+			t.Errorf("normal scale = %v, want (1,1)", u.Scale[:2])
+		}
+	})
+}
+
+// TestEmissiveStrength covers KHR_materials_emissive_strength, which arrives as
+// raw JSON because the extension is not registered with the decoder.
+//
+// Every malformed case has to return 1 rather than 0. Returning 0 would make a
+// broken extension delete the emission entirely, which reads as "this model has
+// no emissive material" rather than as a parse failure -- and glTF's own default
+// when the extension is absent is 1, so 1 is both the safe answer and the
+// correct one.
+//
+// It has teeth: returning 0 from any failure path fails the corresponding case,
+// and dropping the negative guard fails the last one.
+func TestEmissiveStrength(t *testing.T) {
+	const key = "KHR_materials_emissive_strength"
+
+	cases := []struct {
+		name string
+		ext  gltf.Extensions
+		want float32
+	}{
+		{"absent", nil, 1},
+		{"other extension only", gltf.Extensions{"KHR_materials_unlit": json.RawMessage(`{}`)}, 1},
+		{"present", gltf.Extensions{key: json.RawMessage(`{"emissiveStrength":5.5}`)}, 5.5},
+		{"present but empty", gltf.Extensions{key: json.RawMessage(`{}`)}, 1},
+		{"malformed json", gltf.Extensions{key: json.RawMessage(`{`)}, 1},
+		{"wrong type", gltf.Extensions{key: json.RawMessage(`{"emissiveStrength":"bright"}`)}, 1},
+		{"not raw json", gltf.Extensions{key: 5.5}, 1},
+		{"zero is honoured", gltf.Extensions{key: json.RawMessage(`{"emissiveStrength":0}`)}, 0},
+		{"negative falls back", gltf.Extensions{key: json.RawMessage(`{"emissiveStrength":-2}`)}, 1},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := emissiveStrength(&gltf.Material{Extensions: c.ext}); got != c.want {
+				t.Errorf("emissiveStrength = %g, want %g", got, c.want)
+			}
+		})
+	}
 }

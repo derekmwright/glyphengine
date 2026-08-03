@@ -1,8 +1,8 @@
 ---
 id: material-maps
-title: Normal, roughness and occlusion maps
+title: Normal, roughness, occlusion and emissive maps
 summary: >
-  Give a surface per-pixel relief and per-pixel roughness with a Material,
+  Give a surface per-pixel relief, roughness and emission with a Material,
   instead of one uniform material per object.
 capability: rendering
 status: stable
@@ -20,7 +20,7 @@ api:
 assets: procedural
 example: examples/16-materials
 run: go run ./16-materials
-verified: 2026-07-29
+verified: 2026-08-02
 ---
 
 # Material maps
@@ -99,6 +99,34 @@ makes AO-mapped geometry read as dirty rather than as shaped.
 `OcclusionStrength` blends toward no occlusion; zero means one, matching glTF's
 default. To switch occlusion off, leave `Occlusion` nil.
 
+## Emission is not lighting
+
+`EmissiveFactor` is radiance the surface adds regardless of what reaches it. It
+takes no shadow and no occlusion — a surface that emits does so whether or not a
+light can see it, and baked AO describes how much ambient arrives, not how much
+leaves. Fog still applies, because the air between the surface and the eye
+scatters emitted light like any other.
+
+```go
+mat, _ := r.CreateMaterial(renderer.MaterialOptions{
+    Albedo:           albedo,
+    Emissive:         glowMap,               // optional; multiplies the factor
+    EmissiveFactor:   [3]float32{0.35, 0.75, 1.0},
+    EmissiveStrength: 6,                     // above 1 on purpose
+})
+```
+
+`Emissive` multiplies `EmissiveFactor`, which is glTF's rule and the reason a
+model that should glow but comes out black usually has a factor of zero rather
+than a missing map. Author the map as a mask and put the colour in the factor;
+putting the colour in both squares it.
+
+**`EmissiveStrength` is the one place the engine deliberately produces values
+above 1.** That only means something because the scene renders into a half-float
+target — see [`hdr-tonemap.md`](hdr-tonemap.md). Under the default identity
+curve a strength of 6 still clips to white, so `16-materials` selects extended
+Reinhard to keep the colour. Zero means one, matching glTF.
+
 ## No tangent attribute
 
 The tangent frame is derived in the fragment shader from screen-space
@@ -125,11 +153,20 @@ looks lit-from-the-wrong-side along one axis but correct along the other. Set
 
 ## glTF
 
-`LoadGLTF` reads `normalTexture`, `metallicRoughnessTexture`, and
-`occlusionTexture`, along with `normalTexture.scale` and
-`occlusionTexture.strength`, and returns a built `Material` on
-`ModelMesh.Material`. It is nil when the glTF material has none of those maps, so
-existing models stay on the plain textured path unchanged.
+`LoadGLTF` reads `normalTexture`, `metallicRoughnessTexture`,
+`occlusionTexture` and `emissiveTexture`, along with `normalTexture.scale`,
+`occlusionTexture.strength`, `emissiveFactor` and
+`KHR_materials_emissive_strength`, and returns a built `Material` on
+`ModelMesh.Material`. It is nil when the glTF material has none of those maps and
+no emissive factor, so existing models stay on the plain textured path unchanged.
+
+`KHR_materials_emissive_strength` is not registered with the decoder, so it
+arrives as raw JSON and is parsed by hand. Every failure path returns 1, glTF's
+default: a malformed extension should make a material look like one without the
+extension, not delete its emission.
+
+Emissive textures go through the **sRGB** path, unlike normal, roughness and
+occlusion. Emission is a colour.
 
 ```go
 model, _ := r.LoadGLTF(assets, "assets/rock.gltf")

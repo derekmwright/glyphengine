@@ -2,6 +2,7 @@ package renderer
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"image"
 	"image/draw"
@@ -393,6 +394,9 @@ func textureFor(doc *gltf.Document, textures map[int]*Texture, texIdx int) *Text
 // The cache is keyed by glTF material index because primitives share materials:
 // a model with twenty primitives and two materials should allocate two
 // descriptor sets, not twenty. See maxMaterials for the budget.
+//
+// Emissive textures are deliberately absent from dataImageIndices: emission is a
+// colour, so it goes through the sRGB path like albedo.
 func (r *Renderer) resolveMaterialMaps(doc *gltf.Document, textures map[int]*Texture, cache map[int]*Material, materialIdx int) (*Material, error) {
 	if materialIdx < 0 || materialIdx >= len(doc.Materials) {
 		return nil, nil
@@ -418,8 +422,20 @@ func (r *Renderer) resolveMaterialMaps(doc *gltf.Document, textures map[int]*Tex
 	if pbr := mat.PBRMetallicRoughness; pbr != nil && pbr.MetallicRoughnessTexture != nil {
 		opts.MetallicRoughness = textureFor(doc, textures, pbr.MetallicRoughnessTexture.Index)
 	}
+	if mat.EmissiveTexture != nil {
+		opts.Emissive = textureFor(doc, textures, mat.EmissiveTexture.Index)
+	}
+	opts.EmissiveFactor = [3]float32{
+		float32(mat.EmissiveFactor[0]),
+		float32(mat.EmissiveFactor[1]),
+		float32(mat.EmissiveFactor[2]),
+	}
+	opts.EmissiveStrength = emissiveStrength(mat)
 
-	if opts.Normal == nil && opts.Occlusion == nil && opts.MetallicRoughness == nil {
+	// A material with nothing but an emissive factor still needs the material
+	// path -- the plain lit shader has nowhere to put emission.
+	emits := opts.Emissive != nil || opts.EmissiveFactor != [3]float32{}
+	if opts.Normal == nil && opts.Occlusion == nil && opts.MetallicRoughness == nil && !emits {
 		cache[materialIdx] = nil
 		return nil, nil
 	}
@@ -1025,4 +1041,37 @@ func convertMat4(m [4][4]float32) mgl32.Mat4 {
 		m[0][2], m[1][2], m[2][2], m[3][2], // column 2
 		m[0][3], m[1][3], m[2][3], m[3][3], // column 3
 	}
+}
+
+// emissiveStrength reads KHR_materials_emissive_strength, defaulting to 1.
+//
+// The extension is not registered with the glTF decoder, so it arrives as raw
+// JSON rather than as a typed struct. Registering it would mean depending on an
+// ext package that does not exist for this one; parsing the single float here is
+// smaller than that, and every failure path returns the glTF default rather than
+// an error, because a model with a malformed extension should still load looking
+// like a model without it.
+//
+// This matters more than it looks: the extension exists precisely to let a
+// material emit above 1, which is the range the HDR target was added to hold.
+// Dropping it silently clamps every authored glow back to merely bright.
+func emissiveStrength(mat *gltf.Material) float32 {
+	raw, ok := mat.Extensions["KHR_materials_emissive_strength"]
+	if !ok {
+		return 1
+	}
+	msg, ok := raw.(json.RawMessage)
+	if !ok {
+		return 1
+	}
+	var ext struct {
+		EmissiveStrength *float64 `json:"emissiveStrength"`
+	}
+	if err := json.Unmarshal(msg, &ext); err != nil || ext.EmissiveStrength == nil {
+		return 1
+	}
+	if *ext.EmissiveStrength < 0 {
+		return 1
+	}
+	return float32(*ext.EmissiveStrength)
 }

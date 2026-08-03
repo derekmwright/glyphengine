@@ -28,35 +28,22 @@ makes it impossible to say which one moved the image.
 
 ## Choosing a look
 
+Set it from `Game.Init`, where the renderer is available:
+
 ```go
-package main
-
-import (
-	glyph "github.com/derekmwright/glyphengine"
-)
-
-func main() {
-	e, err := glyph.New(glyph.Config{Title: "hdr"})
-	if err != nil {
-		panic(err)
-	}
-	defer e.Close()
-
+func (g *game) Init(e *glyph.Engine) error {
 	// exposure, curve, whitePoint.
 	//   exposure <= 0 leaves the scene alone.
 	//   curve 0 is identity; curve 1 is extended Reinhard.
 	//   whitePoint is the value that maps to white, and is clamped to >= 1.
 	e.Renderer().SetTonemap(1.2, 1, 4.0)
-
-	// ... build a scene ...
-	if err := e.Run(); err != nil {
-		panic(err)
-	}
+	return nil
 }
 ```
 
 Passing `(0, 0, 0)` restores the default. The values are read fresh each frame,
-so they can be animated.
+so they can be animated. `examples/16-materials` selects Reinhard this way,
+because it is the one scene with a surface emitting above 1.
 
 ## Why the target exists
 
@@ -143,10 +130,12 @@ is ALU-bound rather than fill-bound.
 
 ## Not done
 
-- Nothing in the engine emits above 1 yet, so the extra range is available but
-  unused. Emissive materials, or a sun disc written at its real intensity, are
-  what would make a curve do visible work.
-- No bloom. The target it needs now exists.
+- Emissive materials are the only thing that emits above 1 so far. A sun disc
+  written at its real intensity would be the other obvious one, and would make
+  the curve do visible work in every outdoor scene rather than in one example.
+- No bloom. The target it needs now exists, and so does something bright enough
+  for a threshold to select: see
+  [`material-maps.md`](material-maps.md) on `EmissiveStrength`.
 - The curve is a branch on a push-constant rather than a pipeline variant. That
   is a fullscreen pass with a uniform branch, so it costs nothing measurable,
   but it does mean the set of curves is closed and lives in `tonemap.frag`.

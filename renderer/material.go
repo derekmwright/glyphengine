@@ -8,22 +8,23 @@ import (
 )
 
 // materialTextureBindings is how many combined image samplers a Material binds
-// before its uniform buffer: albedo, normal, metallic-roughness, occlusion.
-const materialTextureBindings = 4
+// before its uniform buffer: albedo, normal, metallic-roughness, occlusion,
+// emissive.
+const materialTextureBindings = 5
 
 // materialUniformSize is the byte size of materialUniform, which must match the
 // MaterialBlock declared in lit_material.frag.
-const materialUniformSize = 32
+const materialUniformSize = 48
 
 // Material binds the texture maps that describe one surface — albedo, normal,
-// metallic-roughness, occlusion — plus the flags telling the shader which of
-// them are real.
+// metallic-roughness, occlusion, emissive — plus the flags telling the shader
+// which of them are real.
 //
 // It is the multi-map counterpart to a bare *Texture. A Texture is one combined
 // image sampler and nothing else, so a shader reading it can only vary colour
 // per pixel while the surface still lights as one perfectly smooth material.
-// A Material is four samplers at set 0 bindings 0-3 and a small uniform buffer
-// at binding 4, which is why it needs its own descriptor set layout, pipeline
+// A Material is five samplers at set 0 bindings 0-4 and a small uniform buffer
+// at binding 5, which is why it needs its own descriptor set layout, pipeline
 // layout, and fragment shader rather than riding the plain lit path.
 //
 // TerrainMaterial is the same idea with a fixed four-albedo layout; this
@@ -51,6 +52,11 @@ type materialUniform struct {
 	Maps [4]float32
 	// Scale holds xy = tangent-space normal scale; a negative y flips green.
 	Scale [4]float32
+	// Emissive holds rgb = emitted radiance already multiplied by strength, and
+	// w = has emissive map. The strength is folded in here rather than kept
+	// separate because the shader has no use for the two apart, and this is the
+	// only value in the engine that is meant to exceed 1.
+	Emissive [4]float32
 }
 
 // MaterialOptions describes one surface. Every map is optional: an unsupplied
@@ -93,6 +99,29 @@ type MaterialOptions struct {
 	// Zero means one, matching glTF's default. To switch occlusion off,
 	// leave Occlusion nil rather than setting this to zero.
 	OcclusionStrength float32
+
+	// Emissive is a colour map of what the surface emits. It multiplies
+	// EmissiveFactor, so a map with no factor emits nothing — glTF's rule, and
+	// the reason a model that looks black where it should glow usually has a
+	// factor of zero rather than a missing map.
+	//
+	// This is a colour texture, so load it the ordinary way. Passing a data
+	// texture here makes the emission too dark by the sRGB curve.
+	Emissive *Texture
+
+	// EmissiveFactor is emitted radiance, unlit and unshadowed. Zero means the
+	// surface emits nothing, which is the default.
+	EmissiveFactor [3]float32
+
+	// EmissiveStrength multiplies EmissiveFactor, matching
+	// KHR_materials_emissive_strength. Zero means one.
+	//
+	// This is the one place the engine is meant to produce values above 1. The
+	// HDR target holds them and the tonemap resolve decides what to do with
+	// them; at strength 1 an emissive surface is merely bright, and past that it
+	// is what a bloom threshold can actually select. See
+	// docs/agents/hdr-tonemap.md.
+	EmissiveStrength float32
 }
 
 // materialPipelines bundles the material variant's pipelines for the command
@@ -123,6 +152,10 @@ func newMaterialUniform(opts MaterialOptions) materialUniform {
 	if occlusionStrength == 0 {
 		occlusionStrength = 1
 	}
+	emissiveStrength := opts.EmissiveStrength
+	if emissiveStrength == 0 {
+		emissiveStrength = 1
+	}
 
 	// Green flips by negating the scale's y rather than by a separate flag, so
 	// the shader multiplies once either way.
@@ -139,13 +172,19 @@ func newMaterialUniform(opts MaterialOptions) materialUniform {
 			occlusionStrength,
 		},
 		Scale: [4]float32{normalScale, greenSign, 0, 0},
+		Emissive: [4]float32{
+			opts.EmissiveFactor[0] * emissiveStrength,
+			opts.EmissiveFactor[1] * emissiveStrength,
+			opts.EmissiveFactor[2] * emissiveStrength,
+			boolToFloat(opts.Emissive != nil),
+		},
 	}
 }
 
-// createMaterialDescriptorSetLayout creates a layout with four combined image
-// samplers at set=0, bindings 0-3 (albedo, normal, metallic-roughness,
-// occlusion) plus the per-material uniform buffer at binding 4, all fragment
-// stage.
+// createMaterialDescriptorSetLayout creates a layout with five combined image
+// samplers at set=0, bindings 0-4 (albedo, normal, metallic-roughness,
+// occlusion, emissive) plus the per-material uniform buffer at binding 5, all
+// fragment stage.
 func createMaterialDescriptorSetLayout(deviceDriver core1_0.DeviceDriver) (core1_0.DescriptorSetLayout, error) {
 	bindings := make([]core1_0.DescriptorSetLayoutBinding, materialTextureBindings+1)
 	for i := 0; i < materialTextureBindings; i++ {
@@ -225,6 +264,7 @@ func (r *Renderer) CreateMaterial(opts MaterialOptions) (*Material, error) {
 		orFallback(opts.Normal, r.fallbackNormal),
 		orFallback(opts.MetallicRoughness, r.fallbackTexture),
 		orFallback(opts.Occlusion, r.fallbackTexture),
+		orFallback(opts.Emissive, r.fallbackTexture),
 	}
 
 	writes := make([]core1_0.WriteDescriptorSet, 0, materialTextureBindings+1)

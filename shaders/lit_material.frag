@@ -1,8 +1,8 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 
-// Material shader: the lit path plus normal, metallic-roughness, and occlusion
-// maps. Shares lit.vert and the lit shadow set (set 1); only the material set
+// Material shader: the lit path plus normal, metallic-roughness, occlusion and
+// emissive maps. Shares lit.vert and the lit shadow set (set 1); only the material set
 // (set 0) differs, the same way terrain.frag does.
 //
 // Without this, lighting is Blinn-Phong with one uniform material per object,
@@ -22,10 +22,12 @@ layout(set = 0, binding = 0) uniform sampler2D albedoTex;
 layout(set = 0, binding = 1) uniform sampler2D normalTex;
 layout(set = 0, binding = 2) uniform sampler2D metalRoughTex;
 layout(set = 0, binding = 3) uniform sampler2D occlusionTex;
+layout(set = 0, binding = 4) uniform sampler2D emissiveTex;
 
-layout(set = 0, binding = 4) uniform MaterialBlock {
-    vec4 maps;  // xyz = has normal / metallic-roughness / occlusion, w = occlusion strength
-    vec4 scale; // xy = tangent-space normal scale, y negative flips green
+layout(set = 0, binding = 5) uniform MaterialBlock {
+    vec4 maps;     // xyz = has normal / metallic-roughness / occlusion, w = occlusion strength
+    vec4 scale;    // xy = tangent-space normal scale, y negative flips green
+    vec4 emissive; // rgb = emitted radiance with strength folded in, w = has emissive map
 } matl;
 
 // Shadow at set 1 — identical to lit.frag so the shared shadow descriptor binds.
@@ -137,5 +139,20 @@ void main() {
     }
 
     vec3 lit = evalLightingAO(diffuseColor, F0, shininess, N, V, fragWorldPos, fragShadowPos, ao);
+
+    // Emission is added after lighting and before fog. It takes no shadow and no
+    // occlusion -- a surface that emits does so whether or not a light can see
+    // it, and baked AO describes how much ambient reaches the surface, not how
+    // much leaves it. Fog still applies, because the air between the surface and
+    // the eye scatters emitted light exactly like any other.
+    //
+    // This is the one term in the engine allowed to exceed 1. It reaches the
+    // half-float target intact; see docs/agents/hdr-tonemap.md.
+    vec3 emission = matl.emissive.rgb;
+    if (matl.emissive.w > 0.5) {
+        emission *= texture(emissiveTex, fragUV).rgb;
+    }
+    lit += emission;
+
     outColor = vec4(applyFog(lit, fragWorldPos), 1.0);
 }
