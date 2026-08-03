@@ -1,17 +1,23 @@
-# Handoff — materials, input, and instrumentation
+# Handoff — materials, input, instrumentation, HDR
 
 Transient note for the next session. Delete once the work below has landed.
 
 ## Where things are
 
 Branch `celestial-depth-and-glow`, **not pushed**, `main` untouched. The branch
-name is from its first two commits and now describes about a tenth of what is on
-it; rename before pushing.
+name is from its first two commits and now describes about a twentieth of what is
+on it; rename before pushing.
 
 Everything below is verified with `task ci` and `task validate` (all 16 examples
 silent under the validation layer).
 
 ```
+cdcc8bf  Regenerate the documentation screenshots
+9209823  Add bloom, thresholded above 1
+0a9fa35  Add emissive maps, the first thing that emits above 1
+c0ff534  Render the scene to a half-float target and resolve it
+ebd057c  Keep README screenshots out of the module download
+91fa917  Document the profiling capability and refresh the handoff
 9af2ddb  Thin distant grass, and count what the frame submits
 4dc1926  Add task bench
 8d178f9  Time the CPU side of the frame, including the waits
@@ -23,7 +29,6 @@ acc94de  Add example 17-input and the input capability page
 692e7e4  Let a thumbstick's deflection scale walking speed
 9b6a4c5  Add the action mapping layer
 d04635e  Add gamepad support to the input package
-ecad49d  Note the slider idea in the handoff, with what it would actually take
 0d3a7b6  Update the handoff for the material maps and the three fixes
 086cb69  Make the lake read as water rather than as a wake
 c45a334  Stop the water surface faceting when waves outrun the grid
@@ -35,26 +40,24 @@ cdd0a65  Drive the atmosphere's scattering from the sun, not the current light
 
 ## What landed
 
-**Material maps.** `renderer.Material` binds albedo, normal, metallic-roughness
-and occlusion at set 0 plus a flags UBO, with its own pipeline and a
-double-sided variant. Attach with `MaterialRef.PBR`. Tangent frame comes from
-screen-space derivatives, so no vertex format changed. glTF reads the three
-extra textures. Example `16-materials`.
+**HDR and tonemapping.** The scene renders into `R16G16B16A16_SFLOAT` and a
+fullscreen pass resolves it. `Renderer.SetTonemap` gives exposure and a curve.
+Default is identity, so nothing looks different until asked.
+See [`docs/agents/hdr-tonemap.md`](docs/agents/hdr-tonemap.md).
+
+**Emissive materials.** `MaterialOptions.Emissive*`, plus glTF `emissiveFactor`,
+`emissiveTexture` and `KHR_materials_emissive_strength`. The first thing in the
+engine that emits above 1.
 See [`docs/agents/material-maps.md`](docs/agents/material-maps.md).
 
-**Input.** Gamepads, an action-mapping layer, analog movement, and thumbstick
-look on both cameras. See [`docs/agents/input.md`](docs/agents/input.md).
+**Bloom.** Five-level chain, thresholded, composited in the resolve. Off by
+default and free when off. See [`docs/agents/bloom.md`](docs/agents/bloom.md).
 
-**Instrumentation.** Per-pass GPU timestamps, per-phase CPU timing including the
-GPU wait, render counters, and `task bench`.
-See [`docs/agents/profiling.md`](docs/agents/profiling.md).
+**Material maps, input, instrumentation** — as recorded in the earlier handoff;
+their pages are `material-maps.md`, `input.md` and `profiling.md`.
 
 **Performance.** 15-kitchen-sink GPU 6.53 → 4.09 ms (−37%), from a four-tap PCF
 and thinning distant grass.
-
-**Four bug fixes:** stars drawing through terrain, celestial discs occluding it,
-an orange sunset halo on the midnight moon, and water faceting when waves
-outran the vertex grid.
 
 ## Still open
 
@@ -63,25 +66,27 @@ outran the vertex grid.
   until a pad has been tried against `17-input`, in case sensitivity or dead
   zone needs changing; the values live in the engine, though, so the migration
   itself does not bake anything in.
-- **`task screenshots` has not been run.** Six examples changed framing when
-  their cameras became automatic, and `16-materials.png` and `17-input.png` do
-  not exist. Nothing blocks it now — see the entry below — it just has not been
-  run, and it needs a GPU.
-- **Sky is now the top GPU pass in most scenes** — 83 to 93 percent in 02-cube,
+- **The sun disc does not emit above 1.** It is the obvious next HDR source, and
+  the one that would make the curve and the bloom do visible work in every
+  outdoor scene rather than in one example.
+- **Sky is the top GPU pass in most scenes** — 78 to 92 percent in 02-cube,
   07-terrain, 09-water, 12-particles and 16-materials, and about 30 percent
-  where there is grass. `CloudSteps` is already an exposed setting; the honest
-  next step is measuring what `CloudsLow` costs against how it looks rather than
-  optimising the march.
+  where there is grass. `CloudSteps` is already exposed; the honest next step is
+  measuring what `CloudsLow` costs against how it looks. Note the cloud march is
+  **ALU-bound, not fill-bound**: doubling the target's bit depth did not move it
+  at all (1.594 → 1.593 ms).
 - **Grass past this point costs visible quality.** `grassThinNear/Far/Min` and
   `GrassMaxDistance` are the knobs. Everything free has been taken.
 - **Terrain and skinned meshes ignore `Material`.** Terrain is the larger piece:
   its splat pipeline already spends all four set-0 bindings on albedo.
 - **The terrain splat path is unusable from a clean clone.** No example uses it,
   and `shaders/terrain.frag` says its `SPLAT_TILE` must match
-  `cmd/tools/genterrain/main.go`, which does not exist in this repo. Generating
-  the weight map from the heightmap would fix both.
-- **Sliders for the examples** — scoped in an earlier handoff entry; the only
-  missing piece is a drag callback on `ui.Clickable`.
+  `cmd/tools/genterrain/main.go`, which does not exist in this repo.
+- **Resizing leaks descriptor pool capacity.** `recreateSwapchain` rebuilds the
+  HDR and bloom chains and reallocates their sets without resetting the pool.
+  `maxHDRSets` and `maxBloomSets` are headroom for several resizes, not a fix.
+- **Sliders for the examples** — the only missing piece is a drag callback on
+  `ui.Clickable`.
 - **`14-audio`** — still the only subsystem with neither example nor test.
 
 ## Hard-won context
@@ -91,7 +96,8 @@ outran the vertex grid.
   their `w` because there is nowhere else: `sunColor.w` is the real sun's
   elevation, `pointColor.w` roughness, `ambient.w` metallic, `cameraPos.w` fog
   density, `fog.zw` the real sun's horizontal direction, and in the water path
-  `sunDir.w` is the wave noise fraction. Anything new needs a uniform buffer.
+  `sunDir.w` is the wave noise fraction. Anything new needs a uniform buffer —
+  which is what the material path already does for emissive.
 
 - **`pc.sunDir` is not the sun.** It is whichever body lights the scene, which is
   the moon at night. The real sun is `sunColor.w` plus `fog.zw`, reassembled by
@@ -99,52 +105,47 @@ outran the vertex grid.
   moonlit at night.
 
 - **sRGB is a property of the image, not the sampler.** Normal, roughness and
-  occlusion maps go through `CreateDataTexture`. Loaded as colour, a flat normal
-  arrives tilted and nothing says so.
+  occlusion maps go through `CreateDataTexture`. Emissive maps do **not** —
+  emission is a colour.
 
 - **Everything at the far plane draws LAST**, depth-tested `GreaterOrEqual` —
   `farPlaneDepthState` in `renderer/pipeline.go`, shared by sky and stars because
-  those two drifted apart once. Anything standing in for a body at infinity must
-  sit *just inside* the far plane: nearer occludes the world, and at the far
-  plane the sky wins the tie.
+  those two drifted apart once.
+
+- **Every path that presents must record the tonemap resolve.** The scene passes
+  no longer touch the swapchain at all. `DrawTriangle` has its own loop and was
+  missed; `task ci` passed anyway and only `task validate` caught it.
+
+- **A descriptor's declared layout is validated whether or not the shader reads
+  it.** A uniform branch skipping the sample does nothing for the layout check.
+  That is what `primeBloomLayouts` is for, and `initCubeShadowLayout` before it.
+
+- **Check a bloom or godray threshold against the SKY.** Daytime sky is about
+  0.68 in linear. A ramp reaching below that lifts the whole frame and reads as
+  haze rather than as a mistake. Measured: RMS 0.025 across the sky before the
+  threshold was raised, 0.002 after.
 
 - **Measure, and check the measurement.** Every performance number here came from
-  `task bench`. Three separate times this session a confident measurement was
-  wrong until something checked it: the GPU pass sum exceeding the frame total
-  (mixed `TopOfPipe`/`BottomOfPipe`), 6.3 ms of "CPU" that was `vkQueuePresentKHR`
-  blocking on vsync, and a per-frame ranking generalised from the only two scenes
-  that had grass in them. Read `docs/agents/profiling.md` before trusting a
-  number, including one written here.
+  `task bench`. Read `docs/agents/profiling.md` before trusting a number,
+  including one written here.
 
 - **Establish a noise floor before believing a diff.** Two identical runs first.
-  Frame timing spreads 0.05 ms with means, 0.32 ms without. Screenshots spread
-  RMS 0.00003 on a static scene and 0.0036 on grass, because wind moves
-  everything.
+  Frame timing spreads about 0.02 ms with means. Screenshot RMS spreads
+  0.0006 on 07-terrain, which is the most static scene, and 0.004 to 0.007 on
+  anything with a day cycle or wind — high enough to swamp a subtle change, so
+  compare regions rather than whole frames when the change is local.
 
-- **`task validate` is not optional.** It caught a query pool being read before
-  it was ever reset — undefined behaviour that returns `NotReady`, so the
-  early-out already there looked like it handled the case.
+- **`task validate` is not optional.** It has now caught four things this branch
+  that nothing else did: a query pool read before reset, a swapchain presented in
+  UNDEFINED, MSAA images left at the swapchain format, and the bloom layout
+  above.
 
-- **The shader staleness test earns its keep.** It caught `lit.frag`,
-  `skinned_lit.frag` and `terrain.frag` going stale after an edit to
-  `lighting.inc`. Run `task shaders` after touching any `.inc`.
+- **The shader staleness test earns its keep.** Run `task shaders` after touching
+  any `.inc` — `bloom.inc` is now one of them.
 
-- **Do not reach for ACES or any film curve.** Tried and reverted; nothing here
-  emits above 1, which is exactly where ACES lifts.
-
-- **The washed-out look is content, not the engine.** Measured and disproved.
-
-- **`-novsync` benchmarking is obsolete.** GPU timestamps measure GPU work with
-  vsync on, so the coil whine is no longer a cost of measuring anything.
-
-- **`docs/images/` no longer ships to module consumers.** `.gitattributes`
-  marks it `export-ignore`, which cmd/go honours because it builds module zips
-  with `git archive`. Verified: the archive drops from 11690 KB to 7100 KB and
-  all fourteen images are gone, while `git clone` and GitHub still have them.
-
-  The obvious way to test this reports no change, which is worth knowing before
-  concluding it does not work: `git archive HEAD` reads `.gitattributes` from
-  the tree being archived, so an uncommitted one does nothing at all.
+- **ACES is still not the answer** — but the reason has changed. The target it
+  needs now exists; what is missing is scene content bright enough to justify a
+  film curve. Extended Reinhard is wired and used by 16-materials.
 
 - **The LSP in this workspace reports phantom errors** — undefined symbols for
   APIs that plainly exist. `go build ./...` is the authority.
@@ -164,9 +165,17 @@ task screenshots        # regenerate docs/images
 ```
 
 Per `CLAUDE.md`: when adding a check for a bug, **break the fix and confirm the
-check fails.** Everything added this session was verified that way, with the
-verification recorded in the test's own comment. Two of those checks did not bite
-on the first attempt and had to be retuned — a dead-zone test whose values were
-not strictly inside the threshold, and an input harness that snapshotted state in
-the wrong order so every edge read false. Both reasons are written into the
-tests.
+check fails.** The emissive work was verified that way against six separate
+breaks — dropping the strength multiply, defaulting an unset strength to zero,
+reading the map flag off the wrong field, returning zero from a glTF parse
+failure, dropping the negative guard, and removing the vec4 from the shader's
+`MaterialBlock`. Each fails exactly the test that covers it.
+
+Two things this branch verified by experiment rather than by test, because no
+unit test can see them:
+
+- **The HDR target really holds values above 1.** `lit.frag` temporarily emitting
+  `4.0x`, resolved at `0.25` exposure, reproduces 11-lights intact. An 8-bit
+  target would have returned a flat quarter-grey silhouette.
+- **Emission takes no lighting.** At midnight, panels 1-4 of 16-materials go
+  black and panel 5 keeps glowing.
