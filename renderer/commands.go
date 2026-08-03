@@ -293,10 +293,12 @@ type tonemapPass struct {
 	pipeline    core1_0.Pipeline
 	framebuffer core1_0.Framebuffer
 	set         core1_0.DescriptorSet
+	layout      core1_0.PipelineLayout
 
 	exposure float32
 	curve    float32
 	white    float32
+	bloom    float32
 }
 
 // materialPipelines groups the material variant's pipelines with their layouts.
@@ -334,6 +336,7 @@ func recordCommandBuffer(
 	waterFramebuffer core1_0.Framebuffer,
 	sceneColor *sceneColorTarget,
 	sceneImage core1_0.Image,
+	bloom bloomPass,
 	tonemap tonemapPass,
 	particlePipeline core1_0.Pipeline,
 	terrainPipeline core1_0.Pipeline,
@@ -1137,8 +1140,14 @@ func recordCommandBuffer(
 
 	timer.end(deviceDriver, cmdBuf, frame, PassWater)
 
+	timer.begin(deviceDriver, cmdBuf, frame, PassBloom)
+	if err := recordBloom(deviceDriver, cmdBuf, bloom); err != nil {
+		return err
+	}
+	timer.end(deviceDriver, cmdBuf, frame, PassBloom)
+
 	timer.begin(deviceDriver, cmdBuf, frame, PassTonemap)
-	if err := recordTonemap(deviceDriver, cmdBuf, tonemap, pipelineLayout, extent); err != nil {
+	if err := recordTonemap(deviceDriver, cmdBuf, tonemap, tonemap.layout, extent); err != nil {
 		return err
 	}
 	timer.end(deviceDriver, cmdBuf, frame, PassTonemap)

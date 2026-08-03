@@ -35,9 +35,14 @@ type hdrTarget struct {
 	views   []core1_0.ImageView
 	sampler core1_0.Sampler
 
-	// sets are combined image samplers, one per image, for the tonemap pass to
-	// bind at set 0.
-	sets []core1_0.DescriptorSet
+	// sceneSets sample this image alone, at set 0 binding 0. The bloom
+	// prefilter reads the scene through these.
+	sceneSets []core1_0.DescriptorSet
+
+	// tonemapSets bind the scene at binding 0 and the bloom chain's finest
+	// level at binding 1. They are written after the bloom chain exists, which
+	// is why they are not filled in by createHDRTargets.
+	tonemapSets []core1_0.DescriptorSet
 
 	extent core1_0.Extent2D
 }
@@ -158,7 +163,7 @@ func createHDRTargets(
 		t.destroy(deviceDriver)
 		return nil, fmt.Errorf("allocate hdr descriptor sets: %w", err)
 	}
-	t.sets = sets
+	t.sceneSets = sets
 
 	writes := make([]core1_0.WriteDescriptorSet, count)
 	for i := 0; i < count; i++ {
@@ -199,7 +204,88 @@ func (t *hdrTarget) destroy(deviceDriver core1_0.DeviceDriver) {
 	for _, i := range t.images {
 		deviceDriver.DestroyImage(i, nil)
 	}
-	t.views, t.memory, t.images, t.sets = nil, nil, nil, nil
+	t.views, t.memory, t.images = nil, nil, nil
+	t.sceneSets, t.tonemapSets = nil, nil
+}
+
+// createTonemapSetLayout is set 0 for the resolve: the scene at binding 0 and
+// the bloom chain's finest level at binding 1.
+//
+// Separate from the plain one-sampler layout because the resolve is the only
+// pass that reads both. Binding 1 is written whether or not bloom is on -- a
+// descriptor a shader statically references has to be valid even on the path
+// that never samples it.
+func createTonemapSetLayout(deviceDriver core1_0.DeviceDriver) (core1_0.DescriptorSetLayout, error) {
+	bindings := make([]core1_0.DescriptorSetLayoutBinding, 2)
+	for i := range bindings {
+		bindings[i] = core1_0.DescriptorSetLayoutBinding{
+			Binding:         i,
+			DescriptorType:  core1_0.DescriptorTypeCombinedImageSampler,
+			DescriptorCount: 1,
+			StageFlags:      core1_0.StageFragment,
+		}
+	}
+	layout, _, err := deviceDriver.CreateDescriptorSetLayout(nil, core1_0.DescriptorSetLayoutCreateInfo{
+		Bindings: bindings,
+	})
+	if err != nil {
+		return core1_0.DescriptorSetLayout{}, fmt.Errorf("create tonemap descriptor set layout: %w", err)
+	}
+	return layout, nil
+}
+
+// writeTonemapSets allocates and fills the resolve's descriptor sets, pairing
+// each HDR image with the matching bloom chain's level 0.
+func writeTonemapSets(
+	deviceDriver core1_0.DeviceDriver,
+	descriptorPool core1_0.DescriptorPool,
+	layout core1_0.DescriptorSetLayout,
+	hdr *hdrTarget,
+	bloom *bloomTarget,
+) error {
+	count := len(hdr.views)
+	layouts := make([]core1_0.DescriptorSetLayout, count)
+	for i := range layouts {
+		layouts[i] = layout
+	}
+	sets, _, err := deviceDriver.AllocateDescriptorSets(core1_0.DescriptorSetAllocateInfo{
+		DescriptorPool: descriptorPool,
+		SetLayouts:     layouts,
+	})
+	if err != nil {
+		return fmt.Errorf("allocate tonemap descriptor sets: %w", err)
+	}
+	hdr.tonemapSets = sets
+
+	writes := make([]core1_0.WriteDescriptorSet, 0, count*2)
+	for i := 0; i < count; i++ {
+		writes = append(writes,
+			core1_0.WriteDescriptorSet{
+				DstSet:         sets[i],
+				DstBinding:     0,
+				DescriptorType: core1_0.DescriptorTypeCombinedImageSampler,
+				ImageInfo: []core1_0.DescriptorImageInfo{{
+					Sampler:     hdr.sampler,
+					ImageView:   hdr.views[i],
+					ImageLayout: core1_0.ImageLayoutShaderReadOnlyOptimal,
+				}},
+			},
+			core1_0.WriteDescriptorSet{
+				DstSet:         sets[i],
+				DstBinding:     1,
+				DescriptorType: core1_0.DescriptorTypeCombinedImageSampler,
+				ImageInfo: []core1_0.DescriptorImageInfo{{
+					Sampler:     bloom.sampler,
+					ImageView:   bloom.views[i][0],
+					ImageLayout: core1_0.ImageLayoutShaderReadOnlyOptimal,
+				}},
+			},
+		)
+	}
+	if err := deviceDriver.UpdateDescriptorSets(writes, nil); err != nil {
+		return fmt.Errorf("update tonemap descriptor sets: %w", err)
+	}
+	return nil
 }
 
 // createTonemapRenderPass writes the swapchain from the HDR scene.
@@ -328,10 +414,12 @@ func (r *Renderer) tonemapFor(imageIndex int) tonemapPass {
 		renderPass:  r.tonemapRenderPass,
 		pipeline:    r.tonemapPipeline,
 		framebuffer: r.tonemapFramebuffers[imageIndex],
-		set:         r.hdr.sets[imageIndex],
+		layout:      r.tonemapPipelineLayout,
+		set:         r.hdr.tonemapSets[imageIndex],
 		exposure:    r.exposure,
 		curve:       r.tonemapCurve,
 		white:       r.tonemapWhite,
+		bloom:       r.bloomIntensity,
 	}
 }
 
@@ -386,6 +474,7 @@ func recordTonemap(
 	pc[32] = tonemap.exposure
 	pc[33] = tonemap.curve
 	pc[34] = tonemap.white
+	pc[35] = tonemap.bloom
 	deviceDriver.CmdPushConstants(cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0,
 		unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize))
 

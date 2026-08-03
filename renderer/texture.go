@@ -116,16 +116,28 @@ const maxMaterials = 64
 // silently covers it is a number nobody can check.
 const maxHDRSets = 8
 
+// maxBloomSets bounds the bloom chain's descriptor sets: one per level per
+// swapchain image. Sized against maxHDRSets rather than the real image count for
+// the same reason -- the driver picks that, and it can change on a resize.
+//
+// Resizing rebuilds both chains without resetting the pool, so this is headroom
+// for several resizes rather than an exact fit. A long session of window
+// dragging will eventually exhaust it and fail the reallocation with a clear
+// error, which is worse than resetting the pool but better than the silent
+// corruption of reusing sets that still name freed views.
+const maxBloomSets = maxHDRSets * bloomLevels
+
 // createDescriptorPool creates a pool that can allocate combined image sampler and
 // uniform buffer descriptor sets. Extra capacity for shadow mapping descriptors.
 func createDescriptorPool(deviceDriver core1_0.DeviceDriver, maxSets int) (core1_0.DescriptorPool, error) {
 	pool, _, err := deviceDriver.CreateDescriptorPool(nil, core1_0.DescriptorPoolCreateInfo{
-		MaxSets: maxSets + 36 + maxMaterials + maxHDRSets,
+		MaxSets: maxSets + 36 + maxMaterials + maxHDRSets + maxBloomSets,
 		PoolSizes: []core1_0.DescriptorPoolSize{
 			{
 				Type: core1_0.DescriptorTypeCombinedImageSampler,
 				// +4 sun shadow + 2 cube shadow samplers, then four maps per material
-				DescriptorCount: maxSets + 6 + maxMaterials*materialTextureBindings + maxHDRSets,
+				// The tonemap's sets take two samplers each, hence the doubling.
+				DescriptorCount: maxSets + 6 + maxMaterials*materialTextureBindings + maxHDRSets*2 + maxBloomSets,
 			},
 			{
 				Type: core1_0.DescriptorTypeUniformBuffer,

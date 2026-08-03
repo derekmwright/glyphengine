@@ -21,11 +21,12 @@
 layout(location = 0) in vec2 fragUV;
 
 layout(set = 0, binding = 0) uniform sampler2D hdrScene;
+layout(set = 0, binding = 1) uniform sampler2D bloomTex;
 
 layout(push_constant) uniform PushConstants {
     mat4 invVP;
     mat4 model;
-    vec4 tint;      // x = exposure, y = curve select
+    vec4 tint;      // x = exposure, y = curve select, z = white point, w = bloom intensity
     vec4 sunDir;
     vec4 sunColor;
     vec4 pointPos;
@@ -46,6 +47,20 @@ vec3 reinhard(vec3 c, float whitePoint) {
 
 void main() {
     vec3 hdr = texture(hdrScene, fragUV).rgb;
+
+    // Bloom is added before exposure and the curve, not after. It is light that
+    // reached the sensor, so it has to go through the same response the rest of
+    // the frame does -- add it afterwards and a glow stays linear while
+    // everything around it is compressed, which reads as a decal rather than as
+    // light.
+    //
+    // Skipped entirely when off. The branch is uniform across the draw, so it
+    // costs nothing, and it keeps an untouched bloom target from contributing
+    // whatever its memory happened to contain.
+    float bloomIntensity = pc.tint.w;
+    if (bloomIntensity > 0.0) {
+        hdr += texture(bloomTex, fragUV).rgb * bloomIntensity;
+    }
 
     float exposure = pc.tint.x;
     if (exposure > 0.0) {

@@ -349,6 +349,17 @@ func (g *game) Init(e *glyph.Engine) error {
 	// than as a hole in the image. White point 6 matches the strength.
 	r.SetTonemap(0, 1, 6)
 
+	// Bloom picks up where the curve leaves off. Reinhard keeps the emissive
+	// mortar from clipping, but a real light also spills onto what is around it,
+	// and that is what a threshold above 1 selects: only panel 5's glow is
+	// bright enough to qualify, so the other four are untouched.
+	// Threshold 1.2 with a 0.2 knee, so the ramp starts at exactly 1.0 and
+	// nothing the old 8-bit path could represent contributes at all. Measured:
+	// with a 0.5 knee the ramp reached down to 0.5, the daytime sky sits around
+	// 0.68 in linear, and the whole frame lifted by RMS 0.025 -- milky rather
+	// than glowing. The sky is the thing to check any bloom threshold against.
+	r.SetBloom(0.7, 1.2, 0.2, 1.0)
+
 	// Far enough back for five panels. Four fitted at 13.
 	g.camera = glyph.NewCamera(16)
 	g.camera.Target = mgl32.Vec3{0, 1.9, 0}

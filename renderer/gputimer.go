@@ -25,6 +25,7 @@ const (
 	PassParticles             // billboard particles
 	PassWater                 // scene copy, refraction, god rays
 	PassOverlay               // UI panels, MSDF text, unlit overlays
+	PassBloom                 // bright-pass, downsample and upsample chain
 	PassTonemap               // HDR resolve to the swapchain
 
 	passCount
@@ -49,6 +50,8 @@ func (p Pass) String() string {
 		return "water"
 	case PassOverlay:
 		return "overlay"
+	case PassBloom:
+		return "bloom"
 	case PassTonemap:
 		return "tonemap"
 	default:

@@ -37,6 +37,9 @@ type ShaderSet struct {
 	WaterVert, WaterFrag       []byte // animated water surface
 	GodRayFrag                 []byte // screen-space light shafts (uses SkyVert)
 	TonemapFrag                []byte // HDR resolve to the swapchain (uses SkyVert)
+	BloomPrefilterFrag         []byte // bloom bright-pass (uses SkyVert)
+	BloomDownFrag              []byte // bloom downsample (uses SkyVert)
+	BloomUpFrag                []byte // bloom upsample (uses SkyVert)
 	ParticleVert, ParticleFrag []byte // billboard particles
 	MsdfVert, MsdfFrag         []byte // MSDF text
 	UIVert, UIFrag             []byte // 9-slice UI panels
@@ -69,12 +72,16 @@ func DefaultShaders() ShaderSet {
 		WaterFrag:         shaders.WaterFragSpv,
 		GodRayFrag:        shaders.GodRayFragSpv,
 		TonemapFrag:       shaders.TonemapFragSpv,
-		ParticleVert:      shaders.ParticleVertSpv,
-		ParticleFrag:      shaders.ParticleFragSpv,
-		MsdfVert:          shaders.MsdfVertSpv,
-		MsdfFrag:          shaders.MsdfFragSpv,
-		UIVert:            shaders.UIVertSpv,
-		UIFrag:            shaders.UIFragSpv,
+
+		BloomPrefilterFrag: shaders.BloomPrefilterFragSpv,
+		BloomDownFrag:      shaders.BloomDownFragSpv,
+		BloomUpFrag:        shaders.BloomUpFragSpv,
+		ParticleVert:       shaders.ParticleVertSpv,
+		ParticleFrag:       shaders.ParticleFragSpv,
+		MsdfVert:           shaders.MsdfVertSpv,
+		MsdfFrag:           shaders.MsdfFragSpv,
+		UIVert:             shaders.UIVertSpv,
+		UIFrag:             shaders.UIFragSpv,
 	}
 }
 
@@ -100,6 +107,9 @@ func (s ShaderSet) withDefaults() ShaderSet {
 		{&s.WaterVert, d.WaterVert}, {&s.WaterFrag, d.WaterFrag},
 		{&s.GodRayFrag, d.GodRayFrag},
 		{&s.TonemapFrag, d.TonemapFrag},
+		{&s.BloomPrefilterFrag, d.BloomPrefilterFrag},
+		{&s.BloomDownFrag, d.BloomDownFrag},
+		{&s.BloomUpFrag, d.BloomUpFrag},
 		{&s.ParticleVert, d.ParticleVert}, {&s.ParticleFrag, d.ParticleFrag},
 		{&s.MsdfVert, d.MsdfVert}, {&s.MsdfFrag, d.MsdfFrag},
 		{&s.UIVert, d.UIVert}, {&s.UIFrag, d.UIFrag},

@@ -133,9 +133,8 @@ is ALU-bound rather than fill-bound.
 - Emissive materials are the only thing that emits above 1 so far. A sun disc
   written at its real intensity would be the other obvious one, and would make
   the curve do visible work in every outdoor scene rather than in one example.
-- No bloom. The target it needs now exists, and so does something bright enough
-  for a threshold to select: see
-  [`material-maps.md`](material-maps.md) on `EmissiveStrength`.
+- Bloom is done and lives in [`bloom.md`](bloom.md). It composites into this
+  pass, before exposure and the curve.
 - The curve is a branch on a push-constant rather than a pipeline variant. That
   is a fullscreen pass with a uniform branch, so it costs nothing measurable,
   but it does mean the set of curves is closed and lives in `tonemap.frag`.

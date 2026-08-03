@@ -127,6 +127,9 @@ target — see [`hdr-tonemap.md`](hdr-tonemap.md). Under the default identity
 curve a strength of 6 still clips to white, so `16-materials` selects extended
 Reinhard to keep the colour. Zero means one, matching glTF.
 
+It is also the only thing in the engine a bloom threshold can select — see
+[`bloom.md`](bloom.md).
+
 ## No tangent attribute
 
 The tangent frame is derived in the fragment shader from screen-space

@@ -238,7 +238,7 @@ func (r *Renderer) recordTriangle(cmdBuf core1_0.CommandBuffer, framebuffer core
 
 	// The scene render pass writes the HDR target, so even the diagnostic
 	// triangle needs resolving or nothing reaches the swapchain.
-	if err := recordTonemap(r.deviceDriver, cmdBuf, tonemap, r.pipelineLayout, r.sc.extent); err != nil {
+	if err := recordTonemap(r.deviceDriver, cmdBuf, tonemap, r.tonemapPipelineLayout, r.sc.extent); err != nil {
 		return err
 	}
 

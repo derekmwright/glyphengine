@@ -88,15 +88,31 @@ type Renderer struct {
 
 	// hdr is the offscreen colour buffer the scene renders into; the tonemap
 	// pass resolves it to the swapchain. See hdr.go.
-	hdr                 *hdrTarget
-	tonemapRenderPass   core1_0.RenderPass
-	tonemapPipeline     core1_0.Pipeline
-	tonemapFramebuffers []core1_0.Framebuffer
+	hdr                   *hdrTarget
+	tonemapSetLayout      core1_0.DescriptorSetLayout
+	tonemapPipelineLayout core1_0.PipelineLayout
+	tonemapRenderPass     core1_0.RenderPass
+	tonemapPipeline       core1_0.Pipeline
+	tonemapFramebuffers   []core1_0.Framebuffer
 
 	// Exposure and curve for the tonemap pass; see SetTonemap.
 	exposure     float32
 	tonemapCurve float32
 	tonemapWhite float32
+
+	// bloom is the mip chain the glare passes run through, composited by the
+	// tonemap resolve. Off by default; see SetBloom and bloom.go.
+	bloom                  *bloomTarget
+	bloomDownRenderPass    core1_0.RenderPass
+	bloomUpRenderPass      core1_0.RenderPass
+	bloomPrefilterPipeline core1_0.Pipeline
+	bloomDownPipeline      core1_0.Pipeline
+	bloomUpPipeline        core1_0.Pipeline
+
+	bloomIntensity float32
+	bloomThreshold float32
+	bloomKnee      float32
+	bloomRadius    float32
 
 	// stats counts what the frame submitted; see stats.go.
 	stats RenderStats
@@ -635,13 +651,69 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	}
 	r.onInit(func() { r.hdr.destroy(r.deviceDriver) })
 
+	// Bloom's render passes come before its targets, because the framebuffers
+	// are created alongside the images and need a pass to be compatible with.
+	r.bloomDownRenderPass, err = createBloomRenderPass(r.deviceDriver, false)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create bloom downsample render pass: %w", err)
+	}
+	r.onInit(func() { r.deviceDriver.DestroyRenderPass(r.bloomDownRenderPass, nil) })
+
+	r.bloomUpRenderPass, err = createBloomRenderPass(r.deviceDriver, true)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create bloom upsample render pass: %w", err)
+	}
+	r.onInit(func() { r.deviceDriver.DestroyRenderPass(r.bloomUpRenderPass, nil) })
+
+	r.bloom, err = createBloomTargets(r.instanceDriver, r.deviceDriver, r.physicalDevice,
+		r.descriptorPool, r.descriptorSetLayout, r.bloomDownRenderPass, r.bloomUpRenderPass,
+		r.sc.extent, len(r.sc.imageViews))
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create bloom targets: %w", err)
+	}
+	r.onInit(func() { r.bloom.destroy(r.deviceDriver) })
+
+	for _, p := range []struct {
+		dst      *core1_0.Pipeline
+		frag     []byte
+		pass     core1_0.RenderPass
+		additive bool
+	}{
+		{&r.bloomPrefilterPipeline, r.shaders.BloomPrefilterFrag, r.bloomDownRenderPass, false},
+		{&r.bloomDownPipeline, r.shaders.BloomDownFrag, r.bloomDownRenderPass, false},
+		{&r.bloomUpPipeline, r.shaders.BloomUpFrag, r.bloomUpRenderPass, true},
+	} {
+		*p.dst, err = createBloomPipeline(r.deviceDriver, r.shaders, p.frag, p.pass, r.pipelineLayout, p.additive)
+		if err != nil {
+			return nil, fmt.Errorf("renderer: create bloom pipeline: %w", err)
+		}
+		pipeline := *p.dst
+		r.onInit(func() { r.deviceDriver.DestroyPipeline(pipeline, nil) })
+	}
+
+	r.tonemapSetLayout, err = createTonemapSetLayout(r.deviceDriver)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create tonemap set layout: %w", err)
+	}
+	r.onInit(func() { r.deviceDriver.DestroyDescriptorSetLayout(r.tonemapSetLayout, nil) })
+
+	r.tonemapPipelineLayout, err = createNonLitPipelineLayout(r.deviceDriver, r.tonemapSetLayout)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create tonemap pipeline layout: %w", err)
+	}
+	r.onInit(func() { r.deviceDriver.DestroyPipelineLayout(r.tonemapPipelineLayout, nil) })
+
+	if err := writeTonemapSets(r.deviceDriver, r.descriptorPool, r.tonemapSetLayout, r.hdr, r.bloom); err != nil {
+		return nil, fmt.Errorf("renderer: %w", err)
+	}
+
 	r.tonemapRenderPass, err = createTonemapRenderPass(r.deviceDriver, r.sc.imageFormat)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create tonemap render pass: %w", err)
 	}
 	r.onInit(func() { r.deviceDriver.DestroyRenderPass(r.tonemapRenderPass, nil) })
 
-	r.tonemapPipeline, err = createTonemapPipeline(r.deviceDriver, r.shaders, r.tonemapRenderPass, r.pipelineLayout, r.sc.extent)
+	r.tonemapPipeline, err = createTonemapPipeline(r.deviceDriver, r.shaders, r.tonemapRenderPass, r.tonemapPipelineLayout, r.sc.extent)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create tonemap pipeline: %w", err)
 	}
@@ -715,6 +787,13 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	// state of images the shadow resources already own.
 	if err = r.shadow.initCubeShadowLayout(r); err != nil {
 		return nil, fmt.Errorf("renderer: initialize cube shadow layout: %w", err)
+	}
+
+	// Same reason, same place: the bloom chain is bound by the resolve's
+	// descriptor set every frame but only written when bloom is on, so it needs
+	// a defined layout up front or the validation layer reports every frame.
+	if err = r.primeBloomLayouts(r.bloom); err != nil {
+		return nil, fmt.Errorf("renderer: prime bloom layouts: %w", err)
 	}
 
 	cmdBufs, err := createCommandBuffers(r.deviceDriver, r.commandPool, maxFramesInFlight)
@@ -917,10 +996,34 @@ func (r *Renderer) recreateSwapchain() error {
 	}
 
 	// The HDR targets are swapchain-sized, so they go with it.
+	// Both chains and the sets that point into them are size-dependent, so all
+	// three are rebuilt together. The descriptor sets come from the pool, which
+	// is not reset here -- so this leaks pool capacity across resizes and is why
+	// maxHDRSets and maxBloomSets carry headroom rather than being exact.
+	r.bloom.destroy(r.deviceDriver)
 	r.hdr.destroy(r.deviceDriver)
 	r.hdr, err = createHDRTargets(r.instanceDriver, r.deviceDriver, r.physicalDevice,
 		r.descriptorPool, r.descriptorSetLayout, r.sc.extent, len(r.sc.imageViews), r.maxAnisotropy)
 	if err != nil {
+		return err
+	}
+
+	r.bloom, err = createBloomTargets(r.instanceDriver, r.deviceDriver, r.physicalDevice,
+		r.descriptorPool, r.descriptorSetLayout, r.bloomDownRenderPass, r.bloomUpRenderPass,
+		r.sc.extent, len(r.sc.imageViews))
+	if err != nil {
+		return err
+	}
+
+	if err := r.primeBloomLayouts(r.bloom); err != nil {
+		return err
+	}
+
+	// The resolve's sets name specific views, so they have to be rewritten
+	// against the new images. Skipping this leaves the tonemap sampling freed
+	// image views, which the validation layer catches and a release build does
+	// not.
+	if err := writeTonemapSets(r.deviceDriver, r.descriptorPool, r.tonemapSetLayout, r.hdr, r.bloom); err != nil {
 		return err
 	}
 
@@ -1022,7 +1125,7 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, uiOv
 		return err
 	}
 	recordStart := time.Now()
-	err = recordCommandBuffer(r.deviceDriver, cmdBuf, r.renderPass, r.framebuffers[imageIndex], r.pipeline, r.litDoubleSidedPipeline, r.overlayPipeline, r.skyPipeline, r.starsPipeline, r.uiPipeline, r.msdfPipeline, r.skinnedPipeline, r.grassPipeline, r.waterPipeline, r.godRayPipeline, r.waterRenderPass, waterFB, r.sceneColor, r.hdr.images[imageIndex], r.tonemapFor(imageIndex), r.particlePipeline, r.terrainPipeline, r.materialPipelines(), &r.stats, r.pipelineLayout, r.litPipelineLayout, r.skinnedPipelineLayout, r.terrainPipelineLayout, r.sc.extent, draws, overlays, uiOverlays, msdfOverlays, lighting, r.fallbackTexture, r.shadow, r.grass, r.particles, f, r.msaa != nil, r.gpuTimer)
+	err = recordCommandBuffer(r.deviceDriver, cmdBuf, r.renderPass, r.framebuffers[imageIndex], r.pipeline, r.litDoubleSidedPipeline, r.overlayPipeline, r.skyPipeline, r.starsPipeline, r.uiPipeline, r.msdfPipeline, r.skinnedPipeline, r.grassPipeline, r.waterPipeline, r.godRayPipeline, r.waterRenderPass, waterFB, r.sceneColor, r.hdr.images[imageIndex], r.bloomFor(imageIndex), r.tonemapFor(imageIndex), r.particlePipeline, r.terrainPipeline, r.materialPipelines(), &r.stats, r.pipelineLayout, r.litPipelineLayout, r.skinnedPipelineLayout, r.terrainPipelineLayout, r.sc.extent, draws, overlays, uiOverlays, msdfOverlays, lighting, r.fallbackTexture, r.shadow, r.grass, r.particles, f, r.msaa != nil, r.gpuTimer)
 	if err != nil {
 		return err
 	}
