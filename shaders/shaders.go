@@ -68,6 +68,9 @@ var SkinnedLitVertSpv []byte
 //go:embed skinned_lit.frag.spv
 var SkinnedLitFragSpv []byte
 
+//go:embed skinned_lit_material.frag.spv
+var SkinnedLitMaterialFragSpv []byte
+
 //go:embed grass.vert.spv
 var GrassVertSpv []byte
 

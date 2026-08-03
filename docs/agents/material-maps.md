@@ -16,11 +16,12 @@ api:
   - renderer.Renderer.LoadDataTexture
   - renderer.RenderObject.Material
   - renderer.ModelMesh.Material
+  - renderer.RenderObject.Material
   - glyphengine.MaterialRef
 assets: procedural
 example: examples/16-materials
 run: go run ./16-materials
-verified: 2026-08-02
+verified: 2026-08-03
 ---
 
 # Material maps
@@ -129,6 +130,26 @@ Reinhard to keep the colour. Zero means one, matching glTF.
 
 It is also the only thing in the engine a bloom threshold can select — see
 [`bloom.md`](bloom.md).
+
+## Skinned meshes
+
+A `Material` works on an animated mesh exactly as on a static one — set it via
+`MaterialRef.PBR` on an entity that also has a `SkeletonRef`.
+
+An earlier version of this page, and the comment on `RenderObject.Material`,
+said skinned draws ignored materials and that supporting them would need a
+fourth descriptor set. That was wrong. A `Material` takes **set 0**, which is
+where the plain texture already sat, so joints stay at set 1 and shadow at set 2
+— the layout the skinned pipeline has always used. The only thing genuinely
+missing was a fragment shader declaring the shadow set at 2 instead of 1.
+
+`shaders/material_shading.inc` holds the shading both variants share;
+`lit_material.frag` and `skinned_lit_material.frag` differ only in that
+declaration. That the split changed nothing is checkable: extracting it left
+`lit_material.frag.spv` byte-identical.
+
+`examples/06-skinned` wraps its character's texture in a Material with a
+generated normal map. Run it with `-plain` to compare.
 
 ## No tangent attribute
 

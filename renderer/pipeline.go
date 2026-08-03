@@ -854,10 +854,12 @@ func createSkinnedPipelineLayout(deviceDriver core1_0.DeviceDriver, texSetLayout
 	return layout, nil
 }
 
-// createSkinnedPipeline creates the pipeline for skinned meshes: same as the main
-// lit pipeline but using the skinned vertex shader, skinned vertex input layout,
-// and skinned_lit.frag (shadow sampler at set 2 instead of set 1).
-func createSkinnedPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, skinnedPipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
+// createSkinnedPipeline creates a pipeline for skinned meshes: same as the main
+// lit pipeline but using the skinned vertex shader and skinned vertex input
+// layout. The fragment shader is a parameter because there are two -- the plain
+// one and the material variant -- and they differ only in what set 0 holds.
+// Both put the shadow sampler at set 2, because set 1 is the joint UBO.
+func createSkinnedPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, fragSpv []byte, renderPass core1_0.RenderPass, skinnedPipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
 		Code: bytesToUint32Slice(sh.SkinnedLitVert),
 	})
@@ -867,7 +869,7 @@ func createSkinnedPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, rend
 	defer deviceDriver.DestroyShaderModule(vertModule, nil)
 
 	fragModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
-		Code: bytesToUint32Slice(sh.SkinnedLitFrag),
+		Code: bytesToUint32Slice(fragSpv),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, err

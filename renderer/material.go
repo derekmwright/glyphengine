@@ -133,6 +133,8 @@ func (r *Renderer) materialPipelines() materialPipelines {
 		layout:            r.materialPipelineLayout,
 		doubleSided:       r.materialDoubleSidedPipeline,
 		doubleSidedLayout: r.materialDoubleSidedPipelineLayout,
+		skinned:           r.skinnedMaterialPipeline,
+		skinnedLayout:     r.skinnedMaterialPipelineLayout,
 	}
 }
 

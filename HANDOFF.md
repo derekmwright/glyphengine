@@ -79,8 +79,10 @@ and thinning distant grass.
   at all (1.594 → 1.593 ms).
 - **Grass past this point costs visible quality.** `grassThinNear/Far/Min` and
   `GrassMaxDistance` are the knobs. Everything free has been taken.
-- **Terrain and skinned meshes ignore `Material`.** Terrain is the larger piece:
-  its splat pipeline already spends all four set-0 bindings on albedo.
+- **Terrain ignores `Material`.** Its splat pipeline already spends all four
+  set-0 bindings on albedo, so this one really does need a rethink of the set
+  layout rather than another shader variant. Skinned meshes now support
+  materials.
 - **The terrain splat path is unusable from a clean clone.** No example uses it,
   and `shaders/terrain.frag` says its `SPLAT_TILE` must match
   `cmd/tools/genterrain/main.go`, which does not exist in this repo.

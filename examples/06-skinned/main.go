@@ -68,6 +68,7 @@ type game struct {
 	parts []glyph.Entity
 
 	demo      bool
+	plain     bool
 	demoAngle float32
 
 	// Clip indices resolved once at load. FindClip is a case-insensitive
@@ -112,6 +113,19 @@ func (g *game) Init(e *glyph.Engine) error {
 	}
 
 	// ── the character ──
+	//
+	// A woven normal map, generated rather than shipped, so the example carries
+	// no extra asset. Its only job is to prove the skinned path reaches the
+	// material pipeline: without it the character lights as one smooth surface
+	// no matter how it is posed.
+	var cloth *renderer.Texture
+	if !g.plain {
+		cloth, err = r.CreateDataTexture(buildClothNormal(), clothSize, clothSize)
+		if err != nil {
+			return err
+		}
+	}
+
 	model, err := r.LoadGLTFSkinned(assetsFS, "assets/character.glb")
 	if err != nil {
 		return err
@@ -147,7 +161,24 @@ func (g *game) Init(e *glyph.Engine) error {
 			e.C.Transform.Set(ent, &glyph.Transform{Scale: mgl32.Vec3{1, 1, 1}})
 		}
 		e.C.MeshRef.Set(ent, &glyph.MeshRef{Mesh: m.Mesh, Roughness: 0.8})
-		if m.Texture != nil {
+		switch {
+		case m.Material != nil:
+			// The glTF carried its own maps.
+			e.C.MaterialRef.Set(ent, &glyph.MaterialRef{PBR: m.Material})
+		case m.Texture != nil && cloth != nil:
+			// It did not, so give it a generated one. A Material works on a
+			// skinned mesh exactly as on a static one: it takes set 0, where the
+			// plain texture used to sit, and the joints stay at set 1.
+			mat, err := r.CreateMaterial(renderer.MaterialOptions{
+				Albedo:      m.Texture,
+				Normal:      cloth,
+				NormalScale: 0.8,
+			})
+			if err != nil {
+				return err
+			}
+			e.C.MaterialRef.Set(ent, &glyph.MaterialRef{PBR: mat})
+		case m.Texture != nil:
 			e.C.MaterialRef.Set(ent, &glyph.MaterialRef{Texture: m.Texture})
 		}
 		e.C.SkeletonRef.Set(ent, &glyph.SkeletonRef{
@@ -306,6 +337,7 @@ func main() {
 	frames := flag.Int("frames", 0, "render N frames then exit (0 = run until closed)")
 	shot := flag.String("screenshot", "", "write a PNG of the last frame to this path")
 	demo := flag.Bool("demo", false, "walk a circle automatically, no input needed")
+	plain := flag.Bool("plain", false, "skip the generated normal map, for comparison")
 	flag.Parse()
 
 	opts := []glyph.Option{
@@ -323,7 +355,7 @@ func main() {
 		opts = append(opts, glyph.WithScreenshot(*shot))
 	}
 
-	e, err := glyph.New(&game{demo: *demo}, opts...)
+	e, err := glyph.New(&game{demo: *demo, plain: *plain}, opts...)
 	if err != nil {
 		log.Fatalf("create engine: %v", err)
 	}
@@ -331,4 +363,43 @@ func main() {
 
 	e.Run()
 	log.Printf("rendered %d frames", e.FrameCount())
+}
+
+// clothSize is the edge length of the generated normal map.
+const clothSize = 256
+
+// buildClothNormal generates a tangent-space normal map of a plain weave.
+//
+// Generated rather than shipped so the example stays asset-light, and woven
+// rather than something louder because the point is to be legible on a moving
+// character: a pattern with a single dominant direction turns into a shimmering
+// mess once the surface deforms, while a weave keeps its two axes balanced from
+// any angle.
+//
+// It has to go through CreateDataTexture. Loaded as sRGB colour, 128 decodes to
+// 0.216 rather than 0.502, so every normal arrives tilted and the character
+// lights subtly wrong with nothing in the log to say so.
+func buildClothNormal() []byte {
+	pix := make([]byte, clothSize*clothSize*4)
+	const threads = 24.0
+	for y := 0; y < clothSize; y++ {
+		for x := 0; x < clothSize; x++ {
+			u := float64(x) / clothSize * threads * 2 * math.Pi
+			v := float64(y) / clothSize * threads * 2 * math.Pi
+
+			// Two out-of-phase ripples. The height field is a sum of sines, so
+			// its gradient is a sum of cosines -- no finite differencing needed.
+			nx := -math.Cos(u) * 0.5
+			ny := -math.Cos(v) * 0.5
+			nz := 1.0
+
+			l := math.Sqrt(nx*nx + ny*ny + nz*nz)
+			i := (y*clothSize + x) * 4
+			pix[i+0] = byte((nx/l*0.5 + 0.5) * 255)
+			pix[i+1] = byte((ny/l*0.5 + 0.5) * 255)
+			pix[i+2] = byte((nz/l*0.5 + 0.5) * 255)
+			pix[i+3] = 255
+		}
+	}
+	return pix
 }

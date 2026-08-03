@@ -52,26 +52,29 @@ type Renderer struct {
 	jointDescriptorSetLayout     core1_0.DescriptorSetLayout
 	skinnedPipelineLayout        core1_0.PipelineLayout // skinned: set 0=tex, set 1=joints, set 2=shadow
 	skinnedPipeline              core1_0.Pipeline
-	grassPipeline                core1_0.Pipeline
-	waterPipeline                core1_0.Pipeline
-	godRayPipeline               core1_0.Pipeline
-	waterRenderPass              core1_0.RenderPass
-	waterFramebuffers            []core1_0.Framebuffer
-	sceneColor                   *sceneColorTarget
-	grass                        *GrassSystem
-	terrainSetLayout             core1_0.DescriptorSetLayout // set 0 = 4 terrain samplers
-	terrainPipelineLayout        core1_0.PipelineLayout      // terrain: set 0=4 tex, set 1=shadow
-	terrainPipeline              core1_0.Pipeline
-	particlePipeline             core1_0.Pipeline
-	particles                    *ParticleSystem
-	shadow                       *shadowResources
-	framebuffers                 []core1_0.Framebuffer
-	commandPool                  core1_0.CommandPool
-	commandBuffers               [maxFramesInFlight]core1_0.CommandBuffer
-	sync                         *syncObjects
-	depth                        *depthResources
-	msaa                         *msaaResources
-	msaaSamples                  core1_0.SampleCountFlags
+	// Skinned + Material: set 0=material, set 1=joints, set 2=shadow.
+	skinnedMaterialPipelineLayout core1_0.PipelineLayout
+	skinnedMaterialPipeline       core1_0.Pipeline
+	grassPipeline                 core1_0.Pipeline
+	waterPipeline                 core1_0.Pipeline
+	godRayPipeline                core1_0.Pipeline
+	waterRenderPass               core1_0.RenderPass
+	waterFramebuffers             []core1_0.Framebuffer
+	sceneColor                    *sceneColorTarget
+	grass                         *GrassSystem
+	terrainSetLayout              core1_0.DescriptorSetLayout // set 0 = 4 terrain samplers
+	terrainPipelineLayout         core1_0.PipelineLayout      // terrain: set 0=4 tex, set 1=shadow
+	terrainPipeline               core1_0.Pipeline
+	particlePipeline              core1_0.Pipeline
+	particles                     *ParticleSystem
+	shadow                        *shadowResources
+	framebuffers                  []core1_0.Framebuffer
+	commandPool                   core1_0.CommandPool
+	commandBuffers                [maxFramesInFlight]core1_0.CommandBuffer
+	sync                          *syncObjects
+	depth                         *depthResources
+	msaa                          *msaaResources
+	msaaSamples                   core1_0.SampleCountFlags
 
 	// lastFenceWait is how long the previous DrawFrame blocked on the in-flight
 	// fence and on acquiring a swapchain image. The engine folds it into its own
@@ -585,11 +588,26 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	}
 	r.onInit(func() { r.deviceDriver.DestroyPipelineLayout(r.skinnedPipelineLayout, nil) })
 
-	r.skinnedPipeline, err = createSkinnedPipeline(r.deviceDriver, r.shaders, r.renderPass, r.skinnedPipelineLayout, r.sc.extent, r.msaaSamples)
+	r.skinnedPipeline, err = createSkinnedPipeline(r.deviceDriver, r.shaders, r.shaders.SkinnedLitFrag, r.renderPass, r.skinnedPipelineLayout, r.sc.extent, r.msaaSamples)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create skinned pipeline: %w", err)
 	}
 	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.skinnedPipeline, nil) })
+
+	// Same three sets as the plain skinned pipeline, with the material's layout
+	// in place of the single texture at set 0. That is the whole difference, and
+	// it is why this needs no fourth descriptor set.
+	r.skinnedMaterialPipelineLayout, err = createSkinnedPipelineLayout(r.deviceDriver, r.materialSetLayout, r.jointDescriptorSetLayout, r.shadow.descriptorSetLayout)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create skinned material pipeline layout: %w", err)
+	}
+	r.onInit(func() { r.deviceDriver.DestroyPipelineLayout(r.skinnedMaterialPipelineLayout, nil) })
+
+	r.skinnedMaterialPipeline, err = createSkinnedPipeline(r.deviceDriver, r.shaders, r.shaders.SkinnedLitMaterialFrag, r.renderPass, r.skinnedMaterialPipelineLayout, r.sc.extent, r.msaaSamples)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create skinned material pipeline: %w", err)
+	}
+	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.skinnedMaterialPipeline, nil) })
 
 	r.grassPipeline, err = createGrassPipeline(r.deviceDriver, r.shaders, r.renderPass, r.litPipelineLayout, r.sc.extent, r.msaaSamples)
 	if err != nil {

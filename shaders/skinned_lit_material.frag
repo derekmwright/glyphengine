@@ -1,16 +1,16 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 
-// Material shader for static geometry: the lit path plus normal,
-// metallic-roughness, occlusion and emissive maps. Shares lit.vert and the lit
-// shadow set (set 1); only the material set (set 0) differs, the same way
-// terrain.frag does.
+// Material shader for skinned geometry: skinned_lit.vert plus the same material
+// maps the static path gets.
 //
-// Without this, lighting is Blinn-Phong with one uniform material per object,
-// which is why adding an albedo texture alone disappoints: colour varies per
-// pixel while the surface still lights as one perfectly smooth material.
+// The comment this replaces claimed a skinned material needed a fourth
+// descriptor set. It does not. A Material replaces the plain texture at set 0,
+// which is where skinned_lit.frag already binds its sampler, so the set layout
+// is the one the skinned pipeline has always used: 0 = material, 1 = joints
+// (vertex stage only, so this shader never names it), 2 = shadow.
 //
-// The shading itself is in material_shading.inc, shared with the skinned
+// The shading itself is in material_shading.inc, shared with the static
 // variant. Only the shadow set number differs between them.
 
 layout(location = 0) in vec3 fragColor;
@@ -34,15 +34,16 @@ layout(set = 0, binding = 5) uniform MaterialBlock {
     vec4 emissive; // rgb = emitted radiance with strength folded in, w = has emissive map
 } matl;
 
-// Shadow at set 1 — identical to lit.frag so the shared shadow descriptor binds.
-layout(set = 1, binding = 0) uniform ShadowData {
+// Shadow at set 2, because set 1 is the joint matrix UBO the vertex stage
+// reads. Same contents as the static variant's set 1.
+layout(set = 2, binding = 0) uniform ShadowData {
     mat4 cascadeVP[2];
 } shadow;
-layout(set = 1, binding = 1) uniform sampler2DArrayShadow shadowMap;
-layout(set = 1, binding = 2) uniform samplerCube pointShadowMap;
+layout(set = 2, binding = 1) uniform sampler2DArrayShadow shadowMap;
+layout(set = 2, binding = 2) uniform samplerCube pointShadowMap;
 
 struct UPointLight { vec4 posRange; vec4 color; };
-layout(set = 1, binding = 3) uniform LightBlock {
+layout(set = 2, binding = 3) uniform LightBlock {
     int numLights;
     UPointLight lights[32];
 } lb;
