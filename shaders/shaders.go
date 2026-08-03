@@ -23,6 +23,9 @@ var LitFragSpv []byte
 //go:embed lit_material.frag.spv
 var LitMaterialFragSpv []byte
 
+//go:embed tonemap.frag.spv
+var TonemapFragSpv []byte
+
 //go:embed terrain.frag.spv
 var TerrainFragSpv []byte
 

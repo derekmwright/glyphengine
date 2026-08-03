@@ -8,7 +8,6 @@ import (
 
 	"github.com/go-gl/mathgl/mgl32"
 	"github.com/vkngwrapper/core/v3/core1_0"
-	"github.com/vkngwrapper/extensions/v3/khr_swapchain"
 )
 
 // MaxPointLights is the maximum number of unshadowed point lights supported.
@@ -177,18 +176,21 @@ func (d *RenderObject) worldBoundSphere() (cx, cy, cz, r float32) {
 // Renderer.New checks the device limit and fails with a clear message.
 const pushConstantSize = 256
 
-// createFramebuffers creates one framebuffer per swapchain image view, each
-// referencing its own color and depth attachments.
+// createFramebuffers creates one framebuffer per scene colour view, each
+// referencing its own colour and depth attachments. The views passed in are the
+// HDR targets, not the swapchain -- only the tonemap pass draws to the
+// swapchain -- but there is still one per swapchain image so a frame can be
+// recorded while another is presenting.
 func createFramebuffers(deviceDriver core1_0.DeviceDriver, renderPass core1_0.RenderPass, imageViews []core1_0.ImageView, depthViews []core1_0.ImageView, msaaViews []core1_0.ImageView, extent core1_0.Extent2D) ([]core1_0.Framebuffer, error) {
 	framebuffers := make([]core1_0.Framebuffer, len(imageViews))
 
 	for i, view := range imageViews {
 		var attachments []core1_0.ImageView
 		if msaaViews != nil {
-			// MSAA: [msaaColor, depth, resolve(swapchain)]
+			// MSAA: [msaaColor, depth, resolve(hdr)]
 			attachments = []core1_0.ImageView{msaaViews[i], depthViews[i], view}
 		} else {
-			// No MSAA: [color(swapchain), depth]
+			// No MSAA: [color(hdr), depth]
 			attachments = []core1_0.ImageView{view, depthViews[i]}
 		}
 		fb, _, err := deviceDriver.CreateFramebuffer(nil, core1_0.FramebufferCreateInfo{
@@ -283,6 +285,20 @@ func packLightingPC(pc *[64]float32, lighting SceneLighting) {
 	pc[63] = lighting.RealSunDir[2]
 }
 
+// tonemapPass is everything the HDR resolve needs, grouped for the same reason
+// materialPipelines is: recordCommandBuffer's parameter list is long enough
+// already.
+type tonemapPass struct {
+	renderPass  core1_0.RenderPass
+	pipeline    core1_0.Pipeline
+	framebuffer core1_0.Framebuffer
+	set         core1_0.DescriptorSet
+
+	exposure float32
+	curve    float32
+	white    float32
+}
+
 // materialPipelines groups the material variant's pipelines with their layouts.
 //
 // Grouped rather than passed loose because recordCommandBuffer's parameter list
@@ -317,7 +333,8 @@ func recordCommandBuffer(
 	waterRenderPass core1_0.RenderPass,
 	waterFramebuffer core1_0.Framebuffer,
 	sceneColor *sceneColorTarget,
-	swapchainImage core1_0.Image,
+	sceneImage core1_0.Image,
+	tonemap tonemapPass,
 	particlePipeline core1_0.Pipeline,
 	terrainPipeline core1_0.Pipeline,
 	mat materialPipelines,
@@ -1113,12 +1130,19 @@ func recordCommandBuffer(
 	if sceneColor != nil && (hasWater(draws) || lighting.LightShafts > 0) {
 		if err := recordWaterPass(deviceDriver, stats, cmdBuf, waterRenderPass, waterFramebuffer,
 			waterPipeline, godRayPipeline, pipelineLayout, litPipelineLayout, extent, draws, lighting,
-			sceneColor, swapchainImage, shadowDS, msaaEnabled); err != nil {
+			sceneColor, sceneImage, shadowDS, msaaEnabled); err != nil {
 			return err
 		}
 	}
 
 	timer.end(deviceDriver, cmdBuf, frame, PassWater)
+
+	timer.begin(deviceDriver, cmdBuf, frame, PassTonemap)
+	if err := recordTonemap(deviceDriver, cmdBuf, tonemap, pipelineLayout, extent); err != nil {
+		return err
+	}
+	timer.end(deviceDriver, cmdBuf, frame, PassTonemap)
+
 	timer.end(deviceDriver, cmdBuf, frame, frameQuery)
 
 	_, err = deviceDriver.EndCommandBuffer(cmdBuf)
@@ -1155,7 +1179,7 @@ func recordWaterPass(
 	draws []RenderObject,
 	lighting SceneLighting,
 	sceneColor *sceneColorTarget,
-	swapchainImage core1_0.Image,
+	sceneImage core1_0.Image,
 	shadowDS core1_0.DescriptorSet,
 	msaa bool,
 ) error {
@@ -1164,16 +1188,21 @@ func recordWaterPass(
 		LevelCount: 1, LayerCount: 1,
 	}
 
-	// The first pass left the presentable image in PresentSrc. Borrow it as a
-	// transfer source, copy it, and leave it in a layout the water pass expects.
+	// The first pass left the HDR target in ShaderReadOnlyOptimal. Borrow it as a
+	// transfer source, copy it, and put it back so the water pass can render into
+	// it and the tonemap pass can sample it afterwards.
+	//
+	// Copying the HDR image rather than the swapchain is what keeps refraction
+	// working: the swapchain no longer holds the scene at this point in the
+	// frame -- nothing has been tonemapped into it yet.
 	deviceDriver.CmdPipelineBarrier(cmdBuf,
 		core1_0.PipelineStageColorAttachmentOutput, core1_0.PipelineStageTransfer, 0, nil, nil,
 		[]core1_0.ImageMemoryBarrier{
 			{
-				OldLayout:           khr_swapchain.ImageLayoutPresentSrc,
+				OldLayout:           core1_0.ImageLayoutShaderReadOnlyOptimal,
 				NewLayout:           core1_0.ImageLayoutTransferSrcOptimal,
 				SrcQueueFamilyIndex: -1, DstQueueFamilyIndex: -1,
-				Image:            swapchainImage,
+				Image:            sceneImage,
 				SubresourceRange: colorRange,
 				SrcAccessMask:    core1_0.AccessColorAttachmentWrite,
 				DstAccessMask:    core1_0.AccessTransferRead,
@@ -1195,7 +1224,7 @@ func recordWaterPass(
 		LayerCount: 1,
 	}
 	deviceDriver.CmdCopyImage(cmdBuf,
-		swapchainImage, core1_0.ImageLayoutTransferSrcOptimal,
+		sceneImage, core1_0.ImageLayoutTransferSrcOptimal,
 		sceneColor.image, core1_0.ImageLayoutTransferDstOptimal,
 		core1_0.ImageCopy{
 			SrcSubresource: layers,
@@ -1215,7 +1244,7 @@ func recordWaterPass(
 			DstAccessMask:    core1_0.AccessShaderRead,
 		}})
 
-	// No barrier back for the swapchain image. With MSAA the water pass
+	// No barrier back for the HDR scene image. With MSAA the water pass
 	// declares its resolve target Undefined and rewrites it wholesale; without
 	// MSAA it declares TransferSrc, matching the copy. Either way the render
 	// pass performs the transition, and a manual barrier to Undefined is not a

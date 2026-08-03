@@ -4,7 +4,6 @@ import (
 	"log"
 
 	"github.com/vkngwrapper/core/v3/core1_0"
-	"github.com/vkngwrapper/extensions/v3/khr_swapchain"
 )
 
 // createRenderPass builds a single-subpass render pass. When samples > Samples1,
@@ -55,7 +54,7 @@ func createRenderPass(deviceDriver core1_0.DeviceDriver, imageFormat core1_0.For
 				StencilLoadOp:  core1_0.AttachmentLoadOpDontCare,
 				StencilStoreOp: core1_0.AttachmentStoreOpDontCare,
 				InitialLayout:  core1_0.ImageLayoutUndefined,
-				FinalLayout:    khr_swapchain.ImageLayoutPresentSrc,
+				FinalLayout:    core1_0.ImageLayoutShaderReadOnlyOptimal,
 			},
 		}
 		subpasses = []core1_0.SubpassDescription{
@@ -82,7 +81,7 @@ func createRenderPass(deviceDriver core1_0.DeviceDriver, imageFormat core1_0.For
 				StencilLoadOp:  core1_0.AttachmentLoadOpDontCare,
 				StencilStoreOp: core1_0.AttachmentStoreOpDontCare,
 				InitialLayout:  core1_0.ImageLayoutUndefined,
-				FinalLayout:    khr_swapchain.ImageLayoutPresentSrc,
+				FinalLayout:    core1_0.ImageLayoutShaderReadOnlyOptimal,
 			},
 			{
 				Format:         depthFormat,

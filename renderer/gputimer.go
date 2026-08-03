@@ -25,6 +25,7 @@ const (
 	PassParticles             // billboard particles
 	PassWater                 // scene copy, refraction, god rays
 	PassOverlay               // UI panels, MSDF text, unlit overlays
+	PassTonemap               // HDR resolve to the swapchain
 
 	passCount
 )
@@ -48,6 +49,8 @@ func (p Pass) String() string {
 		return "water"
 	case PassOverlay:
 		return "overlay"
+	case PassTonemap:
+		return "tonemap"
 	default:
 		return fmt.Sprintf("pass%d", int(p))
 	}

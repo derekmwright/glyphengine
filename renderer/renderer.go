@@ -86,6 +86,18 @@ type Renderer struct {
 	lastRecord  time.Duration
 	lastPresent time.Duration
 
+	// hdr is the offscreen colour buffer the scene renders into; the tonemap
+	// pass resolves it to the swapchain. See hdr.go.
+	hdr                 *hdrTarget
+	tonemapRenderPass   core1_0.RenderPass
+	tonemapPipeline     core1_0.Pipeline
+	tonemapFramebuffers []core1_0.Framebuffer
+
+	// Exposure and curve for the tonemap pass; see SetTonemap.
+	exposure     float32
+	tonemapCurve float32
+	tonemapWhite float32
+
 	// stats counts what the frame submitted; see stats.go.
 	stats RenderStats
 
@@ -401,9 +413,12 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	}
 	r.onInit(func() { r.depth.destroy(r.deviceDriver, len(r.depth.views)) })
 
-	// Step 6b: MSAA color images (when MSAA is enabled)
+	// Step 6b: MSAA color images (when MSAA is enabled). These are the scene
+	// pass's colour attachment and resolve into the HDR target, so they carry
+	// hdrFormat rather than the swapchain's — a framebuffer's attachments must
+	// match the formats its render pass declares.
 	if r.msaaSamples != core1_0.Samples1 {
-		r.msaa, err = createMSAAResources(r.instanceDriver, r.deviceDriver, r.physicalDevice, r.sc.extent, r.sc.imageFormat, r.msaaSamples, len(r.sc.imageViews))
+		r.msaa, err = createMSAAResources(r.instanceDriver, r.deviceDriver, r.physicalDevice, r.sc.extent, hdrFormat, r.msaaSamples, len(r.sc.imageViews))
 		if err != nil {
 			return nil, fmt.Errorf("renderer: create MSAA resources: %w", err)
 		}
@@ -454,7 +469,7 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	r.onInit(func() { r.shadow.destroy(r.deviceDriver) })
 
 	// Step 8: Render pass + pipeline
-	r.renderPass, err = createRenderPass(r.deviceDriver, r.sc.imageFormat, r.depth.format, r.msaaSamples)
+	r.renderPass, err = createRenderPass(r.deviceDriver, hdrFormat, r.depth.format, r.msaaSamples)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create render pass: %w", err)
 	}
@@ -572,7 +587,7 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 		r.deviceDriver.DestroyPipeline(r.grassPipeline, nil)
 	})
 
-	r.waterRenderPass, err = createWaterRenderPass(r.deviceDriver, r.sc.imageFormat, r.depth.format, r.msaaSamples)
+	r.waterRenderPass, err = createWaterRenderPass(r.deviceDriver, hdrFormat, r.depth.format, r.msaaSamples)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create water render pass: %w", err)
 	}
@@ -607,12 +622,49 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	if r.msaa != nil {
 		msaaViews = r.msaa.views
 	}
-	r.framebuffers, err = createFramebuffers(r.deviceDriver, r.renderPass, r.sc.imageViews, r.depth.views, msaaViews, r.sc.extent)
+	if !hdrSupported(r.instanceDriver, r.physicalDevice) {
+		// A mandatory format per the Vulkan spec, so this should be
+		// unreachable -- but silently rendering somewhere else would be worse
+		// than saying so.
+		return nil, fmt.Errorf("renderer: device cannot use R16G16B16A16_SFLOAT as a sampleable colour attachment")
+	}
+	r.hdr, err = createHDRTargets(r.instanceDriver, r.deviceDriver, r.physicalDevice,
+		r.descriptorPool, r.descriptorSetLayout, r.sc.extent, len(r.sc.imageViews), r.maxAnisotropy)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create HDR targets: %w", err)
+	}
+	r.onInit(func() { r.hdr.destroy(r.deviceDriver) })
+
+	r.tonemapRenderPass, err = createTonemapRenderPass(r.deviceDriver, r.sc.imageFormat)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create tonemap render pass: %w", err)
+	}
+	r.onInit(func() { r.deviceDriver.DestroyRenderPass(r.tonemapRenderPass, nil) })
+
+	r.tonemapPipeline, err = createTonemapPipeline(r.deviceDriver, r.shaders, r.tonemapRenderPass, r.pipelineLayout, r.sc.extent)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create tonemap pipeline: %w", err)
+	}
+	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.tonemapPipeline, nil) })
+
+	// The scene draws into the HDR views; only the tonemap pass touches the
+	// swapchain.
+	r.framebuffers, err = createFramebuffers(r.deviceDriver, r.renderPass, r.hdr.views, r.depth.views, msaaViews, r.sc.extent)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create framebuffers: %w", err)
 	}
 	r.onInit(func() {
 		for _, fb := range r.framebuffers {
+			r.deviceDriver.DestroyFramebuffer(fb, nil)
+		}
+	})
+
+	r.tonemapFramebuffers, err = createTonemapFramebuffers(r.deviceDriver, r.tonemapRenderPass, r.sc.imageViews, r.sc.extent)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create tonemap framebuffers: %w", err)
+	}
+	r.onInit(func() {
+		for _, fb := range r.tonemapFramebuffers {
 			r.deviceDriver.DestroyFramebuffer(fb, nil)
 		}
 	})
@@ -623,11 +675,11 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	// blending, which is why this is a warning rather than an error.
 	if r.sc.captureCapable {
 		r.sceneColor, err = createSceneColorTarget(r.instanceDriver, r.deviceDriver, r.physicalDevice,
-			r.descriptorPool, r.descriptorSetLayout, r.sc.extent, r.sc.imageFormat, r.maxAnisotropy)
+			r.descriptorPool, r.descriptorSetLayout, r.sc.extent, hdrFormat, r.maxAnisotropy)
 		if err != nil {
 			return nil, fmt.Errorf("renderer: create scene color target: %w", err)
 		}
-		r.waterFramebuffers, err = createWaterFramebuffers(r.deviceDriver, r.waterRenderPass, r.sc.imageViews, r.depth.views, msaaViews, r.sc.extent)
+		r.waterFramebuffers, err = createWaterFramebuffers(r.deviceDriver, r.waterRenderPass, r.hdr.views, r.depth.views, msaaViews, r.sc.extent)
 		if err != nil {
 			return nil, fmt.Errorf("renderer: create water framebuffers: %w", err)
 		}
@@ -815,6 +867,10 @@ func (r *Renderer) recreateSwapchain() error {
 	for _, fb := range r.framebuffers {
 		r.deviceDriver.DestroyFramebuffer(fb, nil)
 	}
+	for _, fb := range r.tonemapFramebuffers {
+		r.deviceDriver.DestroyFramebuffer(fb, nil)
+	}
+	r.tonemapFramebuffers = nil
 	for _, fb := range r.waterFramebuffers {
 		r.deviceDriver.DestroyFramebuffer(fb, nil)
 	}
@@ -847,7 +903,7 @@ func (r *Renderer) recreateSwapchain() error {
 	}
 
 	if r.msaaSamples != core1_0.Samples1 {
-		r.msaa, err = createMSAAResources(r.instanceDriver, r.deviceDriver, r.physicalDevice, r.sc.extent, r.sc.imageFormat, r.msaaSamples, len(r.sc.imageViews))
+		r.msaa, err = createMSAAResources(r.instanceDriver, r.deviceDriver, r.physicalDevice, r.sc.extent, hdrFormat, r.msaaSamples, len(r.sc.imageViews))
 		if err != nil {
 			return err
 		}
@@ -859,18 +915,32 @@ func (r *Renderer) recreateSwapchain() error {
 	if r.msaa != nil {
 		msaaViews = r.msaa.views
 	}
-	r.framebuffers, err = createFramebuffers(r.deviceDriver, r.renderPass, r.sc.imageViews, r.depth.views, msaaViews, r.sc.extent)
+
+	// The HDR targets are swapchain-sized, so they go with it.
+	r.hdr.destroy(r.deviceDriver)
+	r.hdr, err = createHDRTargets(r.instanceDriver, r.deviceDriver, r.physicalDevice,
+		r.descriptorPool, r.descriptorSetLayout, r.sc.extent, len(r.sc.imageViews), r.maxAnisotropy)
+	if err != nil {
+		return err
+	}
+
+	r.framebuffers, err = createFramebuffers(r.deviceDriver, r.renderPass, r.hdr.views, r.depth.views, msaaViews, r.sc.extent)
+	if err != nil {
+		return err
+	}
+
+	r.tonemapFramebuffers, err = createTonemapFramebuffers(r.deviceDriver, r.tonemapRenderPass, r.sc.imageViews, r.sc.extent)
 	if err != nil {
 		return err
 	}
 
 	if r.sc.captureCapable {
 		r.sceneColor, err = createSceneColorTarget(r.instanceDriver, r.deviceDriver, r.physicalDevice,
-			r.descriptorPool, r.descriptorSetLayout, r.sc.extent, r.sc.imageFormat, r.maxAnisotropy)
+			r.descriptorPool, r.descriptorSetLayout, r.sc.extent, hdrFormat, r.maxAnisotropy)
 		if err != nil {
 			return err
 		}
-		r.waterFramebuffers, err = createWaterFramebuffers(r.deviceDriver, r.waterRenderPass, r.sc.imageViews, r.depth.views, msaaViews, r.sc.extent)
+		r.waterFramebuffers, err = createWaterFramebuffers(r.deviceDriver, r.waterRenderPass, r.hdr.views, r.depth.views, msaaViews, r.sc.extent)
 		if err != nil {
 			return err
 		}
@@ -952,7 +1022,7 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, uiOv
 		return err
 	}
 	recordStart := time.Now()
-	err = recordCommandBuffer(r.deviceDriver, cmdBuf, r.renderPass, r.framebuffers[imageIndex], r.pipeline, r.litDoubleSidedPipeline, r.overlayPipeline, r.skyPipeline, r.starsPipeline, r.uiPipeline, r.msdfPipeline, r.skinnedPipeline, r.grassPipeline, r.waterPipeline, r.godRayPipeline, r.waterRenderPass, waterFB, r.sceneColor, r.sc.images[imageIndex], r.particlePipeline, r.terrainPipeline, r.materialPipelines(), &r.stats, r.pipelineLayout, r.litPipelineLayout, r.skinnedPipelineLayout, r.terrainPipelineLayout, r.sc.extent, draws, overlays, uiOverlays, msdfOverlays, lighting, r.fallbackTexture, r.shadow, r.grass, r.particles, f, r.msaa != nil, r.gpuTimer)
+	err = recordCommandBuffer(r.deviceDriver, cmdBuf, r.renderPass, r.framebuffers[imageIndex], r.pipeline, r.litDoubleSidedPipeline, r.overlayPipeline, r.skyPipeline, r.starsPipeline, r.uiPipeline, r.msdfPipeline, r.skinnedPipeline, r.grassPipeline, r.waterPipeline, r.godRayPipeline, r.waterRenderPass, waterFB, r.sceneColor, r.hdr.images[imageIndex], r.tonemapFor(imageIndex), r.particlePipeline, r.terrainPipeline, r.materialPipelines(), &r.stats, r.pipelineLayout, r.litPipelineLayout, r.skinnedPipelineLayout, r.terrainPipelineLayout, r.sc.extent, draws, overlays, uiOverlays, msdfOverlays, lighting, r.fallbackTexture, r.shadow, r.grass, r.particles, f, r.msaa != nil, r.gpuTimer)
 	if err != nil {
 		return err
 	}

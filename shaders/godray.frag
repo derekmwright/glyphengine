@@ -47,14 +47,19 @@ const int SAMPLES = 48;
 // simply contributes nothing.
 vec3 bright(vec3 c) {
     float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
-    // These are LINEAR values. The scene is copied from an sRGB framebuffer
-    // and the sampler decodes on read, so a cutoff picked by eye from sRGB
-    // numbers lands far too high: the sunset disc displays near white but
-    // reads as luminance 0.71 here, and an 0.80 threshold rejected it
-    // entirely, leaving the effect contributing exactly nothing.
+    // These are LINEAR values, and a cutoff picked by eye from sRGB numbers
+    // lands far too high: the sunset disc displays near white but reads as
+    // luminance 0.71 here, and an 0.80 threshold rejected it entirely, leaving
+    // the effect contributing exactly nothing.
     //
     // Daytime sky is around 0.68 and the disc reaches 1.0, so the window sits
     // between them. Below it the whole sky smears and the frame washes out.
+    //
+    // The scene now arrives from a half-float target rather than an sRGB one.
+    // The numbers did not move -- sampling an sRGB image decoded to linear
+    // too -- but the ceiling did: l can exceed 1 once anything emits above it,
+    // and then this window admits everything rather than selecting the sun.
+    // Whoever raises a light past 1 has to revisit these two constants.
     float m = smoothstep(0.62, 0.88, l);
     return c * m;
 }

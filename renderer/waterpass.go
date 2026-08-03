@@ -5,7 +5,6 @@ import (
 	"log"
 
 	"github.com/vkngwrapper/core/v3/core1_0"
-	"github.com/vkngwrapper/extensions/v3/khr_swapchain"
 )
 
 // The water pass exists for one reason: refraction has to sample what is
@@ -207,7 +206,7 @@ func createWaterRenderPass(deviceDriver core1_0.DeviceDriver, imageFormat core1_
 				FinalLayout:    core1_0.ImageLayoutColorAttachmentOptimal,
 			},
 			depthAttachment,
-			// 2: resolve to the swapchain. This resolves a second time in the
+			// 2: resolve to the HDR target. This resolves a second time in the
 			// frame, which is the price of drawing water at full MSAA rather
 			// than aliasing every wave crest against the sky.
 			{
@@ -218,7 +217,7 @@ func createWaterRenderPass(deviceDriver core1_0.DeviceDriver, imageFormat core1_
 				StencilLoadOp:  core1_0.AttachmentLoadOpDontCare,
 				StencilStoreOp: core1_0.AttachmentStoreOpDontCare,
 				InitialLayout:  core1_0.ImageLayoutUndefined,
-				FinalLayout:    khr_swapchain.ImageLayoutPresentSrc,
+				FinalLayout:    core1_0.ImageLayoutShaderReadOnlyOptimal,
 			},
 		}
 		subpasses = []core1_0.SubpassDescription{{
@@ -235,7 +234,7 @@ func createWaterRenderPass(deviceDriver core1_0.DeviceDriver, imageFormat core1_
 		}}
 	} else {
 		attachments = []core1_0.AttachmentDescription{
-			// Without MSAA the first pass drew straight into the swapchain, so
+			// Without MSAA the first pass drew straight into the HDR target, so
 			// water blends directly onto it. It arrives in TransferSrc from the
 			// copy that fed the refraction source.
 			{
@@ -246,7 +245,7 @@ func createWaterRenderPass(deviceDriver core1_0.DeviceDriver, imageFormat core1_
 				StencilLoadOp:  core1_0.AttachmentLoadOpDontCare,
 				StencilStoreOp: core1_0.AttachmentStoreOpDontCare,
 				InitialLayout:  core1_0.ImageLayoutTransferSrcOptimal,
-				FinalLayout:    khr_swapchain.ImageLayoutPresentSrc,
+				FinalLayout:    core1_0.ImageLayoutShaderReadOnlyOptimal,
 			},
 			depthAttachment,
 		}

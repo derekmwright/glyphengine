@@ -159,7 +159,7 @@ func (r *Renderer) DrawTriangle() error {
 	if _, err := r.deviceDriver.ResetCommandBuffer(cmdBuf, 0); err != nil {
 		return err
 	}
-	if err := r.recordTriangle(cmdBuf, r.framebuffers[imageIndex]); err != nil {
+	if err := r.recordTriangle(cmdBuf, r.framebuffers[imageIndex], r.tonemapFor(imageIndex)); err != nil {
 		return err
 	}
 
@@ -193,7 +193,7 @@ func (r *Renderer) DrawTriangle() error {
 }
 
 // recordTriangle records a single render pass that clears and draws 3 vertices.
-func (r *Renderer) recordTriangle(cmdBuf core1_0.CommandBuffer, framebuffer core1_0.Framebuffer) error {
+func (r *Renderer) recordTriangle(cmdBuf core1_0.CommandBuffer, framebuffer core1_0.Framebuffer, tonemap tonemapPass) error {
 	if _, err := r.deviceDriver.BeginCommandBuffer(cmdBuf, core1_0.CommandBufferBeginInfo{}); err != nil {
 		return err
 	}
@@ -235,6 +235,13 @@ func (r *Renderer) recordTriangle(cmdBuf core1_0.CommandBuffer, framebuffer core
 	r.deviceDriver.CmdDraw(cmdBuf, 3, 1, 0, 0)
 
 	r.deviceDriver.CmdEndRenderPass(cmdBuf)
+
+	// The scene render pass writes the HDR target, so even the diagnostic
+	// triangle needs resolving or nothing reaches the swapchain.
+	if err := recordTonemap(r.deviceDriver, cmdBuf, tonemap, r.pipelineLayout, r.sc.extent); err != nil {
+		return err
+	}
+
 	_, err = r.deviceDriver.EndCommandBuffer(cmdBuf)
 	return err
 }
