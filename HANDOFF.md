@@ -66,9 +66,11 @@ and thinning distant grass.
   until a pad has been tried against `17-input`, in case sensitivity or dead
   zone needs changing; the values live in the engine, though, so the migration
   itself does not bake anything in.
-- **The sun disc does not emit above 1.** It is the obvious next HDR source, and
-  the one that would make the curve and the bloom do visible work in every
-  outdoor scene rather than in one example.
+- **No example points the camera at the sun**, so the one HDR source that exists
+  in every outdoor scene cannot be seen doing anything. `09-water -pillars`
+  exists to demo shafts against the setting sun and finding the angle by hand
+  failed repeatedly; it wants a documented flag combination, or a scripted
+  camera that frames the sun.
 - **Sky is the top GPU pass in most scenes** — 78 to 92 percent in 02-cube,
   07-terrain, 09-water, 12-particles and 16-materials, and about 30 percent
   where there is grass. `CloudSteps` is already exposed; the honest next step is
@@ -129,7 +131,13 @@ and thinning distant grass.
   `task bench`. Read `docs/agents/profiling.md` before trusting a number,
   including one written here.
 
-- **Establish a noise floor before believing a diff.** Two identical runs first.
+- **Establish a noise floor before believing a diff.** This caught a fabricated
+  regression on this branch: the light-shaft contribution in `09-water` measured
+  RMS 0.00074 before HDR and 0.00036 after, which reads as the shafts halving —
+  except two identical runs of the same build differ by 0.00067. Both numbers
+  were noise. Shafts are simply not visible in that view.
+
+  Two identical runs first.
   Frame timing spreads about 0.02 ms with means. Screenshot RMS spreads
   0.0006 on 07-terrain, which is the most static scene, and 0.004 to 0.007 on
   anything with a day cycle or wind — high enough to swamp a subtle change, so
@@ -142,6 +150,14 @@ and thinning distant grass.
 
 - **The shader staleness test earns its keep.** Run `task shaders` after touching
   any `.inc` — `bloom.inc` is now one of them.
+
+- **The sun disc has always emitted above 1** — `SunDiscColor` is the sun colour
+  times a 1.7 boost, so it peaks at 1.7 at midday. An earlier version of this
+  handoff claimed it did not; that was wrong. The 8-bit target was throwing the
+  excess away, and the half-float one now carries it, which means a bloom
+  threshold above 1 already selects the sun with no further work. Pinned by
+  `TestSunDiscExceedsOne` — clamping that return to 1 looks like a tidy-up and
+  silently stops the sun being a highlight.
 
 - **ACES is still not the answer** — but the reason has changed. The target it
   needs now exists; what is missing is scene content bright enough to justify a

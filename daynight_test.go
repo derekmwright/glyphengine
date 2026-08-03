@@ -200,3 +200,41 @@ func TestNightIsActuallyDark(t *testing.T) {
 		t.Errorf("daylight is %.3f at midnight", midnight.Daylight())
 	}
 }
+
+// TestSunDiscExceedsOne pins the fact that the sun disc is an HDR value.
+//
+// It is the only thing the engine emits above 1 without a material asking for
+// it, and everything downstream of the half-float target depends on that: a
+// bloom threshold set above 1 selects the sun and nothing else, and a tonemap
+// curve has the disc to compress. Clamp SunDiscColor to 1 -- which looks like
+// a tidy-up, because on the old 8-bit path the excess was thrown away at the
+// framebuffer anyway -- and the sun silently stops being a highlight.
+//
+// The boost is also what makes the core read as a light source rather than a
+// dull ball, which is the reason it was there before there was anywhere to put
+// the extra range.
+//
+// It has teeth: clamping the return of SunDiscColor to 1, or dropping the
+// boost constant to 1.0, fails this.
+func TestSunDiscExceedsOne(t *testing.T) {
+	// Midday, when the disc is brightest and fully faded in.
+	c := (&DayNight{TimeOfDay: 0.5}).SunDiscColor()
+	peak := math.Max(float64(c[0]), math.Max(float64(c[1]), float64(c[2])))
+	if peak <= 1.0 {
+		t.Errorf("midday sun disc peaks at %.3f, want above 1 -- the HDR target has nothing to carry", peak)
+	}
+
+	// And that it is not merely a rounding error above 1. The margin is what a
+	// bloom threshold needs to sit inside: docs/agents/bloom.md recommends 1.2
+	// with a 0.2 knee, so the ramp runs 1.0 to 1.4 and the disc has to clear it.
+	if peak < 1.4 {
+		t.Errorf("midday sun disc peaks at %.3f; the documented bloom ramp tops out at 1.4, so it would barely register", peak)
+	}
+
+	// Night is the control: with the sun below the horizon the disc must fade
+	// out entirely, or a bloom threshold picks up a sun that is not there.
+	night := (&DayNight{TimeOfDay: 0.0}).SunDiscColor()
+	if l := lum(night); l > 0.01 {
+		t.Errorf("midnight sun disc luminance = %.4f, want ~0", l)
+	}
+}
