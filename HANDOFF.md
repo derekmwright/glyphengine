@@ -71,6 +71,14 @@ and thinning distant grass.
   seconds. This was written up as an unresolved gap after several failed attempts
   to find an angle by hand in `07-terrain` and `09-water` -- the answer was an
   example that was already pointing at it once a second.
+- **Night cloud lighting is an artistic floor, not a measurement.** Moonlight in
+  clouds.frag is (0.13, 0.15, 0.21) against daylight's (1.0, 0.97, 0.92). Real
+  moonlight is about a millionth of sunlight; a physically honest night sky is
+  a black one. The previous value was 0.55 -- two thirds of daylight -- and made
+  night clouds read as white: measured, a bright cloud sat at 0.507 luminance at
+  midnight against 0.811 at noon. It is now 0.230. Day is untouched, because the
+  value only appears on the night side of a mix.
+
 - **"Sky is the top GPU pass" means CLOUDS, not the dome.** Measured on
   09-water: the sky pass costs 1.146 ms with the cloud march on and 0.008 ms
   with it off. Over 99 percent of it is the raymarch, and the sky dome is
