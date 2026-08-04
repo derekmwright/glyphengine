@@ -431,13 +431,21 @@ func createStarsPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, render
 		DepthStencilState: farPlaneDepthState(),
 		ColorBlendState: &core1_0.PipelineColorBlendStateCreateInfo{
 			Attachments: []core1_0.PipelineColorBlendAttachmentState{{
-				ColorWriteMask:      core1_0.ColorComponentRed | core1_0.ColorComponentGreen | core1_0.ColorComponentBlue | core1_0.ColorComponentAlpha,
-				BlendEnabled:        true,
-				SrcColorBlendFactor: core1_0.BlendFactorOne,
+				ColorWriteMask: core1_0.ColorComponentRed | core1_0.ColorComponentGreen | core1_0.ColorComponentBlue | core1_0.ColorComponentAlpha,
+				BlendEnabled:   true,
+				// Additive, but scaled by the destination alpha, which sky.frag
+				// wrote as the cloud layer's transmittance. Under clear sky that
+				// is 1 and this is the plain additive blend it always was; under
+				// overcast it goes to 0 and the stars behind the cloud disappear,
+				// which is the point. Without it a starfield speckles straight
+				// through solid cloud.
+				SrcColorBlendFactor: core1_0.BlendFactorDstAlpha,
 				DstColorBlendFactor: core1_0.BlendFactorOne,
 				ColorBlendOp:        core1_0.BlendOpAdd,
-				SrcAlphaBlendFactor: core1_0.BlendFactorOne,
-				DstAlphaBlendFactor: core1_0.BlendFactorZero,
+				// Leave alpha alone: it is still the cloud transmittance, and
+				// nothing downstream should see stars change it.
+				SrcAlphaBlendFactor: core1_0.BlendFactorZero,
+				DstAlphaBlendFactor: core1_0.BlendFactorOne,
 				AlphaBlendOp:        core1_0.BlendOpAdd,
 			}},
 		},

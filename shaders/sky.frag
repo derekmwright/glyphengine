@@ -158,6 +158,15 @@ void main() {
     //
     // This is only affordable because the sky now draws last and depth-tested,
     // so nothing here runs for a pixel the terrain covers.
+    // cloudTransmit is how much of what is BEHIND the cloud layer still gets
+    // through, written to alpha so the star pass can be attenuated by it.
+    //
+    // Stars are drawn after the sky and blend additively, so without this they
+    // are added on top of cloud rather than hidden behind it -- a starfield
+    // showing through solid overcast, which reads as noise speckling the clouds
+    // rather than as anything astronomical. 1.0 is clear sky.
+    float cloudTransmit = 1.0;
+
     int cloudSteps = int(pc.tint.z);
     if (dir.y > 0.015 && cloudSteps > 0) {
         const float CLOUD_BOTTOM = 620.0;
@@ -252,8 +261,9 @@ void main() {
             float horizonFade = smoothstep(0.015, 0.16, dir.y);
             float cover = (1.0 - transmittance) * horizonFade;
             skyColor = skyColor * (1.0 - cover) + scattered * horizonFade;
+            cloudTransmit = 1.0 - cover;
         }
     }
 
-    outColor = vec4(skyColor, 1.0);
+    outColor = vec4(skyColor, cloudTransmit);
 }
