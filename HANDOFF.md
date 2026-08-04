@@ -124,6 +124,23 @@ and thinning distant grass.
   it.** A uniform branch skipping the sample does nothing for the layout check.
   That is what `primeBloomLayouts` is for, and `initCubeShadowLayout` before it.
 
+- **The cloud march must not sample detail its step length cannot resolve.**
+  The finest fbm octave is about 113 world units across and a step covers 30 to
+  170 at ordinary elevations, so that octave could only alias. Octaves now fade
+  out by Nyquist against the live step length, renormalised so coverage does not
+  shift with them.
+
+- **Keep the march's jitter keyed to the world, not to the screen.** It was
+  `hash2D(fragUV)`, which nails the noise pattern to the display: turning the
+  camera drags the clouds through a stationary field and the result reads as a
+  Photoshop add-noise filter rather than as grain. `hash3D(dir * 4096)` gives a
+  patch of sky its own jitter, so the noise travels with the cloud.
+
+  Do not "fix" this by turning the jitter down. Removing it entirely gives the
+  best static grain number and brings back visible horizontal banding at the
+  horizon; a partial amplitude is worse than either, because the residual
+  banding beats against the hash into a structured dither.
+
 - **Check a bloom or godray threshold against the SKY.** Daytime sky is about
   0.68 in linear. A ramp reaching below that lifts the whole frame and reads as
   haze rather than as a mistake. Measured: RMS 0.025 across the sky before the

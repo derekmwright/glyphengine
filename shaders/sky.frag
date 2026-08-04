@@ -81,6 +81,45 @@ float fbm3D(vec3 p) {
     return v;
 }
 
+// fbm3DDetail is fbm3D with the octaves the raymarch cannot resolve faded out.
+//
+// This is the fix for clouds that look like a Photoshop noise filter, worst
+// while the camera turns. The finest octave has features about 113 world units
+// across, and a step is 30 to 170 units at ordinary elevations and hundreds near
+// the horizon -- so that octave sits at or under the sample spacing and cannot
+// be integrated, only aliased. The per-pixel jitter then re-rolls the aliasing
+// for every pixel, and because the jitter is keyed to screen position rather
+// than to the world, rotating the camera drags the clouds through a stationary
+// noise field. That is the boiling.
+//
+// detail is how many octaves are worth sampling, from Nyquist: an octave is
+// resolvable while its wavelength stays above twice the step length. Partial
+// values fade the last octave in rather than popping it, which matters because
+// step length varies smoothly across the frame and a hard cutoff would draw a
+// visible arc across the sky.
+//
+// The result is renormalised by the amplitude actually used, so dropping octaves
+// does not shift the mean and quietly change how much of the sky is cloud --
+// the coverage threshold outside is tuned against the full-octave range.
+float fbm3DDetail(vec3 p, float detail) {
+    float v = 0.0;
+    float used = 0.0;
+    float a = 0.5;
+    for (int i = 0; i < 4; i++) {
+        float w = clamp(detail - float(i), 0.0, 1.0);
+        if (w <= 0.0) {
+            break;
+        }
+        v += a * w * valueNoise3D(p);
+        used += a * w;
+        p = p * 2.03 + vec3(17.1, 9.7, 23.3);
+        a *= 0.5;
+    }
+    // 0.9375 is the four-octave amplitude sum, so a reduced-octave sample lands
+    // on the same scale the coverage threshold expects.
+    return v * (0.9375 / max(used, 1e-4));
+}
+
 // fbm3DLow is the two-octave version used for the light march.
 //
 // Shadowing inside a cloud does not need the detail the shape does: the fine
@@ -209,8 +248,30 @@ void main() {
             sunLight = mix(sunLight, vec3(1.0, 0.62, 0.34), twi * 0.8);
             vec3 skyFill = mix(zenith, horizon, 0.5) * 1.6;
 
+            // How much of the noise the step spacing can actually resolve.
+            //
+            // The base octave is about 950 world units across after the 0.00035
+            // and 3.0 scalings below; each further octave is 2.03 times finer.
+            // An octave survives while its wavelength stays above twice the
+            // step, so the count is log(475/stepLen) in base 2.03. Floored at 1
+            // because a cloud layer with no octaves at all is a flat sheet.
+            float detail = clamp(log(475.0 / stepLen) / log(2.03), 1.0, 4.0);
+
             // Jitter the first sample so the step boundaries do not band.
-            float jitter = hash2D(fragUV * 1024.0);
+            //
+            // Keyed to the world-space ray direction rather than to fragUV. The
+            // amount of noise is the same either way, but screen-space keying
+            // nails the pattern to the display: turn the camera and the clouds
+            // slide through a stationary noise field, which is what makes it
+            // read as a Photoshop add-noise filter rather than as grain. Keyed
+            // to direction, a patch of sky keeps its jitter as the view moves,
+            // so the noise travels with the cloud it belongs to.
+            //
+            // The scale wants to be large enough that neighbouring pixels
+            // decorrelate at any sane resolution: adjacent rays differ by about
+            // fov/width in radians, so 4096 keeps them well apart at 4K and
+            // further apart at 1080p.
+            float jitter = hash3D(dir * 4096.0);
             float t = t0 + stepLen * jitter;
 
             for (int i = 0; i < STEPS; i++) {
@@ -218,7 +279,7 @@ void main() {
 
                 float h = clamp((p.y - CLOUD_BOTTOM) / (CLOUD_TOP - CLOUD_BOTTOM), 0.0, 1.0);
                 vec3 q = vec3(p.xz * 0.00035 + wind, p.y * 0.0011);
-                float n = fbm3D(q * 3.0);
+                float n = fbm3DDetail(q * 3.0, detail);
 
                 // Flatten toward both faces of the slab so clouds have bases
                 // and tops rather than being cut off by the boundary.
