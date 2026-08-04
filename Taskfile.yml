@@ -166,18 +166,28 @@ tasks:
       # because they surface at vkDestroyDevice rather than during rendering.
       - |
         status=0
-        for ex in 01-triangle 02-cube 03-physics 04-first-person 05-textures 06-skinned 07-terrain 08-grass 09-water 10-text 11-lights 12-particles 13-ui 16-materials 17-input 15-kitchen-sink; do
-          out=$(go run ./$ex -frames 30 2>&1) || { echo "$ex: FAILED TO RUN"; echo "$out"; status=1; continue; }
+        check() {
+          ex=$1; shift
+          label=$ex
+          if [ $# -gt 0 ]; then label="$ex $*"; fi
+          out=$(go run ./$ex -frames 30 "$@" 2>&1) || { echo "$label: FAILED TO RUN"; echo "$out"; status=1; return; }
           msgs=$(echo "$out" | grep -cE "VULKAN (ERROR|WARNING)" || true)
           leaks=$(echo "$out" | grep -c "has not been destroyed" || true)
           if [ "$msgs" -ne 0 ]; then
-            echo "$ex: $msgs validation message(s), $leaks of them leaked objects"
+            echo "$label: $msgs validation message(s), $leaks of them leaked objects"
             echo "$out" | grep -E "VULKAN (ERROR|WARNING)" | head -20
             status=1
           else
-            echo "$ex: clean"
+            echo "$label: clean"
           fi
+        }
+        for ex in 01-triangle 02-cube 03-physics 04-first-person 05-textures 06-skinned 07-terrain 08-grass 09-water 10-text 11-lights 12-particles 13-ui 16-materials 17-input 15-kitchen-sink; do
+          check $ex
         done
+        # Render paths no example turns on by default. Everything above runs
+        # with stock settings, so an opt-in path can rot for months with every
+        # gate green -- the layer only ever sees the code that actually runs.
+        check 08-grass -grassimpostor 25
         exit $status
 
   screenshots:
