@@ -64,7 +64,9 @@ type Renderer struct {
 	grass                         *GrassSystem
 	// grassLOD is the distance tuning grass thins, fades and culls by.
 	// Defaulted at construction so a zero value never culls grass at zero.
-	grassLOD              GrassLOD
+	grassLOD GrassLOD
+	// grassImpostor is the baked billboard atlas; nil until grass is loaded.
+	grassImpostor         *grassImpostor
 	terrainSetLayout      core1_0.DescriptorSetLayout // set 0 = 4 terrain samplers
 	terrainPipelineLayout core1_0.PipelineLayout      // terrain: set 0=4 tex, set 1=shadow
 	terrainPipeline       core1_0.Pipeline
@@ -630,6 +632,13 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	}
 	// The GrassSystem itself is created later by InitGrass, if ever.
 	r.onInit(func() {
+		if r.grassImpostor != nil {
+			// Registered here rather than at bake time: the atlas is created
+			// from InitGrass, long after New has finished pushing teardown, and
+			// it has the same lifetime as the grass it stands in for.
+			r.grassImpostor.destroy(r.deviceDriver)
+			r.grassImpostor = nil
+		}
 		if r.grass != nil {
 			r.grass.Destroy(r.deviceDriver)
 		}
@@ -925,6 +934,16 @@ func (r *Renderer) InitGrass(fsys fs.FS, hm GrassHeightmap, originX, originZ, wo
 		return
 	}
 	r.grass = gs
+
+	// Bake the impostor atlas from the meshes just loaded. Doing it here rather
+	// than lazily means the cost lands at load with the rest of the flora, and
+	// the atlas cannot be out of step with the meshes it stands in for.
+	//
+	// A bake failure is not fatal: impostors are an optimisation, and a game
+	// that cannot have them should still get its grass.
+	if err := r.bakeGrassImpostors(grassImpostorCellSize); err != nil {
+		log.Printf("Grass impostor bake failed, meshes will be drawn at all distances: %v", err)
+	}
 }
 
 // InitParticles allocates the GPU particle system with the given max instance count.

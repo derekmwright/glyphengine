@@ -22,29 +22,30 @@ import "github.com/derekmwright/glyphengine/shaders"
 // pipeline-creation failure at startup, or — worse — a shader that links and
 // draws nothing. Run with WithValidation while developing one.
 type ShaderSet struct {
-	TriangleVert, TriangleFrag []byte // diagnostic tri-color triangle
-	MeshVert, MeshFrag         []byte // unlit textured mesh
-	LitVert, LitFrag           []byte // lit static geometry
-	LitMaterialFrag            []byte // lit + normal/roughness/AO maps (shares LitVert)
-	TerrainFrag                []byte // terrain splat blend (shares LitVert)
-	SkinnedLitVert             []byte // GPU-skinned lit geometry
-	SkinnedLitFrag             []byte
-	SkinnedLitMaterialFrag     []byte // skinned + material maps (shares SkinnedLitVert)
-	ShadowVert, ShadowFrag     []byte // depth-only shadow pass
-	ShadowSkinnedVert          []byte // depth-only, skinned
-	SkyVert, SkyFrag           []byte // sky gradient
-	StarsVert, StarsFrag       []byte // star field
-	GrassVert, GrassFrag       []byte // instanced grass
-	WaterVert, WaterFrag       []byte // animated water surface
-	GodRayFrag                 []byte // screen-space light shafts (uses SkyVert)
-	TonemapFrag                []byte // HDR resolve to the swapchain (uses SkyVert)
-	CloudsFrag                 []byte // volumetric clouds at half res (uses SkyVert)
-	BloomPrefilterFrag         []byte // bloom bright-pass (uses SkyVert)
-	BloomDownFrag              []byte // bloom downsample (uses SkyVert)
-	BloomUpFrag                []byte // bloom upsample (uses SkyVert)
-	ParticleVert, ParticleFrag []byte // billboard particles
-	MsdfVert, MsdfFrag         []byte // MSDF text
-	UIVert, UIFrag             []byte // 9-slice UI panels
+	TriangleVert, TriangleFrag   []byte // diagnostic tri-color triangle
+	MeshVert, MeshFrag           []byte // unlit textured mesh
+	LitVert, LitFrag             []byte // lit static geometry
+	LitMaterialFrag              []byte // lit + normal/roughness/AO maps (shares LitVert)
+	TerrainFrag                  []byte // terrain splat blend (shares LitVert)
+	SkinnedLitVert               []byte // GPU-skinned lit geometry
+	SkinnedLitFrag               []byte
+	SkinnedLitMaterialFrag       []byte // skinned + material maps (shares SkinnedLitVert)
+	ShadowVert, ShadowFrag       []byte // depth-only shadow pass
+	ShadowSkinnedVert            []byte // depth-only, skinned
+	SkyVert, SkyFrag             []byte // sky gradient
+	StarsVert, StarsFrag         []byte // star field
+	GrassVert, GrassFrag         []byte // instanced grass
+	GrassBakeVert, GrassBakeFrag []byte // impostor atlas bake
+	WaterVert, WaterFrag         []byte // animated water surface
+	GodRayFrag                   []byte // screen-space light shafts (uses SkyVert)
+	TonemapFrag                  []byte // HDR resolve to the swapchain (uses SkyVert)
+	CloudsFrag                   []byte // volumetric clouds at half res (uses SkyVert)
+	BloomPrefilterFrag           []byte // bloom bright-pass (uses SkyVert)
+	BloomDownFrag                []byte // bloom downsample (uses SkyVert)
+	BloomUpFrag                  []byte // bloom upsample (uses SkyVert)
+	ParticleVert, ParticleFrag   []byte // billboard particles
+	MsdfVert, MsdfFrag           []byte // MSDF text
+	UIVert, UIFrag               []byte // 9-slice UI panels
 }
 
 // DefaultShaders returns the shader set the engine embeds. Copy it, override
@@ -72,6 +73,8 @@ func DefaultShaders() ShaderSet {
 		StarsFrag:              shaders.StarsFragSpv,
 		GrassVert:              shaders.GrassVertSpv,
 		GrassFrag:              shaders.GrassFragSpv,
+		GrassBakeVert:          shaders.GrassBakeVertSpv,
+		GrassBakeFrag:          shaders.GrassBakeFragSpv,
 		WaterVert:              shaders.WaterVertSpv,
 		WaterFrag:              shaders.WaterFragSpv,
 		GodRayFrag:             shaders.GodRayFragSpv,
@@ -111,6 +114,7 @@ func (s ShaderSet) withDefaults() ShaderSet {
 		{&s.SkyVert, d.SkyVert}, {&s.SkyFrag, d.SkyFrag},
 		{&s.StarsVert, d.StarsVert}, {&s.StarsFrag, d.StarsFrag},
 		{&s.GrassVert, d.GrassVert}, {&s.GrassFrag, d.GrassFrag},
+		{&s.GrassBakeVert, d.GrassBakeVert}, {&s.GrassBakeFrag, d.GrassBakeFrag},
 		{&s.WaterVert, d.WaterVert}, {&s.WaterFrag, d.WaterFrag},
 		{&s.GodRayFrag, d.GodRayFrag},
 		{&s.TonemapFrag, d.TonemapFrag},

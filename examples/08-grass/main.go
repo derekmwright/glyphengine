@@ -24,6 +24,7 @@ import (
 	"flag"
 	"log"
 	"math"
+	"os"
 	"runtime"
 
 	"github.com/go-gl/mathgl/mgl32"
@@ -61,6 +62,16 @@ type game struct {
 }
 
 func (g *game) Init(e *glyph.Engine) error {
+	// Dump the baked impostor atlas when asked. An impostor that is framed
+	// wrong or cut off is invisible in a field of grass and obvious in the
+	// atlas, so being able to look at the artifact matters more than the flag
+	// costs.
+	defer func() {
+		if d := os.Getenv("GLYPH_DUMP_IMPOSTOR"); d != "" {
+			dumpImpostorAtlas(e, d)
+		}
+	}()
+
 	// Grass distance tuning, so the LOD knobs can be swept without editing the
 	// engine -- which is the entire point of GrassLOD being configurable.
 	if g.grassDist > 0 || g.grassThin > 0 {
