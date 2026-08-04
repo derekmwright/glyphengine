@@ -64,14 +64,15 @@ type GrassLOD struct {
 	// The swap happens per tile, not per blade, so a whole tile of grass
 	// changes representation at once.
 	//
-	// It is a dial, not a free win. Measured on 08-grass against a two-run noise
-	// floor of RMS 0.0107, with the default 80-unit cull:
+	// It is a dial, not a free win. Measured on 08-grass, min of three runs,
+	// against a two-run noise floor of RMS 0.0125 -- the sky is never still, so
+	// two identical runs never match exactly -- with the default 80-unit cull:
 	//
 	//	distance   grass pass   image vs meshes
-	//	off          2.614 ms   --
-	//	25           0.603 ms   0.044   visible: the far field reads chunkier
-	//	40           1.624 ms   0.029
-	//	60           2.409 ms   0.016   indistinguishable
+	//	off          2.597 ms   --
+	//	25           0.740 ms   0.044   visible: the far field reads chunkier
+	//	40           1.655 ms   0.027
+	//	60           2.400 ms   0.019   indistinguishable
 	//
 	// A billboard always presents its full width where a thin blade was often
 	// seen edge-on, so impostors cover more screen than the meshes they replace

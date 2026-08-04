@@ -847,7 +847,8 @@ func recordCommandBuffer(
 		var lastFloraTex *Texture
 		// Far tiles are collected here and drawn after every variant's meshes,
 		// so the impostor pipeline is bound once rather than per variant.
-		var impostorTiles []variantTiles
+		impostorTiles := grass.impostorVariants[:0]
+		impostorScratch := grass.impostorScratch[:0]
 		visible := grass.visibleScratch[:0]
 		for i := range grass.Variants {
 			v := &grass.Variants[i]
@@ -918,18 +919,7 @@ func recordCommandBuffer(
 			meshTiles := visible
 			if grassLOD.ImpostorDistance > 0 && impostor != nil {
 				cut := grassLOD.ImpostorDistance * grassLOD.ImpostorDistance
-				split := len(visible)
-				for i, vt := range visible {
-					if vt.dist2 > cut {
-						split = i
-						break
-					}
-				}
-				meshTiles = visible[:split]
-				impostorTiles = append(impostorTiles, variantTiles{
-					variant: i,
-					tiles:   visible[split:],
-				})
+				meshTiles, impostorScratch, impostorTiles = splitImpostorTiles(visible, cut, impostorScratch, impostorTiles, i)
 			}
 
 			for _, vt := range meshTiles {
@@ -980,7 +970,7 @@ func recordCommandBuffer(
 				pc[46] = float32(vt.variant)
 				deviceDriver.CmdPushConstants(cmdBuf, litPipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
 
-				for _, t := range vt.tiles {
+				for _, t := range impostorScratch[vt.start:vt.end] {
 					tile := t.tile
 					count := tile.Count
 					if keep := grassLOD.keepFraction(float32(math.Sqrt(float64(t.dist2)))); keep < 1 {
@@ -997,6 +987,8 @@ func recordCommandBuffer(
 			}
 		}
 		grass.visibleScratch = visible
+		grass.impostorScratch = impostorScratch
+		grass.impostorVariants = impostorTiles
 	}
 
 	timer.end(deviceDriver, cmdBuf, frame, PassGrass)

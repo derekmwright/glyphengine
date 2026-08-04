@@ -46,14 +46,40 @@ type GrassInstance struct {
 	Rotation float32
 }
 
-// GrassTile is a contiguous instance-buffer range covering one world-space
-// tile, with a bounding sphere for frustum/distance culling.
 // variantTiles is one variant's share of the tiles drawn as impostors, so the
 // billboard pass can run once for all variants rather than interleaving with
 // the mesh draws and rebinding the pipeline each time.
+//
+// It holds a range rather than a slice on purpose. The tiles are collected
+// while the per-variant sort scratch is still being reused by later variants,
+// so a slice of that scratch would be rewritten under it before the billboard
+// pass ever ran.
 type variantTiles struct {
-	variant int
-	tiles   []tileDraw
+	variant    int
+	start, end int // into GrassSystem.impostorScratch
+}
+
+// splitImpostorTiles divides one variant's distance-sorted visible tiles at the
+// impostor distance, returning the near tiles to draw as meshes and appending
+// the far ones to scratch for the billboard pass.
+//
+// cut is squared, matching tileDraw.dist2. The far tiles are copied because the
+// caller's visible slice is scratch that the next variant resets, while the
+// billboard pass does not run until every variant has been collected.
+func splitImpostorTiles(visible []tileDraw, cut float32, scratch []tileDraw, variants []variantTiles, variant int) (mesh, outScratch []tileDraw, outVariants []variantTiles) {
+	split := len(visible)
+	for i, vt := range visible {
+		if vt.dist2 > cut {
+			split = i
+			break
+		}
+	}
+	if split < len(visible) {
+		start := len(scratch)
+		scratch = append(scratch, visible[split:]...)
+		variants = append(variants, variantTiles{variant: variant, start: start, end: len(scratch)})
+	}
+	return visible[:split], scratch, variants
 }
 
 // tileDraw pairs a visible tile with its squared distance, so the draw order can
@@ -63,6 +89,8 @@ type tileDraw struct {
 	dist2 float32
 }
 
+// GrassTile is a contiguous instance-buffer range covering one world-space
+// tile, with a bounding sphere for frustum/distance culling.
 type GrassTile struct {
 	FirstInstance int
 	Count         int
@@ -95,6 +123,12 @@ type GrassSystem struct {
 	// visibleScratch is reused by the draw loop for the per-frame front-to-back
 	// tile sort, so sorting costs no allocation.
 	visibleScratch []tileDraw
+
+	// impostorScratch accumulates every variant's far tiles across the whole
+	// variant loop, because the billboard pass runs after it. It cannot share
+	// visibleScratch, which each variant resets.
+	impostorScratch  []tileDraw
+	impostorVariants []variantTiles
 }
 
 // GrassHeightmap is the minimal interface needed for grass instance placement.
