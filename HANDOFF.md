@@ -71,6 +71,33 @@ and thinning distant grass.
   seconds. This was written up as an unresolved gap after several failed attempts
   to find an angle by hand in `07-terrain` and `09-water` -- the answer was an
   example that was already pointing at it once a second.
+- **"Sky is the top GPU pass" means CLOUDS, not the dome.** Measured on
+  09-water: the sky pass costs 1.146 ms with the cloud march on and 0.008 ms
+  with it off. Over 99 percent of it is the raymarch, and the sky dome is
+  essentially free.
+
+  This was got wrong once, expensively, and the mistake is cheap to repeat. A
+  Hillaire-style LUT atmosphere was built on the grounds that it would make the
+  top GPU pass cheaper, by comparing the engine's whole sky pass against the
+  source paper's "Draw Far Sky" row of 0.105 ms. That row is the dome alone; the
+  same table lists Draw Clouds separately at 7.15 ms. So it compared the
+  engine's dome-plus-clouds against the paper's dome, and both halves of the
+  conclusion were wrong: the engine's dome was already thirteen times cheaper
+  than the paper's, and there was no saving to collect. Measured afterwards, the
+  sky pass was 0.917 ms analytic and 0.918 ms with the LUT.
+
+  It was reverted -- no performance gain, and the artistic dome looked better.
+  The branch `atmosphere-lut-experiment` holds the work if it is ever wanted:
+  transmittance, multiple-scattering and sky-view LUTs, a runtime-parameterised
+  medium, and an F3 A/B toggle, all verified against reference images.
+
+  **Read both rows of a performance table before believing the comparison.**
+
+- **If the sky is to get cheaper, it is the cloud march that has to.** Half
+  resolution plus temporal reprojection, which the CESCG paper names as its own
+  main gap. That would also converge the raymarch jitter properly rather than
+  attenuating it, which is the fix currently in sky.frag.
+
 - **Sky is the top GPU pass in most scenes** — 78 to 92 percent in 02-cube,
   07-terrain, 09-water, 12-particles and 16-materials, and about 30 percent
   where there is grass. `CloudSteps` is already exposed; the honest next step is
