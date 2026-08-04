@@ -281,6 +281,7 @@ func main() {
 
 	opts := []glyph.Option{
 		glyph.WithTitle("GlyphEngine - 07 Terrain"),
+		glyph.WithDebugKeys(),
 		glyph.WithWindowSize(*width, *height),
 		glyph.WithMSAA(4),
 		// The terrain spans 200 units; push the far plane out to match.

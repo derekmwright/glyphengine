@@ -609,3 +609,10 @@ func (r *Renderer) SetBloom(intensity, threshold, knee, radius float32) {
 	}
 	r.bloomIntensity, r.bloomThreshold, r.bloomKnee, r.bloomRadius = intensity, threshold, knee, radius
 }
+
+// Bloom returns the current intensity, threshold, knee and radius, as last set
+// by SetBloom. Exposed so a harness can switch bloom off and restore the same
+// settings rather than guessing them.
+func (r *Renderer) Bloom() (intensity, threshold, knee, radius float32) {
+	return r.bloomIntensity, r.bloomThreshold, r.bloomKnee, r.bloomRadius
+}

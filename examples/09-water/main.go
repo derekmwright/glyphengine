@@ -380,6 +380,7 @@ func main() {
 
 	opts := []glyph.Option{
 		glyph.WithTitle("GlyphEngine - 09 Water"),
+		glyph.WithDebugKeys(),
 		glyph.WithWindowSize(*width, *height),
 		glyph.WithMSAA(*msaa),
 		glyph.WithProjection(50, 0.1, 800),

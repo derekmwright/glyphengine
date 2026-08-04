@@ -482,3 +482,9 @@ func recordTonemap(
 	deviceDriver.CmdEndRenderPass(cmdBuf)
 	return nil
 }
+
+// Tonemap returns the current exposure, curve and white point, as last set by
+// SetTonemap. Exposed so a harness can toggle a curve and put it back.
+func (r *Renderer) Tonemap() (exposure, curve, whitePoint float32) {
+	return r.exposure, r.tonemapCurve, r.tonemapWhite
+}

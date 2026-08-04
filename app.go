@@ -118,6 +118,7 @@ type config struct {
 	near, far  float32
 	quitKey    input.Key
 	hasQuitKey bool
+	debugKeys  bool
 }
 
 // WithScene injects an externally created Scene instead of building a fresh
@@ -282,6 +283,24 @@ func WithQuitKey(key input.Key) Option {
 	return func(c *config) { c.quitKey, c.hasQuitKey = key, true }
 }
 
+// WithDebugKeys binds F1 to toggle bloom and F2 to cycle the tonemap curve.
+//
+// The second exception to "the engine never reads input on the game's behalf",
+// and admitted for the same reason as the first: judging a post-process means
+// looking at the same frame with it on and off, and restarting the program
+// between the two comparisons is not looking at the same frame. That is a
+// harness concern, exactly like getting out of a window.
+//
+// Opt-in, so nothing takes F1 and F2 away from a game that wants them. F-keys
+// because they do not collide with movement.
+//
+// F1 turns bloom on even in a scene that never called SetBloom, using the
+// defaults documented in bloom.md. That is deliberate -- most scenes have never
+// asked for bloom, and those are the interesting ones to try it on.
+func WithDebugKeys() Option {
+	return func(c *config) { c.debugKeys = true }
+}
+
 // WithProjection overrides the vertical field of view in degrees and the near
 // and far clip planes. Defaults are 45°, 0.1, and 500.
 func WithProjection(fovDegrees, near, far float32) Option {
@@ -332,6 +351,11 @@ type Engine struct {
 	// See WithQuitKey. hasQuitKey is separate because key zero is a real key.
 	quitKey    input.Key
 	hasQuitKey bool
+
+	// See WithDebugKeys. debugBloom remembers the intensity F1 switched off, so
+	// switching it back on restores what the scene chose rather than a guess.
+	debugKeys  bool
+	debugBloom float32
 
 	// cpu accumulates per-phase CPU cost; see cputimer.go.
 	cpu cpuTimer
@@ -426,6 +450,7 @@ func New(g Game, opts ...Option) (*Engine, error) {
 		screenshot:   cfg.screenshot,
 		quitKey:      cfg.quitKey,
 		hasQuitKey:   cfg.hasQuitKey,
+		debugKeys:    cfg.debugKeys,
 	}
 
 	// Celestial billboards are engine-owned meshes, not game assets.
@@ -739,6 +764,9 @@ func (e *Engine) Run() {
 		// tick would be.
 		if e.hasQuitKey && e.input.KeyPressed(e.quitKey) {
 			e.Close()
+		}
+		if e.debugKeys {
+			e.handleDebugKeys()
 		}
 
 		if e.window.WasResized() {
@@ -1207,5 +1235,48 @@ func (e *Engine) teardown() {
 	if e.window != nil {
 		e.window.Destroy()
 		e.window = nil
+	}
+}
+
+// tonemapCurveNames indexes SetTonemap's curve selector for logging.
+var tonemapCurveNames = []string{"identity", "extended Reinhard", "ACES filmic"}
+
+// handleDebugKeys implements WithDebugKeys: F1 toggles bloom, F2 cycles the
+// tonemap curve. Both log, because a toggle whose effect you cannot see -- a
+// scene with nothing above the bloom threshold, say -- is otherwise
+// indistinguishable from a key that did not register.
+func (e *Engine) handleDebugKeys() {
+	r := e.renderer
+
+	if e.input.KeyPressed(input.KeyF1) {
+		intensity, threshold, knee, radius := r.Bloom()
+		if threshold <= 0 {
+			// Never configured. Use the starting point bloom.md recommends
+			// rather than zeroes, which would switch bloom "on" into a
+			// threshold of 0 and smear the whole frame.
+			threshold, knee, radius = 1.2, 0.2, 1.0
+		}
+		if intensity > 0 {
+			e.debugBloom = intensity
+			r.SetBloom(0, threshold, knee, radius)
+			log.Println("debug: bloom off")
+		} else {
+			restore := e.debugBloom
+			if restore <= 0 {
+				restore = 0.7
+			}
+			r.SetBloom(restore, threshold, knee, radius)
+			log.Printf("debug: bloom on, intensity %.2f threshold %.2f", restore, threshold)
+		}
+	}
+
+	if e.input.KeyPressed(input.KeyF2) {
+		exposure, curve, white := r.Tonemap()
+		next := (int(curve) + 1) % len(tonemapCurveNames)
+		if white <= 0 {
+			white = 6
+		}
+		r.SetTonemap(exposure, float32(next), white)
+		log.Printf("debug: tonemap curve %d, %s", next, tonemapCurveNames[next])
 	}
 }

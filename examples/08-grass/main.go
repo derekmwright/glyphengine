@@ -256,6 +256,7 @@ func main() {
 
 	opts := []glyph.Option{
 		glyph.WithTitle("GlyphEngine - 08 Grass"),
+		glyph.WithDebugKeys(),
 		glyph.WithWindowSize(*width, *height),
 		glyph.WithMSAA(*msaa),
 		glyph.WithProjection(55, 0.1, 600),

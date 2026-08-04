@@ -489,6 +489,7 @@ func main() {
 
 	opts := []glyph.Option{
 		glyph.WithTitle("GlyphEngine - 15 Kitchen Sink"),
+		glyph.WithDebugKeys(),
 		glyph.WithWindowSize(*width, *height),
 		glyph.WithMSAA(4),
 		// The terrain spans 160 units; push the far plane out to match.

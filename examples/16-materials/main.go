@@ -418,6 +418,7 @@ func main() {
 		glyph.WithWindowSize(*width, *height),
 		glyph.WithMSAA(4),
 		glyph.WithQuitKey(input.KeyEscape),
+		glyph.WithDebugKeys(),
 	}
 	if *fullscreen {
 		opts = append(opts, glyph.WithFullscreen())
