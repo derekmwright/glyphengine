@@ -209,6 +209,14 @@ and thinning distant grass.
   `task bench`. Read `docs/agents/profiling.md` before trusting a number,
   including one written here.
 
+- **GPU timings drift between batches; take the minimum of several runs.** The
+  same cloud configuration measured 0.222 ms in one batch and 0.568 to 0.610 ms
+  in another minutes later -- a factor of 2.7 with nothing changed. Clock and
+  power state move over a run of measurements, so comparing configuration A
+  measured in one batch against B measured in the next is worthless. Back to
+  back within a batch, the ordering is trustworthy; across batches it is not.
+  `task bench -repeat N` keeps the fastest run for exactly this reason.
+
 - **Establish a noise floor before believing a diff.** This caught a fabricated
   regression on this branch: the light-shaft contribution in `09-water` measured
   RMS 0.00074 before HDR and 0.00036 after, which reads as the shafts halving —

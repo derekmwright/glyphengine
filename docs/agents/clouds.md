@@ -154,9 +154,22 @@ landscape. **Brighten the moon, not the air.**
 
 ## Not done
 
-- **Step count is still 32 at `CloudsHigh`.** That number was chosen to keep
-  *single-frame* noise tolerable, and temporal accumulation removes that
-  constraint — a lower count is the next available saving.
+- **Step count is still 32 at `CloudsHigh`, and lowering it is not free.**
+  Temporal accumulation does remove the single-frame-noise constraint that
+  originally set it, but step length feeds the Nyquist octave rule, so fewer
+  steps means fewer octaves and the clouds change shape rather than just getting
+  noisier. Measured against a deterministic 0.00012 floor: steps 32 to 16 is
+  0.574 to 0.256 ms but moves the image by RMS 0.082.
+
+  The inner light march is the other lever and is independent of octave detail:
+  `LIGHT_STEPS` 4 to 2 is 0.574 to 0.365 ms, and 16 steps with 2 light steps
+  reaches 0.162 ms. That also moves the image by about RMS 0.085, through
+  flatter self-shadowing.
+
+  Both are available and neither is free. They were left alone because the pass
+  is already 0.34 ms in kitchensink after the half-resolution and temporal work,
+  and the remaining time is not worth visible cloud quality.
+
 - **No weather map.** Coverage is a single constant, slightly heavier at night
   so the sky is not empty.
 - **The march is not distance-adaptive.** Step length is uniform along the ray,
