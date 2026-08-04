@@ -66,11 +66,11 @@ and thinning distant grass.
   until a pad has been tried against `17-input`, in case sensitivity or dead
   zone needs changing; the values live in the engine, though, so the migration
   itself does not bake anything in.
-- **No example points the camera at the sun**, so the one HDR source that exists
-  in every outdoor scene cannot be seen doing anything. `09-water -pillars`
-  exists to demo shafts against the setting sun and finding the angle by hand
-  failed repeatedly; it wants a documented flag combination, or a scripted
-  camera that frames the sun.
+- **To see the sun glare, use `16-materials -time 0.76`.** Its camera orbits, so
+  it sweeps past the sun on its own; `-speed 8` runs a full cycle in about 19
+  seconds. This was written up as an unresolved gap after several failed attempts
+  to find an angle by hand in `07-terrain` and `09-water` -- the answer was an
+  example that was already pointing at it once a second.
 - **Sky is the top GPU pass in most scenes** — 78 to 92 percent in 02-cube,
   07-terrain, 09-water, 12-particles and 16-materials, and about 30 percent
   where there is grass. `CloudSteps` is already exposed; the honest next step is
@@ -161,9 +161,20 @@ and thinning distant grass.
   `TestSunDiscExceedsOne` — clamping that return to 1 looks like a tidy-up and
   silently stops the sun being a highlight.
 
-- **ACES is still not the answer** — but the reason has changed. The target it
-  needs now exists; what is missing is scene content bright enough to justify a
-  film curve. Extended Reinhard is wired and used by 16-materials.
+- **ACES is the answer now, and the old note saying otherwise was right when it
+  was written.** That note said not to reach for a film curve because nothing
+  emitted above 1, so a curve built to compress highlights had nothing to
+  compress. The precondition is gone: the sun disc emits 5, emissive materials
+  emit 6, and at sunset 63 percent of the sky was measured sitting within a
+  whisker of the top of the 8-bit range. That is photographic blowout, and it is
+  why a sunset read wrong -- the sun clipped, the sky clipped with it, and
+  nothing distinguished them.
+
+  Measured on 16-materials at a fixed sun, panel local contrast against sky
+  pinned at the ceiling: identity 0.01234 / 63.9%, Reinhard 0.01095 / 0.0%,
+  ACES 0.01725 / 2.5%. ACES beats identity on both at once because it lifts
+  midtones -- aces(0.5) is 0.62 against Reinhard's 0.34 -- while rolling
+  highlights off. It is `SetTonemap` curve 2.
 
 - **The LSP in this workspace reports phantom errors** — undefined symbols for
   APIs that plainly exist. `go build ./...` is the authority.

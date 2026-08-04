@@ -201,7 +201,8 @@ func TestNightIsActuallyDark(t *testing.T) {
 	}
 }
 
-// TestSunDiscExceedsOne pins the fact that the sun disc is an HDR value.
+// TestSunDiscExceedsOne pins the fact that the sun disc is an HDR value, and
+// that it stays one for as long as it is on screen.
 //
 // It is the only thing the engine emits above 1 without a material asking for
 // it, and everything downstream of the half-float target depends on that: a
@@ -210,31 +211,65 @@ func TestNightIsActuallyDark(t *testing.T) {
 // a tidy-up, because on the old 8-bit path the excess was thrown away at the
 // framebuffer anyway -- and the sun silently stops being a highlight.
 //
-// The boost is also what makes the core read as a light source rather than a
-// dull ball, which is the reason it was there before there was anywhere to put
-// the extra range.
+// The horizon sweep is the part that earns its keep. An earlier version of this
+// test checked midday only, where the horizon fade is 1.0 and the answer is
+// trivially yes. It passed while the sun at sunset was reaching 0.81 -- below
+// the bloom threshold, and darker than the sky behind it, so the one moment the
+// sun should obviously glare was the one moment it could not. The bug was found
+// by looking at a sunset, not by running the tests.
 //
-// It has teeth: clamping the return of SunDiscColor to 1, or dropping the
-// boost constant to 1.0, fails this.
+// It has teeth: dropping the boost to 1.0 fails the peak check, clamping the
+// return of SunDiscColor to 1 fails it, and moving the fade window back over
+// the horizon to -0.17..0.05 fails the sweep at every elevation below about
+// +0.03.
 func TestSunDiscExceedsOne(t *testing.T) {
+	maxChan := func(c [3]float32) float32 {
+		m := c[0]
+		for _, v := range c[1:] {
+			if v > m {
+				m = v
+			}
+		}
+		return m
+	}
+
 	// Midday, when the disc is brightest and fully faded in.
-	c := (&DayNight{TimeOfDay: 0.5}).SunDiscColor()
-	peak := math.Max(float64(c[0]), math.Max(float64(c[1]), float64(c[2])))
-	if peak <= 1.0 {
+	if peak := maxChan((&DayNight{TimeOfDay: 0.5}).SunDiscColor()); peak <= 1.0 {
 		t.Errorf("midday sun disc peaks at %.3f, want above 1 -- the HDR target has nothing to carry", peak)
 	}
 
-	// And that it is not merely a rounding error above 1. The margin is what a
-	// bloom threshold needs to sit inside: docs/agents/bloom.md recommends 1.2
-	// with a 0.2 knee, so the ramp runs 1.0 to 1.4 and the disc has to clear it.
-	if peak < 1.4 {
-		t.Errorf("midday sun disc peaks at %.3f; the documented bloom ramp tops out at 1.4, so it would barely register", peak)
+	// Every elevation at which the disc is still on screen has to clear the
+	// bloom ramp docs/agents/bloom.md documents: threshold 1.2 with a 0.2 knee,
+	// so the ramp runs 1.0 to 1.4. The threshold compares the max channel, not
+	// luminance, which matters here because a sunset disc is almost pure red and
+	// its luminance is far below its red channel.
+	//
+	// -0.05 rather than 0 because the disc has width: the sun is still visibly
+	// sitting on the horizon when its centre has dropped just below it.
+	const (
+		visibleElevation = -0.05
+		bloomRampTop     = 1.4
+	)
+	for step := 0; step <= 1000; step++ {
+		tod := float32(step) / 1000
+		dn := &DayNight{TimeOfDay: tod}
+		if dn.SunDir()[1] < visibleElevation {
+			continue
+		}
+		if peak := maxChan(dn.SunDiscColor()); peak < bloomRampTop {
+			t.Errorf("t=%.3f: sun at elevation %+.3f is visible but its disc peaks at %.3f, "+
+				"below the bloom ramp top of %.1f -- it will not glare",
+				tod, dn.SunDir()[1], peak, bloomRampTop)
+			break
+		}
 	}
 
-	// Night is the control: with the sun below the horizon the disc must fade
-	// out entirely, or a bloom threshold picks up a sun that is not there.
-	night := (&DayNight{TimeOfDay: 0.0}).SunDiscColor()
-	if l := lum(night); l > 0.01 {
+	// Night is the control: with the sun well below the horizon the disc must
+	// fade out entirely, or a bloom threshold picks up a sun that is not there.
+	if l := lum((&DayNight{TimeOfDay: 0.0}).SunDiscColor()); l > 0.01 {
 		t.Errorf("midnight sun disc luminance = %.4f, want ~0", l)
+	}
+	if l := lum((&DayNight{TimeOfDay: 0.80}).SunDiscColor()); l > 0.01 {
+		t.Errorf("well-past-sunset disc luminance = %.4f, want ~0", l)
 	}
 }

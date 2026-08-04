@@ -59,6 +59,10 @@ const autoOrbitRate = 0.15
 type game struct {
 	camera *glyph.Camera
 	flat   bool
+	tod    float32
+	speed  float32
+	curve  float32
+	dist   float32
 }
 
 // mapSize is the edge length of every generated map, and tileCount how many
@@ -338,21 +342,40 @@ func (g *game) Init(e *glyph.Engine) error {
 	// the sun overhead the relief flattens out, because the shading difference
 	// between a tile face and its bevel is largest when the light is nearly
 	// parallel to the surface.
-	e.SetDayCycleSpeed(1.0 / 150.0)
+	e.SetDayCycleSpeed(g.speed / 150.0)
 	e.SetTimeOfDay(0.30)
+	if g.tod >= 0 {
+		// Freeze the clock, so a given time of day can be inspected and
+		// screenshots of it are reproducible. Same flag as 09-water.
+		e.SetTimeOfDay(g.tod)
+		e.SetDayCycleSpeed(0)
+	}
 
-	// Reinhard rather than the engine default of identity, because this is the
-	// one scene with a surface emitting above 1 and identity simply clips it:
-	// the glow comes out a flat white blob with the colour only surviving at the
-	// edges where the map falls off. The curve compresses (2.1, 4.5, 6.0) to
-	// roughly (0.72, 0.92, 1.0) instead, so it reads as bright blue light rather
-	// than as a hole in the image. White point 6 matches the strength.
-	r.SetTonemap(0, 1, 6)
+	// ACES filmic. Measured against the alternatives on this scene, at a fixed
+	// sun, on the two things that matter here -- how much surface shading
+	// survives on the panels, and how much of the sunset sky ends up pinned at
+	// the top of the 8-bit range:
+	//
+	//	curve      panel contrast   sky at ceiling
+	//	identity   0.01234          63.9%
+	//	reinhard   0.01095           0.0%
+	//	ACES       0.01725           2.5%
+	//
+	// Identity blows the sky out, which is what makes a sunset read wrong: the
+	// sun clips, the sky clips with it, and there is nothing left to tell them
+	// apart. Reinhard fixes that by compressing everything equally, and pays for
+	// it with the flattest panels of the three. ACES beats identity on both
+	// counts at once, because it lifts midtones -- aces(0.5) is 0.62 -- while
+	// rolling the highlights off.
+	//
+	// -curve 0 and 1 are still there to see the difference.
+	r.SetTonemap(0, g.curve, 6)
 
-	// Bloom picks up where the curve leaves off. Reinhard keeps the emissive
-	// mortar from clipping, but a real light also spills onto what is around it,
-	// and that is what a threshold above 1 selects: only panel 5's glow is
-	// bright enough to qualify, so the other four are untouched.
+	// Bloom is what makes the emissive panel read as a light rather than as a
+	// bright surface: a real light spills onto what is around it, and a
+	// threshold above 1 selects only panel 5's glow, so the other four are
+	// untouched. It is also why the identity curve is enough here -- the halo
+	// carries the colour that a clipped white core loses.
 	// Threshold 1.2 with a 0.2 knee, so the ramp starts at exactly 1.0 and
 	// nothing the old 8-bit path could represent contributes at all. Measured:
 	// with a 0.5 knee the ramp reached down to 0.5, the daytime sky sits around
@@ -360,8 +383,11 @@ func (g *game) Init(e *glyph.Engine) error {
 	// than glowing. The sky is the thing to check any bloom threshold against.
 	r.SetBloom(0.7, 1.2, 0.2, 1.0)
 
-	// Far enough back for five panels. Four fitted at 13.
-	g.camera = glyph.NewCamera(16)
+	// Far enough back for five panels without pushing them so far away the maps
+	// stop being legible. 16 fitted them all at any orbit angle but cost another
+	// 14% of local contrast on top of what the curve was already taking; 14 is
+	// the compromise, and the orbit brings the fifth panel fully into view.
+	g.camera = glyph.NewCamera(g.dist)
 	g.camera.Target = mgl32.Vec3{0, 1.9, 0}
 	g.camera.Pitch = 0.12
 
@@ -380,6 +406,10 @@ func main() {
 	fullscreen := flag.Bool("fullscreen", false, "run fullscreen on the primary monitor")
 	frames := flag.Int("frames", 0, "render N frames then exit (0 = run until closed)")
 	flat := flag.Bool("flat", false, "give every panel albedo only, for comparison")
+	tod := flag.Float64("time", -1, "freeze time of day in [0,1): 0=midnight, 0.25=sunrise, 0.5=noon, 0.75=sunset")
+	speed := flag.Float64("speed", 1, "day cycle rate multiplier; 1 is a full cycle in 150 seconds")
+	curve := flag.Float64("curve", 2, "tonemap curve: 0 identity, 1 extended Reinhard, 2 ACES filmic")
+	dist := flag.Float64("dist", 14, "camera orbit radius; smaller shows the maps better")
 	shot := flag.String("screenshot", "", "write a PNG of the last frame to this path")
 	flag.Parse()
 
@@ -399,7 +429,7 @@ func main() {
 		opts = append(opts, glyph.WithScreenshot(*shot))
 	}
 
-	e, err := glyph.New(&game{flat: *flat}, opts...)
+	e, err := glyph.New(&game{flat: *flat, tod: float32(*tod), speed: float32(*speed), curve: float32(*curve), dist: float32(*dist)}, opts...)
 	if err != nil {
 		log.Fatalf("create engine: %v", err)
 	}

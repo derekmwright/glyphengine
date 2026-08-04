@@ -1166,11 +1166,24 @@ func (e *Engine) buildMoonObject(vp mgl32.Mat4, env EnvironmentState) renderer.R
 
 	fade := horizonFade(md)
 
+	// Above 1 for the same reason the sun is: below it the moon cannot cross a
+	// bloom threshold at all, so it renders as a flat white disc pasted on the
+	// sky rather than as something giving off light.
+	//
+	// Well under the sun's 5, though. The moon is the brightest thing in a night
+	// sky but it is not a sun, and matching them would flatten the difference
+	// between the two halves of the cycle.
+	const moonBoost = 2.2
+
 	return renderer.RenderObject{
-		Mesh:     e.moonMesh,
-		MVP:      vp.Mul4(model),
-		Model:    model,
-		Color:    [3]float32{0.85 * fade, 0.88 * fade, 0.95 * fade},
+		Mesh:  e.moonMesh,
+		MVP:   vp.Mul4(model),
+		Model: model,
+		Color: [3]float32{
+			0.85 * fade * moonBoost,
+			0.88 * fade * moonBoost,
+			0.95 * fade * moonBoost,
+		},
 		Emissive: true,
 	}
 }

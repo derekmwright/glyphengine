@@ -97,8 +97,34 @@ func (dn *DayNight) SunDiscColor() [3]float32 {
 	// continuous across midnight. The keyframe table only spans the daylight
 	// half of the cycle and clamps to a different endpoint on each side, so
 	// without this the disc's colour steps as the cycle wraps.
-	const boost = 1.7
-	f := boost * smoothstep(-0.17, 0.05, dn.SunDir()[1])
+	//
+	// The fade window sits BELOW the horizon on purpose. Centred on it -- which
+	// is what -0.17..0.05 did -- the disc is dimmest exactly when it is most
+	// visible and most worth looking at: at an elevation of -0.06, sitting on
+	// the horizon at sunset, the boost was cancelled down to 0.81 and the disc
+	// read as a dull orange ball darker than the sky behind it. It also fell
+	// under the bloom threshold, so the one moment the sun should obviously
+	// glare was the one moment it could not.
+	//
+	// Below the horizon the sun is hidden by terrain, or by the horizon itself
+	// over open water, so there is nothing to fade for until it is genuinely
+	// down. Keep this window wider than about 0.15 or TestCycleIsContinuous
+	// starts seeing it as a step rather than a ramp.
+	// The boost is what makes the disc glare rather than merely sit there.
+	//
+	// 1.7 was chosen when the framebuffer was 8-bit and everything above 1 was
+	// thrown away, so its only job was to clip the core to white. Against a
+	// bloom threshold it is nearly useless: the contribution is
+	// (bright-threshold)/bright, so a 1.7 disc against a 1.2 threshold spends 29
+	// percent of itself on the glare while an emissive material at 6 spends 80.
+	// The sun came out visibly duller than a glowing panel, which is the wrong
+	// way round.
+	//
+	// 5 is not physical -- a real sun is thousands of times the sky, not five --
+	// but it is where the disc reads as a light source at every elevation it is
+	// visible without the halo swallowing the horizon at noon.
+	const boost = 5.0
+	f := boost * smoothstep(-0.20, -0.02, dn.SunDir()[1])
 	return [3]float32{c[0] * f, c[1] * f, c[2] * f}
 }
 

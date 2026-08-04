@@ -124,9 +124,12 @@ putting the colour in both squares it.
 
 **`EmissiveStrength` is the one place the engine deliberately produces values
 above 1.** That only means something because the scene renders into a half-float
-target — see [`hdr-tonemap.md`](hdr-tonemap.md). Under the default identity
-curve a strength of 6 still clips to white, so `16-materials` selects extended
-Reinhard to keep the colour. Zero means one, matching glTF.
+target — see [`hdr-tonemap.md`](hdr-tonemap.md). Zero means one, matching glTF.
+
+A strength of 6 still clips to white under the default identity curve, and with
+bloom on that is fine: the halo carries the colour and the white core reads as a
+bright light. Reaching for a tonemap curve to recover it costs midtone contrast
+everywhere else in the scene — see the note in `hdr-tonemap.md`.
 
 It is also the only thing in the engine a bloom threshold can select — see
 [`bloom.md`](bloom.md).

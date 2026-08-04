@@ -34,7 +34,7 @@ Set it from `Game.Init`, where the renderer is available:
 func (g *game) Init(e *glyph.Engine) error {
 	// exposure, curve, whitePoint.
 	//   exposure <= 0 leaves the scene alone.
-	//   curve 0 is identity; curve 1 is extended Reinhard.
+	//   curve 0 is identity; 1 is extended Reinhard; 2 is ACES filmic.
 	//   whitePoint is the value that maps to white, and is clamped to >= 1.
 	e.Renderer().SetTonemap(1.2, 1, 4.0)
 	return nil
@@ -42,8 +42,38 @@ func (g *game) Init(e *glyph.Engine) error {
 ```
 
 Passing `(0, 0, 0)` restores the default. The values are read fresh each frame,
-so they can be animated. `examples/16-materials` selects Reinhard this way,
-because it is the one scene with a surface emitting above 1.
+so they can be animated. `examples/16-materials` exposes it as `-curve`.
+
+## Choosing a curve
+
+Measured on `16-materials` at a fixed sun, on the two things a curve trades
+against each other — how much surface shading survives, and how much of the
+sunset sky ends up pinned at the top of the 8-bit range:
+
+| curve | panel local contrast | sunset sky at the ceiling |
+| ----- | -------------------- | ------------------------- |
+| 0 identity | 0.01234 | 63.9% |
+| 1 extended Reinhard | 0.01095 | 0.0% |
+| **2 ACES filmic** | **0.01725** | **2.5%** |
+
+**Identity blows out skies.** Two thirds of a sunset sky sitting at the ceiling
+is photographic blowout: the sun's core is *supposed* to clip, because a real
+one is thousands of times brighter than the sky and no display can show it, but
+when the sky clips alongside it there is nothing left to tell them apart. The
+sun stops reading as the sun.
+
+**Reinhard fixes that by compressing everything equally**, midtones included —
+`reinhard(0.5, 6)` is 0.34 — so it buys highlight headroom by flattening every
+lit surface in the scene. It was briefly the default in `16-materials` and cost
+the four map panels 12% of their local contrast before anyone noticed.
+
+**ACES beats identity on both counts at once**, because it lifts midtones —
+`aces(0.5)` is 0.62 — while rolling highlights off. It is the one to reach for.
+
+This reverses a rule that used to be in the engine's notes: *do not reach for
+ACES, nothing here emits above 1, which is exactly where ACES lifts.* That was
+correct when written. The precondition is gone — the sun disc emits 5, emissive
+materials emit 6.
 
 ## Why the target exists
 
