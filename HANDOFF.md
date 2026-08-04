@@ -100,9 +100,27 @@ and thinning distant grass.
   255 -- because clouds are soft and there is no edge for the upscale to blur
   that was not soft already.
 
-  Temporal reprojection is still open, and would be the next step: it would
-  converge the raymarch jitter properly rather than attenuating it, which is
-  what sky.frag does today.
+  The march is also temporally accumulated: each frame blends with the previous
+  one, reprojected through the previous view-projection using the middle of the
+  marched slab as a stand-in for where the cloud is. That converges the jitter
+  rather than attenuating it, taking grain from 0.000856 to 0.000741 against a
+  clouds-off floor of 0.000054, and costs nothing measurable -- the history
+  fetches hide behind the march's ALU work.
+
+  Two things keep it from ghosting. History outside the previous frame's screen
+  is rejected, because there is nothing behind the edge to blend with. And the
+  history is clamped to the range of the current frame's neighbours, so
+  convergence happens where the picture is stable and is discarded where it is
+  genuinely changing -- which is what the drifting clouds need.
+
+  The history chain is indexed by a frame counter, not the swapchain image
+  index: the presentation engine may hand indices back in any order and the
+  chain has to be strictly the previous frame. It needs maxFramesInFlight+1
+  buffers, and the +1 is load-bearing -- see cloudBufferCount.
+
+  Still open: the accumulation makes a lower step count affordable, which is
+  where the next saving is. Not done yet, and worth doing as its own measured
+  change rather than folded in here.
 
 - **Sky is the top GPU pass in most scenes** — 78 to 92 percent in 02-cube,
   07-terrain, 09-water, 12-particles and 16-materials, and about 30 percent

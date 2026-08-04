@@ -284,6 +284,30 @@ func (t *bloomTarget) destroy(deviceDriver core1_0.DeviceDriver) {
 // images hold zeroes rather than whatever the allocation contained, so a future
 // change that samples them on the disabled path gets black instead of NaN.
 func (r *Renderer) primeBloomLayouts(t *bloomTarget) error {
+	var imgs []core1_0.Image
+	for _, level := range t.images {
+		imgs = append(imgs, level...)
+	}
+	return r.primeSampledImages(imgs)
+}
+
+// primeSampledImages clears images once and leaves them in
+// SHADER_READ_ONLY_OPTIMAL.
+//
+// For any image a descriptor set binds every frame but a pass only sometimes
+// writes -- or has not written yet. Vulkan validates the layout a descriptor
+// declares against the image's actual layout at submit, whether or not the
+// shader samples it, so a uniform branch skipping the read does nothing for
+// that check. It caught the bloom chain when bloom is off, and it caught the
+// cloud history on the very first frame.
+//
+// The clear on top of the transition is worth it: the images then hold zeroes
+// rather than whatever the allocation contained, so anything that does read
+// them early gets black instead of NaN.
+func (r *Renderer) primeSampledImages(images []core1_0.Image) error {
+	if len(images) == 0 {
+		return nil
+	}
 	cmdBuf, err := r.beginSingleTimeCommands()
 	if err != nil {
 		return err
@@ -296,35 +320,31 @@ func (r *Renderer) primeBloomLayouts(t *bloomTarget) error {
 	}
 
 	var toDst, toRead []core1_0.ImageMemoryBarrier
-	for _, imgs := range t.images {
-		for _, img := range imgs {
-			toDst = append(toDst, core1_0.ImageMemoryBarrier{
-				OldLayout:           core1_0.ImageLayoutUndefined,
-				NewLayout:           core1_0.ImageLayoutTransferDstOptimal,
-				SrcQueueFamilyIndex: -1, DstQueueFamilyIndex: -1,
-				Image:            img,
-				SubresourceRange: rng,
-				DstAccessMask:    core1_0.AccessTransferWrite,
-			})
-			toRead = append(toRead, core1_0.ImageMemoryBarrier{
-				OldLayout:           core1_0.ImageLayoutTransferDstOptimal,
-				NewLayout:           core1_0.ImageLayoutShaderReadOnlyOptimal,
-				SrcQueueFamilyIndex: -1, DstQueueFamilyIndex: -1,
-				Image:            img,
-				SubresourceRange: rng,
-				SrcAccessMask:    core1_0.AccessTransferWrite,
-				DstAccessMask:    core1_0.AccessShaderRead,
-			})
-		}
+	for _, img := range images {
+		toDst = append(toDst, core1_0.ImageMemoryBarrier{
+			OldLayout:           core1_0.ImageLayoutUndefined,
+			NewLayout:           core1_0.ImageLayoutTransferDstOptimal,
+			SrcQueueFamilyIndex: -1, DstQueueFamilyIndex: -1,
+			Image:            img,
+			SubresourceRange: rng,
+			DstAccessMask:    core1_0.AccessTransferWrite,
+		})
+		toRead = append(toRead, core1_0.ImageMemoryBarrier{
+			OldLayout:           core1_0.ImageLayoutTransferDstOptimal,
+			NewLayout:           core1_0.ImageLayoutShaderReadOnlyOptimal,
+			SrcQueueFamilyIndex: -1, DstQueueFamilyIndex: -1,
+			Image:            img,
+			SubresourceRange: rng,
+			SrcAccessMask:    core1_0.AccessTransferWrite,
+			DstAccessMask:    core1_0.AccessShaderRead,
+		})
 	}
 
 	r.deviceDriver.CmdPipelineBarrier(cmdBuf,
 		core1_0.PipelineStageTopOfPipe, core1_0.PipelineStageTransfer, 0, nil, nil, toDst)
-	for _, imgs := range t.images {
-		for _, img := range imgs {
-			r.deviceDriver.CmdClearColorImage(cmdBuf, img, core1_0.ImageLayoutTransferDstOptimal,
-				core1_0.ClearValueFloat{0, 0, 0, 1}, rng)
-		}
+	for _, img := range images {
+		r.deviceDriver.CmdClearColorImage(cmdBuf, img, core1_0.ImageLayoutTransferDstOptimal,
+			core1_0.ClearValueFloat{0, 0, 0, 1}, rng)
 	}
 	r.deviceDriver.CmdPipelineBarrier(cmdBuf,
 		core1_0.PipelineStageTransfer, core1_0.PipelineStageFragmentShader, 0, nil, nil, toRead)

@@ -23,12 +23,18 @@ layout(push_constant) uniform PushConstants {
     vec4 tint;     // x = time, y = nightFactor, z = cloud raymarch steps
     vec4 sunDir;   // xyz = direction toward the body lighting the scene
     vec4 sunColor; // rgb, w = the real sun's elevation
-    vec4 pointPos;
-    vec4 pointColor;
-    vec4 ambient;
-    vec4 cameraPos;
+    // The previous frame's view-projection, occupying the four vec4s the march
+    // has never read. Push constants are full at 256 bytes, and reusing dead
+    // slots beats adding a uniform buffer for one matrix -- but it does mean
+    // this block deliberately disagrees with every other shader's packing from
+    // here to fog, which is why it is spelled out rather than left implicit.
+    mat4 prevVP;   // was pointPos, pointColor, ambient, cameraPos
     vec4 fog;      // zw = the real sun's horizontal direction
 } pc;
+
+// The previous frame's cloud target. Always bound; on the first frame it holds
+// the clear value and the reprojection is rejected anyway.
+layout(set = 0, binding = 0) uniform sampler2D historyTex;
 
 layout(location = 0) out vec4 outColor;
 
@@ -153,6 +159,10 @@ void main() {
     vec3 cloudScatter = vec3(0.0);
     float cloudTransmit = 1.0;
 
+    // Where to reproject from. Zero means "no history", which is what a ray
+    // that never entered the slab should get.
+    float reprojectDist = 0.0;
+
     int cloudSteps = int(pc.tint.z);
     if (dir.y > 0.015 && cloudSteps > 0) {
         const float CLOUD_BOTTOM = 620.0;
@@ -171,6 +181,11 @@ void main() {
         t1 = min(t1, MAX_DIST);
 
         if (t1 > t0) {
+            // The middle of the marched span stands in for where the cloud is.
+            // It has to come from the geometry rather than a host constant,
+            // because a grazing ray crosses the slab tens of kilometres out
+            // while an overhead one crosses it in hundreds of units.
+            reprojectDist = (t0 + t1) * 0.5;
             float day = atmDaylight(sunElevation);
             float twi = atmTwilight(sunElevation);
 
@@ -272,5 +287,53 @@ void main() {
         }
     }
 
-    outColor = vec4(cloudScatter, cloudTransmit);
+    vec4 current = vec4(cloudScatter, cloudTransmit);
+
+    // ----- Temporal accumulation -----
+    //
+    // The march is a stochastic estimator: each pixel jitters its ray start, so
+    // a single frame is a noisy sample of the right answer. Averaging across
+    // frames converges it, which is a real fix rather than the amplitude
+    // reduction sky.frag used to do -- that hid the noise by taking less of it.
+    //
+    // Reprojection is direction-based, using the middle of the marched slab as
+    // a stand-in for where the cloud actually is. Clouds sit 620 to 1500 units
+    // out and the camera walks at a few units a second, so the parallax error
+    // over one frame is far below a half-resolution texel. Rotation is the
+    // motion that matters here and this handles it exactly.
+    if (reprojectDist > 0.0) {
+        vec3 worldPoint = camPos + dir * reprojectDist;
+        vec4 prevClip = pc.prevVP * vec4(worldPoint, 1.0);
+        if (prevClip.w > 0.0) {
+            vec2 prevUV = (prevClip.xy / prevClip.w) * 0.5 + 0.5;
+            // Reject history that was off screen last frame: there is nothing
+            // behind the edge of the previous frame to blend with, and sampling
+            // the clamped edge smears it inward.
+            if (all(greaterThanEqual(prevUV, vec2(0.0))) && all(lessThanEqual(prevUV, vec2(1.0)))) {
+                vec4 history = texture(historyTex, prevUV);
+
+                // Neighbourhood clamp. The clouds drift under wind, so history
+                // is always slightly stale, and without a bound on how far it
+                // may differ the blend smears moving edges into ghosts.
+                // Clamping to the range of the current frame's neighbours keeps
+                // the convergence where the signal is stable and discards it
+                // where the picture is genuinely changing.
+                vec2 texel = 1.0 / vec2(textureSize(historyTex, 0));
+                vec4 lo = current;
+                vec4 hi = current;
+                for (int i = 0; i < 4; i++) {
+                    vec2 o = vec2(i == 0 ? -1 : i == 1 ? 1 : 0, i == 2 ? -1 : i == 3 ? 1 : 0);
+                    vec4 n = texture(historyTex, fragUV + o * texel);
+                    lo = min(lo, n);
+                    hi = max(hi, n);
+                }
+                history = clamp(history, lo, hi);
+
+                outColor = mix(current, history, 0.8);
+                return;
+            }
+        }
+    }
+
+    outColor = current;
 }

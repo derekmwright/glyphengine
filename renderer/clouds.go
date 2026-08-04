@@ -31,6 +31,16 @@ type cloudTarget struct {
 	extent core1_0.Extent2D
 }
 
+// cloudBufferCount is how many half-resolution buffers the ping-pong needs.
+//
+// maxFramesInFlight+1, and the +1 is load-bearing. Frame f writes buf[f%N] and
+// reads buf[(f-1)%N]. With N buffers, frame f+N reuses what frame f wrote -- and
+// the fence it waits on belongs to frame f+N-maxFramesInFlight, which with
+// N = maxFramesInFlight+1 is frame f+1: the last frame that could still have
+// been reading it. Two buffers would let a frame overwrite a buffer another
+// frame in flight is still sampling.
+const cloudBufferCount = maxFramesInFlight + 1
+
 // cloudExtent halves the frame, rounding up so an odd dimension still covers it.
 func cloudExtent(full core1_0.Extent2D) core1_0.Extent2D {
 	return core1_0.Extent2D{
@@ -141,14 +151,16 @@ func createOffscreenColor(
 		zv core1_0.ImageView
 	)
 	img, _, err := deviceDriver.CreateImage(nil, core1_0.ImageCreateInfo{
-		ImageType:     core1_0.ImageType2D,
-		Format:        hdrFormat,
-		Extent:        core1_0.Extent3D{Width: extent.Width, Height: extent.Height, Depth: 1},
-		MipLevels:     1,
-		ArrayLayers:   1,
-		Samples:       core1_0.Samples1,
-		Tiling:        core1_0.ImageTilingOptimal,
-		Usage:         core1_0.ImageUsageColorAttachment | core1_0.ImageUsageSampled,
+		ImageType:   core1_0.ImageType2D,
+		Format:      hdrFormat,
+		Extent:      core1_0.Extent3D{Width: extent.Width, Height: extent.Height, Depth: 1},
+		MipLevels:   1,
+		ArrayLayers: 1,
+		Samples:     core1_0.Samples1,
+		Tiling:      core1_0.ImageTilingOptimal,
+		// TransferDst only for the one-time clear that gives the buffer a
+		// defined layout before the first frame samples it as history.
+		Usage:         core1_0.ImageUsageColorAttachment | core1_0.ImageUsageSampled | core1_0.ImageUsageTransferDst,
 		SharingMode:   core1_0.SharingModeExclusive,
 		InitialLayout: core1_0.ImageLayoutUndefined,
 	})
@@ -217,7 +229,8 @@ func (t *cloudTarget) destroy(deviceDriver core1_0.DeviceDriver) {
 	t.sampler = core1_0.Sampler{}
 }
 
-// recordClouds marches the cloud layer into the half-resolution target.
+// recordClouds marches the cloud layer into the half-resolution target and
+// blends it with the previous frame's result.
 //
 // Recorded before the scene render pass, in its own pass. The render pass's
 // external dependency -- colour writes before fragment reads -- is what orders
@@ -229,9 +242,12 @@ func (t *cloudTarget) destroy(deviceDriver core1_0.DeviceDriver) {
 // tables both fell into. With zero steps the shader early-outs to fully
 // transmissive and the composite is a no-op, at a cost of a quarter-resolution
 // fullscreen triangle.
-func (r *Renderer) recordClouds(cmdBuf core1_0.CommandBuffer, imageIndex int, lighting SceneLighting) error {
+func (r *Renderer) recordClouds(cmdBuf core1_0.CommandBuffer, lighting SceneLighting) error {
 	t := r.clouds
-	idx := imageIndex % len(t.fbs)
+	// Indexed by a frame counter rather than the swapchain image index: the
+	// presentation engine is free to hand back indices in any order, and the
+	// history chain has to be strictly the previous frame's.
+	idx := r.cloudFrame % len(t.fbs)
 
 	if err := r.deviceDriver.CmdBeginRenderPass(cmdBuf, core1_0.SubpassContentsInline, core1_0.RenderPassBeginInfo{
 		RenderPass:  r.cloudRenderPass,
@@ -245,8 +261,10 @@ func (r *Renderer) recordClouds(cmdBuf core1_0.CommandBuffer, imageIndex int, li
 		Width: float32(t.extent.Width), Height: float32(t.extent.Height), MinDepth: 0, MaxDepth: 1,
 	})
 	r.deviceDriver.CmdSetScissor(cmdBuf, core1_0.Rect2D{Offset: core1_0.Offset2D{X: 0, Y: 0}, Extent: t.extent})
+	// The previous frame's target, which this pass reprojects and blends.
+	prev := (r.cloudFrame + len(t.sets) - 1) % len(t.sets)
 	r.deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, r.pipelineLayout, 0,
-		[]core1_0.DescriptorSet{r.fallbackTexture.DescriptorSet}, nil)
+		[]core1_0.DescriptorSet{t.sets[prev]}, nil)
 
 	// The same packing the sky uses, because the march was lifted out of it and
 	// reads the same values from the same offsets.
@@ -265,6 +283,9 @@ func (r *Renderer) recordClouds(cmdBuf core1_0.CommandBuffer, imageIndex int, li
 	pc[41] = lighting.SunColor[1]
 	pc[42] = lighting.SunColor[2]
 	pc[43] = lighting.SunElevation
+	// The previous frame's view-projection, in the four vec4 slots the march
+	// does not read. See the push block in clouds.frag.
+	copy(pc[44:60], r.prevVP[:])
 	pc[62] = lighting.RealSunDir[0]
 	pc[63] = lighting.RealSunDir[2]
 	r.deviceDriver.CmdPushConstants(cmdBuf, r.pipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0,
@@ -275,7 +296,8 @@ func (r *Renderer) recordClouds(cmdBuf core1_0.CommandBuffer, imageIndex int, li
 	return nil
 }
 
-// cloudSetFor is the descriptor the sky pass samples the cloud layer through.
-func (r *Renderer) cloudSetFor(imageIndex int) core1_0.DescriptorSet {
-	return r.clouds.sets[imageIndex%len(r.clouds.sets)]
+// cloudSetFor is the descriptor the sky pass samples the cloud layer through:
+// whatever this frame's march just wrote.
+func (r *Renderer) cloudSetFor() core1_0.DescriptorSet {
+	return r.clouds.sets[r.cloudFrame%len(r.clouds.sets)]
 }
