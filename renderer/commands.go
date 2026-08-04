@@ -363,6 +363,8 @@ func recordCommandBuffer(
 	shadow *shadowResources,
 	grass *GrassSystem,
 	grassLOD GrassLOD,
+	impostor *grassImpostor,
+	grassImpostorPipeline core1_0.Pipeline,
 	particles *ParticleSystem,
 	frame int,
 	msaaEnabled bool,
@@ -843,6 +845,9 @@ func recordCommandBuffer(
 		camX, camY, camZ := lighting.CameraPos[0], lighting.CameraPos[1], lighting.CameraPos[2]
 
 		var lastFloraTex *Texture
+		// Far tiles are collected here and drawn after every variant's meshes,
+		// so the impostor pipeline is bound once rather than per variant.
+		var impostorTiles []variantTiles
 		visible := grass.visibleScratch[:0]
 		for i := range grass.Variants {
 			v := &grass.Variants[i]
@@ -907,7 +912,27 @@ func recordCommandBuffer(
 				}
 			})
 
-			for _, vt := range visible {
+			// Tiles are sorted near to far, so everything the impostor path
+			// takes is a suffix. Splitting once beats testing per tile and keeps
+			// the mesh draws contiguous.
+			meshTiles := visible
+			if grassLOD.ImpostorDistance > 0 && impostor != nil {
+				cut := grassLOD.ImpostorDistance * grassLOD.ImpostorDistance
+				split := len(visible)
+				for i, vt := range visible {
+					if vt.dist2 > cut {
+						split = i
+						break
+					}
+				}
+				meshTiles = visible[:split]
+				impostorTiles = append(impostorTiles, variantTiles{
+					variant: i,
+					tiles:   visible[split:],
+				})
+			}
+
+			for _, vt := range meshTiles {
 				tile := vt.tile
 
 				// Thin distant tiles. Instances are shuffled within a tile at
@@ -925,6 +950,50 @@ func recordCommandBuffer(
 				stats.GrassTilesDrawn++
 				stats.addDraw(count, v.Mesh.IndexCount, v.Mesh.VertexCount)
 				deviceDriver.CmdDrawIndexed(cmdBuf, v.Mesh.IndexCount, count, 0, 0, uint32(tile.FirstInstance))
+			}
+		}
+
+		// Billboards for everything past the impostor distance.
+		//
+		// One pipeline bind for all variants, after every mesh draw, because
+		// switching back and forth per variant would cost more than the tiles
+		// save. Order within grass does not matter: it depth-tests and writes
+		// depth, so the nearest blade wins wherever two overlap.
+		if len(impostorTiles) > 0 {
+			deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, grassImpostorPipeline)
+			deviceDriver.CmdSetViewport(cmdBuf, viewport)
+			deviceDriver.CmdSetScissor(cmdBuf, scissor)
+			// The atlas at set 0 in place of the flora texture; grass.frag reads
+			// whichever is bound and does not care which.
+			deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, litPipelineLayout, 0,
+				[]core1_0.DescriptorSet{impostor.set, shadowDS}, nil)
+
+			pc[46] = 0                       // pointPos.z: atlas cell, per variant below
+			pc[47] = float32(impostor.cells) // pointPos.w: cell count
+			pc[52] = impostor.worldWidth     // ambient.x: billboard width
+			pc[53] = impostor.worldHeight    // ambient.y: billboard height
+
+			for _, vt := range impostorTiles {
+				v := &grass.Variants[vt.variant]
+				deviceDriver.CmdBindVertexBuffers(cmdBuf, 1, []core1_0.Buffer{v.InstanceBuffer}, []int{0})
+
+				pc[46] = float32(vt.variant)
+				deviceDriver.CmdPushConstants(cmdBuf, litPipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
+
+				for _, t := range vt.tiles {
+					tile := t.tile
+					count := tile.Count
+					if keep := grassLOD.keepFraction(float32(math.Sqrt(float64(t.dist2)))); keep < 1 {
+						count = int(float32(count) * keep)
+						if count < 1 {
+							count = 1
+						}
+					}
+					stats.GrassTilesDrawn++
+					// Six vertices, two triangles, against a mesh's few hundred.
+					stats.addDraw(count, 6, 6)
+					deviceDriver.CmdDraw(cmdBuf, 6, count, 0, uint32(tile.FirstInstance))
+				}
 			}
 		}
 		grass.visibleScratch = visible

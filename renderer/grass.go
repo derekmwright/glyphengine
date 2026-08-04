@@ -48,6 +48,14 @@ type GrassInstance struct {
 
 // GrassTile is a contiguous instance-buffer range covering one world-space
 // tile, with a bounding sphere for frustum/distance culling.
+// variantTiles is one variant's share of the tiles drawn as impostors, so the
+// billboard pass can run once for all variants rather than interleaving with
+// the mesh draws and rebinding the pipeline each time.
+type variantTiles struct {
+	variant int
+	tiles   []tileDraw
+}
+
 // tileDraw pairs a visible tile with its squared distance, so the draw order can
 // be sorted without recomputing it.
 type tileDraw struct {

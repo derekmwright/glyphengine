@@ -56,6 +56,7 @@ type Renderer struct {
 	skinnedMaterialPipelineLayout core1_0.PipelineLayout
 	skinnedMaterialPipeline       core1_0.Pipeline
 	grassPipeline                 core1_0.Pipeline
+	grassImpostorPipeline         core1_0.Pipeline
 	waterPipeline                 core1_0.Pipeline
 	godRayPipeline                core1_0.Pipeline
 	waterRenderPass               core1_0.RenderPass
@@ -625,6 +626,12 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 		return nil, fmt.Errorf("renderer: create skinned material pipeline: %w", err)
 	}
 	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.skinnedMaterialPipeline, nil) })
+
+	r.grassImpostorPipeline, err = createGrassImpostorPipeline(r.deviceDriver, r.shaders, r.renderPass, r.litPipelineLayout, r.sc.extent, r.msaaSamples)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create grass impostor pipeline: %w", err)
+	}
+	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.grassImpostorPipeline, nil) })
 
 	r.grassPipeline, err = createGrassPipeline(r.deviceDriver, r.shaders, r.renderPass, r.litPipelineLayout, r.sc.extent, r.msaaSamples)
 	if err != nil {
@@ -1223,7 +1230,7 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, uiOv
 	err = recordCommandBuffer(r.deviceDriver, cmdBuf, r.renderPass, r.framebuffers[imageIndex], r.pipeline, r.litDoubleSidedPipeline, r.overlayPipeline, r.skyPipeline, r.starsPipeline, r.uiPipeline, r.msdfPipeline, r.skinnedPipeline, r.grassPipeline, r.waterPipeline, r.godRayPipeline, r.waterRenderPass, waterFB, r.sceneColor, r.hdr.images[imageIndex],
 		func(cb core1_0.CommandBuffer) error { return r.recordClouds(cb, lighting) },
 		r.cloudSetFor(),
-		r.bloomFor(imageIndex), r.tonemapFor(imageIndex), r.particlePipeline, r.terrainPipeline, r.materialPipelines(), &r.stats, r.pipelineLayout, r.litPipelineLayout, r.skinnedPipelineLayout, r.terrainPipelineLayout, r.sc.extent, draws, overlays, uiOverlays, msdfOverlays, lighting, r.fallbackTexture, r.shadow, r.grass, r.grassLOD, r.particles, f, r.msaa != nil, r.gpuTimer)
+		r.bloomFor(imageIndex), r.tonemapFor(imageIndex), r.particlePipeline, r.terrainPipeline, r.materialPipelines(), &r.stats, r.pipelineLayout, r.litPipelineLayout, r.skinnedPipelineLayout, r.terrainPipelineLayout, r.sc.extent, draws, overlays, uiOverlays, msdfOverlays, lighting, r.fallbackTexture, r.shadow, r.grass, r.grassLOD, r.grassImpostor, r.grassImpostorPipeline, r.particles, f, r.msaa != nil, r.gpuTimer)
 	if err != nil {
 		return err
 	}

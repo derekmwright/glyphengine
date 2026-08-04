@@ -49,6 +49,36 @@ type GrassLOD struct {
 	// Keep it meaningfully below MaxDistance. Equal values make grass vanish at
 	// a hard ring, which is far more noticeable than the fade it replaces.
 	FadeStart float32
+
+	// ImpostorDistance is where blades stop being meshes and become billboards
+	// textured from an atlas baked off the meshes themselves. Zero disables it
+	// and everything stays a mesh, which is the default.
+	//
+	// This is the knob with the most performance behind it, because grass is
+	// primitive-bound rather than fill-bound: measured on 08-grass the pass
+	// costs 3.70 ms at 1920x1080 and 1.97 ms at 640x360, nine times the pixels
+	// for under twice the cost, while MSAA 4x to 1x takes it from 3.05 to
+	// 1.36 ms. That is triangle setup and per-sample coverage on thin slivers.
+	// A blade is about 340 triangles and a billboard is two.
+	//
+	// The swap happens per tile, not per blade, so a whole tile of grass
+	// changes representation at once.
+	//
+	// It is a dial, not a free win. Measured on 08-grass against a two-run noise
+	// floor of RMS 0.0107, with the default 80-unit cull:
+	//
+	//	distance   grass pass   image vs meshes
+	//	off          2.614 ms   --
+	//	25           0.603 ms   0.044   visible: the far field reads chunkier
+	//	40           1.624 ms   0.029
+	//	60           2.409 ms   0.016   indistinguishable
+	//
+	// A billboard always presents its full width where a thin blade was often
+	// seen edge-on, so impostors cover more screen than the meshes they replace
+	// and a field of them reads denser. The wide, dry variants gain most, which
+	// is why the far field also shifts yellower. Pushing the distance out trades
+	// that away against the saving.
+	ImpostorDistance float32
 }
 
 // DefaultGrassLOD is the engine's tuning: the values that were constants before
@@ -60,6 +90,10 @@ func DefaultGrassLOD() GrassLOD {
 		ThinMin:     0.35,
 		MaxDistance: 80,
 		FadeStart:   50,
+		// Off. The atlas is baked either way -- it costs a megabyte and a
+		// millisecond at load -- but nothing is drawn from it until asked, the
+		// same way bloom and the physical sky ship.
+		ImpostorDistance: 0,
 	}
 }
 
@@ -115,6 +149,15 @@ func (l GrassLOD) sanitised() GrassLOD {
 	}
 	if l.ThinMin <= 0 || l.ThinMin > 1 {
 		l.ThinMin = d.ThinMin
+	}
+	if l.ImpostorDistance < 0 {
+		l.ImpostorDistance = 0
+	}
+	if l.ImpostorDistance > l.MaxDistance {
+		// Past the cull it can never take effect, which reads as the setting
+		// being ignored. Clamping makes it mean "impostors everywhere they are
+		// still drawn", which is what asking for that presumably meant.
+		l.ImpostorDistance = l.MaxDistance
 	}
 	return l
 }

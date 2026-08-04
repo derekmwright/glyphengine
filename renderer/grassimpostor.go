@@ -71,21 +71,32 @@ func (r *Renderer) bakeGrassImpostors(cellSize int) error {
 	}
 
 	// Frame every variant with one projection so the cells share a scale. A
-	// per-cell fit would make a clover and a grass blade the same size on
-	// screen, which is exactly the information the impostor needs to keep.
-	var maxRadius float32
+	// per-cell fit would draw a clover and a grass blade the same size on
+	// screen, which is exactly the information the impostor has to keep.
+	//
+	// Anchored at the blade's base rather than centred on its bounding sphere.
+	// Centring puts the base wherever the sphere's centre happens to fall --
+	// measured, about 69 percent down the cell for the shortest variant -- and
+	// the billboard would then have to know that offset to sit on the ground.
+	// Framing y from 0 to the tallest tip means the quad maps to the cell
+	// exactly: base at the bottom edge, tip at the top.
+	var halfWidth, tipHeight float32
 	for _, v := range gs.Variants {
-		if v.Mesh != nil && v.Mesh.BoundRadius > maxRadius {
-			maxRadius = v.Mesh.BoundRadius
+		if v.Mesh == nil {
+			continue
+		}
+		if v.Mesh.BoundRadius > halfWidth {
+			halfWidth = v.Mesh.BoundRadius
+		}
+		if top := v.Mesh.BoundCenter[1] + v.Mesh.BoundRadius; top > tipHeight {
+			tipHeight = top
 		}
 	}
-	if maxRadius <= 0 {
+	if halfWidth <= 0 || tipHeight <= 0 {
 		return fmt.Errorf("grass impostor: variants have no bounds to frame")
 	}
-	// The mesh is authored around the origin and scaled by grassBladeScale at
-	// draw time; bake in model space and record the world size for the quad.
-	imp.worldHeight = 2 * maxRadius * grassBladeScale
-	imp.worldWidth = imp.worldHeight
+	imp.worldHeight = tipHeight * grassBladeScale
+	imp.worldWidth = 2 * halfWidth * grassBladeScale
 
 	sampler, err := deviceSampler(r.deviceDriver)
 	if err != nil {
@@ -150,7 +161,7 @@ func (r *Renderer) bakeGrassImpostors(cellSize int) error {
 		return fmt.Errorf("grass impostor descriptor write: %w", err)
 	}
 
-	if err := r.recordGrassBake(imp, cellSize, maxRadius); err != nil {
+	if err := r.recordGrassBake(imp, cellSize, halfWidth, tipHeight); err != nil {
 		imp.destroy(r.deviceDriver)
 		return err
 	}
@@ -162,7 +173,7 @@ func (r *Renderer) bakeGrassImpostors(cellSize int) error {
 }
 
 // recordGrassBake draws every variant into its cell in one pass.
-func (r *Renderer) recordGrassBake(imp *grassImpostor, cellSize int, radius float32) error {
+func (r *Renderer) recordGrassBake(imp *grassImpostor, cellSize int, halfWidth, tipHeight float32) error {
 	cmdBuf, err := r.beginSingleTimeCommands()
 	if err != nil {
 		return err
@@ -209,24 +220,27 @@ func (r *Renderer) recordGrassBake(imp *grassImpostor, cellSize int, radius floa
 		// Orthographic box around the mesh, built for Vulkan's clip space
 		// rather than taken from mgl32.Ortho.
 		//
-		// mgl32 is an OpenGL library: its Ortho maps depth to [-1, 1], and
-		// Vulkan clips to [0, 1], so half the mesh lands behind the near plane
-		// and is discarded. The first version of this baked an entirely empty
-		// atlas for exactly that reason, and an empty atlas looks identical to
-		// a transparent one in any image viewer -- it took bypassing the matrix
-		// in the vertex shader to tell the two apart.
+		// mgl32 is an OpenGL library: its Ortho maps depth to [-1, 1] and Vulkan
+		// clips to [0, 1], so half the mesh lands behind the near plane and is
+		// discarded. The first version of this baked an entirely empty atlas for
+		// exactly that reason, and an empty atlas looks identical to a
+		// transparent one in any image viewer -- it took bypassing the matrix in
+		// the vertex shader to tell the two apart.
 		//
-		// x and y map [-radius, radius] to [-1, 1], with y negated because
-		// Vulkan's clip space has y pointing down. z maps the same range to
-		// [0, 1], which is only about staying inside the frustum: the bake has
-		// no depth test, so nothing depends on the ordering.
+		// x maps [-halfWidth, halfWidth] to [-1, 1]. y maps [0, tipHeight] to
+		// [1, -1], putting the blade's base on the cell's bottom edge, with the
+		// sign carrying Vulkan's y-down clip space. z maps into [0, 1] purely to
+		// stay inside the frustum; there is no depth test, so nothing depends on
+		// the ordering.
 		var proj mgl32.Mat4
-		proj[0] = 1 / radius  // m00
-		proj[5] = -1 / radius // m11, y down
-		proj[10] = 1 / (2 * radius)
-		proj[14] = 0.5 // z into [0, 1]
+		proj[0] = 1 / halfWidth        // m00
+		proj[5] = -2 / tipHeight       // m11, y down and base-anchored
+		proj[13] = 1                   // m13, the base-anchoring offset
+		proj[10] = 1 / (2 * halfWidth) // m22
+		proj[14] = 0.5                 // m23, z into [0, 1]
 		proj[15] = 1
-		view := mgl32.Translate3D(-c[0], -c[1], -c[2])
+		// Centre horizontally only: y is already anchored by the projection.
+		view := mgl32.Translate3D(-c[0], 0, -c[2])
 		mvp := proj.Mul4(view)
 
 		var pc [pushConstantSize / 4]float32
@@ -508,4 +522,88 @@ func half16(h uint16) float32 {
 	default:
 		return math.Float32frombits(sign | (exp+127-15)<<23 | mant<<13)
 	}
+}
+
+// createGrassImpostorPipeline builds the billboard pass.
+//
+// Shares grass.frag and the lit pipeline layout with the mesh path, so the
+// impostor lights, cuts out and fades identically -- only the vertex stage
+// differs. It declares binding 1 alone: the quad's corners come from
+// gl_VertexIndex, so there is no per-vertex buffer to bind.
+func createGrassImpostorPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, layout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
+	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
+		Code: bytesToUint32Slice(sh.GrassImpostorVert),
+	})
+	if err != nil {
+		return core1_0.Pipeline{}, err
+	}
+	defer deviceDriver.DestroyShaderModule(vertModule, nil)
+
+	fragModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
+		Code: bytesToUint32Slice(sh.GrassFrag),
+	})
+	if err != nil {
+		return core1_0.Pipeline{}, err
+	}
+	defer deviceDriver.DestroyShaderModule(fragModule, nil)
+
+	pipelines, _, err := deviceDriver.CreateGraphicsPipelines(nil, nil, core1_0.GraphicsPipelineCreateInfo{
+		Stages: []core1_0.PipelineShaderStageCreateInfo{
+			{Stage: core1_0.StageVertex, Module: vertModule, Name: "main"},
+			{Stage: core1_0.StageFragment, Module: fragModule, Name: "main"},
+		},
+		VertexInputState: &core1_0.PipelineVertexInputStateCreateInfo{
+			VertexBindingDescriptions: []core1_0.VertexInputBindingDescription{{
+				Binding:   1,
+				Stride:    16, // sizeof(GrassInstance)
+				InputRate: core1_0.VertexInputRateInstance,
+			}},
+			VertexAttributeDescriptions: []core1_0.VertexInputAttributeDescription{{
+				Location: 4,
+				Binding:  1,
+				Format:   core1_0.FormatR32G32B32A32SignedFloat,
+				Offset:   0,
+			}},
+		},
+		InputAssemblyState: &core1_0.PipelineInputAssemblyStateCreateInfo{Topology: core1_0.PrimitiveTopologyTriangleList},
+		ViewportState: &core1_0.PipelineViewportStateCreateInfo{
+			Viewports: []core1_0.Viewport{{Width: float32(extent.Width), Height: float32(extent.Height), MinDepth: 0, MaxDepth: 1}},
+			Scissors:  []core1_0.Rect2D{{Extent: extent}},
+		},
+		RasterizationState: &core1_0.PipelineRasterizationStateCreateInfo{
+			PolygonMode: core1_0.PolygonModeFill,
+			// No culling: the quad is built facing the camera, but the wind
+			// shear can push its top past vertical and flip the winding.
+			CullMode:  0,
+			FrontFace: core1_0.FrontFaceCounterClockwise,
+			LineWidth: 1.0,
+		},
+		MultisampleState: &core1_0.PipelineMultisampleStateCreateInfo{
+			RasterizationSamples: samples,
+			// The same alpha-to-coverage the blades use, which is what makes the
+			// distance fade dissolve rather than shrink.
+			AlphaToCoverageEnable: true,
+		},
+		DepthStencilState: &core1_0.PipelineDepthStencilStateCreateInfo{
+			DepthTestEnable:  true,
+			DepthWriteEnable: true,
+			DepthCompareOp:   core1_0.CompareOpGreaterOrEqual, // reverse-Z
+		},
+		ColorBlendState: &core1_0.PipelineColorBlendStateCreateInfo{
+			Attachments: []core1_0.PipelineColorBlendAttachmentState{{
+				ColorWriteMask: core1_0.ColorComponentRed | core1_0.ColorComponentGreen | core1_0.ColorComponentBlue | core1_0.ColorComponentAlpha,
+			}},
+		},
+		DynamicState: &core1_0.PipelineDynamicStateCreateInfo{
+			DynamicStates: []core1_0.DynamicState{core1_0.DynamicStateViewport, core1_0.DynamicStateScissor},
+		},
+		Layout:     layout,
+		RenderPass: renderPass,
+		Subpass:    0,
+	})
+	if err != nil {
+		return core1_0.Pipeline{}, fmt.Errorf("create grass impostor pipeline: %w", err)
+	}
+	log.Println("Grass impostor pipeline created")
+	return pipelines[0], nil
 }

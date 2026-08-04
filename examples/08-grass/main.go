@@ -53,6 +53,7 @@ const (
 type game struct {
 	grassDist float32
 	grassThin float32
+	grassImp  float32
 	camera    *glyph.FPCamera
 	player    glyph.Entity
 	seed      int64
@@ -74,7 +75,7 @@ func (g *game) Init(e *glyph.Engine) error {
 
 	// Grass distance tuning, so the LOD knobs can be swept without editing the
 	// engine -- which is the entire point of GrassLOD being configurable.
-	if g.grassDist > 0 || g.grassThin > 0 {
+	if g.grassDist > 0 || g.grassThin > 0 || g.grassImp > 0 {
 		lod := e.Renderer().GrassLOD()
 		if g.grassDist > 0 {
 			lod.MaxDistance = g.grassDist
@@ -82,6 +83,9 @@ func (g *game) Init(e *glyph.Engine) error {
 		}
 		if g.grassThin > 0 {
 			lod.ThinMin = g.grassThin
+		}
+		if g.grassImp > 0 {
+			lod.ImpostorDistance = g.grassImp
 		}
 		e.Renderer().SetGrassLOD(lod)
 	}
@@ -281,6 +285,7 @@ func main() {
 	msaa := flag.Int("msaa", 4, "MSAA sample count (1 disables it)")
 	grassDist := flag.Float64("grassdist", 0, "grass cull distance (0 = engine default 80)")
 	grassThin := flag.Float64("grassthin", 0, "grass density floor 0..1 (0 = engine default 0.35)")
+	grassImp := flag.Float64("grassimpostor", 0, "distance past which grass becomes billboards (0 = meshes everywhere)")
 	flag.Parse()
 
 	opts := []glyph.Option{
@@ -300,7 +305,7 @@ func main() {
 		opts = append(opts, glyph.WithScreenshot(*shot))
 	}
 
-	e, err := glyph.New(&game{seed: *seed, grassDist: float32(*grassDist), grassThin: float32(*grassThin)}, opts...)
+	e, err := glyph.New(&game{seed: *seed, grassDist: float32(*grassDist), grassThin: float32(*grassThin), grassImp: float32(*grassImp)}, opts...)
 	if err != nil {
 		log.Fatalf("create engine: %v", err)
 	}

@@ -36,6 +36,7 @@ type ShaderSet struct {
 	StarsVert, StarsFrag         []byte // star field
 	GrassVert, GrassFrag         []byte // instanced grass
 	GrassBakeVert, GrassBakeFrag []byte // impostor atlas bake
+	GrassImpostorVert            []byte // billboard LOD (pairs with GrassFrag)
 	WaterVert, WaterFrag         []byte // animated water surface
 	GodRayFrag                   []byte // screen-space light shafts (uses SkyVert)
 	TonemapFrag                  []byte // HDR resolve to the swapchain (uses SkyVert)
@@ -74,6 +75,7 @@ func DefaultShaders() ShaderSet {
 		GrassVert:              shaders.GrassVertSpv,
 		GrassFrag:              shaders.GrassFragSpv,
 		GrassBakeVert:          shaders.GrassBakeVertSpv,
+		GrassImpostorVert:      shaders.GrassImpostorVertSpv,
 		GrassBakeFrag:          shaders.GrassBakeFragSpv,
 		WaterVert:              shaders.WaterVertSpv,
 		WaterFrag:              shaders.WaterFragSpv,
@@ -115,6 +117,7 @@ func (s ShaderSet) withDefaults() ShaderSet {
 		{&s.StarsVert, d.StarsVert}, {&s.StarsFrag, d.StarsFrag},
 		{&s.GrassVert, d.GrassVert}, {&s.GrassFrag, d.GrassFrag},
 		{&s.GrassBakeVert, d.GrassBakeVert}, {&s.GrassBakeFrag, d.GrassBakeFrag},
+		{&s.GrassImpostorVert, d.GrassImpostorVert},
 		{&s.WaterVert, d.WaterVert}, {&s.WaterFrag, d.WaterFrag},
 		{&s.GodRayFrag, d.GodRayFrag},
 		{&s.TonemapFrag, d.TonemapFrag},
