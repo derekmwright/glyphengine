@@ -15,7 +15,7 @@ layout(push_constant) uniform PushConstants {
     vec4 tint;
     vec4 sunDir;   // xyz = sun direction, w = time (for wind)
     vec4 sunColor;
-    vec4 pointPos;
+    vec4 pointPos; // x = LOD max distance, y = fade start (see GrassLOD)
     vec4 pointColor;
     vec4 ambient;
     vec4 cameraPos;
@@ -32,13 +32,20 @@ const float grassScale = 0.35;
 
 void main() {
     // Distance fade: shrink grass blades toward zero height at max distance.
+    // Cull and fade distances come from the host so a game can tune grass
+    // without editing the engine; see renderer.GrassLOD. Falling back to the
+    // engine defaults keeps a shader replacement that forgets to set them from
+    // silently drawing no grass at all.
+    float lodMax  = pc.pointPos.x > 0.0 ? pc.pointPos.x : 80.0;
+    float lodFade = pc.pointPos.y > 0.0 ? pc.pointPos.y : 50.0;
+
     float distToCam = distance(inInstance.xyz, pc.cameraPos.xyz);
-    if (distToCam > 80.0) {
+    if (distToCam > lodMax) {
         gl_Position = vec4(0.0);
         fragFade = 0.0;
         return;
     }
-    float fadeFactor = smoothstep(80.0, 50.0, distToCam);
+    float fadeFactor = smoothstep(lodMax, lodFade, distToCam);
     // Alpha-to-coverage fade: distant blades dissolve via MSAA coverage
     // instead of shrinking into shimmering sub-pixel slivers.
     fragFade = fadeFactor;

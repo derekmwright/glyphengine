@@ -362,6 +362,7 @@ func recordCommandBuffer(
 	fallbackTexture *Texture,
 	shadow *shadowResources,
 	grass *GrassSystem,
+	grassLOD GrassLOD,
 	particles *ParticleSystem,
 	frame int,
 	msaaEnabled bool,
@@ -828,8 +829,11 @@ func recordCommandBuffer(
 		pc[35] = -1.0 // flat shading for grass (double-sided foliage)
 		packLightingPC(&pc, lighting)
 		pc[39] = lighting.Time // sunDir.w = time for wind animation
-		pc[51] = 1.0           // roughness = fully matte
-		pc[55] = 0.0           // metallic = non-metal
+		// pointPos.xy: the distance tuning grass.vert culls and fades by.
+		pc[44] = grassLOD.MaxDistance
+		pc[45] = grassLOD.FadeStart
+		pc[51] = 1.0 // roughness = fully matte
+		pc[55] = 0.0 // metallic = non-metal
 		pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
 		deviceDriver.CmdPushConstants(cmdBuf, litPipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
 
@@ -881,7 +885,7 @@ func recordCommandBuffer(
 				dy := tile.Center[1] - camY
 				dz := tile.Center[2] - camZ
 				d2 := dx*dx + dy*dy + dz*dz
-				maxDist := float32(GrassMaxDistance) + tile.Radius
+				maxDist := grassLOD.MaxDistance + tile.Radius
 				if d2 > maxDist*maxDist {
 					stats.GrassTilesCulled++
 					continue
@@ -911,7 +915,7 @@ func recordCommandBuffer(
 				// drawing fewer of them removes blades evenly rather than
 				// clearing one side.
 				count := tile.Count
-				if keep := grassKeepFraction(float32(math.Sqrt(float64(vt.dist2)))); keep < 1 {
+				if keep := grassLOD.keepFraction(float32(math.Sqrt(float64(vt.dist2)))); keep < 1 {
 					count = int(float32(count) * keep)
 					if count < 1 {
 						count = 1

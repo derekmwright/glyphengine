@@ -22,26 +22,15 @@ import (
 // Blades already shrink and dissolve over the same range (see grass.vert), so
 // removing some of them there costs far less than it saves. Full density is kept
 // close to the camera where it is actually legible.
-const (
-	grassThinNear = 30.0 // full density up to here
-	grassThinFar  = 70.0 // grassThinMin density from here out
-	grassThinMin  = 0.35
-)
+//
+// The numbers live in GrassLOD now; see grasslod.go.
 
-// grassKeepFraction is the share of a tile's instances to draw at that distance.
-func grassKeepFraction(dist float32) float32 {
-	if dist <= grassThinNear {
-		return 1
-	}
-	if dist >= grassThinFar {
-		return grassThinMin
-	}
-	t := (dist - grassThinNear) / (grassThinFar - grassThinNear)
-	return 1 - t*(1-grassThinMin)
-}
-
-// GrassMaxDistance is the hard cull distance for grass blades.
-// Must match the distance cull in grass.vert.
+// GrassMaxDistance is the default hard cull distance for grass blades.
+//
+// Deprecated as a tuning knob: it is DefaultGrassLOD().MaxDistance, and the
+// live value is whatever SetGrassLOD was given. Kept because it is the right
+// figure for sizing a world -- an island much smaller than this has grass
+// culled before its far edge.
 const GrassMaxDistance = 80.0
 
 // grassBladeScale is the mesh scale applied in grass.vert (grassScale).

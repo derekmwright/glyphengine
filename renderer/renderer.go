@@ -62,19 +62,22 @@ type Renderer struct {
 	waterFramebuffers             []core1_0.Framebuffer
 	sceneColor                    *sceneColorTarget
 	grass                         *GrassSystem
-	terrainSetLayout              core1_0.DescriptorSetLayout // set 0 = 4 terrain samplers
-	terrainPipelineLayout         core1_0.PipelineLayout      // terrain: set 0=4 tex, set 1=shadow
-	terrainPipeline               core1_0.Pipeline
-	particlePipeline              core1_0.Pipeline
-	particles                     *ParticleSystem
-	shadow                        *shadowResources
-	framebuffers                  []core1_0.Framebuffer
-	commandPool                   core1_0.CommandPool
-	commandBuffers                [maxFramesInFlight]core1_0.CommandBuffer
-	sync                          *syncObjects
-	depth                         *depthResources
-	msaa                          *msaaResources
-	msaaSamples                   core1_0.SampleCountFlags
+	// grassLOD is the distance tuning grass thins, fades and culls by.
+	// Defaulted at construction so a zero value never culls grass at zero.
+	grassLOD              GrassLOD
+	terrainSetLayout      core1_0.DescriptorSetLayout // set 0 = 4 terrain samplers
+	terrainPipelineLayout core1_0.PipelineLayout      // terrain: set 0=4 tex, set 1=shadow
+	terrainPipeline       core1_0.Pipeline
+	particlePipeline      core1_0.Pipeline
+	particles             *ParticleSystem
+	shadow                *shadowResources
+	framebuffers          []core1_0.Framebuffer
+	commandPool           core1_0.CommandPool
+	commandBuffers        [maxFramesInFlight]core1_0.CommandBuffer
+	sync                  *syncObjects
+	depth                 *depthResources
+	msaa                  *msaaResources
+	msaaSamples           core1_0.SampleCountFlags
 
 	// lastFenceWait is how long the previous DrawFrame blocked on the in-flight
 	// fence and on acquiring a swapchain image. The engine folds it into its own
@@ -314,6 +317,7 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 		lastPresented: -1,
 		shaders:       DefaultShaders(),
 		dynamicMeshes: make(map[*Mesh]*dynamicMesh),
+		grassLOD:      DefaultGrassLOD(),
 	}
 	for _, o := range opts {
 		o(r)
@@ -1200,7 +1204,7 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, uiOv
 	err = recordCommandBuffer(r.deviceDriver, cmdBuf, r.renderPass, r.framebuffers[imageIndex], r.pipeline, r.litDoubleSidedPipeline, r.overlayPipeline, r.skyPipeline, r.starsPipeline, r.uiPipeline, r.msdfPipeline, r.skinnedPipeline, r.grassPipeline, r.waterPipeline, r.godRayPipeline, r.waterRenderPass, waterFB, r.sceneColor, r.hdr.images[imageIndex],
 		func(cb core1_0.CommandBuffer) error { return r.recordClouds(cb, lighting) },
 		r.cloudSetFor(),
-		r.bloomFor(imageIndex), r.tonemapFor(imageIndex), r.particlePipeline, r.terrainPipeline, r.materialPipelines(), &r.stats, r.pipelineLayout, r.litPipelineLayout, r.skinnedPipelineLayout, r.terrainPipelineLayout, r.sc.extent, draws, overlays, uiOverlays, msdfOverlays, lighting, r.fallbackTexture, r.shadow, r.grass, r.particles, f, r.msaa != nil, r.gpuTimer)
+		r.bloomFor(imageIndex), r.tonemapFor(imageIndex), r.particlePipeline, r.terrainPipeline, r.materialPipelines(), &r.stats, r.pipelineLayout, r.litPipelineLayout, r.skinnedPipelineLayout, r.terrainPipelineLayout, r.sc.extent, draws, overlays, uiOverlays, msdfOverlays, lighting, r.fallbackTexture, r.shadow, r.grass, r.grassLOD, r.particles, f, r.msaa != nil, r.gpuTimer)
 	if err != nil {
 		return err
 	}
