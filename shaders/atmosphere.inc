@@ -65,8 +65,13 @@ void atmSkyPalette(float sunY, out vec3 zenith, out vec3 horizon) {
     const vec3 zenithTwi    = vec3(0.055, 0.085, 0.26);
     const vec3 horizonTwi   = vec3(0.88, 0.42, 0.22);
 
-    const vec3 zenithNight  = vec3(0.008, 0.010, 0.035);
-    const vec3 horizonNight = vec3(0.020, 0.030, 0.075);
+    // Night is deliberately dark. These are the endpoints the whole scene
+    // reaches at midnight -- the dome, the fog distant geometry fades into, and
+    // the water's reflection all read from here -- so lifting them to make the
+    // sky legible washes out the entire landscape with it. If night needs to be
+    // brighter, brighten the moon, not the air.
+    const vec3 zenithNight  = vec3(0.005, 0.006, 0.021);
+    const vec3 horizonNight = vec3(0.012, 0.018, 0.045);
 
     float day = atmDaylight(sunY);
     float twi = atmTwilight(sunY);

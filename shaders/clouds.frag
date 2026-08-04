@@ -212,9 +212,7 @@ void main() {
             // of the daylight figure and made moonlit cloud read as white --
             // measured, a bright cloud at midnight sat at 0.507 luminance
             // against 0.811 at noon. Whatever moonlight is, it is not two thirds
-            // of sunlight. At 0.13 a night cloud measures 0.230 against the same
-            // 0.811, which is dim enough to read as night while keeping the form
-            // the march worked for.
+            // of sunlight.
             //
             // Still far brighter than physics would allow -- real moonlight is
             // about a millionth of sunlight -- because a physically dim sky is
@@ -224,7 +222,7 @@ void main() {
             // The blue bias is kept: moonlight is sunlight, but the eye's
             // scotopic response shifts toward blue at these levels, so a cool
             // cast is what a night scene is expected to look like.
-            vec3 sunLight = mix(vec3(0.13, 0.15, 0.21), vec3(1.0, 0.97, 0.92), day);
+            vec3 sunLight = mix(vec3(0.085, 0.10, 0.145), vec3(1.0, 0.97, 0.92), day);
             sunLight = mix(sunLight, vec3(1.0, 0.62, 0.34), twi * 0.8);
             vec3 skyFill = mix(zenith, horizon, 0.5) * 1.6;
 

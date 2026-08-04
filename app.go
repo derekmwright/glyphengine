@@ -1200,8 +1200,10 @@ func (e *Engine) buildMoonObject(vp mgl32.Mat4, env EnvironmentState) renderer.R
 	//
 	// Well under the sun's 5, though. The moon is the brightest thing in a night
 	// sky but it is not a sun, and matching them would flatten the difference
-	// between the two halves of the cycle.
-	const moonBoost = 2.2
+	// between the two halves of the cycle. Tuned down from 2.2 alongside the
+	// night sky and the cloud lighting: the three have to move together or the
+	// moon ends up a hole punched in a dark sky.
+	const moonBoost = 1.5
 
 	return renderer.RenderObject{
 		Mesh:  e.moonMesh,
