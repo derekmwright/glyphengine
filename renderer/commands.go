@@ -341,6 +341,8 @@ func recordCommandBuffer(
 	waterFramebuffer core1_0.Framebuffer,
 	sceneColor *sceneColorTarget,
 	sceneImage core1_0.Image,
+	recordCloudsFn func(core1_0.CommandBuffer) error,
+	cloudSet core1_0.DescriptorSet,
 	bloom bloomPass,
 	tonemap tonemapPass,
 	particlePipeline core1_0.Pipeline,
@@ -375,6 +377,14 @@ func recordCommandBuffer(
 	stats.reset()
 	timer.reset(deviceDriver, cmdBuf, frame)
 	timer.begin(deviceDriver, cmdBuf, frame, frameQuery)
+
+	// Clouds first, at half resolution, into their own target. The sky pass
+	// samples it; the render pass's external dependency orders the two.
+	timer.begin(deviceDriver, cmdBuf, frame, PassClouds)
+	if err := recordCloudsFn(cmdBuf); err != nil {
+		return err
+	}
+	timer.end(deviceDriver, cmdBuf, frame, PassClouds)
 
 	timer.begin(deviceDriver, cmdBuf, frame, PassShadow)
 	// ── Sun shadow depth passes (one per cascade) ──
@@ -933,7 +943,9 @@ func recordCommandBuffer(
 		deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, skyPipeline)
 		deviceDriver.CmdSetViewport(cmdBuf, viewport)
 		deviceDriver.CmdSetScissor(cmdBuf, scissor)
-		deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, []core1_0.DescriptorSet{fallbackTexture.DescriptorSet}, nil)
+		// The half-resolution cloud target, which the sky composites over its
+		// dome. It is written earlier in this same command buffer.
+		deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, []core1_0.DescriptorSet{cloudSet}, nil)
 
 		var pc [64]float32
 		copy(pc[:16], lighting.InvVP[:])

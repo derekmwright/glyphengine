@@ -103,6 +103,12 @@ type Renderer struct {
 	tonemapCurve float32
 	tonemapWhite float32
 
+	// clouds is the half-resolution buffer the raymarch renders into; the sky
+	// pass composites it. See clouds.go.
+	clouds          *cloudTarget
+	cloudRenderPass core1_0.RenderPass
+	cloudPipeline   core1_0.Pipeline
+
 	// bloom is the mip chain the glare passes run through, composited by the
 	// tonemap resolve. Off by default; see SetBloom and bloom.go.
 	bloom                  *bloomTarget
@@ -709,6 +715,28 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 		r.onInit(func() { r.deviceDriver.DestroyPipeline(pipeline, nil) })
 	}
 
+	// The cloud pass reuses the bloom downsample pass's shape: one half-float
+	// colour attachment, contents discarded, ending sampleable.
+	r.cloudRenderPass, err = createBloomRenderPass(r.deviceDriver, false)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create cloud render pass: %w", err)
+	}
+	r.onInit(func() { r.deviceDriver.DestroyRenderPass(r.cloudRenderPass, nil) })
+
+	r.clouds, err = createCloudTargets(r.instanceDriver, r.deviceDriver, r.physicalDevice,
+		r.descriptorPool, r.descriptorSetLayout, r.cloudRenderPass, r.sc.extent, len(r.sc.imageViews))
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create cloud targets: %w", err)
+	}
+	r.onInit(func() { r.clouds.destroy(r.deviceDriver) })
+
+	r.cloudPipeline, err = createBloomPipeline(r.deviceDriver, r.shaders, r.shaders.CloudsFrag,
+		r.cloudRenderPass, r.pipelineLayout, false)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create cloud pipeline: %w", err)
+	}
+	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.cloudPipeline, nil) })
+
 	r.tonemapSetLayout, err = createTonemapSetLayout(r.deviceDriver)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create tonemap set layout: %w", err)
@@ -1033,6 +1061,13 @@ func (r *Renderer) recreateSwapchain() error {
 		return err
 	}
 
+	r.clouds.destroy(r.deviceDriver)
+	r.clouds, err = createCloudTargets(r.instanceDriver, r.deviceDriver, r.physicalDevice,
+		r.descriptorPool, r.descriptorSetLayout, r.cloudRenderPass, r.sc.extent, len(r.sc.imageViews))
+	if err != nil {
+		return err
+	}
+
 	if err := r.primeBloomLayouts(r.bloom); err != nil {
 		return err
 	}
@@ -1143,7 +1178,10 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, uiOv
 		return err
 	}
 	recordStart := time.Now()
-	err = recordCommandBuffer(r.deviceDriver, cmdBuf, r.renderPass, r.framebuffers[imageIndex], r.pipeline, r.litDoubleSidedPipeline, r.overlayPipeline, r.skyPipeline, r.starsPipeline, r.uiPipeline, r.msdfPipeline, r.skinnedPipeline, r.grassPipeline, r.waterPipeline, r.godRayPipeline, r.waterRenderPass, waterFB, r.sceneColor, r.hdr.images[imageIndex], r.bloomFor(imageIndex), r.tonemapFor(imageIndex), r.particlePipeline, r.terrainPipeline, r.materialPipelines(), &r.stats, r.pipelineLayout, r.litPipelineLayout, r.skinnedPipelineLayout, r.terrainPipelineLayout, r.sc.extent, draws, overlays, uiOverlays, msdfOverlays, lighting, r.fallbackTexture, r.shadow, r.grass, r.particles, f, r.msaa != nil, r.gpuTimer)
+	err = recordCommandBuffer(r.deviceDriver, cmdBuf, r.renderPass, r.framebuffers[imageIndex], r.pipeline, r.litDoubleSidedPipeline, r.overlayPipeline, r.skyPipeline, r.starsPipeline, r.uiPipeline, r.msdfPipeline, r.skinnedPipeline, r.grassPipeline, r.waterPipeline, r.godRayPipeline, r.waterRenderPass, waterFB, r.sceneColor, r.hdr.images[imageIndex],
+		func(cb core1_0.CommandBuffer) error { return r.recordClouds(cb, imageIndex, lighting) },
+		r.cloudSetFor(imageIndex),
+		r.bloomFor(imageIndex), r.tonemapFor(imageIndex), r.particlePipeline, r.terrainPipeline, r.materialPipelines(), &r.stats, r.pipelineLayout, r.litPipelineLayout, r.skinnedPipelineLayout, r.terrainPipelineLayout, r.sc.extent, draws, overlays, uiOverlays, msdfOverlays, lighting, r.fallbackTexture, r.shadow, r.grass, r.particles, f, r.msaa != nil, r.gpuTimer)
 	if err != nil {
 		return err
 	}

@@ -93,10 +93,16 @@ and thinning distant grass.
 
   **Read both rows of a performance table before believing the comparison.**
 
-- **If the sky is to get cheaper, it is the cloud march that has to.** Half
-  resolution plus temporal reprojection, which the CESCG paper names as its own
-  main gap. That would also converge the raymarch jitter properly rather than
-  attenuating it, which is the fix currently in sky.frag.
+- **The cloud march now runs at half resolution in its own pass**, which is
+  where the sky's cost actually was. GPU totals: water 1.399 to 0.688 ms,
+  terrain 1.296 to 0.591, kitchensink 3.515 to 3.131. The image is unchanged --
+  RMS 0.00079 against a run-to-run noise floor of 0.00067, max difference 2 of
+  255 -- because clouds are soft and there is no edge for the upscale to blur
+  that was not soft already.
+
+  Temporal reprojection is still open, and would be the next step: it would
+  converge the raymarch jitter properly rather than attenuating it, which is
+  what sky.frag does today.
 
 - **Sky is the top GPU pass in most scenes** — 78 to 92 percent in 02-cube,
   07-terrain, 09-water, 12-particles and 16-materials, and about 30 percent

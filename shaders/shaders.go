@@ -26,6 +26,9 @@ var LitMaterialFragSpv []byte
 //go:embed tonemap.frag.spv
 var TonemapFragSpv []byte
 
+//go:embed clouds.frag.spv
+var CloudsFragSpv []byte
+
 //go:embed bloom_prefilter.frag.spv
 var BloomPrefilterFragSpv []byte
 

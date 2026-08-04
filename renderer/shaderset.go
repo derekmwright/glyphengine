@@ -38,6 +38,7 @@ type ShaderSet struct {
 	WaterVert, WaterFrag       []byte // animated water surface
 	GodRayFrag                 []byte // screen-space light shafts (uses SkyVert)
 	TonemapFrag                []byte // HDR resolve to the swapchain (uses SkyVert)
+	CloudsFrag                 []byte // volumetric clouds at half res (uses SkyVert)
 	BloomPrefilterFrag         []byte // bloom bright-pass (uses SkyVert)
 	BloomDownFrag              []byte // bloom downsample (uses SkyVert)
 	BloomUpFrag                []byte // bloom upsample (uses SkyVert)
@@ -76,6 +77,8 @@ func DefaultShaders() ShaderSet {
 		GodRayFrag:             shaders.GodRayFragSpv,
 		TonemapFrag:            shaders.TonemapFragSpv,
 
+		CloudsFrag: shaders.CloudsFragSpv,
+
 		BloomPrefilterFrag: shaders.BloomPrefilterFragSpv,
 		BloomDownFrag:      shaders.BloomDownFragSpv,
 		BloomUpFrag:        shaders.BloomUpFragSpv,
@@ -111,6 +114,7 @@ func (s ShaderSet) withDefaults() ShaderSet {
 		{&s.WaterVert, d.WaterVert}, {&s.WaterFrag, d.WaterFrag},
 		{&s.GodRayFrag, d.GodRayFrag},
 		{&s.TonemapFrag, d.TonemapFrag},
+		{&s.CloudsFrag, d.CloudsFrag},
 		{&s.BloomPrefilterFrag, d.BloomPrefilterFrag},
 		{&s.BloomDownFrag, d.BloomDownFrag},
 		{&s.BloomUpFrag, d.BloomUpFrag},

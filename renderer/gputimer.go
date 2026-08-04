@@ -21,6 +21,7 @@ const (
 	PassTerrain               // the splat pipeline
 	PassOpaque                // lit and skinned geometry
 	PassGrass                 // instanced flora
+	PassClouds                // half-resolution volumetric cloud march
 	PassSky                   // sky dome, volumetric clouds, stars
 	PassParticles             // billboard particles
 	PassWater                 // scene copy, refraction, god rays
@@ -42,6 +43,8 @@ func (p Pass) String() string {
 		return "opaque"
 	case PassGrass:
 		return "grass"
+	case PassClouds:
+		return "clouds"
 	case PassSky:
 		return "sky"
 	case PassParticles:
