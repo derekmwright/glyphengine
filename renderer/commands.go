@@ -287,6 +287,34 @@ func packLightingPC(pc *[64]float32, lighting SceneLighting) {
 	pc[63] = lighting.RealSunDir[2]
 }
 
+// Push-constant floats the impostor pass borrows for billboard geometry.
+//
+// The block is full at 256 bytes, so anything the billboards need has to go in
+// a slot grass does not read. These three qualify: grass.frag is diffuse-only,
+// so roughness and metallic reach no code, and it never reads tint.w at all.
+//
+// Which slots are picked matters more than it looks. Every neighbouring slot is
+// live lighting data that grass.frag does read, and writing one relights the
+// billboards without touching the meshes -- silently, since it is a valid float
+// in a valid slot. The billboard size sat in ambient.xy for one commit and the
+// far field glowed pale at night while the grass in front of it stayed dark.
+// TestImpostorPushSlotsAvoidLighting keeps them clear.
+const (
+	pcImpostorCell   = 35 // tint.w, otherwise the flat-shading flag
+	pcImpostorWidth  = 51 // pointColor.w, otherwise roughness
+	pcImpostorHeight = 55 // ambient.w, otherwise metallic
+)
+
+// grassImpostorCellStride packs the atlas cell count and the cell index into
+// pcImpostorCell, because the billboards need four numbers and the block has
+// three slots to spare. Both are small non-negative integers and a float32 is
+// exact to 2^24, so nothing is lost; grassImpostorMaxCells is what keeps them
+// from colliding.
+const (
+	grassImpostorCellStride = 64
+	grassImpostorMaxCells   = grassImpostorCellStride
+)
+
 // tonemapPass is everything the HDR resolve needs, grouped for the same reason
 // materialPipelines is: recordCommandBuffer's parameter list is long enough
 // already.
@@ -958,16 +986,16 @@ func recordCommandBuffer(
 			deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, litPipelineLayout, 0,
 				[]core1_0.DescriptorSet{impostor.set, shadowDS}, nil)
 
-			pc[46] = 0                       // pointPos.z: atlas cell, per variant below
-			pc[47] = float32(impostor.cells) // pointPos.w: cell count
-			pc[52] = impostor.worldWidth     // ambient.x: billboard width
-			pc[53] = impostor.worldHeight    // ambient.y: billboard height
+			// Billboard geometry only. The lighting slots stay exactly as the
+			// mesh draws left them, which is what makes the two agree.
+			pc[pcImpostorWidth] = impostor.worldWidth
+			pc[pcImpostorHeight] = impostor.worldHeight
 
 			for _, vt := range impostorTiles {
 				v := &grass.Variants[vt.variant]
 				deviceDriver.CmdBindVertexBuffers(cmdBuf, 1, []core1_0.Buffer{v.InstanceBuffer}, []int{0})
 
-				pc[46] = float32(vt.variant)
+				pc[pcImpostorCell] = float32(impostor.cells*grassImpostorCellStride + vt.variant)
 				deviceDriver.CmdPushConstants(cmdBuf, litPipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
 
 				for _, t := range impostorScratch[vt.start:vt.end] {

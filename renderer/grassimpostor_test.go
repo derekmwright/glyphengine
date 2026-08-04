@@ -2,6 +2,61 @@ package renderer
 
 import "testing"
 
+// The push constant block is full, so the impostor pass borrows slots grass
+// does not read. Borrowing one grass *does* read lights the billboards
+// differently from the meshes they stand in for, and it is silent -- a valid
+// float in a valid slot, no validation message, correct in daylight where the
+// sun dominates and wrong at night where the ambient term is most of the light.
+// That is exactly what shipped: the billboard size sat in ambient.xy and the
+// far field glowed pale under a dark sky.
+//
+// Verified against the bug: moving any of the three to 52, 53 or 54 fails here.
+func TestImpostorPushSlotsAvoidLighting(t *testing.T) {
+	var pc [64]float32
+	// Every field packLightingPC reads, non-zero, so "written" is visible.
+	packLightingPC(&pc, SceneLighting{
+		SunDir:        [3]float32{1, 1, 1},
+		SunColor:      [3]float32{1, 1, 1},
+		SunElevation:  1,
+		PointPos:      [3]float32{1, 1, 1},
+		PointRange:    1,
+		PointColor:    [3]float32{1, 1, 1},
+		Ambient:       [3]float32{1, 1, 1},
+		CameraPos:     [3]float32{1, 1, 1},
+		FogDensity:    1,
+		FogHeight:     1,
+		FogBaseHeight: 1,
+		RealSunDir:    [3]float32{1, 1, 1},
+	})
+	// The grass pass adds two of its own on top: the wind clock, which
+	// packLightingPC leaves as padding, and the LOD distances that grass.vert
+	// culls and fades by, which it writes over the point light's position.
+	pc[39] = 1
+	pc[44], pc[45] = 1, 1
+	// Slots 0..34 are the two matrices and the tint colour.
+	for i := 0; i <= 34; i++ {
+		pc[i] = 1
+	}
+
+	slots := map[string]int{
+		"cell":   pcImpostorCell,
+		"width":  pcImpostorWidth,
+		"height": pcImpostorHeight,
+	}
+	for name, slot := range slots {
+		if pc[slot] != 0 {
+			t.Errorf("impostor %s is in push slot %d, which already carries scene data", name, slot)
+		}
+	}
+	seen := map[int]string{}
+	for name, slot := range slots {
+		if other, dup := seen[slot]; dup {
+			t.Errorf("impostor %s and %s share push slot %d", name, other, slot)
+		}
+		seen[slot] = name
+	}
+}
+
 func tilesAt(dists ...float32) []tileDraw {
 	out := make([]tileDraw, len(dists))
 	for i, d := range dists {

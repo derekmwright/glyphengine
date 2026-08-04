@@ -64,21 +64,34 @@ type GrassLOD struct {
 	// The swap happens per tile, not per blade, so a whole tile of grass
 	// changes representation at once.
 	//
-	// It is a dial, not a free win. Measured on 08-grass, min of three runs,
-	// against a two-run noise floor of RMS 0.0125 -- the sky is never still, so
-	// two identical runs never match exactly -- with the default 80-unit cull:
+	// It is a dial. Measured on 08-grass, min of three runs, against a two-run
+	// noise floor of RMS 0.0094 -- the sky is never still, so two identical runs
+	// never match exactly -- with the default 80-unit cull:
 	//
 	//	distance   grass pass   image vs meshes
-	//	off          2.597 ms   --
-	//	25           0.740 ms   0.044   visible: the far field reads chunkier
-	//	40           1.655 ms   0.027
-	//	60           2.400 ms   0.019   indistinguishable
+	//	off          2.557 ms   --
+	//	25           0.722 ms   0.025   visible: the far field reads chunkier
+	//	40           1.643 ms   0.017
+	//	60           2.376 ms   0.009   at the noise floor
 	//
 	// A billboard always presents its full width where a thin blade was often
 	// seen edge-on, so impostors cover more screen than the meshes they replace
 	// and a field of them reads denser. The wide, dry variants gain most, which
-	// is why the far field also shifts yellower. Pushing the distance out trades
-	// that away against the saving.
+	// is why the far field also shifts slightly yellower. Pushing the distance
+	// out trades that away against the saving. At night the difference falls to
+	// the noise floor at every distance: what separates the two is mostly how
+	// they catch direct sun.
+	//
+	// The far field is also steadier in motion, which is the other half of the
+	// trade and the half that is easy to miss in a screenshot. A blade at range
+	// is a handful of sub-pixel triangles whose coverage flips as the wind moves
+	// it, and that flicker is what reads as speckle. A billboard is one filtered
+	// quad. Between consecutive frames at distance 25, the far band changes 36
+	// percent less (RMS 0.046 to 0.030) while the near band, meshes in both
+	// cases, changes the same -- so the gain is where the representation
+	// changed, not a global blur. Some of that is billboards shearing where
+	// meshes bend, so read it as less motion *and* less shimmer, not shimmer
+	// alone.
 	ImpostorDistance float32
 }
 

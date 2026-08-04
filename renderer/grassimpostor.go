@@ -61,6 +61,13 @@ func (r *Renderer) bakeGrassImpostors(cellSize int) error {
 	if gs == nil || len(gs.Variants) == 0 {
 		return nil
 	}
+	// The cell index and count share one push-constant float, so the count is
+	// bounded by how they are packed. Failing here costs impostors and nothing
+	// else -- the caller logs and draws meshes at every distance.
+	if len(gs.Variants) > grassImpostorMaxCells {
+		return fmt.Errorf("grass impostor: %d variants exceeds the %d the atlas can index",
+			len(gs.Variants), grassImpostorMaxCells)
+	}
 
 	imp := &grassImpostor{
 		cells: len(gs.Variants),

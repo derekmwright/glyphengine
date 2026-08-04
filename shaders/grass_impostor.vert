@@ -15,15 +15,20 @@
 // Per-instance (binding 1): xyz = world position, w = Y rotation.
 layout(location = 4) in vec4 inInstance;
 
+// The billboard's own numbers ride in the .w slots grass leaves unread: it is
+// diffuse-only, so roughness and metallic reach no code, and nothing in the
+// grass path looks at tint.w. Everything else here is live lighting that
+// grass.frag reads, and writing any of it would light the billboards
+// differently from the meshes they stand in for.
 layout(push_constant) uniform PushConstants {
     mat4 vp;
     mat4 model;
-    vec4 tint;
-    vec4 sunDir;   // xyz = sun direction, w = time (for wind)
+    vec4 tint;       // rgb = tint, w = atlas cell count * 64 + cell index
+    vec4 sunDir;     // xyz = sun direction, w = time (for wind)
     vec4 sunColor;
-    vec4 pointPos; // x = LOD max distance, y = fade start, z = atlas cell, w = cell count
-    vec4 pointColor;
-    vec4 ambient;  // x = billboard width, y = height (world units)
+    vec4 pointPos;   // x = LOD max distance, y = fade start (as grass.vert)
+    vec4 pointColor; // w = billboard width in world units
+    vec4 ambient;    // w = billboard height in world units
     vec4 cameraPos;
 } pc;
 
@@ -60,8 +65,8 @@ void main() {
     fragFade = fadeFactor;
 
     vec2 corner = CORNERS[gl_VertexIndex];
-    float width  = pc.ambient.x;
-    float height = pc.ambient.y * fadeFactor;
+    float width  = pc.pointColor.w;
+    float height = pc.ambient.w * fadeFactor;
 
     // Face the camera about the vertical axis only. A fully camera-facing quad
     // would tilt as the camera pitches, and grass that leans back when you look
@@ -92,8 +97,12 @@ void main() {
 
     // Into this variant's atlas cell. v is flipped because the bake put the
     // blade's tip at the top of the cell, which is v = 0.
-    float cell  = pc.pointPos.z;
-    float cells = max(pc.pointPos.w, 1.0);
+    // Cell index and cell count share one slot. Both are small non-negative
+    // integers and a float32 holds integers exactly to 2^24, so this is lossless
+    // -- and it is what the block can afford: the only alternative slots hold
+    // live lighting, and the count is capped at 64 where it is packed.
+    float cells = max(floor(pc.tint.w / 64.0), 1.0);
+    float cell  = pc.tint.w - cells * 64.0;
     fragUV = vec2((cell + corner.x + 0.5) / cells, 1.0 - corner.y);
 
     fragColor = pc.tint.rgb;
