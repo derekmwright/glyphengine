@@ -56,9 +56,12 @@ type game struct {
 	grassImp  float32
 	timeOfDay float32
 	stars     float64
-	camera    *glyph.FPCamera
-	player    glyph.Entity
-	seed      int64
+
+	font   *renderer.Font
+	hud    *renderer.MSDFText
+	camera *glyph.FPCamera
+	player glyph.Entity
+	seed   int64
 
 	intent     glyph.MoveIntent
 	jumpQueued bool
@@ -208,6 +211,24 @@ func (g *game) LateUpdate(e *glyph.Engine, _ float32) {
 		g.camera.Follow(&t)
 	}
 	e.SetCamera(g.camera.ViewVectors())
+
+	// Sky readout. Sun elevation is what explains the picture -- the palette,
+	// the twilight warmth and the sun glow are all functions of it, not of the
+	// clock -- so a screenshot of a frame that looks wrong carries what is
+	// needed to reproduce it.
+	env := e.Scene.Environment()
+	phase := "night"
+	switch y := env.SunElevation; {
+	case y > 0.10:
+		phase = "day"
+	case y > -0.02:
+		phase = "sunset"
+	case y > -0.18:
+		phase = "twilight"
+	}
+	e.Debugf("ToD  %.4f", e.Scene.TimeOfDay())
+	e.Debugf("sun  %+.4f  %s", env.SunElevation, phase)
+
 }
 
 // tint keeps the terrain readable under the grass: earth where grass will

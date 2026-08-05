@@ -149,9 +149,28 @@ func LoadFont(r *Renderer, fsys fs.FS, jsonName, pngName string) (*Font, error) 
 
 	// Convert to RGBA
 	bounds := img.Bounds()
-	w, h := bounds.Dx(), bounds.Dy()
 	rgba := image.NewRGBA(bounds)
 	draw.Draw(rgba, bounds, img, bounds.Min, draw.Src)
+
+	return NewFontFromAtlas(r, rgba, jsonData)
+}
+
+// NewFontFromAtlas builds a font from an atlas already in memory and its
+// metadata in msdf-atlas-gen's JSON schema, which is what msdf.Generate
+// produces. LoadFont is this with a decode in front of it.
+//
+// It exists so a font can be generated at runtime rather than shipped: the
+// engine's debug text builds one from Go Mono on first use, and an asset the
+// engine needs but does not carry is an asset every game has to remember to
+// copy in.
+func NewFontFromAtlas(r *Renderer, rgba *image.RGBA, jsonData []byte) (*Font, error) {
+	var fj fontJSON
+	if err := json.Unmarshal(jsonData, &fj); err != nil {
+		return nil, fmt.Errorf("parse font json: %w", err)
+	}
+
+	bounds := rgba.Bounds()
+	w, h := bounds.Dx(), bounds.Dy()
 
 	// Upload as linear texture
 	atlas, err := r.CreateTextureLinear(rgba.Pix, w, h)
