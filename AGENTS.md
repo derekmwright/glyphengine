@@ -135,6 +135,15 @@ which change removed it and show the number:
 - **Prove the check is not vacuous.** `task determinism` renders a control
   with the real clock that *must* differ; the first version of it passed on
   four examples while hashing nothing at all.
+- **Give a visual metric a visibility floor, and do not trust it alone.** A
+  ratio test ("2.5x the local median") reports invisible noise as a defect in
+  any dark scene: at midnight it flagged 213 pixels sitting 12/255 from their
+  neighbours, which no one can see. Pair every ratio with an absolute contrast
+  and report both. And if the artifact only shows up in motion -- shimmer,
+  sparkle, crawl -- no still-frame metric will find it. Run the example and
+  have a person watch it; every visual bug found today was found that way,
+  while `task ci`, `task validate`, and the metrics all stayed green.
+
 - **Record what you measured, in the code.** Scene, metric, and numbers before
   and after, next to the line they justify -- so the next person can re-run it
   rather than trust it. Rule 12 exists because that was missing.
