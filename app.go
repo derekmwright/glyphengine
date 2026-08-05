@@ -510,6 +510,11 @@ func New(g Game, opts ...Option) (*Engine, error) {
 	// A fixed clock is only half of a repeatable run: particle spawns draw from
 	// a source that is reseeded at every process start, so pin that too.
 	if e.fixedFrameTime > 0 {
+		// The cursor is the input nobody decides to move. Left live, it makes a
+		// capture depend on where the mouse happened to be sitting: two runs of
+		// 15-kitchen-sink came out RMS 0.59 apart that way, and 09-water failed
+		// the determinism gate intermittently for the same reason.
+		e.input.IgnorePointer(true)
 		pinSpawnRand(0x5eed)
 		log.Printf("Fixed frame time: %v (deterministic run)", e.fixedFrameTime)
 	}
@@ -1012,6 +1017,7 @@ func (e *Engine) renderFrame() {
 		DrawSky:       env.DrawSky,
 		DrawStars:     env.DrawStars,
 		MilkyWay:      env.MilkyWay,
+		StarDensity:   env.StarDensity,
 		CloudSteps:    env.CloudSteps,
 		LightShafts:   shaftStrength,
 		SunScreenPos:  sunScreen,

@@ -6,6 +6,9 @@ import "github.com/go-gl/glfw/v3.3/glfw"
 type Input struct {
 	handle *glfw.Window
 
+	// ignorePointer suppresses cursor and scroll reporting. See IgnorePointer.
+	ignorePointer bool
+
 	// Keyboard state indexed by glfw.Key.
 	keys     [glfw.KeyLast + 1]bool
 	prevKeys [glfw.KeyLast + 1]bool
@@ -143,8 +146,21 @@ func (inp *Input) MousePos() (x, y float64) {
 	return inp.mouseX, inp.mouseY
 }
 
+// IgnorePointer stops MouseDelta and the scroll queries reporting anything.
+//
+// The engine turns this on for a fixed frame clock. A run meant to reproduce
+// byte for byte cannot also read a live cursor, and the cursor is the input
+// that moves without anyone deciding to move it -- a capture that depends on
+// where the mouse happened to be sitting is not a capture. Keys are left alone:
+// pressing one during a recorded run is a choice, and the engine should not
+// second-guess it.
+func (inp *Input) IgnorePointer(on bool) { inp.ignorePointer = on }
+
 // MouseDelta returns cursor movement since last frame.
 func (inp *Input) MouseDelta() (dx, dy float64) {
+	if inp.ignorePointer {
+		return 0, 0
+	}
 	return inp.mouseX - inp.prevMouseX, inp.mouseY - inp.prevMouseY
 }
 
@@ -152,6 +168,9 @@ func (inp *Input) MouseDelta() (dx, dy float64) {
 
 // Scroll returns the scroll wheel delta accumulated this frame.
 func (inp *Input) Scroll() (x, y float64) {
+	if inp.ignorePointer {
+		return 0, 0
+	}
 	return inp.scrollX, inp.scrollY
 }
 
@@ -159,6 +178,9 @@ func (inp *Input) Scroll() (x, y float64) {
 // reads in the same frame see zero. Use this for input that should only
 // be applied once per frame even when the caller runs in a fixed-timestep loop.
 func (inp *Input) ConsumeScroll() (x, y float64) {
+	if inp.ignorePointer {
+		return 0, 0
+	}
 	x, y = inp.scrollX, inp.scrollY
 	inp.scrollX, inp.scrollY = 0, 0
 	return
