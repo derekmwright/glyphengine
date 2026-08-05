@@ -80,6 +80,9 @@ type EnvironmentState struct {
 	// StarFade is how visible the stars are, 0 to 1.
 	StarFade float32
 
+	// MilkyWay is the galactic band's strength, 0 to 1. See Sky.MilkyWay.
+	MilkyWay float32
+
 	// DrawSky draws the procedural dome. DrawStars, DrawSun and DrawMoon add
 	// the stars and the celestial billboards.
 	DrawSky   bool
@@ -156,6 +159,23 @@ type Environment struct {
 type Sky struct {
 	// Stars fade in as night falls.
 	Stars bool
+
+	// MilkyWay is the galactic band's strength, 0 to 1. Default 0.
+	//
+	// It draws a tilted band broken by dust lanes and raises star density
+	// inside it, so the galaxy is made of stars rather than painted behind
+	// them. Needs Stars -- it rides in the same pass and fades on the same
+	// night factor, and costs nothing when off (the noise is branched around).
+	//
+	// Off by default because it is not dialled in yet: at any strength that
+	// makes it visible it still reads as an overcast cloud rather than a galaxy.
+	// Structure is closer than it was -- narrow spine in a wide halo, brighter
+	// toward the galactic centre, near-black dust lanes, warm core grading cool
+	// at the edges, all taken from ESO's all-sky panorama -- but a smooth
+	// luminous mass with soft edges is what a cloud looks like, and the part
+	// that would fix it is making the band out of unresolved stars rather than
+	// haze. Turn it on to iterate; do not ship it on without looking.
+	MilkyWay float32
 
 	// SunDisc and MoonDisc draw the celestial billboards. A game can keep the
 	// sky's light and colour without visible bodies in it.
@@ -346,6 +366,12 @@ func (env *Environment) State() EnvironmentState {
 			s.LightShafts = env.Sky.LightShafts
 		}
 		s.DrawStars = env.Sky.Stars && s.StarFade > 0
+		s.MilkyWay = env.Sky.MilkyWay
+		if s.MilkyWay < 0 {
+			s.MilkyWay = 0
+		} else if s.MilkyWay > 1 {
+			s.MilkyWay = 1
+		}
 		// The discs are the cycle's bodies; without one there is nothing to
 		// place them by.
 		s.DrawSun = env.Sky.SunDisc && env.Cycle != nil && s.SunDiscDir[1] > -0.15

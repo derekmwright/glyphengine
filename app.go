@@ -1011,6 +1011,7 @@ func (e *Engine) renderFrame() {
 		FogBaseHeight: env.FogBaseHeight,
 		DrawSky:       env.DrawSky,
 		DrawStars:     env.DrawStars,
+		MilkyWay:      env.MilkyWay,
 		CloudSteps:    env.CloudSteps,
 		LightShafts:   shaftStrength,
 		SunScreenPos:  sunScreen,
