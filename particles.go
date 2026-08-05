@@ -3,6 +3,7 @@ package glyphengine
 import (
 	"math"
 	"math/rand"
+	"time"
 
 	"github.com/derekmwright/glyphengine/renderer"
 )
@@ -121,6 +122,17 @@ func NewParticleEmitter(cfg *EmitterConfig, minX, maxX, minZ, maxZ, baseY, heigh
 }
 
 // SetPosition repositions the emitter centered on (cx, baseY, cz), preserving its extent.
+// spawnRand is the randomness behind emitter spawn jitter. It is a package
+// source rather than math/rand's global one so that a deterministic run can pin
+// it -- the global is reseeded at every process start and cannot be fixed
+// without reaching for a deprecated API. Not safe for concurrent use, which
+// matches its only caller: emitters are updated on the frame loop.
+var spawnRand = rand.New(rand.NewSource(time.Now().UnixNano()))
+
+// pinSpawnRand makes particle spawns repeat run to run. Called when a fixed
+// frame clock is in effect; see WithFixedFrameTime.
+func pinSpawnRand(seed int64) { spawnRand = rand.New(rand.NewSource(seed)) }
+
 func (em *ParticleEmitter) SetPosition(cx, baseY, cz float32) {
 	hw := (em.MaxX - em.MinX) / 2
 	hd := (em.MaxZ - em.MinZ) / 2
@@ -143,30 +155,30 @@ func (em *ParticleEmitter) Reset() {
 // spawnParticle creates a new particle using the emitter config.
 func (em *ParticleEmitter) spawnParticle() Particle {
 	cfg := em.Config
-	life := cfg.LifeMin + rand.Float32()*(cfg.LifeMax-cfg.LifeMin)
+	life := cfg.LifeMin + spawnRand.Float32()*(cfg.LifeMax-cfg.LifeMin)
 
 	p := Particle{
-		X:       em.MinX + rand.Float32()*(em.MaxX-em.MinX),
-		Y:       em.BaseY + em.HeightMin + rand.Float32()*(em.HeightMax-em.HeightMin),
-		Z:       em.MinZ + rand.Float32()*(em.MaxZ-em.MinZ),
-		Phase:   rand.Float32() * 2 * math.Pi,
+		X:       em.MinX + spawnRand.Float32()*(em.MaxX-em.MinX),
+		Y:       em.BaseY + em.HeightMin + spawnRand.Float32()*(em.HeightMax-em.HeightMin),
+		Z:       em.MinZ + spawnRand.Float32()*(em.MaxZ-em.MinZ),
+		Phase:   spawnRand.Float32() * 2 * math.Pi,
 		Life:    life,
 		MaxLife: life,
-		Size:    cfg.SizeMin + rand.Float32()*(cfg.SizeMax-cfg.SizeMin),
-		R:       cfg.RMin + rand.Float32()*(cfg.RMax-cfg.RMin),
-		G:       cfg.GMin + rand.Float32()*(cfg.GMax-cfg.GMin),
-		B:       cfg.BMin + rand.Float32()*(cfg.BMax-cfg.BMin),
+		Size:    cfg.SizeMin + spawnRand.Float32()*(cfg.SizeMax-cfg.SizeMin),
+		R:       cfg.RMin + spawnRand.Float32()*(cfg.RMax-cfg.RMin),
+		G:       cfg.GMin + spawnRand.Float32()*(cfg.GMax-cfg.GMin),
+		B:       cfg.BMin + spawnRand.Float32()*(cfg.BMax-cfg.BMin),
 	}
 
 	switch cfg.Move {
 	case MoveDrift:
-		p.VX = (rand.Float32() - 0.5) * 2 * cfg.InitialSpeedXZ
-		p.VY = (rand.Float32() - 0.5) * 2 * cfg.InitialSpeedY
-		p.VZ = (rand.Float32() - 0.5) * 2 * cfg.InitialSpeedXZ
+		p.VX = (spawnRand.Float32() - 0.5) * 2 * cfg.InitialSpeedXZ
+		p.VY = (spawnRand.Float32() - 0.5) * 2 * cfg.InitialSpeedY
+		p.VZ = (spawnRand.Float32() - 0.5) * 2 * cfg.InitialSpeedXZ
 	case MoveGravity:
-		p.VX = (rand.Float32() - 0.5) * 2 * cfg.InitialSpeedXZ
-		p.VY = cfg.InitialSpeedY + rand.Float32()*cfg.InitialSpeedY*0.5
-		p.VZ = (rand.Float32() - 0.5) * 2 * cfg.InitialSpeedXZ
+		p.VX = (spawnRand.Float32() - 0.5) * 2 * cfg.InitialSpeedXZ
+		p.VY = cfg.InitialSpeedY + spawnRand.Float32()*cfg.InitialSpeedY*0.5
+		p.VZ = (spawnRand.Float32() - 0.5) * 2 * cfg.InitialSpeedXZ
 	case MoveRadial:
 		cx := (em.MinX + em.MaxX) / 2
 		cz := (em.MinZ + em.MaxZ) / 2
@@ -177,7 +189,7 @@ func (em *ParticleEmitter) spawnParticle() Particle {
 			p.VX = dx / dist * cfg.RadialSpeed
 			p.VZ = dz / dist * cfg.RadialSpeed
 		}
-		p.VY = (rand.Float32() - 0.5) * 2 * cfg.InitialSpeedY
+		p.VY = (spawnRand.Float32() - 0.5) * 2 * cfg.InitialSpeedY
 	}
 
 	return p
@@ -210,17 +222,17 @@ func (em *ParticleEmitter) Tick(dt, nightFactor float32) {
 		// Movement.
 		switch cfg.Move {
 		case MoveDrift:
-			p.VX += (rand.Float32() - 0.5) * cfg.TurbulenceXZ * dt
-			p.VY += (rand.Float32() - 0.5) * cfg.TurbulenceY * dt
-			p.VZ += (rand.Float32() - 0.5) * cfg.TurbulenceXZ * dt
+			p.VX += (spawnRand.Float32() - 0.5) * cfg.TurbulenceXZ * dt
+			p.VY += (spawnRand.Float32() - 0.5) * cfg.TurbulenceY * dt
+			p.VZ += (spawnRand.Float32() - 0.5) * cfg.TurbulenceXZ * dt
 		case MoveGravity:
 			p.VY -= cfg.Gravity * dt
-			p.VX += (rand.Float32() - 0.5) * cfg.TurbulenceXZ * dt
-			p.VZ += (rand.Float32() - 0.5) * cfg.TurbulenceXZ * dt
+			p.VX += (spawnRand.Float32() - 0.5) * cfg.TurbulenceXZ * dt
+			p.VZ += (spawnRand.Float32() - 0.5) * cfg.TurbulenceXZ * dt
 		case MoveRadial:
-			p.VX += (rand.Float32() - 0.5) * cfg.TurbulenceXZ * dt
-			p.VY += (rand.Float32() - 0.5) * cfg.TurbulenceY * dt
-			p.VZ += (rand.Float32() - 0.5) * cfg.TurbulenceXZ * dt
+			p.VX += (spawnRand.Float32() - 0.5) * cfg.TurbulenceXZ * dt
+			p.VY += (spawnRand.Float32() - 0.5) * cfg.TurbulenceY * dt
+			p.VZ += (spawnRand.Float32() - 0.5) * cfg.TurbulenceXZ * dt
 		}
 
 		// Clamp speed.

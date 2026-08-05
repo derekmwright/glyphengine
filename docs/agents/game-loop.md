@@ -32,6 +32,7 @@ api:
   - glyphengine.Engine.InterpolatedTransform
   - glyphengine.Scene.ClearInterpolation
   - glyphengine.WithMaxFrames
+  - glyphengine.WithFixedFrameTime
   - glyphengine.WithTickRate
   - glyphengine.WithMaxCatchUp
   - glyphengine.WithProjection
@@ -42,7 +43,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-07-28
+verified: 2026-08-04
 ---
 
 # Run a game loop with Engine and Game
@@ -314,6 +315,41 @@ go run ./02-cube -frames 60
 
 Combined with a software rasterizer this makes the whole engine runnable on a
 GPU-less CI runner. It is also the easiest way to profile a fixed workload.
+
+## Repeatable renders
+
+`-frames N` fixes how *many* frames run, not what they show. The clock is still
+wall-clock, so wind, clouds, water, particle spawns, animation and the day-night
+cycle land somewhere slightly different on every run. Two captures of the same
+build differ, and the difference is not small: measured on `08-grass`, two
+identical 150-frame runs came out RMS 0.009–0.05 apart, which is the same order
+as some of the changes worth measuring.
+
+`WithFixedFrameTime(d)` advances the clock by exactly `d` per frame instead, so
+a run becomes a function of its frame count. The environment forces it on a
+binary that never asked:
+
+```
+GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./08-grass -frames 90 -screenshot a.png
+GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./08-grass -frames 90 -screenshot b.png
+# a.png and b.png are byte-identical
+```
+
+It does not pace the loop — the frame still takes as long as it takes, and the
+CPU and GPU timers still report real time. It only changes what the simulation
+is told.
+
+Reach for it whenever a visual difference is the thing being measured: A/B
+screenshots, bisecting a rendering artifact, or counting a sparkle that appears
+a different number of times each run. Without it, "it looks different now"
+cannot be separated from "the wind moved".
+
+`task determinism` is the gate: it captures each animated example twice and
+fails if the two differ, plus a control run with the real clock that must
+differ, so the check cannot pass vacuously.
+
+Particle spawn jitter is pinned alongside the clock, since `math/rand`'s global
+source is reseeded at every process start.
 
 ## Failure modes
 

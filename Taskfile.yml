@@ -190,6 +190,53 @@ tasks:
         check 08-grass -grassimpostor 25
         exit $status
 
+  determinism:
+    desc: "Check that a fixed frame clock makes renders byte-identical"
+    dir: examples
+    cmds:
+      # Needs a GPU, so it sits with smoke and validate rather than in `task ci`.
+      #
+      # The scenes here are the ones that move on their own: wind and clouds,
+      # water, particle spawns, animation sampling. A still scene would pass
+      # this without proving anything.
+      # The output paths are relative on purpose: the examples resolve them
+      # against their own working directory, and a Windows Go binary cannot
+      # open the POSIX path mktemp hands back.
+      - |
+        status=0
+        d=.determinism
+        rm -rf $d && mkdir -p $d
+        shot() { GLYPHENGINE_FIXED_FRAME_TIME=$1 go run ./$2 -frames 90 $4 -screenshot $d/$3.png >/dev/null 2>&1; }
+        same() {
+          [ -s "$d/$1.png" ] && [ -s "$d/$2.png" ] || { echo "MISSING CAPTURE -- this gate proves nothing"; status=1; return 1; }
+          [ "$(sha256sum < $d/$1.png)" = "$(sha256sum < $d/$2.png)" ]
+        }
+        for ex in "08-grass" "09-water" "12-particles" "06-skinned -demo"; do
+          set -- $ex
+          name=$1; shift
+          shot 16.667ms $name a "$*"
+          shot 16.667ms $name b "$*"
+          if same a b; then
+            echo "$name: identical"
+          elif [ $? -eq 1 ] && [ -s $d/a.png ]; then
+            echo "$name: TWO RUNS DIFFER under a fixed clock"
+            status=1
+          fi
+        done
+        # Prove the check is not vacuous: with the real clock the same two runs
+        # must NOT match, or it is passing on a scene that never moves -- or on
+        # captures that were never written.
+        go run ./08-grass -frames 90 -screenshot $d/c.png >/dev/null 2>&1
+        go run ./08-grass -frames 90 -screenshot $d/e.png >/dev/null 2>&1
+        if same c e; then
+          echo "control: 08-grass matched WITHOUT a fixed clock -- this gate proves nothing"
+          status=1
+        else
+          echo "control: differs without the fixed clock, as it must"
+        fi
+        rm -rf $d
+        exit $status
+
   screenshots:
     desc: Regenerate the documentation images in docs/images
     dir: examples

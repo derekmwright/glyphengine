@@ -98,27 +98,28 @@ type ResizeGame interface {
 type Option func(*config)
 
 type config struct {
-	scene      *Scene
-	msaa       int
-	width      int
-	height     int
-	title      string
-	appName    string
-	appVersion common.Version
-	fullscreen bool
-	resizable  bool
-	validation bool
-	vsync      bool
-	interp     bool
-	tickRate   int
-	maxCatchUp time.Duration
-	maxFrames  int
-	screenshot string
-	fov        float32
-	near, far  float32
-	quitKey    input.Key
-	hasQuitKey bool
-	debugKeys  bool
+	scene          *Scene
+	msaa           int
+	width          int
+	height         int
+	title          string
+	appName        string
+	appVersion     common.Version
+	fullscreen     bool
+	resizable      bool
+	validation     bool
+	vsync          bool
+	interp         bool
+	tickRate       int
+	maxCatchUp     time.Duration
+	maxFrames      int
+	screenshot     string
+	fixedFrameTime time.Duration
+	fov            float32
+	near, far      float32
+	quitKey        input.Key
+	hasQuitKey     bool
+	debugKeys      bool
 }
 
 // WithScene injects an externally created Scene instead of building a fresh
@@ -252,6 +253,31 @@ func WithMaxFrames(n int) Option {
 	return func(c *config) { c.maxFrames = n }
 }
 
+// WithFixedFrameTime makes every frame advance the clock by exactly d instead
+// of by however long the frame took, so a run is a function of its frame count
+// rather than of the machine it ran on. Zero, the default, uses the real delta.
+//
+// This is a diagnostic setting, not a pacing one: it does not slow the loop
+// down to d, it lies to the simulation about how much time passed. Wind,
+// clouds, water, particles, animation and the day-night cycle all read that
+// clock, so with it set two runs at the same -frames produce the same image,
+// bit for bit.
+//
+// Without it they do not, and that is expensive when you are hunting an
+// artifact. Comparing two renders means comparing them against a noise floor
+// measured from two identical runs, and anything smaller than the floor is
+// invisible -- a single-pixel sparkle counted 7 times in one run and 14 in the
+// next is not a measurement, and a fix judged by one run of each is a coin
+// toss. It also makes bisecting a visual bug possible at all: without a fixed
+// clock, "it looks different now" cannot be told from "the wind moved".
+//
+// Set GLYPHENGINE_FIXED_FRAME_TIME to a Go duration ("16.667ms") to force it on
+// a binary you did not compile, the way GLYPHENGINE_TIMING and
+// GLYPHENGINE_VALIDATION work. The environment wins over this option.
+func WithFixedFrameTime(d time.Duration) Option {
+	return func(c *config) { c.fixedFrameTime = d }
+}
+
 // WithScreenshot writes a PNG of the last rendered frame to path when Run
 // finishes, then returns.
 //
@@ -345,8 +371,12 @@ type Engine struct {
 	maxCatchUp   time.Duration
 	maxFrames    int
 	frameCount   int
-	screenshot   string
-	alpha        float32 // fraction between the last two ticks; see Alpha
+
+	// fixedFrameTime replaces the measured frame delta when non-zero; see
+	// WithFixedFrameTime.
+	fixedFrameTime time.Duration
+	screenshot     string
+	alpha          float32 // fraction between the last two ticks; see Alpha
 
 	// See WithQuitKey. hasQuitKey is separate because key zero is a real key.
 	quitKey    input.Key
@@ -363,6 +393,29 @@ type Engine struct {
 
 // resolveMaxCatchUp applies the default and makes sure the budget can fit at
 // least one tick — a smaller budget would starve the simulation completely.
+// resolveFixedFrameTime lets the environment force a fixed clock on a binary
+// that never asked for one, which is the point: the artifact you need to
+// reproduce is usually in an example someone else built. An unparseable value
+// is reported rather than silently ignored -- a run that is quietly still
+// non-deterministic wastes more time than a bad flag.
+func resolveFixedFrameTime(requested time.Duration) time.Duration {
+	if v := os.Getenv("GLYPHENGINE_FIXED_FRAME_TIME"); v != "" {
+		d, err := time.ParseDuration(v)
+		switch {
+		case err != nil:
+			log.Printf("GLYPHENGINE_FIXED_FRAME_TIME=%q is not a duration (want e.g. 16.667ms), ignoring", v)
+		case d <= 0:
+			log.Printf("GLYPHENGINE_FIXED_FRAME_TIME=%q is not positive, ignoring", v)
+		default:
+			return d
+		}
+	}
+	if requested < 0 {
+		return 0
+	}
+	return requested
+}
+
 func resolveMaxCatchUp(requested, tickDuration time.Duration) time.Duration {
 	if requested <= 0 {
 		requested = DefaultMaxCatchUp
@@ -433,24 +486,32 @@ func New(g Game, opts ...Option) (*Engine, error) {
 	}
 
 	e := &Engine{
-		Scene:        scene,
-		window:       w,
-		renderer:     r,
-		input:        input.New(w.Handle()),
-		game:         g,
-		cameraEye:    mgl32.Vec3{0, 1, 3},
-		cameraCenter: mgl32.Vec3{0, 0, 0},
-		cameraUp:     mgl32.Vec3{0, 1, 0},
-		fov:          cfg.fov,
-		near:         cfg.near,
-		far:          cfg.far,
-		tickDuration: time.Second / time.Duration(cfg.tickRate),
-		maxCatchUp:   resolveMaxCatchUp(cfg.maxCatchUp, time.Second/time.Duration(cfg.tickRate)),
-		maxFrames:    cfg.maxFrames,
-		screenshot:   cfg.screenshot,
-		quitKey:      cfg.quitKey,
-		hasQuitKey:   cfg.hasQuitKey,
-		debugKeys:    cfg.debugKeys,
+		Scene:          scene,
+		window:         w,
+		renderer:       r,
+		input:          input.New(w.Handle()),
+		game:           g,
+		cameraEye:      mgl32.Vec3{0, 1, 3},
+		cameraCenter:   mgl32.Vec3{0, 0, 0},
+		cameraUp:       mgl32.Vec3{0, 1, 0},
+		fov:            cfg.fov,
+		near:           cfg.near,
+		far:            cfg.far,
+		tickDuration:   time.Second / time.Duration(cfg.tickRate),
+		maxCatchUp:     resolveMaxCatchUp(cfg.maxCatchUp, time.Second/time.Duration(cfg.tickRate)),
+		maxFrames:      cfg.maxFrames,
+		screenshot:     cfg.screenshot,
+		fixedFrameTime: resolveFixedFrameTime(cfg.fixedFrameTime),
+		quitKey:        cfg.quitKey,
+		hasQuitKey:     cfg.hasQuitKey,
+		debugKeys:      cfg.debugKeys,
+	}
+
+	// A fixed clock is only half of a repeatable run: particle spawns draw from
+	// a source that is reseeded at every process start, so pin that too.
+	if e.fixedFrameTime > 0 {
+		pinSpawnRand(0x5eed)
+		log.Printf("Fixed frame time: %v (deterministic run)", e.fixedFrameTime)
 	}
 
 	// Celestial billboards are engine-owned meshes, not game assets.
@@ -739,6 +800,13 @@ func (e *Engine) Run() {
 		frameStart := time.Now()
 		frameDelta := frameStart.Sub(prev)
 		prev = frameStart
+		// A fixed clock replaces the measured delta for everything the
+		// simulation reads, and nothing else: the CPU timers below still
+		// measure real time, because their job is to report what the frame
+		// actually cost. See WithFixedFrameTime.
+		if e.fixedFrameTime > 0 {
+			frameDelta = e.fixedFrameTime
+		}
 		accumulator += frameDelta
 
 		// Bound catch-up work so a long pause cannot spiral. Past the budget
