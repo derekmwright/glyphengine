@@ -70,8 +70,8 @@ void atmSkyPalette(float sunY, out vec3 zenith, out vec3 horizon) {
     // the water's reflection all read from here -- so lifting them to make the
     // sky legible washes out the entire landscape with it. If night needs to be
     // brighter, brighten the moon, not the air.
-    const vec3 zenithNight  = vec3(0.005, 0.006, 0.021);
-    const vec3 horizonNight = vec3(0.012, 0.018, 0.045);
+    const vec3 zenithNight  = vec3(0.0014, 0.0017, 0.0060);
+    const vec3 horizonNight = vec3(0.0034, 0.0050, 0.0130);
 
     float day = atmDaylight(sunY);
     float twi = atmTwilight(sunY);

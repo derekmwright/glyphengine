@@ -222,7 +222,7 @@ void main() {
             // The blue bias is kept: moonlight is sunlight, but the eye's
             // scotopic response shifts toward blue at these levels, so a cool
             // cast is what a night scene is expected to look like.
-            vec3 sunLight = mix(vec3(0.085, 0.10, 0.145), vec3(1.0, 0.97, 0.92), day);
+            vec3 sunLight = mix(vec3(0.030, 0.036, 0.055), vec3(1.0, 0.97, 0.92), day);
             sunLight = mix(sunLight, vec3(1.0, 0.62, 0.34), twi * 0.8);
             vec3 skyFill = mix(zenith, horizon, 0.5) * 1.6;
 
