@@ -38,8 +38,16 @@ float atmDaylight(float sunY) {
 // It is independent of atmDaylight on purpose. The warm scattering has to
 // survive sunset — it is strongest just after — so it cannot be gated on how
 // much daylight is left.
+//
+// Asymmetric, because the two sides are not the same event. Above the horizon
+// the warmth builds while there is still a sun to light the air; below it there
+// is progressively less air left in sunlight, and the glow should go with it.
+// A symmetric curve wide enough for the approach kept the horizon 37 percent
+// warm at an elevation where atmNight already reports full night — the sky
+// calling itself night while still holding a sunset.
 float atmTwilight(float sunY) {
-    float y = sunY / 0.20;
+    float width = sunY > 0.0 ? 0.20 : 0.115;
+    float y = sunY / width;
     return exp(-y * y);
 }
 
@@ -103,6 +111,7 @@ vec3 atmSunGlow(vec3 dir, vec3 sunDir, vec3 sunCol, float sunY) {
 
     float halo = pow(prox, 8.0) * (0.35 + 0.9 * twi);
     float wash = pow(prox, 1.6) * twi * 0.55;
+
 
     // Concentrate the wash near the horizon, where the light path through the
     // atmosphere is longest.
