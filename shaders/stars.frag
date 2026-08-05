@@ -266,7 +266,7 @@ void main() {
         dustBlock = block;
         painted *= 1.0 - 0.99 * block;
 
-        col += painted * 0.042 * milkyWay;
+        col += painted * 0.029 * milkyWay;
 
         mwTint = mix(mid, hotWhite, hotMask);
         structure = band * lengthwise * midMask * (1.0 - 0.99 * block);
@@ -289,9 +289,9 @@ void main() {
     // Grain: dense faint points that merge rather than resolve, carrying the
     // band's colour. Points with a footprint rather than high-frequency noise,
     // which crawls the moment the camera turns.
-    col += mwTint * starLayer(dir, 130.0, 0.95 * inBand, 0.15, time);
-    col += mwTint * starLayer(dir, 190.0, 1.00 * inBand, 0.09, time);
-    col += mwTint * starLayer(dir, 280.0, 1.00 * inBand, 0.05, time);
+    col += mwTint * starLayer(dir, 130.0, 0.95 * inBand, 0.105, time);
+    col += mwTint * starLayer(dir, 190.0, 1.00 * inBand, 0.063, time);
+    col += mwTint * starLayer(dir, 280.0, 1.00 * inBand, 0.035, time);
 
     // Density is not uniform across the sky. A flat field reads as a texture --
     // the eye finds the regularity immediately -- so a low-frequency noise
