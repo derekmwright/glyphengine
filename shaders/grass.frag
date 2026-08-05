@@ -44,11 +44,12 @@ layout(push_constant) uniform PushConstants {
 layout(location = 0) out vec4 outColor;
 
 #include "lighting.inc"
+#include "grass_shade.inc"
 
 void main() {
     vec4 texSample = texture(texSampler, fragUV);
     if (texSample.a < 0.5) discard; // alpha test for foliage cutout
-    vec3 baseColor = fragColor * texSample.rgb;
+    vec3 baseColor = grassShade(fragColor) * texSample.rgb;
 
     // The per-vertex blade normal, as authored.
     //
