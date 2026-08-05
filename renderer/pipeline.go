@@ -379,6 +379,106 @@ func createOverlayPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, rend
 
 // createStarsPipeline creates a pipeline for procedural starfield rendering:
 // no vertex input, depth-tested against the far plane, additive blending.
+// createCelestialPipeline draws the sun and moon discs after the sky rather
+// than with the opaque geometry.
+//
+// In the draw list they wrote depth, so the sky pass -- which is where clouds
+// are composited -- was depth-rejected on exactly those pixels, and a cloud
+// could never be drawn in front of the sun. Drawing them here instead, blended
+// against the destination alpha the sky pass writes, puts the clouds back in
+// front and keeps terrain occlusion working.
+
+func createCelestialPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
+	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
+		Code: bytesToUint32Slice(sh.MeshVert),
+	})
+	if err != nil {
+		return core1_0.Pipeline{}, err
+	}
+	defer deviceDriver.DestroyShaderModule(vertModule, nil)
+
+	fragModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
+		Code: bytesToUint32Slice(sh.MeshFrag),
+	})
+	if err != nil {
+		return core1_0.Pipeline{}, err
+	}
+	defer deviceDriver.DestroyShaderModule(fragModule, nil)
+
+	pipelines, _, err := deviceDriver.CreateGraphicsPipelines(nil, nil, core1_0.GraphicsPipelineCreateInfo{
+		Stages: []core1_0.PipelineShaderStageCreateInfo{
+			{Stage: core1_0.StageVertex, Module: vertModule, Name: "main"},
+			{Stage: core1_0.StageFragment, Module: fragModule, Name: "main"},
+		},
+		VertexInputState: &core1_0.PipelineVertexInputStateCreateInfo{
+			VertexBindingDescriptions:   []core1_0.VertexInputBindingDescription{vertexBindingDescription()},
+			VertexAttributeDescriptions: vertexAttributeDescriptions(),
+		},
+		InputAssemblyState: &core1_0.PipelineInputAssemblyStateCreateInfo{
+			Topology: core1_0.PrimitiveTopologyTriangleList,
+		},
+		ViewportState: &core1_0.PipelineViewportStateCreateInfo{
+			Viewports: []core1_0.Viewport{{
+				X: 0, Y: 0,
+				Width: float32(extent.Width), Height: float32(extent.Height),
+				MinDepth: 0, MaxDepth: 1,
+			}},
+			Scissors: []core1_0.Rect2D{{
+				Offset: core1_0.Offset2D{X: 0, Y: 0},
+				Extent: extent,
+			}},
+		},
+		RasterizationState: &core1_0.PipelineRasterizationStateCreateInfo{
+			PolygonMode: core1_0.PolygonModeFill,
+			CullMode:    0, // no culling
+			FrontFace:   core1_0.FrontFaceClockwise,
+			LineWidth:   1.0,
+		},
+		MultisampleState: &core1_0.PipelineMultisampleStateCreateInfo{
+			RasterizationSamples: samples,
+		},
+		DepthStencilState: &core1_0.PipelineDepthStencilStateCreateInfo{
+			DepthTestEnable:  false,
+			DepthWriteEnable: false,
+		},
+		ColorBlendState: &core1_0.PipelineColorBlendStateCreateInfo{
+			Attachments: []core1_0.PipelineColorBlendAttachmentState{{
+				ColorWriteMask: core1_0.ColorComponentRed | core1_0.ColorComponentGreen | core1_0.ColorComponentBlue | core1_0.ColorComponentAlpha,
+				BlendEnabled:   true,
+
+				// Gated on destination alpha, exactly as the stars are. The sky
+				// pass writes coverage there, so a cloud drawn over the sun
+				// masks the disc for free, and geometry masks it too -- which is
+				// what stops the sun shining through a hillside now that it no
+				// longer depth-tests.
+				SrcColorBlendFactor: core1_0.BlendFactorDstAlpha,
+				DstColorBlendFactor: core1_0.BlendFactorOne,
+				ColorBlendOp:        core1_0.BlendOpAdd,
+				SrcAlphaBlendFactor: core1_0.BlendFactorZero,
+				DstAlphaBlendFactor: core1_0.BlendFactorOne,
+				AlphaBlendOp:        core1_0.BlendOpAdd,
+			}},
+		},
+		DynamicState: &core1_0.PipelineDynamicStateCreateInfo{
+			DynamicStates: []core1_0.DynamicState{
+				core1_0.DynamicStateViewport,
+				core1_0.DynamicStateScissor,
+			},
+		},
+		Layout:     pipelineLayout,
+		RenderPass: renderPass,
+		Subpass:    0,
+	})
+	if err != nil {
+		return core1_0.Pipeline{}, err
+	}
+
+	log.Println("Celestial pipeline created")
+	return pipelines[0], nil
+}
+
+// createStarsPipeline creates a pipeline for procedural starfield rendering:
+// no vertex input, depth-tested against the far plane, additive blending.
 func createStarsPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
 		Code: bytesToUint32Slice(sh.StarsVert),

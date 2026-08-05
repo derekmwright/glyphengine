@@ -365,6 +365,7 @@ func recordCommandBuffer(
 	overlayPipeline core1_0.Pipeline,
 	skyPipeline core1_0.Pipeline,
 	starsPipeline core1_0.Pipeline,
+	celestialPipeline core1_0.Pipeline,
 	uiPipeline core1_0.Pipeline,
 	msdfPipeline core1_0.Pipeline,
 	skinnedPipeline core1_0.Pipeline,
@@ -390,6 +391,7 @@ func recordCommandBuffer(
 	extent core1_0.Extent2D,
 	draws []RenderObject,
 	overlays []RenderObject,
+	celestials []RenderObject,
 	uiOverlays []UIRenderObject,
 	msdfOverlays []RenderObject,
 	lighting SceneLighting,
@@ -1102,6 +1104,46 @@ func recordCommandBuffer(
 		pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
 		deviceDriver.CmdPushConstants(cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
 		deviceDriver.CmdDraw(cmdBuf, 3, 1, 0, 0)
+	}
+
+	// The sun and moon, after the sky and its clouds rather than with the
+	// opaque geometry. See createCelestialPipeline: drawn earlier they wrote
+	// depth, which rejected the sky pass on those pixels and made it impossible
+	// for a cloud to pass in front of the sun.
+	if len(celestials) > 0 {
+		deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, celestialPipeline)
+		deviceDriver.CmdSetViewport(cmdBuf, viewport)
+		deviceDriver.CmdSetScissor(cmdBuf, scissor)
+		deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, []core1_0.DescriptorSet{fallbackTexture.DescriptorSet}, nil)
+
+		for i := range celestials {
+			d := &celestials[i]
+			if d.Mesh == nil || (d.Mesh.IndexCount == 0 && d.Mesh.VertexCount == 0) {
+				continue
+			}
+			deviceDriver.CmdBindVertexBuffers(cmdBuf, 0, []core1_0.Buffer{d.Mesh.vertexBuffer}, []int{0})
+
+			var pc [64]float32
+			copy(pc[:16], d.MVP[:])
+			pc[16] = 1
+			pc[21] = 1
+			pc[26] = 1
+			pc[31] = 1
+			pc[32] = d.Color[0]
+			pc[33] = d.Color[1]
+			pc[34] = d.Color[2]
+			pc[35] = 1.0
+			pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
+			deviceDriver.CmdPushConstants(cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
+
+			stats.addDraw(1, d.Mesh.IndexCount, d.Mesh.VertexCount)
+			if d.Mesh.IndexCount > 0 {
+				deviceDriver.CmdBindIndexBuffer(cmdBuf, d.Mesh.indexBuffer, 0, d.Mesh.indexType)
+				deviceDriver.CmdDrawIndexed(cmdBuf, d.Mesh.IndexCount, 1, 0, 0, 0)
+			} else {
+				deviceDriver.CmdDraw(cmdBuf, d.Mesh.VertexCount, 1, 0, 0)
+			}
+		}
 	}
 
 	timer.end(deviceDriver, cmdBuf, frame, PassSky)

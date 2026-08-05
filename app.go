@@ -358,7 +358,12 @@ type Engine struct {
 	overlays     []renderer.RenderObject
 	uiOverlays   []renderer.UIRenderObject
 	msdfOverlays []renderer.RenderObject
-	smoothDelta  float64
+
+	// Debug text queued this frame, and the font built for it on first use.
+	debugLines  []string
+	debugFont   *renderer.Font
+	debugText   *renderer.MSDFText
+	smoothDelta float64
 
 	moonMesh *renderer.Mesh
 	sunMesh  *renderer.Mesh
@@ -961,13 +966,18 @@ func (e *Engine) renderFrame() {
 	e.cpu.begin(CPUDrawList)
 	draws := e.buildDrawList(vp, shadowEnabled, cascadeVPs[renderer.ShadowCascades-1])
 
+	// The sun and moon go in their own list rather than the draw list. There
+	// they wrote depth, which rejected the sky pass on those pixels and left
+	// the clouds unable to pass in front of them. See createCelestialPipeline.
+	var celestials []renderer.RenderObject
+
 	// Celestial billboards fade near the horizon instead of cutting out; the
 	// environment decides whether they exist at all.
 	if env.DrawSun {
-		draws = append(draws, e.buildSunObject(vp, env))
+		celestials = append(celestials, e.buildSunObject(vp, env))
 	}
 	if env.DrawMoon {
-		draws = append(draws, e.buildMoonObject(vp, env))
+		celestials = append(celestials, e.buildMoonObject(vp, env))
 	}
 
 	// Project the sun to screen space for the light shafts. It sits at a fixed
@@ -1037,7 +1047,13 @@ func (e *Engine) renderFrame() {
 	}
 
 	e.cpu.begin(CPUSubmit)
-	if err := e.renderer.DrawFrame(draws, e.overlays, e.uiOverlays, e.msdfOverlays, lighting); err != nil {
+	// Debug text rides in its own channel, appended rather than merged, so a
+	// game calling SetMSDFOverlays neither loses its own text nor clobbers this.
+	msdf := e.msdfOverlays
+	if dbg := e.debugOverlay(); len(dbg) > 0 {
+		msdf = append(append([]renderer.RenderObject(nil), msdf...), dbg...)
+	}
+	if err := e.renderer.DrawFrame(draws, e.overlays, celestials, e.uiOverlays, msdf, lighting); err != nil {
 		log.Printf("glyphengine: draw error: %v", err)
 	}
 }

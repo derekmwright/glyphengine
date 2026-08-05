@@ -46,6 +46,7 @@ type Renderer struct {
 	litDoubleSidedPipelineLayout core1_0.PipelineLayout
 	overlayPipeline              core1_0.Pipeline
 	starsPipeline                core1_0.Pipeline
+	celestialPipeline            core1_0.Pipeline
 	skyPipeline                  core1_0.Pipeline
 	uiPipeline                   core1_0.Pipeline
 	msdfPipeline                 core1_0.Pipeline
@@ -579,6 +580,12 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 		return nil, fmt.Errorf("renderer: create overlay pipeline: %w", err)
 	}
 	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.overlayPipeline, nil) })
+
+	r.celestialPipeline, err = createCelestialPipeline(r.deviceDriver, r.shaders, r.renderPass, r.pipelineLayout, r.sc.extent, r.msaaSamples)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create celestial pipeline: %w", err)
+	}
+	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.celestialPipeline, nil) })
 
 	r.starsPipeline, err = createStarsPipeline(r.deviceDriver, r.shaders, r.renderPass, r.pipelineLayout, r.sc.extent, r.msaaSamples)
 	if err != nil {
@@ -1161,7 +1168,7 @@ func (r *Renderer) recreateSwapchain() error {
 
 // DrawFrame records and submits one frame: waits for the in-flight fence, acquires
 // a swapchain image, records draw commands, submits to the GPU, and presents.
-func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, uiOverlays []UIRenderObject, msdfOverlays []RenderObject, lighting SceneLighting) error {
+func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, celestials []RenderObject, uiOverlays []UIRenderObject, msdfOverlays []RenderObject, lighting SceneLighting) error {
 	f := r.currentFrame
 
 	waitStart := time.Now()
@@ -1231,10 +1238,10 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, uiOv
 		return err
 	}
 	recordStart := time.Now()
-	err = recordCommandBuffer(r.deviceDriver, cmdBuf, r.renderPass, r.framebuffers[imageIndex], r.pipeline, r.litDoubleSidedPipeline, r.overlayPipeline, r.skyPipeline, r.starsPipeline, r.uiPipeline, r.msdfPipeline, r.skinnedPipeline, r.grassPipeline, r.waterPipeline, r.godRayPipeline, r.waterRenderPass, waterFB, r.sceneColor, r.hdr.images[imageIndex],
+	err = recordCommandBuffer(r.deviceDriver, cmdBuf, r.renderPass, r.framebuffers[imageIndex], r.pipeline, r.litDoubleSidedPipeline, r.overlayPipeline, r.skyPipeline, r.starsPipeline, r.celestialPipeline, r.uiPipeline, r.msdfPipeline, r.skinnedPipeline, r.grassPipeline, r.waterPipeline, r.godRayPipeline, r.waterRenderPass, waterFB, r.sceneColor, r.hdr.images[imageIndex],
 		func(cb core1_0.CommandBuffer) error { return r.recordClouds(cb, lighting) },
 		r.cloudSetFor(),
-		r.bloomFor(imageIndex), r.tonemapFor(imageIndex), r.particlePipeline, r.terrainPipeline, r.materialPipelines(), &r.stats, r.pipelineLayout, r.litPipelineLayout, r.skinnedPipelineLayout, r.terrainPipelineLayout, r.sc.extent, draws, overlays, uiOverlays, msdfOverlays, lighting, r.fallbackTexture, r.milkyWayTex, r.shadow, r.grass, r.grassLOD, r.grassImpostor, r.grassImpostorPipeline, r.particles, f, r.msaa != nil, r.gpuTimer)
+		r.bloomFor(imageIndex), r.tonemapFor(imageIndex), r.particlePipeline, r.terrainPipeline, r.materialPipelines(), &r.stats, r.pipelineLayout, r.litPipelineLayout, r.skinnedPipelineLayout, r.terrainPipelineLayout, r.sc.extent, draws, overlays, celestials, uiOverlays, msdfOverlays, lighting, r.fallbackTexture, r.milkyWayTex, r.shadow, r.grass, r.grassLOD, r.grassImpostor, r.grassImpostorPipeline, r.particles, f, r.msaa != nil, r.gpuTimer)
 	if err != nil {
 		return err
 	}
