@@ -54,6 +54,7 @@ type game struct {
 	grassDist float32
 	grassThin float32
 	grassImp  float32
+	timeOfDay float32
 	camera    *glyph.FPCamera
 	player    glyph.Entity
 	seed      int64
@@ -140,7 +141,10 @@ func (g *game) Init(e *glyph.Engine) error {
 	e.C.CharacterController.Set(g.player, &cc)
 
 	e.SetDayCycleSpeed(1.0 / 300.0)
-	e.SetTimeOfDay(0.28) // low sun: long shadows across the grass
+	// Default is a low sun for long shadows across the grass. It is a flag
+	// because half of what goes wrong in this scene only shows up at night,
+	// and waiting out the day cycle to see it is not a debugging loop.
+	e.SetTimeOfDay(g.timeOfDay)
 	e.SetFogDensity(0.008)
 
 	g.camera = glyph.NewFPCamera()
@@ -286,6 +290,7 @@ func main() {
 	grassDist := flag.Float64("grassdist", 0, "grass cull distance (0 = engine default 80)")
 	grassThin := flag.Float64("grassthin", 0, "grass density floor 0..1 (0 = engine default 0.35)")
 	grassImp := flag.Float64("grassimpostor", 0, "distance past which grass becomes billboards (0 = meshes everywhere)")
+	timeOfDay := flag.Float64("timeofday", 0.28, "starting time of day: 0 = midnight, 0.5 = noon")
 	flag.Parse()
 
 	opts := []glyph.Option{
@@ -305,7 +310,7 @@ func main() {
 		opts = append(opts, glyph.WithScreenshot(*shot))
 	}
 
-	e, err := glyph.New(&game{seed: *seed, grassDist: float32(*grassDist), grassThin: float32(*grassThin), grassImp: float32(*grassImp)}, opts...)
+	e, err := glyph.New(&game{seed: *seed, grassDist: float32(*grassDist), grassThin: float32(*grassThin), grassImp: float32(*grassImp), timeOfDay: float32(*timeOfDay)}, opts...)
 	if err != nil {
 		log.Fatalf("create engine: %v", err)
 	}
