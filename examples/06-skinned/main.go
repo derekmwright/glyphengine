@@ -229,7 +229,7 @@ func (g *game) Update(e *glyph.Engine, dt float32) {
 		g.demoAngle += 0.6 * dt
 		g.intent.Forward = 1
 		g.intent.Yaw = g.demoAngle
-		g.camera.Yaw = g.demoAngle + math.Pi
+		g.camera.Yaw = g.demoAngle
 	} else {
 		if in.KeyDown(input.KeyW) {
 			g.intent.Forward++
@@ -310,7 +310,12 @@ func (g *game) LateUpdate(e *glyph.Engine, dt float32) {
 		for _, ent := range g.parts {
 			if pt, ok := e.C.Transform.Get(ent); ok {
 				pt.Position = feet.Position
+				// The model is authored facing +Z; the engine's forward is -Z,
+				// so the mesh renders 180 degrees from the entity's facing.
+				// The demo hid this by putting the camera on the far side,
+				// which cancelled the flip -- manual play showed his face.
 				pt.Rotation = t.Rotation
+				pt.Rotation[1] += math.Pi
 			}
 		}
 

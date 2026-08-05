@@ -211,7 +211,7 @@ tasks:
           [ -s "$d/$1.png" ] && [ -s "$d/$2.png" ] || { echo "MISSING CAPTURE -- this gate proves nothing"; status=1; return 1; }
           [ "$(sha256sum < $d/$1.png)" = "$(sha256sum < $d/$2.png)" ]
         }
-        for ex in "08-grass" "09-water" "12-particles" "06-skinned -demo"; do
+        for ex in "08-grass" "09-water" "12-particles" "06-skinned -demo" "15-kitchen-sink -demo"; do
           set -- $ex
           name=$1; shift
           shot 16.667ms $name a "$*"

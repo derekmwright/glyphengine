@@ -89,6 +89,8 @@ type game struct {
 	// One entity per mesh in the model, all sharing a joint buffer.
 	parts []glyph.Entity
 
+	timeOfDay float32
+
 	font *renderer.Font
 	text *renderer.MSDFText
 
@@ -209,7 +211,10 @@ func (g *game) Init(e *glyph.Engine) error {
 
 	// ── world ──
 	e.SetDayCycleSpeed(1.0 / 300.0)
-	e.SetTimeOfDay(0.30) // morning sun: long shadows across the grass
+	// Morning sun by default, for long shadows across the grass. A flag because
+	// the sky and star work only shows at night, and the cycle takes five
+	// minutes to get there.
+	e.SetTimeOfDay(g.timeOfDay)
 	// Enough haze to hide where the grass stops, not so much that the far side
 	// of the island turns into sky.
 	e.SetFogDensity(0.0075)
@@ -232,8 +237,14 @@ func (g *game) Update(e *glyph.Engine, dt float32) {
 		e.Close()
 	}
 
-	// Mouse look consumes this frame's delta, so it belongs per-frame.
-	g.camera.Update(in)
+	// Mouse look consumes this frame's delta, so it belongs per-frame -- and it
+	// has to happen before the intent is built, or movement follows the camera
+	// a frame late. Skipped entirely in demo mode: that path drives the
+	// documentation screenshot, and reading a real mouse delta made the capture
+	// depend on where the cursor happened to be sitting.
+	if !g.demo {
+		g.camera.Update(in)
+	}
 
 	g.intent = glyph.MoveIntent{Yaw: g.camera.Yaw}
 	if g.demo {
@@ -244,7 +255,13 @@ func (g *game) Update(e *glyph.Engine, dt float32) {
 		g.intent.Forward = 1
 		g.intent.Sprint = true
 		g.intent.Yaw = g.demoAngle
-		g.camera.Yaw = g.demoAngle + math.Pi
+		g.camera.Yaw = g.demoAngle
+		// Pinned, and the mouse is not read at all on this path. The demo
+		// drives the documentation screenshot, and consuming a real mouse delta
+		// made the capture depend on where the cursor happened to be sitting:
+		// two runs of the same build came out RMS 0.59 apart, which is a
+		// different shot, not a different frame.
+		g.camera.Pitch = 0.30
 	} else {
 		if in.KeyDown(input.KeyW) {
 			g.intent.Forward++
@@ -324,7 +341,13 @@ func (g *game) LateUpdate(e *glyph.Engine, dt float32) {
 		for _, ent := range g.parts {
 			if pt, ok := e.C.Transform.Get(ent); ok {
 				pt.Position = feet.Position
+				// The model is authored facing +Z; the engine's forward is -Z
+				// (see MoveIntent.Yaw and the controller's forward vector), so
+				// the mesh renders 180 degrees from the entity's facing. The
+				// controller is right and the character still moves where it
+				// should -- he just showed the camera his face while doing it.
 				pt.Rotation = t.Rotation
+				pt.Rotation[1] += math.Pi
 			}
 		}
 		g.camera.Target = t.Position
@@ -482,6 +505,7 @@ func main() {
 	fullscreen := flag.Bool("fullscreen", false, "run fullscreen on the primary monitor")
 	frames := flag.Int("frames", 0, "render N frames then exit (0 = run until closed)")
 	seed := flag.Int64("seed", 4, "terrain generation seed")
+	timeOfDay := flag.Float64("timeofday", 0.30, "starting time of day: 0 = midnight, 0.5 = noon")
 	shot := flag.String("screenshot", "", "write a PNG of the last frame to this path")
 	demo := flag.Bool("demo", false, "run a loop automatically, no input needed")
 	gputime := flag.Bool("gputime", false, "print mean per-pass GPU timings on exit")
@@ -505,7 +529,7 @@ func main() {
 		opts = append(opts, glyph.WithScreenshot(*shot))
 	}
 
-	e, err := glyph.New(&game{seed: *seed, demo: *demo}, opts...)
+	e, err := glyph.New(&game{seed: *seed, demo: *demo, timeOfDay: float32(*timeOfDay)}, opts...)
 	if err != nil {
 		log.Fatalf("create engine: %v", err)
 	}
