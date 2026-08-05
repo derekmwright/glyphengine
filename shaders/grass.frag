@@ -50,14 +50,20 @@ void main() {
     if (texSample.a < 0.5) discard; // alpha test for foliage cutout
     vec3 baseColor = fragColor * texSample.rgb;
 
-    // Stable analytic normal, biased heavily toward vertical. Derivative-based
-    // normals (dFdx/dFdy) are per-quad noise on sub-pixel blades, and combined
-    // with grazing-angle Fresnel they produce bright speckle at dawn/dusk —
-    // the "TV static" artifact. The per-vertex blade normal is smooth, and the
-    // up-bias gives near-uniform lighting across a patch of blades.
-    vec3 N = normalize(mix(normalize(fragWorldNormal), vec3(0.0, 1.0, 0.0), 0.7));
+    // The per-vertex blade normal, as authored.
+    //
+    // This used to be biased 70% toward vertical, credited with stopping a
+    // "TV static" speckle. It stops nothing: swept across six times of day the
+    // bias changed the speck count by zero and the image by RMS 0.0003 to
+    // 0.005. It also named a cause this shader does not have -- the derivative
+    // normals it blamed are never computed here. The speckle is the vertex
+    // colour gradient aliasing; see grass_shade.inc.
+    vec3 N = normalize(fragWorldNormal);
 
-    // Diffuse-only: grass gets no specular/Fresnel at all.
+    // Diffuse-only, and not as an artifact fix either: the grass draw pins
+    // roughness to 1.0, so the specular lobe is already flat and restoring it
+    // moves the image by RMS 0.00003 at dusk. It stays because skipping it
+    // measures 0.017 ms cheaper on the grass pass.
     vec3 lit = evalLightingDiffuse(baseColor, N, fragWorldPos, fragShadowPos);
 
     // Alpha drives MSAA coverage (alpha-to-coverage), dissolving distant blades.
