@@ -240,6 +240,11 @@ tasks:
   screenshots:
     desc: Regenerate the documentation images in docs/images
     dir: examples
+    env:
+      # A fixed clock makes these reproducible: the same commit regenerates the
+      # same bytes, so a diff in docs/images means the renderer changed rather
+      # than that the wind was somewhere else. See WithFixedFrameTime.
+      GLYPHENGINE_FIXED_FRAME_TIME: 16.667ms
     cmds:
       - go run ./01-triangle -frames 30 -screenshot ../docs/images/01-triangle.png
       - go run ./02-cube -frames 150 -screenshot ../docs/images/02-cube.png
