@@ -19,8 +19,6 @@ layout(set = 0, binding = 0) uniform sampler2D albedoTex;
 
 layout(location = 0) out vec4 outColor;
 
-#include "grass_shade.inc"
-
 void main() {
     vec4 t = texture(albedoTex, fragUV);
     // The same 0.5 cutout the grass pipeline uses, so the impostor's silhouette
@@ -28,7 +26,5 @@ void main() {
     if (t.a < 0.5) {
         discard;
     }
-    // The same gradient cap the blades get, in the same stage, so a billboard
-    // is not brighter-tipped than the grass it stands in for.
-    outColor = vec4(grassShade(fragColor) * t.rgb, 1.0);
+    outColor = vec4(fragColor * t.rgb, 1.0);
 }

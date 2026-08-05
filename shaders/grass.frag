@@ -5,7 +5,15 @@
 // alpha-to-coverage dissolves distant blades through MSAA coverage instead of
 // leaving shimmering sub-pixel slivers ("TV static").
 
-layout(location = 0) in vec3 fragColor;
+// centroid, and it matters more than it looks. The flora vertex colour is a
+// base-to-tip gradient authored 0..1; extrapolated at MSAA sample positions
+// outside a sub-pixel blade it leaves that range, and a negative albedo shades
+// to a black pixel. That was thousands of dark specks along the horizon --
+// 1105 in the horizon band at morning, 3516 at night, against 8 and 272 with
+// this. It also removes the bright specks at the other end of the gradient,
+// which a 0.90 ceiling was previously papering over at a cost of RMS 0.014 to
+// midday tip brightness.
+layout(location = 0) centroid in vec3 fragColor;
 layout(location = 1) in vec3 fragWorldPos;
 layout(location = 2) in vec3 fragWorldNormal;
 layout(location = 3) in vec2 fragUV;
@@ -44,12 +52,11 @@ layout(push_constant) uniform PushConstants {
 layout(location = 0) out vec4 outColor;
 
 #include "lighting.inc"
-#include "grass_shade.inc"
 
 void main() {
     vec4 texSample = texture(texSampler, fragUV);
     if (texSample.a < 0.5) discard; // alpha test for foliage cutout
-    vec3 baseColor = grassShade(fragColor) * texSample.rgb;
+    vec3 baseColor = fragColor * texSample.rgb;
 
     // The per-vertex blade normal, as authored.
     //
@@ -58,7 +65,7 @@ void main() {
     // bias changed the speck count by zero and the image by RMS 0.0003 to
     // 0.005. It also named a cause this shader does not have -- the derivative
     // normals it blamed are never computed here. The speckle is the vertex
-    // colour gradient aliasing; see grass_shade.inc.
+    // colour gradient extrapolating past its range; see the centroid note above.
     vec3 N = normalize(fragWorldNormal);
 
     // Diffuse-only, and not as an artifact fix either: the grass draw pins

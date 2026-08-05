@@ -21,7 +21,11 @@ layout(push_constant) uniform PushConstants {
     vec4 cameraPos;
 } pc;
 
-layout(location = 0) out vec3 fragColor;
+// centroid: with MSAA a pixel-centre sample can land outside a sub-pixel
+// triangle, and the attribute is then extrapolated rather than interpolated --
+// past both ends of the authored 0..1 gradient, including negative. Sampling at
+// the covered centroid keeps it inside the primitive. See grass.frag.
+layout(location = 0) centroid out vec3 fragColor;
 layout(location = 1) out vec3 fragWorldPos;
 layout(location = 2) out vec3 fragWorldNormal;
 layout(location = 3) out vec2 fragUV;
