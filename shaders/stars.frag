@@ -5,7 +5,7 @@ layout(location = 0) in vec2 fragUV;
 layout(push_constant) uniform PushConstants {
     mat4 invVP;    // inverse view-projection
     mat4 model;    // [0..2] = camera position (reuses model slot)
-    vec4 tint;     // x = time, y = nightFactor, z = milky way strength
+    vec4 tint;     // x = time, y = nightFactor, z = milky way, w = star density
     vec4 sunDir;
     vec4 sunColor;
     vec4 pointPos;
@@ -112,6 +112,7 @@ void main() {
 
     float time = pc.tint.x;
     float milkyWay = pc.tint.z;
+    float starDensity = pc.tint.w;
     vec3 camPos = pc.model[0].xyz;
 
     // Reconstruct world-space ray direction from screen UV
@@ -201,11 +202,23 @@ void main() {
 
     float inBand = structure * milkyWay;
 
+    // Density is not uniform across the sky. A flat field reads as a texture --
+    // the eye finds the regularity immediately -- so a low-frequency noise
+    // thins whole regions and leaves others crowded, the way dust and depth
+    // actually do it.
+    //
+    // One sample, shared by all three layers, taken per pixel rather than per
+    // cell. That is safe because the noise is far coarser than a star: every
+    // pixel of a given star reads essentially the same value, so they cannot
+    // disagree about whether it exists and flicker along its edge.
+    float region = smoothstep(0.30, 0.78, vnoise(dir * 2.3));
+    float density = starDensity * mix(0.20, 1.0, region);
+
     // The sky everyone recognises: a few bright ones, a field behind them, and
     // a haze of faint ones that thickens into the band.
-    col += starLayer(dir, 60.0, 0.10, 0.85, time);
-    col += starLayer(dir, 110.0, 0.22 + 0.45 * inBand, 0.30, time);
-    col += starLayer(dir, 200.0, 0.30 + 0.60 * inBand, 0.10, time);
+    col += starLayer(dir, 60.0, 0.026 * density, 0.85, time);
+    col += starLayer(dir, 110.0, 0.046 * density + 0.45 * inBand, 0.30, time);
+    col += starLayer(dir, 200.0, 0.060 * density + 0.60 * inBand, 0.10, time);
 
     // Two more layers that exist only inside the band, dense and faint enough
     // to merge into grain rather than resolve as points. This is the galaxy.

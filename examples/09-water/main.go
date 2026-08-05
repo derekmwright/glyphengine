@@ -66,6 +66,7 @@ type game struct {
 	pitch      float32
 	tod        float32
 	clouds     int
+	stars      float64
 	fogHeight  float32
 	yaw        float32
 	shafts     float32
@@ -168,6 +169,7 @@ func (g *game) Init(e *glyph.Engine) error {
 	if env, ok := e.Scene.Env.(*glyph.Environment); ok {
 		if env.Sky != nil {
 			env.Sky.CloudSteps = g.clouds
+			env.Sky.StarDensity = float32(g.stars)
 			if g.shafts >= 0 {
 				env.Sky.LightShafts = g.shafts
 			}
@@ -370,6 +372,7 @@ func main() {
 	msaa := flag.Int("msaa", 4, "MSAA sample count (1 disables it)")
 	novsync := flag.Bool("novsync", false, "disable vsync, for measuring frame cost")
 	clouds := flag.Int("clouds", glyph.CloudsHigh, "volumetric cloud raymarch steps (0 disables)")
+	stars := flag.Float64("stars", 1.0, "star density multiplier (0 = none)")
 	fogHeight := flag.Float64("fogheight", 0, "height fog falloff in world units (0 = uniform density)")
 	yaw := flag.Float64("yaw", 0, "initial camera yaw in radians")
 	shafts := flag.Float64("shafts", -1, "light shaft strength (0 disables; -1 keeps the default)")
@@ -398,7 +401,7 @@ func main() {
 		opts = append(opts, glyph.WithScreenshot(*shot))
 	}
 
-	e, err := glyph.New(&game{seed: *seed, refract: *refract, pitch: float32(*pitch), tod: float32(*tod), clouds: *clouds, fogHeight: float32(*fogHeight), yaw: float32(*yaw), shafts: float32(*shafts), pillars: *pillars}, opts...)
+	e, err := glyph.New(&game{seed: *seed, refract: *refract, pitch: float32(*pitch), tod: float32(*tod), clouds: *clouds, stars: *stars, fogHeight: float32(*fogHeight), yaw: float32(*yaw), shafts: float32(*shafts), pillars: *pillars}, opts...)
 	if err != nil {
 		log.Fatalf("create engine: %v", err)
 	}

@@ -83,6 +83,9 @@ type EnvironmentState struct {
 	// MilkyWay is the galactic band's strength, 0 to 1. See Sky.MilkyWay.
 	MilkyWay float32
 
+	// StarDensity scales the star count. See Sky.StarDensity.
+	StarDensity float32
+
 	// DrawSky draws the procedural dome. DrawStars, DrawSun and DrawMoon add
 	// the stars and the celestial billboards.
 	DrawSky   bool
@@ -159,6 +162,12 @@ type Environment struct {
 type Sky struct {
 	// Stars fade in as night falls.
 	Stars bool
+
+	// StarDensity scales how many stars are drawn, 1 being the shipped default
+	// and 0 leaving an empty sky. It scales the whole field at once; the
+	// regional thinning that keeps the sky from looking uniform is applied on
+	// top of it either way.
+	StarDensity float32
 
 	// MilkyWay is the galactic band's strength, 0 to 1. Default 0.
 	//
@@ -246,7 +255,7 @@ const (
 
 // DefaultSky is a full sky: dome, volumetric clouds, stars, and both discs.
 func DefaultSky() *Sky {
-	return &Sky{Stars: true, SunDisc: true, MoonDisc: true, CloudSteps: CloudsHigh, LightShafts: 0.35}
+	return &Sky{Stars: true, StarDensity: 1, SunDisc: true, MoonDisc: true, CloudSteps: CloudsHigh, LightShafts: 0.35}
 }
 
 // DirectionalLight is a fixed sun: one direction, one colour, no clock.
@@ -366,6 +375,10 @@ func (env *Environment) State() EnvironmentState {
 			s.LightShafts = env.Sky.LightShafts
 		}
 		s.DrawStars = env.Sky.Stars && s.StarFade > 0
+		s.StarDensity = env.Sky.StarDensity
+		if s.StarDensity < 0 {
+			s.StarDensity = 0
+		}
 		s.MilkyWay = env.Sky.MilkyWay
 		if s.MilkyWay < 0 {
 			s.MilkyWay = 0

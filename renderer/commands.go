@@ -58,6 +58,9 @@ type SceneLighting struct {
 	// MilkyWay is the galactic band's strength in the star pass, 0 to 1.
 	MilkyWay float32
 
+	// StarDensity scales how many stars the sky draws, 1 being the default.
+	StarDensity float32
+
 	// CloudSteps is the volumetric cloud sample count; zero draws none.
 	CloudSteps int
 
@@ -1084,6 +1087,7 @@ func recordCommandBuffer(
 		pc[32] = lighting.Time
 		pc[33] = lighting.NightFactor
 		pc[34] = lighting.MilkyWay
+		pc[35] = lighting.StarDensity
 		pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
 		deviceDriver.CmdPushConstants(cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
 		deviceDriver.CmdDraw(cmdBuf, 3, 1, 0, 0)
