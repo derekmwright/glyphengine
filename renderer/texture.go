@@ -245,6 +245,22 @@ func (r *Renderer) CreateTexture(pixels []byte, width, height int) (*Texture, er
 	})
 }
 
+// SetMilkyWayTexture supplies an equirectangular sky panorama for the star
+// pass to sample as the galactic band: longitude across, latitude down, the
+// layout every all-sky survey ships.
+//
+// Nil, the default, leaves the procedural band. The engine ships no image --
+// a sky panorama is megabytes and carries someone's licence, neither of which
+// belongs in a module every consumer downloads.
+//
+// Supply one stripped of its point stars. The renderer draws its own, and they
+// are sharp at any resolution and any field of view where a panorama's are not:
+// a 6000-pixel-wide equirect is 16.7 pixels per degree against the 23 a 1280
+// wide window at 55 degrees needs, so its stars arrive soft while its band --
+// which has no detail that fine -- arrives intact. A median filter over the
+// source removes the points and leaves the band.
+func (r *Renderer) SetMilkyWayTexture(tex *Texture) { r.milkyWayTex = tex }
+
 // CreateDataTexture uploads RGBA pixel data as a linear (non-sRGB) texture with
 // a full mipmap chain, linear filtering, and repeat addressing.
 //

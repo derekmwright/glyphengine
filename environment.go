@@ -169,21 +169,18 @@ type Sky struct {
 	// top of it either way.
 	StarDensity float32
 
-	// MilkyWay is the galactic band's strength, 0 to 1. Default 0.
+	// MilkyWay is the galactic band's strength, 0 to 1. Default 1.
 	//
-	// It draws a tilted band broken by dust lanes and raises star density
-	// inside it, so the galaxy is made of stars rather than painted behind
-	// them. Needs Stars -- it rides in the same pass and fades on the same
-	// night factor, and costs nothing when off (the noise is branched around).
+	// A band of amber and violet cloud with dust lanes cutting through it,
+	// carrying its own grain of unresolved stars. It rides in the star pass and
+	// fades on the same night factor, so it needs Stars, and the noise is
+	// branched around when this is zero -- an empty sky costs nothing.
 	//
-	// Off by default because it is not dialled in yet: at any strength that
-	// makes it visible it still reads as an overcast cloud rather than a galaxy.
-	// Structure is closer than it was -- narrow spine in a wide halo, brighter
-	// toward the galactic centre, near-black dust lanes, warm core grading cool
-	// at the edges, all taken from ESO's all-sky panorama -- but a smooth
-	// luminous mass with soft edges is what a cloud looks like, and the part
-	// that would fix it is making the band out of unresolved stars rather than
-	// haze. Turn it on to iterate; do not ship it on without looking.
+	// It is drawn in four passes: a midtone cloud field, warm highlights
+	// confined to a lane along the spine, dust blocked in over the top, and
+	// grain. All four read off the same cloud field so they nest instead of
+	// fighting, and the dust occludes the band's own grain but not the star
+	// field, which is nearer than the galaxy.
 	MilkyWay float32
 
 	// SunDisc and MoonDisc draw the celestial billboards. A game can keep the
@@ -255,7 +252,7 @@ const (
 
 // DefaultSky is a full sky: dome, volumetric clouds, stars, and both discs.
 func DefaultSky() *Sky {
-	return &Sky{Stars: true, StarDensity: 1, SunDisc: true, MoonDisc: true, CloudSteps: CloudsHigh, LightShafts: 0.35}
+	return &Sky{Stars: true, StarDensity: 1, MilkyWay: 1, SunDisc: true, MoonDisc: true, CloudSteps: CloudsHigh, LightShafts: 0.35}
 }
 
 // DirectionalLight is a fixed sun: one direction, one colour, no clock.

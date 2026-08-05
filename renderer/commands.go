@@ -394,6 +394,7 @@ func recordCommandBuffer(
 	msdfOverlays []RenderObject,
 	lighting SceneLighting,
 	fallbackTexture *Texture,
+	milkyWayTex *Texture,
 	shadow *shadowResources,
 	grass *GrassSystem,
 	grassLOD GrassLOD,
@@ -1077,7 +1078,16 @@ func recordCommandBuffer(
 		deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, starsPipeline)
 		deviceDriver.CmdSetViewport(cmdBuf, viewport)
 		deviceDriver.CmdSetScissor(cmdBuf, scissor)
-		deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, []core1_0.DescriptorSet{fallbackTexture.DescriptorSet}, nil)
+		// The star pass has always bound a descriptor here without sampling it.
+		// When a panorama is supplied it goes in that slot, and sunDir.x -- which
+		// this pass does not otherwise use -- says whether it is real.
+		starTex := fallbackTexture
+		var haveBand float32
+		if milkyWayTex != nil {
+			starTex = milkyWayTex
+			haveBand = 1
+		}
+		deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, []core1_0.DescriptorSet{starTex.DescriptorSet}, nil)
 
 		var pc [64]float32
 		copy(pc[:16], lighting.InvVP[:])
@@ -1088,6 +1098,7 @@ func recordCommandBuffer(
 		pc[33] = lighting.NightFactor
 		pc[34] = lighting.MilkyWay
 		pc[35] = lighting.StarDensity
+		pc[36] = haveBand
 		pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
 		deviceDriver.CmdPushConstants(cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
 		deviceDriver.CmdDraw(cmdBuf, 3, 1, 0, 0)

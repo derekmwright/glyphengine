@@ -6,7 +6,7 @@ layout(push_constant) uniform PushConstants {
     mat4 invVP;    // inverse view-projection
     mat4 model;    // [0..2] = camera position (reuses model slot)
     vec4 tint;     // x = time, y = nightFactor, z = milky way, w = star density
-    vec4 sunDir;
+    vec4 sunDir;   // x = 1 when a real band panorama is bound at set 0
     vec4 sunColor;
     vec4 pointPos;
     vec4 pointColor;
@@ -14,6 +14,11 @@ layout(push_constant) uniform PushConstants {
 } pc;
 
 layout(location = 0) out vec4 outColor;
+
+// The band panorama, when one is supplied. The pass binds a descriptor here
+// either way -- a 1x1 white fallback otherwise -- so sunDir.x is what says
+// whether sampling it means anything.
+layout(set = 0, binding = 0) uniform sampler2D bandTex;
 
 // Hash function for pseudo-random star placement
 float hash(vec3 p) {
@@ -41,6 +46,26 @@ float fbm(vec3 p) {
     for (int i = 0; i < 4; i++) {
         sum += amp * vnoise(p);
         p *= 2.03;
+        amp *= 0.5;
+    }
+    return sum;
+}
+
+// Ridged multifractal. Plain fbm makes round patches of one size, which is
+// what "splotchy" is; folding each octave about its midpoint and squaring it
+// turns the field into filaments and wisps, and feeding each octave's value
+// forward as the next one's weight makes the fine detail cling to the ridges
+// instead of spreading evenly.
+float ridged(vec3 p) {
+    float sum = 0.0;
+    float amp = 0.5;
+    float w = 1.0;
+    for (int i = 0; i < 5; i++) {
+        float n = 1.0 - abs(2.0 * vnoise(p) - 1.0);
+        n *= n;
+        sum += n * amp * w;
+        w = clamp(n * 2.0, 0.0, 1.0);
+        p *= 2.07;
         amp *= 0.5;
     }
     return sum;
@@ -136,9 +161,9 @@ void main() {
     // Two components, not one. A single Gaussian wide enough to be visible is
     // also wide enough to look like weather; the real profile is a narrow
     // bright spine sitting in a much fainter, wider halo.
-    float spine = exp(-lat * lat * 120.0);
-    float halo = exp(-lat * lat * 20.0);
-    float band = spine * 0.80 + halo * 0.20;
+    float spine = exp(-lat * lat * 75.0);
+    float halo = exp(-lat * lat * 16.0);
+    float band = spine * 0.72 + halo * 0.28;
 
     vec3 col = vec3(0.0);
 
@@ -150,57 +175,123 @@ void main() {
     // like weather. Unresolved grain is the cue that says star field.
     float structure = 0.0;
     float core = 0.0;
+    float dustBlock = 0.0;
     vec3 mwTint = vec3(0.7, 0.75, 0.9);
 
-    // The band is a quarter of the sky, so the noise is worth branching around
-    // rather than paying for everywhere. The branch is coherent -- neighbouring
-    // pixels are on the same side of it almost everywhere.
-    if (milkyWay > 0.0 && band > 0.004) {
-        // Stretched along the plane, not isotropic. Round blobs of noise are
-        // what clouds look like; sampling with the across-band axis at several
-        // times the in-band frequency elongates the structure into streaks that
-        // follow the band, which is what the real thing does.
+    // A supplied panorama replaces the procedural band outright. It is one
+    // texture fetch against roughly fifty hash lookups, and it is the real
+    // sky's structure rather than an approximation of it.
+    if (milkyWay > 0.0 && pc.sunDir.x > 0.5) {
+        // Hemi-octahedral: the direction is projected onto an octahedron and
+        // the upper half unfolded into the square. Nothing but arithmetic --
+        // no atan2 to jump by 2*pi and seam the mip selection, no acos to
+        // collapse at the zenith, and no half of the image below the horizon
+        // that is never sampled. The galactic rotation is baked into the map.
+        vec2 p = dir.xz / (abs(dir.x) + abs(dir.y) + abs(dir.z));
+        vec2 uv = vec2(p.x + p.y, p.x - p.y) * 0.5 + 0.5;
+        vec3 panorama = texture(bandTex, uv).rgb;
+        // The panorama carries its own stars however well they were removed,
+        // and its own black sky. Scaled down hard: it is a haze behind the
+        // renderer's stars, not a lit surface.
+        col += panorama * 0.55 * milkyWay;
+        structure = 0.0;
+    } else if (milkyWay > 0.0 && band > 0.004) {
+        // One cloud field, low frequency and stretched hard along the band --
+        // big soft masses, not small smears. Everything below reads off this
+        // same field so the layers nest instead of fighting: the warm core sits
+        // inside the midtone because it is literally the top of it.
         vec3 inPlane = dir - GALACTIC_POLE * lat;
-        vec3 q = inPlane * 9.0 + GALACTIC_POLE * lat * 22.0;
+        // Near-isotropic on purpose. Stretching the noise itself smears every
+        // feature into a streak; the band's own falloff already supplies the
+        // long shape, so the clouds inside it should stay puffy.
+        vec3 q = inPlane * 6.0 + GALACTIC_POLE * lat * 9.0;
+        float cloud = fbm(q);
 
-        // The dust is sampled with its own, stronger stretch rather than a
-        // scaled copy of the first: reusing one warp for both makes every lane
-        // parallel, which combs the band into brush strokes.
-        vec3 r = inPlane * 13.0 + GALACTIC_POLE * lat * 44.0;
-
-        float clouds = fbm(q);
-        float rift = fbm(r + vec3(17.0, 4.0, 9.0));
-        float mottle = vnoise(dir * 55.0);
-
-        // Brightness along the band, peaking toward the galactic centre. Flat
-        // along its length is the other half of why a band reads as a smear.
+        // Brightness along the band, peaking toward the galactic centre.
         vec3 planeDir = normalize(inPlane);
         float along = dot(planeDir, GALACTIC_CENTER);
-        core = smoothstep(-0.15, 0.95, along);
-        float lengthwise = 0.25 + 0.75 * core;
+        // Wide on purpose: this is a galaxy seen edge on from inside it, so the
+        // warm inner region runs most of the way along the band rather than
+        // brightening over a short stretch.
+        core = smoothstep(-0.80, 0.90, along);
+        float lengthwise = 0.45 + 0.55 * core;
 
-        // Dust is opaque and nearly black: it takes the stars with it, not just
-        // the glow. Soft grey shading reads as cloud shadow; this reads as dust.
-        float dust = 1.0 - 0.95 * smoothstep(0.34, 0.60, rift);
-        structure = band * lengthwise * (0.25 + 0.75 * clouds) * (0.75 + 0.35 * mottle) * dust;
+        // 1. Midtone: the broad body of the band, amber-purple.
+        float midMask = smoothstep(0.28, 0.66, cloud);
 
-        // Warm at the core, cool toward the edges and the far end -- the
-        // gradient runs along the band rather than being random patches, which
-        // is what the reference actually shows. A little violet drift on top so
-        // it is not a single ramp.
-        float hue = vnoise(q * 0.30 + vec3(31.0, 7.0, 19.0));
-        vec3 amber = vec3(1.00, 0.80, 0.52);
-        vec3 pale = vec3(0.72, 0.76, 0.92);
-        vec3 violet = vec3(0.52, 0.42, 0.86);
-        mwTint = mix(pale, amber, core * (0.55 + 0.45 * spine));
-        mwTint = mix(mwTint, violet, 0.30 * smoothstep(0.62, 0.85, hue) * (1.0 - core));
+        // 2. Highlights: the same field further up, and confined to a narrow
+        //    lane along the band's spine. Gated on the cloud field alone they
+        //    pool into a blob wherever it peaks; multiplying by a tight
+        //    across-band falloff makes them run lengthwise inside the warm
+        //    region, which is what the core of a galaxy looks like from in it.
+        float hotLane = exp(-lat * lat * 300.0);
+        float hotMask = smoothstep(0.46, 0.80, cloud) * hotLane;
 
-        // A faint underglow only -- the light from stars too small to resolve.
-        // Most of the band's brightness comes from the grain below.
-        col += mwTint * structure * 0.05 * milkyWay;
+        // 3. Blockout: its own field, equally chunky, multiplied through hard.
+        //    Softening this is what made it invisible before.
+        // Stretched far harder than the cloud field: varying quickly across the
+        // band and slowly along it is what makes dust read as lanes rather than
+        // as a hole punched in the middle of it.
+        // Near-isotropic, like the cloud field it sits in front of. Any stretch
+        // here pulls the dust into smears; billowing shapes need the sampling
+        // to be roughly square.
+        vec3 r = inPlane * 5.0 + GALACTIC_POLE * lat * 7.0;
+        float blockField = fbm(r + vec3(31.0, 7.0, 19.0));
+        // Finer detail added before the threshold, not after: perturbing the
+        // field breaks the silhouette into a ragged edge, where thresholding a
+        // smooth field can only ever give a smooth contour however hard the
+        // ramp is.
+        blockField += 0.26 * (fbm(r * 4.4 + vec3(3.0, 11.0, 23.0)) - 0.5);
+        // Concentrated along the midline, by raising the bar away from it
+        // rather than fading the result. Fading would soften precisely the
+        // edges the perturbation and the tight ramp exist to sharpen; biasing
+        // the threshold instead makes dust rarer toward the band's edges while
+        // whatever does appear stays just as crisp.
+        float dustBias = 0.34 * (1.0 - exp(-lat * lat * 55.0));
+
+        // Tight ramp: the edge resolves over a narrow range instead of fading
+        // across the whole cloud.
+        float block = smoothstep(0.50 + dustBias, 0.58 + dustBias, blockField);
+
+        vec3 purple = vec3(0.38, 0.28, 0.66);
+        vec3 amber = vec3(1.00, 0.58, 0.24);
+        vec3 hotWhite = vec3(1.00, 0.82, 0.55);
+
+        // Warm toward the core, cool at the edges -- position, not noise, so
+        // the two colours occupy their own regions instead of interleaving.
+        vec3 mid = mix(purple, amber, core * (0.35 + 0.65 * spine));
+
+        vec3 painted = mid * midMask * band * lengthwise * 1.20;
+        painted += hotWhite * hotMask * band * lengthwise * 3.00;
+        dustBlock = block;
+        painted *= 1.0 - 0.99 * block;
+
+        col += painted * 0.042 * milkyWay;
+
+        mwTint = mix(mid, hotWhite, hotMask);
+        structure = band * lengthwise * midMask * (1.0 - 0.99 * block);
     }
 
     float inBand = structure * milkyWay;
+
+    // Compositing order, far to near: the band, then its own unresolved grain,
+    // then the star field, then the camera.
+    //
+    // The band and its grain are one thing and sit behind everything -- the
+    // grain is the galaxy's own stars, too small to resolve, so the dust in
+    // front of them takes them with it (structure already carries that).
+    //
+    // The star field is nearer than all of it and is not touched by the dust.
+    // It is drawn last for that reason: a lane with foreground stars across it
+    // is what the sky actually looks like, and occluding them to make the dust
+    // read as solid would be putting the whole field behind the galaxy.
+
+    // Grain: dense faint points that merge rather than resolve, carrying the
+    // band's colour. Points with a footprint rather than high-frequency noise,
+    // which crawls the moment the camera turns.
+    col += mwTint * starLayer(dir, 130.0, 0.95 * inBand, 0.15, time);
+    col += mwTint * starLayer(dir, 190.0, 1.00 * inBand, 0.09, time);
+    col += mwTint * starLayer(dir, 280.0, 1.00 * inBand, 0.05, time);
 
     // Density is not uniform across the sky. A flat field reads as a texture --
     // the eye finds the regularity immediately -- so a low-frequency noise
@@ -215,15 +306,10 @@ void main() {
     float density = starDensity * mix(0.20, 1.0, region);
 
     // The sky everyone recognises: a few bright ones, a field behind them, and
-    // a haze of faint ones that thickens into the band.
+    // a haze of faint ones.
     col += starLayer(dir, 60.0, 0.026 * density, 0.85, time);
-    col += starLayer(dir, 110.0, 0.046 * density + 0.45 * inBand, 0.30, time);
-    col += starLayer(dir, 200.0, 0.060 * density + 0.60 * inBand, 0.10, time);
-
-    // Two more layers that exist only inside the band, dense and faint enough
-    // to merge into grain rather than resolve as points. This is the galaxy.
-    col += mwTint * starLayer(dir, 150.0, 0.90 * inBand, 0.22, time);
-    col += mwTint * starLayer(dir, 240.0, 0.95 * inBand, 0.13, time);
+    col += starLayer(dir, 110.0, 0.046 * density, 0.30, time);
+    col += starLayer(dir, 200.0, 0.060 * density, 0.10, time);
 
     col *= nightFactor * horizonFade;
 

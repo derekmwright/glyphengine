@@ -24,8 +24,13 @@ package main
 
 import (
 	"flag"
+	"fmt"
+	"image"
+	"image/draw"
+	"image/png"
 	"log"
 	"math"
+	"os"
 	"runtime"
 
 	"github.com/go-gl/mathgl/mgl32"
@@ -67,6 +72,8 @@ type game struct {
 	tod        float32
 	clouds     int
 	stars      float64
+	milkyway   string
+	band       float64
 	fogHeight  float32
 	yaw        float32
 	shafts     float32
@@ -74,6 +81,13 @@ type game struct {
 }
 
 func (g *game) Init(e *glyph.Engine) error {
+	// ── optional sky panorama ──
+	if g.milkyway != "" {
+		if err := loadMilkyWay(e, g.milkyway); err != nil {
+			return err
+		}
+	}
+
 	// ── terrain ──
 	heights := generateHeights(gridSize, gridSize, g.seed)
 	hm, err := glyph.NewHeightmap(gridSize, gridSize, worldSize, worldSize,
@@ -170,6 +184,7 @@ func (g *game) Init(e *glyph.Engine) error {
 		if env.Sky != nil {
 			env.Sky.CloudSteps = g.clouds
 			env.Sky.StarDensity = float32(g.stars)
+			env.Sky.MilkyWay = float32(g.band)
 			if g.shafts >= 0 {
 				env.Sky.LightShafts = g.shafts
 			}
@@ -373,6 +388,8 @@ func main() {
 	novsync := flag.Bool("novsync", false, "disable vsync, for measuring frame cost")
 	clouds := flag.Int("clouds", glyph.CloudsHigh, "volumetric cloud raymarch steps (0 disables)")
 	stars := flag.Float64("stars", 1.0, "star density multiplier (0 = none)")
+	milkyway := flag.String("milkyway", "", "equirectangular sky panorama (PNG) to use as the galactic band")
+	band := flag.Float64("band", 1, "procedural galactic band strength, 0 to 1")
 	fogHeight := flag.Float64("fogheight", 0, "height fog falloff in world units (0 = uniform density)")
 	yaw := flag.Float64("yaw", 0, "initial camera yaw in radians")
 	shafts := flag.Float64("shafts", -1, "light shaft strength (0 disables; -1 keeps the default)")
@@ -401,7 +418,7 @@ func main() {
 		opts = append(opts, glyph.WithScreenshot(*shot))
 	}
 
-	e, err := glyph.New(&game{seed: *seed, refract: *refract, pitch: float32(*pitch), tod: float32(*tod), clouds: *clouds, stars: *stars, fogHeight: float32(*fogHeight), yaw: float32(*yaw), shafts: float32(*shafts), pillars: *pillars}, opts...)
+	e, err := glyph.New(&game{seed: *seed, refract: *refract, pitch: float32(*pitch), tod: float32(*tod), clouds: *clouds, stars: *stars, milkyway: *milkyway, band: *band, fogHeight: float32(*fogHeight), yaw: float32(*yaw), shafts: float32(*shafts), pillars: *pillars}, opts...)
 	if err != nil {
 		log.Fatalf("create engine: %v", err)
 	}
@@ -409,4 +426,31 @@ func main() {
 
 	e.Run()
 	log.Printf("rendered %d frames", e.FrameCount())
+}
+
+// loadMilkyWay reads an equirectangular panorama off disk and hands it to the
+// star pass. Off disk rather than embedded because the engine ships no sky
+// image: they are megabytes and they carry a licence.
+func loadMilkyWay(e *glyph.Engine, path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	img, err := png.Decode(f)
+	if err != nil {
+		return fmt.Errorf("decode %s: %w", path, err)
+	}
+	b := img.Bounds()
+	rgba := image.NewRGBA(image.Rect(0, 0, b.Dx(), b.Dy()))
+	draw.Draw(rgba, rgba.Bounds(), img, b.Min, draw.Src)
+
+	tex, err := e.Renderer().CreateTexture(rgba.Pix, b.Dx(), b.Dy())
+	if err != nil {
+		return err
+	}
+	e.Renderer().SetMilkyWayTexture(tex)
+	log.Printf("Milky Way panorama: %s (%dx%d)", path, b.Dx(), b.Dy())
+	return nil
 }
