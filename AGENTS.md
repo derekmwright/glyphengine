@@ -72,6 +72,20 @@ deliberate: `go get` of the engine never pulls example code or assets, while
     is written down. Verify with `task validate`.
 11. **No AI attribution in commits.** No `Co-Authored-By`, no generation notices.
 
+12. **A comment claiming to prevent something is a hypothesis, not evidence.**
+    Two mitigations in `grass.frag` carried confident explanations of the
+    artifact they stopped. Measured, they stopped nothing, and one named a
+    cause the shader does not even have. They cost a day of looking in the
+    wrong place, because the comment read as settled. Before you build on a
+    claim like that, turn it off and measure. If it earns its place, record the
+    number next to it; if it does not, delete it.
+
+13. **Compare renders under `GLYPHENGINE_FIXED_FRAME_TIME`.** Wall-clock
+    animation makes two runs of the same build differ by RMS 0.009 to 0.05,
+    which is the size of changes worth measuring. Ablations judged one run each
+    have already produced a "50 percent improvement" that five runs each showed
+    to be nothing. See `WithFixedFrameTime`.
+
 ## Getting a window on screen
 
 ```
@@ -104,8 +118,26 @@ entry point for a task, then read the body for working code.
 | `task lint` | gofmt, then `go vet -unsafeptr=false` |
 | `task smoke` | Renders real frames of every example, exits non-zero on failure |
 | `task validate` | Every example under the Vulkan validation layer; must be completely silent (needs a GPU and the SDK) |
+| `task determinism` | Renders repeat byte for byte under a fixed frame clock (needs a GPU) |
 | `task bench` | Per-pass GPU and per-phase CPU cost over a fixed scene set (needs a GPU) |
 | `task ci` | Lint, build, test, race |
+
+### Signing off a fix
+
+A fix is not done when the symptom disappears. It is done when you can say
+which change removed it and show the number:
+
+- **Isolate it.** Fix one thing at a time under a fixed clock. Two changes in
+  one measurement tell you nothing about either.
+- **Break it and watch the check fail.** A check that has never failed is
+  decoration. This repo has shipped green tests that compared a value to
+  itself, and a gate whose captures were empty files.
+- **Prove the check is not vacuous.** `task determinism` renders a control
+  with the real clock that *must* differ; the first version of it passed on
+  four examples while hashing nothing at all.
+- **Record what you measured, in the code.** Scene, metric, and numbers before
+  and after, next to the line they justify -- so the next person can re-run it
+  rather than trust it. Rule 12 exists because that was missing.
 
 `go vet` needs `-unsafeptr=false`: the GLFW-to-Vulkan surface handle bridge in
 `window/window.go` is a deliberate, documented `unsafe.Pointer` round-trip.

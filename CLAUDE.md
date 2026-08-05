@@ -43,6 +43,21 @@ When adding a check for a bug, **break the fix and confirm the check fails.**
 If it still passes, the check is decoration. Several tests here have comments
 recording exactly that verification.
 
+## Do not inherit a comment's conclusion
+
+A comment that says it prevents an artifact is telling you what someone
+believed, not what is true. Two in `grass.frag` were confidently wrong -- one
+blamed a normal source the shader never computes -- and reading them as settled
+sent this session chasing Fresnel and normals for hours while the real cause
+sat in the albedo. `AGENTS.md` rules 12 and 13 are the standing version of
+this. Turn the claim off, measure it, and either write the number next to it or
+delete it.
+
+Renders are only comparable under `GLYPHENGINE_FIXED_FRAME_TIME`; without it
+two runs of the same build differ by as much as the change you are measuring,
+and single-run before/after readings are coin tosses. `task determinism` is the
+gate.
+
 ## Measure, do not assume
 
 Claims about frame pacing, CPU cost, and timing have been wrong here more often
