@@ -361,6 +361,10 @@ func (env *Environment) State() EnvironmentState {
 		}
 		if env.Sky != nil {
 			s.SunElevation = env.Sky.FixedSunElevation
+			// The same curve the cycle uses. Without this a sky frozen below the
+			// horizon draws the night palette over an empty field, because
+			// StarFade stays at its zero value and DrawStars reads it.
+			s.StarFade = starVisibilityAt(s.SunElevation)
 		}
 	}
 

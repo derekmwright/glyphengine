@@ -1,6 +1,9 @@
 package glyphengine
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 // TestNilEnvironmentIsEmpty is the property the split exists for: a game that
 // does not ask for an environment does not get one.
@@ -294,5 +297,46 @@ func TestRealSunDirTracksTheSunNotTheLight(t *testing.T) {
 	fixed := &Environment{Sun: &DirectionalLight{Direction: [3]float32{0, 1, 0}, Color: [3]float32{1, 1, 1}}}
 	if fs := fixed.State(); fs.RealSunDir != fs.SunDir {
 		t.Errorf("fixed sun: RealSunDir %v != SunDir %v", fs.RealSunDir, fs.SunDir)
+	}
+}
+
+// TestFixedSunElevationDrawsStars covers the sky-without-a-cycle path, which is
+// the documented way to get a static sky at a chosen hour.
+//
+// It used to give a static *night* an empty one. StarFade is only meaningful
+// with a Cycle to compute it from, so on this path it was never assigned, and
+// DrawStars reads it -- a scene frozen at midnight got the night palette,
+// night ambient and no stars at all. Nothing failed; there was simply nothing
+// in the sky.
+//
+// Verified by removing the StarFade assignment from the no-cycle branch of
+// Environment.State: this fails with DrawStars false at every elevation below
+// the horizon.
+func TestFixedSunElevationDrawsStars(t *testing.T) {
+	night := (&Environment{Sky: &Sky{Stars: true, FixedSunElevation: -0.5}}).State()
+	if !night.DrawStars {
+		t.Errorf("a sky frozen at elevation -0.5 draws no stars")
+	}
+	if night.StarFade < 0.99 {
+		t.Errorf("StarFade %.2f at elevation -0.5; want fully out", night.StarFade)
+	}
+
+	day := (&Environment{Sky: &Sky{Stars: true, FixedSunElevation: 0.6}}).State()
+	if day.DrawStars {
+		t.Errorf("a sky frozen at midday draws stars")
+	}
+
+	// And the two paths must agree. A cycle parked at the same elevation and a
+	// fixed sky at that elevation are the same sky; they read the curve from
+	// one place so they cannot disagree.
+	for _, tod := range []float32{0.02, 0.20, 0.30, 0.78, 0.90} {
+		dn := &DayNight{TimeOfDay: tod}
+		elev := dn.SunDir()[1]
+		cycled := (&Environment{Sky: &Sky{Stars: true}, Cycle: dn}).State()
+		fixed := (&Environment{Sky: &Sky{Stars: true, FixedSunElevation: elev}}).State()
+		if math.Abs(float64(cycled.StarFade-fixed.StarFade)) > 1e-6 {
+			t.Errorf("at elevation %+.3f a cycle gives StarFade %.4f and a fixed sky %.4f",
+				elev, cycled.StarFade, fixed.StarFade)
+		}
 	}
 }

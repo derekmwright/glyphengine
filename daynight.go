@@ -195,7 +195,16 @@ func (dn *DayNight) SkyColor() [4]float32 {
 // arriving actively erased the sunset. The sky now derives its own blend from
 // sun elevation; see Daylight and Twilight.
 func (dn *DayNight) StarVisibility() float32 {
-	return 1 - smoothstep(-0.30, -0.02, dn.SunDir()[1])
+	return starVisibilityAt(dn.SunDir()[1])
+}
+
+// starVisibilityAt is the curve itself, separated from the cycle because a
+// scene can have a sky without one. Environment resolves Sky.FixedSunElevation
+// through this so a static night sky gets stars; before it did, StarFade was
+// simply never assigned on that path and a fixed midnight drew the night
+// palette with an empty sky above it.
+func starVisibilityAt(sunY float32) float32 {
+	return 1 - smoothstep(-0.30, -0.02, sunY)
 }
 
 // Daylight is the sky's day/night blend: 1 in full day, 0 in full night.
