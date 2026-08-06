@@ -211,8 +211,23 @@ func (dn *DayNight) Daylight() float32 {
 // It is what drives the warm scattering near the horizon, and it is
 // independent of Daylight on purpose: the glow has to survive the sun going
 // down, since that is when it is strongest.
+//
+// Asymmetric, because the two sides are not the same event. Above the horizon
+// the warmth builds while there is still a sun lighting the air; below it there
+// is progressively less lit air left, and the glow goes with it. A symmetric
+// curve wide enough for the approach still held the horizon 37 percent warm at
+// an elevation of -0.20, with the stars already 71 percent out.
+//
+// Must match atmTwilight in shaders/atmosphere.inc. These are the same function
+// computed in two places -- the shader for the sky, the fog and the water, this
+// for game code -- and they had already drifted once, when only the shader was
+// changed.
 func (dn *DayNight) Twilight() float32 {
-	y := dn.SunDir()[1] / 0.20
+	width := float32(0.20)
+	if dn.SunDir()[1] <= 0 {
+		width = 0.115
+	}
+	y := dn.SunDir()[1] / width
 	return float32(math.Exp(-float64(y * y)))
 }
 

@@ -122,16 +122,30 @@ func TestTwilightPeaksAtTheHorizon(t *testing.T) {
 		t.Errorf("twilight peaks at sun elevation %.3f; want the horizon", y)
 	}
 
-	// And it must not be extinguished as the stars appear. Twilight is a
-	// function of sun elevation alone; gating it on nightfall as well is the
-	// original bug, and halves it exactly here. The correct model gives ~0.53
-	// at the point the stars are half out.
+	// And nothing but elevation may feed it. Multiplying by (1 - starVisibility)
+	// is the original bug, and the two curves overlap enough that most sample
+	// points cannot tell them apart -- at the moment the stars first appear the
+	// gated curve still reads 0.73 against a correct 0.77, which no sane
+	// threshold separates.
+	//
+	// So sample where they diverge most, measured rather than guessed: sun
+	// elevation -0.117, a quarter of the way into the stars coming out, where
+	// the correct curve gives 0.376 and the gated one 0.278. 0.33 sits between
+	// them. Reintroducing the multiply drops it to 0.278 and this fires --
+	// verified by doing exactly that.
+	//
+	// This threshold moved down from 0.45-at-half-star-visibility, which the
+	// asymmetric curve legitimately fails: narrowing the below-horizon width to
+	// 0.115 is what stops the glow lingering into full night, and it is the
+	// change that made the sunset look right. The invariant being guarded is
+	// unchanged -- twilight is a function of sun elevation alone.
 	for x := 0.6; x < 0.95; x += 0.001 {
 		dn := &DayNight{TimeOfDay: float32(x)}
-		if dn.StarVisibility() > 0.45 && dn.StarVisibility() < 0.55 {
-			if dn.Twilight() < 0.45 {
-				t.Errorf("at half-star visibility twilight is %.2f; the sunset is being erased by nightfall",
-					dn.Twilight())
+		if dn.StarVisibility() > 0.25 {
+			if dn.Twilight() < 0.33 {
+				t.Errorf("a quarter into nightfall (sun elevation %.3f) twilight is %.3f, want >= 0.33; "+
+					"something other than sun elevation is scaling the glow",
+					dn.SunDir()[1], dn.Twilight())
 			}
 			break
 		}
