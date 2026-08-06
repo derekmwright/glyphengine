@@ -7,6 +7,7 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 	"io/fs"
+	"math"
 	"math/bits"
 	"unsafe"
 
@@ -245,9 +246,14 @@ func (r *Renderer) CreateTexture(pixels []byte, width, height int) (*Texture, er
 	})
 }
 
-// SetMilkyWayTexture supplies an equirectangular sky panorama for the star
-// pass to sample as the galactic band: longitude across, latitude down, the
-// layout every all-sky survey ships.
+// SetMilkyWayTexture supplies a sky panorama for the star pass to sample as
+// the galactic band, replacing the procedural one.
+//
+// The texture must be in the layout EquirectToSkyMap produces. Handing it a
+// raw equirectangular image compiles, binds and draws -- and paints a smeared,
+// mirrored sky, because the pass decodes the square as a hemi-octahedral map.
+// Run the source through EquirectToSkyMap first; that is the only supported
+// input, and it takes the equirect layout every all-sky survey ships.
 //
 // Nil, the default, leaves the procedural band. The engine ships no image --
 // a sky panorama is megabytes and carries someone's licence, neither of which
@@ -260,6 +266,99 @@ func (r *Renderer) CreateTexture(pixels []byte, width, height int) (*Texture, er
 // which has no detail that fine -- arrives intact. A median filter over the
 // source removes the points and leaves the band.
 func (r *Renderer) SetMilkyWayTexture(tex *Texture) { r.milkyWayTex = tex }
+
+// Must match GALACTIC_POLE in shaders/stars.frag. The galactic orientation is
+// baked into the map here rather than rebuilt per fragment.
+var galacticPole = [3]float64{0.8619, 0.1603, -0.4810}
+
+// EquirectToSkyMap resamples an equirectangular all-sky panorama into the
+// square sky map SetMilkyWayTexture expects, returning RGBA pixels size by
+// size. src is RGBA, srcW by srcH, longitude across and latitude down.
+//
+// The projection is hemi-octahedral: the upper hemisphere folded onto a square.
+// Feeding the shader the equirect directly would be simpler and is what the
+// first version did, but it wastes half the texels below a horizon the pass
+// never samples, seams where atan2 wraps -- visibly, because the UV derivative
+// jumps there and takes mip selection with it -- and pinches at the zenith.
+// The octahedral square has none of those and decodes with arithmetic rather
+// than trig.
+//
+// Sampling is bilinear and wraps in longitude, so the source's own seam does
+// not survive into the map. size is the output edge; the panorama's horizontal
+// resolution divided by four is a reasonable starting point, since the map
+// covers a hemisphere rather than a sphere.
+//
+// This is CPU work over size*size texels and belongs at load time, not in a
+// frame.
+func EquirectToSkyMap(src []byte, srcW, srcH, size int) []byte {
+	// Same basis the shader used before the rotation was baked in, so an image
+	// prepared for either lands in the same place.
+	gy := galacticPole
+	gz := normalize3(cross3(gy, [3]float64{0, 1, 0}))
+	gx := cross3(gy, gz)
+
+	out := make([]byte, size*size*4)
+	for y := 0; y < size; y++ {
+		for x := 0; x < size; x++ {
+			// Square -> direction, upper hemisphere only.
+			tx := (float64(x)+0.5)/float64(size)*2 - 1
+			ty := (float64(y)+0.5)/float64(size)*2 - 1
+			px := (tx + ty) * 0.5
+			pz := (tx - ty) * 0.5
+			d := normalize3([3]float64{px, 1 - math.Abs(px) - math.Abs(pz), pz})
+
+			// World -> galactic, then an equirect lookup into the source.
+			g := [3]float64{dot3(d, gx), dot3(d, gy), dot3(d, gz)}
+			u := math.Atan2(g[2], g[0])/(2*math.Pi) + 0.5
+			v := math.Acos(math.Min(1, math.Max(-1, g[1]))) / math.Pi
+
+			r, gg, b := bilinearWrapU(src, srcW, srcH, u*float64(srcW), v*float64(srcH))
+			o := (y*size + x) * 4
+			out[o], out[o+1], out[o+2], out[o+3] = r, gg, b, 255
+		}
+	}
+	return out
+}
+
+func normalize3(v [3]float64) [3]float64 {
+	l := math.Sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2])
+	return [3]float64{v[0] / l, v[1] / l, v[2] / l}
+}
+
+func cross3(a, b [3]float64) [3]float64 {
+	return [3]float64{a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0]}
+}
+
+func dot3(a, b [3]float64) float64 { return a[0]*b[0] + a[1]*b[1] + a[2]*b[2] }
+
+// bilinearWrapU samples RGBA pixels at a pixel-space coordinate, wrapping in x
+// and clamping in y -- which is what an equirect needs: longitude is periodic,
+// latitude is not.
+func bilinearWrapU(pix []byte, w, h int, fx, fy float64) (byte, byte, byte) {
+	x0 := int(math.Floor(fx - 0.5))
+	y0 := int(math.Floor(fy - 0.5))
+	ax := fx - 0.5 - float64(x0)
+	ay := fy - 0.5 - float64(y0)
+
+	var r, g, b float64
+	for j := 0; j < 2; j++ {
+		sy := y0 + j
+		if sy < 0 {
+			sy = 0
+		} else if sy >= h {
+			sy = h - 1
+		}
+		for i := 0; i < 2; i++ {
+			sx := ((x0+i)%w + w) % w
+			o := (sy*w + sx) * 4
+			wt := (1 - math.Abs(float64(i)-ax)) * (1 - math.Abs(float64(j)-ay))
+			r += float64(pix[o]) * wt
+			g += float64(pix[o+1]) * wt
+			b += float64(pix[o+2]) * wt
+		}
+	}
+	return byte(r), byte(g), byte(b)
+}
 
 // CreateDataTexture uploads RGBA pixel data as a linear (non-sRGB) texture with
 // a full mipmap chain, linear filtering, and repeat addressing.

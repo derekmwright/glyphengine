@@ -38,6 +38,7 @@ import (
 	glyph "github.com/derekmwright/glyphengine"
 	"github.com/derekmwright/glyphengine/ecs"
 	"github.com/derekmwright/glyphengine/input"
+	"github.com/derekmwright/glyphengine/renderer"
 )
 
 func init() {
@@ -446,11 +447,21 @@ func loadMilkyWay(e *glyph.Engine, path string) error {
 	rgba := image.NewRGBA(image.Rect(0, 0, b.Dx(), b.Dy()))
 	draw.Draw(rgba, rgba.Bounds(), img, b.Min, draw.Src)
 
-	tex, err := e.Renderer().CreateTexture(rgba.Pix, b.Dx(), b.Dy())
+	// The star pass samples a hemi-octahedral map, not the equirect. Binding the
+	// panorama directly draws a mirrored, smeared sky rather than failing, so
+	// the resample is not optional. A quarter of the source width is about the
+	// resolution the original had over the half-sky this covers.
+	size := b.Dx() / 4
+	if size < 256 {
+		size = 256
+	}
+	skyMap := renderer.EquirectToSkyMap(rgba.Pix, b.Dx(), b.Dy(), size)
+
+	tex, err := e.Renderer().CreateTexture(skyMap, size, size)
 	if err != nil {
 		return err
 	}
 	e.Renderer().SetMilkyWayTexture(tex)
-	log.Printf("Milky Way panorama: %s (%dx%d)", path, b.Dx(), b.Dy())
+	log.Printf("Milky Way panorama: %s (%dx%d equirect -> %dx%d sky map)", path, b.Dx(), b.Dy(), size, size)
 	return nil
 }
