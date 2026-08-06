@@ -19,11 +19,14 @@ api:
   - glyphengine.Fog
   - glyphengine.Scene.Env
   - glyphengine.Scene.Environment
+  - glyphengine.Scene.SetTimeOfDay
+  - glyphengine.Scene.SetDayCycleSpeed
+  - glyphengine.Engine.SetFogDensity
 requires: []
 assets: none
 example: examples/09-water
 run: go run ./09-water
-verified: 2026-07-28
+verified: 2026-08-06
 ---
 
 # Environment
@@ -57,7 +60,7 @@ opens onto a lit world. Everything past that is a decision.
 | Piece | Nil means |
 |---|---|
 | `Cycle` | Time does not pass. `Sun` and `Ambient` supply the light instead |
-| `Sky` | No dome, no discs, no stars. The frame clears to `ClearColor` |
+| `Sky` | No dome, no discs, no stars ([stars](stars.md)). The frame clears to `ClearColor` |
 | `Sun` | No directional light (unless `Cycle` provides one) |
 | `Ambient` | No fill light (unless `Cycle` provides one) |
 | `Fog` | No distance fog |
@@ -70,7 +73,9 @@ answer to the same question.
 Useful combinations:
 
 - `Sky` without `Cycle` — a static sky at a fixed hour. Set
-  `Sky.FixedSunElevation` to pick which one.
+  `Sky.FixedSunElevation` to pick which one; the star fade derives from it too,
+  so a fixed elevation below the horizon gets a real night sky rather than an
+  empty one. See [stars](stars.md).
 - `Cycle` without `Sky` — the engine's sun, moon and ambient driving *your*
   skybox. The light works; nothing is drawn.
 - `Sky` with `SunDisc: false` — sky colour and light without a visible sun.
@@ -90,6 +95,18 @@ menu, not left at a constant. Measured at 1280x720, MSAA 4x, on a Radeon RX
 
 Those are one GPU's numbers; the ratios transfer better than the absolutes.
 Any integer works, not just the presets.
+
+Those are also **whole-frame differences**, taken before the engine could time a
+pass. `task bench` measures each pass directly now and broadly confirms them —
+the sky pass is 83–93% of GPU time in `02-cube`, `07-terrain`, `09-water`,
+`12-particles` and `16-materials`.
+
+The exception is flora, and it inverts the advice. Grass overdraws itself
+heavily while the sky is one layer deep and depth-rejected wherever terrain
+covers it, so in `08-grass` the split is grass 3.95 ms against sky 1.68 ms, and
+in `15-kitchen-sink` 4.30 against 1.20. In a scene with ground cover, clouds are
+no longer the first thing to reach for. Measure — in either direction. See
+[profiling](profiling.md).
 
 It is safe to change every frame — the value is read when the environment
 resolves, so a slider takes effect on the next frame with nothing to rebuild.

@@ -20,6 +20,7 @@ api:
   - glyphengine.Engine.Destroy
   - glyphengine.Engine.SetCamera
   - glyphengine.Engine.ViewProjection
+  - glyphengine.Engine.Debugf
   - glyphengine.WithTitle
   - glyphengine.WithApplicationName
   - glyphengine.WithWindowSize
@@ -43,7 +44,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-08-04
+verified: 2026-08-06
 ---
 
 # Run a game loop with Engine and Game
@@ -350,6 +351,36 @@ differ, so the check cannot pass vacuously.
 
 Particle spawn jitter is pinned alongside the clock, since `math/rand`'s global
 source is reseeded at every process start.
+
+## Debug text
+
+`Engine.Debugf` puts a line in the top-left corner for one frame:
+
+```go
+func (g *game) Update(e *glyph.Engine, dt float32) {
+    e.Debugf("pos  %.1f %.1f %.1f", p[0], p[1], p[2])
+    e.Debugf("ToD  %.4f", e.Scene.TimeOfDay())
+}
+```
+
+Queued, not retained — the lines are cleared every frame, so call it from
+`Update` or `LateUpdate` for a value that changes. They render in call order,
+top to bottom, in a channel of their own, so they neither disturb nor are
+disturbed by `SetMSDFOverlays`.
+
+The font is Go Mono, generated on first use rather than loaded, so this needs no
+asset and no setup and a game that never calls it pays nothing. Generation costs
+a few hundred milliseconds the first time; do not call `Debugf` in a shipping
+build if that matters. Monospaced on purpose — a value changing width between
+frames would shift every line after it.
+
+It exists because a number you can *watch move* answers questions a screenshot
+does not. `examples/08-grass` shows time of day and sun elevation this way,
+which is how the sunset glow's tail was pinned down: "the glow lingers too long"
+became "the glow is still warm at sun elevation -0.14", which is actionable.
+
+This is for game state. Per-pass CPU and GPU timings are a separate facility and
+print rather than draw — see [profiling](profiling.md).
 
 ## Failure modes
 
