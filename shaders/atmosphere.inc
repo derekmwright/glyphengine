@@ -42,20 +42,21 @@ float atmDaylight(float sunY) {
 // Asymmetric, because the two sides are not the same event. Above the horizon
 // the warmth builds while there is still a sun to light the air; below it there
 // is progressively less air left in sunlight, and the glow should go with it.
-// A symmetric curve wide enough for the approach kept the horizon 37 percent
-// warm at an elevation where atmNight already reports full night — the sky
-// calling itself night while still holding a sunset.
+// A symmetric curve wide enough for the approach still held the horizon 37
+// percent warm at an elevation of -0.20, with the stars already 71 percent out
+// — the sky holding a sunset well into the night.
+//
+// DayNight.Twilight in Go is the same curve; change both together.
 float atmTwilight(float sunY) {
     float width = sunY > 0.0 ? 0.20 : 0.115;
     float y = sunY / width;
     return exp(-y * y);
 }
 
-// atmNight lags the sky's darkening, so stars arrive during the blue hour
-// rather than the instant the sun touches the horizon.
-float atmNight(float sunY) {
-    return 1.0 - smoothstep(-0.22, -0.04, sunY);
-}
+// There is deliberately no star-fade curve here. The stars are drawn from Go's
+// DayNight.StarVisibility, which arrives as a push constant, and the copy that
+// used to sit at this spot had no callers and had already drifted to different
+// constants — a trap for anyone who came here to change the star fade.
 
 // atmSkyPalette returns the zenith and horizon colours for a sun elevation.
 //
