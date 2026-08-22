@@ -7,3 +7,10 @@
 # uncommitted .gitattributes has no effect, which makes the obvious test of this
 # report no change at all.
 docs/images/** export-ignore
+
+# miniaudio.h is 4.1 MB of vendored third-party C -- more than three times the
+# size of every Go file in the repo -- so Linguist counts the whole engine as a
+# C project. Marking it vendored keeps it out of the language stats without
+# hiding it from diffs or search.
+audio/miniaudio.c linguist-vendored
+audio/miniaudio.h linguist-vendored
