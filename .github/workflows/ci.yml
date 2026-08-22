@@ -77,18 +77,18 @@ jobs:
       - name: Test (race)
         run: task test:race
 
-  # Linux does not compile yet, and that is not our bug: vkngwrapper/core
-  # v3.1.1 is missing an `unsafe` import in system_nonwindows.go. The fix is
-  # merged upstream but has never been tagged — tracked in
-  # https://github.com/vkngwrapper/core/issues/13
+  # Linux is a supported consumer platform, so it gates. It gets the same
+  # lint/build/test/race treatment as Windows and needs none of the MinGW
+  # loader aliasing above: libvulkan-dev installs a real libvulkan.so where
+  # the linker already looks.
   #
-  # This job exists to notice the day that changes rather than to gate merges,
-  # so it is allowed to fail. When it starts passing, drop continue-on-error,
-  # bump the dependency, and add the lavapipe render job this unblocks.
-  linux-tracker:
-    name: build (linux, expected to fail upstream)
+  # This job was advisory until 2026-08-22. vkngwrapper/core v3.1.1 omits an
+  # `unsafe` import in system_nonwindows.go, so nothing off Windows compiled at
+  # all. The fix is merged upstream but still untagged, so go.mod pins the
+  # merge commit as a pseudo-version -- see the note there before "fixing" it.
+  linux:
+    name: build + test (linux)
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
@@ -102,5 +102,74 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libvulkan-dev libgl1-mesa-dev xorg-dev
 
+      - name: Install go-task
+        run: go install github.com/go-task/task/v3/cmd/task@latest
+
+      - name: Lint
+        run: task lint
+
       - name: Build
-        run: go build ./...
+        run: task build
+
+      - name: Test
+        run: task test
+
+      - name: Test (race)
+        run: task test:race
+
+  # What a `go get` user actually receives, which is not what a local build
+  # sees. The engine embeds 37 .spv files with go:embed and export-ignores
+  # docs/images, so the module is only usable if every embedded file is
+  # committed AND survives the archive. Both are invisible to an in-repo build,
+  # which reads the working tree including anything uncommitted or ignored.
+  #
+  # cmd/go builds module zips with `git archive`, so archiving HEAD reproduces
+  # the consumer's tree exactly -- offline and without needing the commit to be
+  # fetchable by the module proxy.
+  #
+  # Verified by breaking it: deleting shaders/clouds.frag.spv from the archive
+  # fails this job with "pattern clouds.frag.spv: no matching files found"
+  # while task ci stays green, which is the whole point.
+  consumer:
+    name: go get consumer (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libvulkan-dev libgl1-mesa-dev xorg-dev
+
+      - name: Build against the module as published
+        run: |
+          set -euxo pipefail
+          mkdir -p "$RUNNER_TEMP/engine" "$RUNNER_TEMP/consumer"
+          git archive HEAD | tar -x -C "$RUNNER_TEMP/engine"
+
+          # go.work in the checkout must not leak into the consumer build.
+          export GOWORK=off
+          cd "$RUNNER_TEMP/consumer"
+
+          go mod init consumer
+          go mod edit -require=github.com/derekmwright/glyphengine@v0.0.0
+          go mod edit -replace=github.com/derekmwright/glyphengine="$RUNNER_TEMP/engine"
+
+          cat > main.go <<'EOF'
+          // Imports the engine the way a downstream game would: the root
+          // package, which transitively pulls in the renderer and therefore
+          // every embedded shader.
+          package main
+
+          import "github.com/derekmwright/glyphengine"
+
+          func main() { _ = glyphengine.DefaultTickRate }
+          EOF
+
+          go mod tidy
+          go build ./...
