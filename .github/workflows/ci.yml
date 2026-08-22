@@ -100,7 +100,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libvulkan-dev libgl1-mesa-dev xorg-dev
+          sudo apt-get install -y libvulkan-dev libgl1-mesa-dev xorg-dev xvfb
 
       - name: Install go-task
         run: go install github.com/go-task/task/v3/cmd/task@latest
@@ -111,11 +111,27 @@ jobs:
       - name: Build
         run: task build
 
+      # Deliberately NOT under xvfb: this asserts the headless guard is real.
+      # go-gl's acceptError logs GLFW's PlatformError and returns nil, so
+      # glfw.Init reports success on a display-less machine; before
+      # confirmGLFWInit this step panicked with NotInitialized rather than
+      # skipping, which is how the bug was found.
+      - name: Window tests skip without a display
+        run: |
+          set -uo pipefail
+          out=$(go test ./window/ -count=1 -v 2>&1); rc=$?
+          echo "$out"
+          if [ $rc -ne 0 ]; then echo "::error::window tests must skip, not fail, with no DISPLAY"; exit 1; fi
+          echo "$out" | grep -q -- '--- SKIP' || { echo "::error::expected a SKIP with no DISPLAY"; exit 1; }
+
+      # Everything else runs against a virtual display so the window tests
+      # actually execute here rather than skipping. The reference counting they
+      # cover is the reason closing one window does not invalidate the others.
       - name: Test
-        run: task test
+        run: xvfb-run -a task test
 
       - name: Test (race)
-        run: task test:race
+        run: xvfb-run -a task test:race
 
   # What a `go get` user actually receives, which is not what a local build
   # sees. The engine embeds 37 .spv files with go:embed and export-ignores

@@ -59,8 +59,38 @@ func acquireGLFW() error {
 		if err := glfw.Init(); err != nil {
 			return fmt.Errorf("glfw init: %w", err)
 		}
+		if err := confirmGLFWInit(); err != nil {
+			return err
+		}
 	}
 	glfwRefs++
+	return nil
+}
+
+// confirmGLFWInit reports whether GLFW actually came up, because glfw.Init's
+// error return cannot be trusted to say so.
+//
+// go-gl classifies GLFW's PlatformError as "not a programmer error", and its
+// acceptError logs such errors and returns nil rather than surfacing them
+// (error.go). A headless X11 machine fails init with exactly that code, so
+// Init prints "PlatformError: X11: The DISPLAY environment variable is
+// missing" to the standard logger and then reports success. The failure only
+// becomes visible at the next call, as a NotInitialized panic from somewhere
+// unrelated -- glfw.WindowHint inside New, in the case that found this.
+//
+// GetPrimaryMonitor is a cheap call that go-gl routes through the same
+// acceptError, and NotInitialized *is* on its programmer-error list, so it
+// panics precisely when init silently failed. A nil monitor is not an error:
+// that is a normal answer on a machine with no monitors attached.
+func confirmGLFWInit() (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			// glfwInit already cleaned up after itself -- GLFW terminates
+			// internally when init fails -- so there is nothing to release.
+			err = fmt.Errorf("glfw init: %v", r)
+		}
+	}()
+	glfw.GetPrimaryMonitor()
 	return nil
 }
 
