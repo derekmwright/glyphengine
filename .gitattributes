@@ -14,3 +14,8 @@ docs/images/** export-ignore
 # hiding it from diffs or search.
 audio/miniaudio.c linguist-vendored
 audio/miniaudio.h linguist-vendored
+
+# The .inc files are GLSL fragments pulled in by #include, not C++. Linguist
+# maps the .inc extension to C++ by default, which put a C++ slice on the
+# language bar for code that no C++ compiler has ever seen.
+shaders/*.inc linguist-language=GLSL
