@@ -19,3 +19,23 @@ audio/miniaudio.h linguist-vendored
 # maps the .inc extension to C++ by default, which put a C++ slice on the
 # language bar for code that no C++ compiler has ever seen.
 shaders/*.inc linguist-language=GLSL
+
+# Line endings are declared here rather than left to each machine's
+# core.autocrlf, because that setting is per-clone and this repository cannot
+# tolerate the variance: gofmt requires LF, so a CRLF checkout fails
+# `task lint` on every Go file at once, with a diff that shows every single
+# line changed and no actual formatting problem.
+#
+# That is not hypothetical. It failed exactly this way on a developer machine
+# with the Git-for-Windows default (core.autocrlf=true) and on the CI Windows
+# runner, while the blobs themselves were LF-clean the whole time. Declaring
+# it here makes checkout identical everywhere and outranks core.autocrlf.
+* text=auto eol=lf
+
+# Assets git must never line-ending-convert or diff as text. text=auto detects
+# most of these, but SPIR-V in particular is a stream of 32-bit words that can
+# contain no 0x0D at all and still be misread as text by a heuristic.
+*.spv  binary
+*.png  binary
+*.glb  binary
+*.bin  binary
