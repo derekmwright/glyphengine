@@ -30,14 +30,15 @@ github.com/rogpeppe/go-internal v1.14.1 h1:UQB4HGPB6osV0SQTLymcB4TgvyWu6ZyliaW0t
 github.com/rogpeppe/go-internal v1.14.1/go.mod h1:MaRKkUm5W0goXpeCfT7UZI6fk/L7L7so1lCWt35ZSgc=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
-github.com/vkngwrapper/core/v3 v3.1.1 h1:STZ/g7MhUddDkHDP7AU3WLSZKtlQI/5SSNqDBnBu7HA=
-github.com/vkngwrapper/core/v3 v3.1.1/go.mod h1:lIcOUaI3UePxmy+LW29EqmozCaVKF+r+pncbtx36qO4=
+github.com/vkngwrapper/core/v3 v3.1.2-0.20260223161040-227274a7d9ae h1:ZgzC/1oKWSPJ2WE3736eqPXACb3EwJP6DG5zjC0Y6v0=
+github.com/vkngwrapper/core/v3 v3.1.2-0.20260223161040-227274a7d9ae/go.mod h1:lIcOUaI3UePxmy+LW29EqmozCaVKF+r+pncbtx36qO4=
 github.com/vkngwrapper/extensions/v3 v3.3.0 h1:STsbRIgMP/A4Qbxq62pktn4DJDcke6Yfw4H88WN/Alw=
 github.com/vkngwrapper/extensions/v3 v3.3.0/go.mod h1:JriYb+wGHsYCWbmZsSqcMmwEYuTIwsRSVdJWQ0fFgdw=
 go.uber.org/mock v0.6.0 h1:hyF9dfmbgIX5EfOdasqLsWD6xqpNZlXblLB/Dbnwv3Y=
 go.uber.org/mock v0.6.0/go.mod h1:KiVJ4BqZJaMj4svdfmHM0AUx4NJYO8ZNpPnZn1Z+BBU=
 golang.org/x/image v0.44.0 h1:+tDekMZED9+LrtB3G5xzRggpVh9CARjZqROla3R3R+I=
 golang.org/x/image v0.44.0/go.mod h1:V8K3KE9KKKE+pLpQDOeN18w9oacNSvy1tDOirTu4xtY=
+golang.org/x/text v0.40.0 h1:Ub2Z6/xjgF1WrYQz2nuITOEegKFtiIy+rieRJ5lHZKs=
 gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=
 gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c h1:Hei/4ADfdWqJk1ZMxUNpqntNwaWcugrBjAiHlqqRiVk=
 gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c/go.mod h1:JHkPIbrfpd72SG/EVd6muEfDQjcINNoR0C8j2r3qZ4Q=
