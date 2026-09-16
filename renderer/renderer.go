@@ -51,15 +51,25 @@ type Renderer struct {
 	translucentPipelineLayout            core1_0.PipelineLayout
 	translucentDoubleSidedPipeline       core1_0.Pipeline
 	translucentDoubleSidedPipelineLayout core1_0.PipelineLayout
-	overlayPipeline                      core1_0.Pipeline
-	starsPipeline                        core1_0.Pipeline
-	celestialPipeline                    core1_0.Pipeline
-	skyPipeline                          core1_0.Pipeline
-	uiPipeline                           core1_0.Pipeline
-	msdfPipeline                         core1_0.Pipeline
-	jointDescriptorSetLayout             core1_0.DescriptorSetLayout
-	skinnedPipelineLayout                core1_0.PipelineLayout // skinned: set 0=tex, set 1=joints, set 2=shadow
-	skinnedPipeline                      core1_0.Pipeline
+	// The instanced lit variants and their layouts; see
+	// createInstancedPipeline.
+	instancedPipeline                  core1_0.Pipeline
+	instancedPipelineLayout            core1_0.PipelineLayout
+	instancedDoubleSidedPipeline       core1_0.Pipeline
+	instancedDoubleSidedPipelineLayout core1_0.PipelineLayout
+	// instanceSets is every set the renderer has handed out, so they can be
+	// freed at teardown. A set outlives the frames that reference it, so a game
+	// never destroys one itself.
+	instanceSets             []*InstanceSet
+	overlayPipeline          core1_0.Pipeline
+	starsPipeline            core1_0.Pipeline
+	celestialPipeline        core1_0.Pipeline
+	skyPipeline              core1_0.Pipeline
+	uiPipeline               core1_0.Pipeline
+	msdfPipeline             core1_0.Pipeline
+	jointDescriptorSetLayout core1_0.DescriptorSetLayout
+	skinnedPipelineLayout    core1_0.PipelineLayout // skinned: set 0=tex, set 1=joints, set 2=shadow
+	skinnedPipeline          core1_0.Pipeline
 	// Skinned + Material: set 0=material, set 1=joints, set 2=shadow.
 	skinnedMaterialPipelineLayout core1_0.PipelineLayout
 	skinnedMaterialPipeline       core1_0.Pipeline
@@ -606,6 +616,34 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	r.onInit(func() {
 		r.deviceDriver.DestroyPipeline(r.translucentDoubleSidedPipeline, nil)
 		r.deviceDriver.DestroyPipelineLayout(r.translucentDoubleSidedPipelineLayout, nil)
+	})
+
+	r.instancedPipeline, r.instancedPipelineLayout, err = createInstancedPipeline(r.deviceDriver, r.shaders, r.renderPass, r.sc.extent, r.descriptorSetLayout, r.shadow.descriptorSetLayout, r.msaaSamples)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create instanced pipeline: %w", err)
+	}
+	r.onInit(func() {
+		r.deviceDriver.DestroyPipeline(r.instancedPipeline, nil)
+		r.deviceDriver.DestroyPipelineLayout(r.instancedPipelineLayout, nil)
+	})
+
+	r.instancedDoubleSidedPipeline, r.instancedDoubleSidedPipelineLayout, err = createInstancedPipeline(r.deviceDriver, r.shaders, r.renderPass, r.sc.extent, r.descriptorSetLayout, r.shadow.descriptorSetLayout, r.msaaSamples, 0)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create double-sided instanced pipeline: %w", err)
+	}
+	r.onInit(func() {
+		r.deviceDriver.DestroyPipeline(r.instancedDoubleSidedPipeline, nil)
+		r.deviceDriver.DestroyPipelineLayout(r.instancedDoubleSidedPipelineLayout, nil)
+	})
+
+	// Sets are created by the game after New returns, so this frees whatever
+	// the list holds at teardown rather than a fixed set. AGENTS.md rule 10:
+	// the teardown goes next to the thing that allocates.
+	r.onInit(func() {
+		for _, s := range r.instanceSets {
+			s.destroy(r.deviceDriver)
+		}
+		r.instanceSets = nil
 	})
 
 	r.overlayPipeline, err = createOverlayPipeline(r.deviceDriver, r.shaders, r.renderPass, r.pipelineLayout, r.sc.extent, r.msaaSamples)
@@ -1302,7 +1340,7 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 		return err
 	}
 	recordStart := time.Now()
-	err = recordCommandBuffer(r.deviceDriver, cmdBuf, r.renderPass, r.framebuffers[imageIndex], r.pipeline, r.litDoubleSidedPipeline, r.translucentPipeline, r.translucentDoubleSidedPipeline, r.overlayPipeline, r.skyPipeline, r.starsPipeline, r.celestialPipeline, r.uiPipeline, r.msdfPipeline, r.skinnedPipeline, r.grassPipeline, r.waterPipeline, r.godRayPipeline, r.waterRenderPass, waterFB, r.sceneColor, r.hdr.images[imageIndex],
+	err = recordCommandBuffer(r.deviceDriver, cmdBuf, r.renderPass, r.framebuffers[imageIndex], r.pipeline, r.litDoubleSidedPipeline, r.translucentPipeline, r.translucentDoubleSidedPipeline, r.instancedPipeline, r.instancedDoubleSidedPipeline, r.overlayPipeline, r.skyPipeline, r.starsPipeline, r.celestialPipeline, r.uiPipeline, r.msdfPipeline, r.skinnedPipeline, r.grassPipeline, r.waterPipeline, r.godRayPipeline, r.waterRenderPass, waterFB, r.sceneColor, r.hdr.images[imageIndex],
 		func(cb core1_0.CommandBuffer) error { return r.recordClouds(cb, lighting) },
 		r.cloudSetFor(),
 		r.bloomFor(imageIndex), r.tonemapFor(imageIndex), r.particlePipeline, r.terrainPipeline, r.materialPipelines(), &r.stats, r.pipelineLayout, r.litPipelineLayout, r.skinnedPipelineLayout, r.terrainPipelineLayout, r.sc.extent, draws, overlays, celestials, uiOverlays, msdfOverlays, lighting, r.fallbackTexture, r.milkyWayTex, r.shadow, r.grass, r.grassLOD, r.grassImpostor, r.grassImpostorPipeline, r.particles, f, r.msaa != nil, r.gpuTimer)

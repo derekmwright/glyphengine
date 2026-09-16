@@ -65,6 +65,12 @@ type shadowResources struct {
 	pipeline        core1_0.Pipeline // static depth-only
 	skinnedPipeline core1_0.Pipeline // skinned depth-only
 
+	// instancedPipeline is the depth-only stage for InstanceSets. Without it
+	// instanced geometry silently stops casting: the draw still records, and
+	// every instance lands on top of the first one, because shadow.vert takes
+	// the model matrix from a push constant the instanced path does not set.
+	instancedPipeline core1_0.Pipeline
+
 	// Point light cube shadow map
 	cubeImages       [maxFramesInFlight]core1_0.Image
 	cubeMemories     [maxFramesInFlight]core1_0.DeviceMemory
@@ -431,6 +437,11 @@ func createShadowResources(
 		return nil, fmt.Errorf("shadow pipeline: %w", err)
 	}
 
+	s.instancedPipeline, err = createInstancedShadowPipeline(deviceDriver, sh, s.renderPass, s.pipelineLayout)
+	if err != nil {
+		return nil, err
+	}
+
 	s.skinnedPipeline, err = createShadowPipeline(deviceDriver, sh, s.renderPass, s.skinnedPipelineLayout, true)
 	if err != nil {
 		s.destroy(deviceDriver)
@@ -618,15 +629,34 @@ func createShadowResources(
 	return s, nil
 }
 
+// createInstancedShadowPipeline is the depth-only stage for InstanceSets.
+//
+// It reuses the non-skinned shadow pipeline layout -- the push constants are
+// the same 128 bytes, and the instanced vertex stage simply reads the first
+// matrix as a view-projection rather than a view-projection-model. Only the
+// vertex input state differs.
+func createInstancedShadowPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, layout core1_0.PipelineLayout) (core1_0.Pipeline, error) {
+	return createShadowPipelineWithInput(deviceDriver, sh, sh.ShadowInstancedVert, renderPass, layout,
+		[]core1_0.VertexInputBindingDescription{vertexBindingDescription(), instanceBindingDescription()},
+		instanceAttributeDescriptions())
+}
+
 // createShadowPipeline creates a depth-only pipeline for the shadow pass.
 func createShadowPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, layout core1_0.PipelineLayout, skinned bool) (core1_0.Pipeline, error) {
-	var vertSpv []byte
 	if skinned {
-		vertSpv = sh.ShadowSkinnedVert
-	} else {
-		vertSpv = sh.ShadowVert
+		return createShadowPipelineWithInput(deviceDriver, sh, sh.ShadowSkinnedVert, renderPass, layout,
+			[]core1_0.VertexInputBindingDescription{skinnedVertexBindingDescription()},
+			skinnedVertexAttributeDescriptions())
 	}
+	return createShadowPipelineWithInput(deviceDriver, sh, sh.ShadowVert, renderPass, layout,
+		[]core1_0.VertexInputBindingDescription{vertexBindingDescription()},
+		vertexAttributeDescriptions())
+}
 
+// createShadowPipelineWithInput is createShadowPipeline with the vertex stage
+// and vertex input state supplied, so the skinned and instanced variants
+// differ only in those two things.
+func createShadowPipelineWithInput(deviceDriver core1_0.DeviceDriver, sh ShaderSet, vertSpv []byte, renderPass core1_0.RenderPass, layout core1_0.PipelineLayout, bindings []core1_0.VertexInputBindingDescription, attrDescs []core1_0.VertexInputAttributeDescription) (core1_0.Pipeline, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
 		Code: bytesToUint32Slice(vertSpv),
 	})
@@ -643,23 +673,13 @@ func createShadowPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, rende
 	}
 	defer deviceDriver.DestroyShaderModule(fragModule, nil)
 
-	var bindingDesc core1_0.VertexInputBindingDescription
-	var attrDescs []core1_0.VertexInputAttributeDescription
-	if skinned {
-		bindingDesc = skinnedVertexBindingDescription()
-		attrDescs = skinnedVertexAttributeDescriptions()
-	} else {
-		bindingDesc = vertexBindingDescription()
-		attrDescs = vertexAttributeDescriptions()
-	}
-
 	pipelines, _, err := deviceDriver.CreateGraphicsPipelines(nil, nil, core1_0.GraphicsPipelineCreateInfo{
 		Stages: []core1_0.PipelineShaderStageCreateInfo{
 			{Stage: core1_0.StageVertex, Module: vertModule, Name: "main"},
 			{Stage: core1_0.StageFragment, Module: fragModule, Name: "main"},
 		},
 		VertexInputState: &core1_0.PipelineVertexInputStateCreateInfo{
-			VertexBindingDescriptions:   []core1_0.VertexInputBindingDescription{bindingDesc},
+			VertexBindingDescriptions:   bindings,
 			VertexAttributeDescriptions: attrDescs,
 		},
 		InputAssemblyState: &core1_0.PipelineInputAssemblyStateCreateInfo{
@@ -930,6 +950,9 @@ func (s *shadowResources) destroy(deviceDriver core1_0.DeviceDriver) {
 		}
 	}
 	// Directional shadow resources
+	if s.instancedPipeline.Handle() != 0 {
+		deviceDriver.DestroyPipeline(s.instancedPipeline, nil)
+	}
 	if s.skinnedPipeline.Handle() != 0 {
 		deviceDriver.DestroyPipeline(s.skinnedPipeline, nil)
 	}

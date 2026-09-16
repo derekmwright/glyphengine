@@ -102,6 +102,9 @@ entity with `NoCastShadow` cleared.
 - **DoubleSided** composes, via a second blended pipeline. Without it, a glass
   box would cull its back faces and leave nothing where the far wall should be.
 - **Hidden** still wins; it is checked first.
+- **InstancedMesh** does not. There is no blended instanced pipeline, so a set
+  stays opaque rather than silently losing its placements. See
+  [`instancing.md`](instancing.md).
 
 ## Failure mode: the paths with no blended variant
 

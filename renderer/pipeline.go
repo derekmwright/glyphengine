@@ -177,6 +177,15 @@ func createNonLitPipelineLayout(deviceDriver core1_0.DeviceDriver, texSetLayout 
 // They are one pipeline with a different material concept plugged into set 0, and
 // a fourth copy is how one of them quietly ends up with the wrong compare op.
 func createLitVariantPipeline(deviceDriver core1_0.DeviceDriver, vertSpv, fragSpv []byte, label string, renderPass core1_0.RenderPass, extent core1_0.Extent2D, set0Layout, shadowSetLayout core1_0.DescriptorSetLayout, samples core1_0.SampleCountFlags, cull core1_0.CullModeFlags, blend bool) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
+	return createLitVariantPipelineWithInput(deviceDriver, vertSpv, fragSpv, label, renderPass, extent,
+		set0Layout, shadowSetLayout, samples, cull, blend,
+		[]core1_0.VertexInputBindingDescription{vertexBindingDescription()}, vertexAttributeDescriptions())
+}
+
+// createLitVariantPipelineWithInput is createLitVariantPipeline with the vertex
+// input state supplied, which is what the instanced variant needs: a second
+// per-instance binding carrying the model matrix the ordinary path pushes.
+func createLitVariantPipelineWithInput(deviceDriver core1_0.DeviceDriver, vertSpv, fragSpv []byte, label string, renderPass core1_0.RenderPass, extent core1_0.Extent2D, set0Layout, shadowSetLayout core1_0.DescriptorSetLayout, samples core1_0.SampleCountFlags, cull core1_0.CullModeFlags, blend bool, bindings []core1_0.VertexInputBindingDescription, attrs []core1_0.VertexInputAttributeDescription) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
 		Code: bytesToUint32Slice(vertSpv),
 	})
@@ -242,8 +251,8 @@ func createLitVariantPipeline(deviceDriver core1_0.DeviceDriver, vertSpv, fragSp
 			{Stage: core1_0.StageFragment, Module: fragModule, Name: "main"},
 		},
 		VertexInputState: &core1_0.PipelineVertexInputStateCreateInfo{
-			VertexBindingDescriptions:   []core1_0.VertexInputBindingDescription{vertexBindingDescription()},
-			VertexAttributeDescriptions: vertexAttributeDescriptions(),
+			VertexBindingDescriptions:   bindings,
+			VertexAttributeDescriptions: attrs,
 		},
 		InputAssemblyState: &core1_0.PipelineInputAssemblyStateCreateInfo{
 			Topology: core1_0.PrimitiveTopologyTriangleList,
@@ -336,6 +345,28 @@ func createTranslucentPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, 
 	}
 	return createLitVariantPipeline(deviceDriver, sh.LitVert, sh.LitFrag, label,
 		renderPass, extent, texSetLayout, shadowSetLayout, samples, cull, true)
+}
+
+// createInstancedPipeline is the lit pipeline for InstanceSets: the same
+// fragment stage and the same layout, with a vertex stage that takes the model
+// matrix and tint from a per-instance vertex binding instead of from push
+// constants.
+//
+// Everything that made this worth doing is in the vertex input state. The rest
+// of the pipeline is deliberately identical to the opaque lit one, so an
+// instanced prop is lit, fogged and shadowed exactly as the same mesh drawn
+// individually would be -- which is the property that lets the two be compared.
+func createInstancedPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, extent core1_0.Extent2D, texSetLayout core1_0.DescriptorSetLayout, shadowSetLayout core1_0.DescriptorSetLayout, samples core1_0.SampleCountFlags, cullMode ...core1_0.CullModeFlags) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
+	cull := core1_0.CullModeBack
+	label := "Instanced"
+	if len(cullMode) > 0 {
+		cull = cullMode[0]
+		label = "Instanced double-sided"
+	}
+	return createLitVariantPipelineWithInput(deviceDriver, sh.LitInstancedVert, sh.LitFrag, label,
+		renderPass, extent, texSetLayout, shadowSetLayout, samples, cull, false,
+		[]core1_0.VertexInputBindingDescription{vertexBindingDescription(), instanceBindingDescription()},
+		instanceAttributeDescriptions())
 }
 
 // createOverlayPipeline creates a pipeline for HUD/overlay geometry with no

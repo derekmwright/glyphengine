@@ -54,6 +54,13 @@ var scenes = []scene{
 	{"particles", "12-particles", []string{"-frames", "200"}, "three additive emitters"},
 	{"materials", "16-materials", []string{"-frames", "200"}, "the material pipeline"},
 	{"translucent", "18-translucent", []string{"-frames", "200"}, "the blended pass and its sort"},
+
+	// The same 900 props drawn two ways. Paired deliberately: instancing trades
+	// CPU command recording for GPU vertex work that culling no longer removes,
+	// and the only honest way to say whether that is a win is to run both
+	// against an identical field.
+	{"instanced", "19-instanced", []string{"-count", "900", "-instanced=true", "-frames", "200"}, "900 props, one draw call"},
+	{"individual", "19-instanced", []string{"-count", "900", "-instanced=false", "-frames", "200"}, "the same 900, one draw each"},
 	{"kitchensink", "15-kitchen-sink", []string{"-demo", "-frames", "240"}, "everything at once"},
 }
 
