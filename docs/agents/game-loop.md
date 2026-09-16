@@ -38,13 +38,15 @@ api:
   - glyphengine.WithMaxCatchUp
   - glyphengine.WithProjection
   - glyphengine.WithScene
+  - glyphengine.WithShaders
+  - renderer.Renderer.Shaders
 example: examples/02-cube
 run: task example:02-cube
 requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-08-06
+verified: 2026-09-16
 ---
 
 # Run a game loop with Engine and Game
@@ -304,6 +306,39 @@ itself — `Camera.ResolveCollision`, or your own headless systems — pass
 
 That embedding is also the seam: `Scene` has no window or renderer dependency,
 so a server or a test can build one with `NewScene()` and never open a window.
+
+## Replacing an engine shader
+
+`WithShaders` hands the renderer a `renderer.ShaderSet`. Fields left nil fall
+back to the embedded shader for that stage, so overriding one pipeline does not
+mean supplying all of them:
+
+```go
+custom := renderer.DefaultShaders()
+custom.SkyFrag = alienSkySpv // //go:embed your own .spv
+
+e, err := glyph.New(&game{},
+    glyph.WithTitle("Not Earth"),
+    glyph.WithShaders(custom),
+)
+```
+
+This is a passthrough to `renderer.WithShaders`, and it is the only way to reach
+that seam without giving up `Engine` entirely. Before it existed, a game that
+wanted a sky that is not Earth's had to call `renderer.New` directly and then
+reimplement the frame loop, the fixed timestep, interpolation, the draw-list
+build and the environment resolve that `Run` already provides.
+
+`renderer.ShaderSet` documents what a replacement has to match: the vertex input
+layout, descriptor set layout and push-constant ranges the engine's pipelines
+declare. A mismatch is a pipeline-creation failure at startup or — worse — a
+shader that links and draws nothing, so develop one under `WithValidation`.
+
+Authoring is unchanged: write GLSL, run `task shaders`, commit the `.spv`, and
+`go:embed` it. There is no hot reload.
+
+`Renderer.Shaders()` reports what is actually in effect, defaults filled in, for
+a harness that wants to check rather than assume.
 
 ## Headless and CI
 

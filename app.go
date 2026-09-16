@@ -120,6 +120,33 @@ type config struct {
 	quitKey        input.Key
 	hasQuitKey     bool
 	debugKeys      bool
+	shaders        renderer.ShaderSet
+	hasShaders     bool
+}
+
+// rendererOptions translates the engine's config into the renderer's options.
+//
+// Split out of New so it can be tested without a GPU: the options are plain
+// functions, so a test can apply them to a Renderer and read back what arrived.
+// That is the failure this guards against -- an option that exists on Engine,
+// is documented, and never reaches renderer.New.
+func (c *config) rendererOptions() []renderer.Option {
+	appName := c.appName
+	if appName == "" {
+		appName = c.title
+	}
+	opts := []renderer.Option{
+		renderer.WithApplicationName(appName, c.appVersion),
+		renderer.WithValidation(c.validation),
+		renderer.WithVSync(c.vsync),
+	}
+	if c.msaa != 0 {
+		opts = append(opts, renderer.WithMSAASamples(c.msaa))
+	}
+	if c.hasShaders {
+		opts = append(opts, renderer.WithShaders(c.shaders))
+	}
+	return opts
 }
 
 // WithScene injects an externally created Scene instead of building a fresh
@@ -132,6 +159,29 @@ func WithScene(s *Scene) Option {
 // it to what the GPU supports. Zero keeps the renderer default.
 func WithMSAA(n int) Option {
 	return func(c *config) { c.msaa = n }
+}
+
+// WithShaders replaces the SPIR-V the renderer builds its pipelines from.
+//
+// Fields left nil fall back to the engine's embedded shader for that stage, so
+// a game can override one pipeline without supplying all of them:
+//
+//	custom := renderer.DefaultShaders()
+//	custom.SkyFrag = myAlienSkySpv
+//	e, err := glyph.New(&game{}, glyph.WithShaders(custom))
+//
+// This is a straight passthrough to renderer.WithShaders, and exists because
+// without it the seam was unreachable from Engine. A game that wanted a sky
+// that is not Earth's had to call renderer.New directly and then reimplement
+// the frame loop, the fixed timestep, interpolation, the draw-list build and
+// the environment resolve that Run already provides -- a steep price for one
+// field.
+//
+// See renderer.ShaderSet for what a replacement has to match. A mismatch is a
+// pipeline-creation failure at startup or, worse, a shader that links and draws
+// nothing, so develop one with WithValidation on.
+func WithShaders(set renderer.ShaderSet) Option {
+	return func(c *config) { c.shaders, c.hasShaders = set, true }
 }
 
 // WithValidation enables the Vulkan validation layer, which reports API misuse
@@ -472,19 +522,7 @@ func New(g Game, opts ...Option) (*Engine, error) {
 		return nil, err
 	}
 
-	appName := cfg.appName
-	if appName == "" {
-		appName = cfg.title
-	}
-	rOpts := []renderer.Option{
-		renderer.WithApplicationName(appName, cfg.appVersion),
-		renderer.WithValidation(cfg.validation),
-		renderer.WithVSync(cfg.vsync),
-	}
-	if cfg.msaa != 0 {
-		rOpts = append(rOpts, renderer.WithMSAASamples(cfg.msaa))
-	}
-	r, err := renderer.New(w, rOpts...)
+	r, err := renderer.New(w, cfg.rendererOptions()...)
 	if err != nil {
 		w.Destroy()
 		return nil, err

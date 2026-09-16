@@ -28,7 +28,7 @@ requires:
 assets: none
 example: examples/09-water
 run: go run ./09-water -time 0.78
-verified: 2026-08-06
+verified: 2026-09-16
 ---
 
 # Day/night cycle
@@ -131,7 +131,9 @@ intensity, which is where that inversion came from.
 
 The visible sky comes from `shaders/atmosphere.inc` via `sky.frag`;
 `atmSkyPalette` is the place. To replace it wholesale, swap the sky shaders
-through `renderer.WithShaders`.
+through `glyphengine.WithShaders` from `glyph.New`, or `renderer.WithShaders` if
+you drive the renderer directly. See
+[`game-loop.md`](game-loop.md#replacing-an-engine-shader).
 
 The clear colour behind it is `Environment.ClearColor`, and is only seen when
 `Sky` is nil — the dome is opaque and drawn first.

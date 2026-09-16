@@ -287,6 +287,14 @@ func WithShaders(set ShaderSet) Option {
 	return func(r *Renderer) { r.shaders = set }
 }
 
+// Shaders returns the set the renderer builds its pipelines from, as last set
+// by WithShaders and filled in from the embedded defaults. Exposed for the same
+// reason Bloom and Tonemap are: so a harness can see what is actually in effect
+// rather than assuming the option it passed arrived.
+func (r *Renderer) Shaders() ShaderSet {
+	return r.shaders
+}
+
 // WithMSAASamples requests an MSAA sample count (1, 2, 4, or 8). Invalid
 // values are ignored; the value is clamped to what the device supports for
 // both color and depth once the physical device is selected.
