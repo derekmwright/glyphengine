@@ -176,7 +176,7 @@ func createNonLitPipelineLayout(deviceDriver core1_0.DeviceDriver, texSetLayout 
 // function that had to agree on reverse-Z, culling, and the push constant range.
 // They are one pipeline with a different material concept plugged into set 0, and
 // a fourth copy is how one of them quietly ends up with the wrong compare op.
-func createLitVariantPipeline(deviceDriver core1_0.DeviceDriver, vertSpv, fragSpv []byte, label string, renderPass core1_0.RenderPass, extent core1_0.Extent2D, set0Layout, shadowSetLayout core1_0.DescriptorSetLayout, samples core1_0.SampleCountFlags, cull core1_0.CullModeFlags) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
+func createLitVariantPipeline(deviceDriver core1_0.DeviceDriver, vertSpv, fragSpv []byte, label string, renderPass core1_0.RenderPass, extent core1_0.Extent2D, set0Layout, shadowSetLayout core1_0.DescriptorSetLayout, samples core1_0.SampleCountFlags, cull core1_0.CullModeFlags, blend bool) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
 		Code: bytesToUint32Slice(vertSpv),
 	})
@@ -208,6 +208,34 @@ func createLitVariantPipeline(deviceDriver core1_0.DeviceDriver, vertSpv, fragSp
 		return core1_0.Pipeline{}, core1_0.PipelineLayout{}, err
 	}
 
+	// Opaque writes depth and does not blend. Translucent takes the water
+	// pipeline's state, which is the one already proven in this render pass:
+	// depth still tested, so a ghost behind a hill stays behind it, but not
+	// written, so two translucent surfaces do not fight over which one exists
+	// and the opaque depth every later pass reads stays the opaque depth.
+	depthState := &core1_0.PipelineDepthStencilStateCreateInfo{
+		DepthTestEnable:  true,
+		DepthWriteEnable: !blend,
+		DepthCompareOp:   core1_0.CompareOpGreater,
+	}
+	const writeAll = core1_0.ColorComponentRed | core1_0.ColorComponentGreen | core1_0.ColorComponentBlue | core1_0.ColorComponentAlpha
+	attachment := core1_0.PipelineColorBlendAttachmentState{ColorWriteMask: writeAll}
+	if blend {
+		attachment = core1_0.PipelineColorBlendAttachmentState{
+			ColorWriteMask:      writeAll,
+			BlendEnabled:        true,
+			SrcColorBlendFactor: core1_0.BlendFactorSrcAlpha,
+			DstColorBlendFactor: core1_0.BlendFactorOneMinusSrcAlpha,
+			ColorBlendOp:        core1_0.BlendOpAdd,
+			SrcAlphaBlendFactor: core1_0.BlendFactorOne,
+			DstAlphaBlendFactor: core1_0.BlendFactorZero,
+			AlphaBlendOp:        core1_0.BlendOpAdd,
+		}
+	}
+	blendState := &core1_0.PipelineColorBlendStateCreateInfo{
+		Attachments: []core1_0.PipelineColorBlendAttachmentState{attachment},
+	}
+
 	pipelines, _, err := deviceDriver.CreateGraphicsPipelines(nil, nil, core1_0.GraphicsPipelineCreateInfo{
 		Stages: []core1_0.PipelineShaderStageCreateInfo{
 			{Stage: core1_0.StageVertex, Module: vertModule, Name: "main"},
@@ -233,19 +261,8 @@ func createLitVariantPipeline(deviceDriver core1_0.DeviceDriver, vertSpv, fragSp
 		MultisampleState: &core1_0.PipelineMultisampleStateCreateInfo{
 			RasterizationSamples: samples,
 		},
-		DepthStencilState: &core1_0.PipelineDepthStencilStateCreateInfo{
-			DepthTestEnable:  true,
-			DepthWriteEnable: true,
-			DepthCompareOp:   core1_0.CompareOpGreater,
-		},
-		ColorBlendState: &core1_0.PipelineColorBlendStateCreateInfo{
-			Attachments: []core1_0.PipelineColorBlendAttachmentState{
-				{
-					ColorWriteMask: core1_0.ColorComponentRed | core1_0.ColorComponentGreen | core1_0.ColorComponentBlue | core1_0.ColorComponentAlpha,
-					BlendEnabled:   false,
-				},
-			},
-		},
+		DepthStencilState: depthState,
+		ColorBlendState:   blendState,
 		DynamicState: &core1_0.PipelineDynamicStateCreateInfo{
 			DynamicStates: []core1_0.DynamicState{
 				core1_0.DynamicStateViewport,
@@ -274,7 +291,7 @@ func createGraphicsPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, ren
 		cull = cullMode[0]
 	}
 	return createLitVariantPipeline(deviceDriver, sh.LitVert, sh.LitFrag, "Graphics",
-		renderPass, extent, texSetLayout, shadowSetLayout, samples, cull)
+		renderPass, extent, texSetLayout, shadowSetLayout, samples, cull, false)
 }
 
 // createTerrainPipeline creates the terrain splat pipeline: same vertex stage,
@@ -283,7 +300,7 @@ func createGraphicsPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, ren
 // material (4 samplers), set 1 = shadow.
 func createTerrainPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, extent core1_0.Extent2D, terrainSetLayout core1_0.DescriptorSetLayout, shadowSetLayout core1_0.DescriptorSetLayout, samples core1_0.SampleCountFlags) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
 	return createLitVariantPipeline(deviceDriver, sh.LitVert, sh.TerrainFrag, "Terrain",
-		renderPass, extent, terrainSetLayout, shadowSetLayout, samples, core1_0.CullModeBack)
+		renderPass, extent, terrainSetLayout, shadowSetLayout, samples, core1_0.CullModeBack, false)
 }
 
 // createMaterialPipeline creates the material pipeline: the lit path with normal,
@@ -295,7 +312,30 @@ func createMaterialPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, ren
 		cull = cullMode[0]
 	}
 	return createLitVariantPipeline(deviceDriver, sh.LitVert, sh.LitMaterialFrag, "Material",
-		renderPass, extent, materialSetLayout, shadowSetLayout, samples, cull)
+		renderPass, extent, materialSetLayout, shadowSetLayout, samples, cull, false)
+}
+
+// createTranslucentPipeline is the lit pipeline with the water pipeline's depth
+// and blend state: the fourth lit variant.
+//
+// Same shaders and the same layout as the opaque lit path, so a translucent
+// draw is lit, fogged and shadow-receiving exactly as it would be at full
+// opacity. The only differences are that lit.frag writes its alpha from
+// sunDir.w rather than 1, and that this pipeline blends the result.
+//
+// A double-sided twin exists for the same reason the opaque path has one:
+// DoubleSided is a component a game can already put on an entity, and a
+// translucent pipeline that ignored it would cull the back faces of a glass box
+// and leave nothing where its far wall should be.
+func createTranslucentPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, extent core1_0.Extent2D, texSetLayout core1_0.DescriptorSetLayout, shadowSetLayout core1_0.DescriptorSetLayout, samples core1_0.SampleCountFlags, cullMode ...core1_0.CullModeFlags) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
+	cull := core1_0.CullModeBack
+	label := "Translucent"
+	if len(cullMode) > 0 {
+		cull = cullMode[0]
+		label = "Translucent double-sided"
+	}
+	return createLitVariantPipeline(deviceDriver, sh.LitVert, sh.LitFrag, label,
+		renderPass, extent, texSetLayout, shadowSetLayout, samples, cull, true)
 }
 
 // createOverlayPipeline creates a pipeline for HUD/overlay geometry with no

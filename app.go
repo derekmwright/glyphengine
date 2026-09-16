@@ -1183,17 +1183,39 @@ func (e *Engine) buildDrawList(vp mgl32.Mat4, shadowEnabled bool, lightVP mgl32.
 			}
 		}
 
+		// Translucency. Alpha at or below zero means the entity has been faded
+		// all the way out, which is Hidden by another name -- dropping it here
+		// costs a draw call rather than blending a fully transparent object
+		// over the frame. At or above one it falls through to the opaque path,
+		// so a fade-in can run to 1 and get the cheaper pipeline back without
+		// the game special-casing the last frame.
+		var alpha float32
+		if tr, ok := c.Translucent.Get(entity); ok {
+			if tr.Alpha <= 0 {
+				return
+			}
+			if tr.Alpha < 1 {
+				alpha = tr.Alpha
+			}
+		}
+
 		draws = append(draws, renderer.RenderObject{
-			Mesh:         mesh,
-			Texture:      tex,
-			MVP:          vp.Mul4(model),
-			Model:        model,
-			Color:        color,
-			Metallic:     mr.Metallic,
-			Roughness:    mr.Roughness,
-			Emissive:     c.Emissive.Has(entity),
-			DoubleSided:  c.DoubleSided.Has(entity),
-			NoCastShadow: c.NoCastShadow.Has(entity),
+			Mesh:        mesh,
+			Texture:     tex,
+			MVP:         vp.Mul4(model),
+			Model:       model,
+			Color:       color,
+			Metallic:    mr.Metallic,
+			Roughness:   mr.Roughness,
+			Emissive:    c.Emissive.Has(entity),
+			Alpha:       alpha,
+			DoubleSided: c.DoubleSided.Has(entity),
+			// A translucent object throwing a solid shadow is what turns a
+			// placement preview back into a building, so the decision is made
+			// here where the draw is built rather than discovered in a shader.
+			// RenderObject.IsTranslucent decides what counts, so this cannot
+			// drift from what the blended pass actually draws.
+			NoCastShadow: c.NoCastShadow.Has(entity) || alpha > 0,
 			ShadowOnly:   shadowOnly,
 			Joints:       joints,
 			TerrainMat:   terrainMat,
@@ -1202,10 +1224,41 @@ func (e *Engine) buildDrawList(vp mgl32.Mat4, shadowEnabled bool, lightVP mgl32.
 		})
 	})
 
-	// Group by pipeline variant then texture so command recording does far
-	// fewer pipeline binds and descriptor switches. All lit geometry is opaque
-	// and depth-tested, so draw order does not affect the image.
+	// Opaque geometry groups by pipeline variant then texture, so command
+	// recording does far fewer pipeline binds and descriptor switches. It is
+	// all depth-tested, so its draw order does not affect the image.
+	//
+	// Translucent geometry sorts after all of it, and within itself back to
+	// front by distance from the eye. That ordering *is* the image: blending is
+	// not commutative, so two overlapping ghosts drawn the wrong way round
+	// composite the wrong colours. It is redone every frame because it depends
+	// on where the camera is, not on what the scene contains.
+	//
+	// ViewDepth is recomputed on each comparison rather than cached in a
+	// parallel slice. The translucent subset is the handful of ghosts,
+	// indicators and panes a frame has, so the sort is short; precompute it if
+	// that ever stops being true.
+	eye := [3]float32{e.cameraEye.X(), e.cameraEye.Y(), e.cameraEye.Z()}
 	slices.SortFunc(draws, func(a, b renderer.RenderObject) int {
+		at, bt := a.IsTranslucent(), b.IsTranslucent()
+		if at != bt {
+			if at {
+				return 1
+			}
+			return -1
+		}
+		if at {
+			// Farther first.
+			da, db := a.ViewDepth(eye), b.ViewDepth(eye)
+			switch {
+			case da > db:
+				return -1
+			case da < db:
+				return 1
+			default:
+				return 0
+			}
+		}
 		ka, kb := a.SortKey(), b.SortKey()
 		switch {
 		case ka < kb:
