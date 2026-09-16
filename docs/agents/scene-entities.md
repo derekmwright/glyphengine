@@ -29,7 +29,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-07-28
+verified: 2026-09-16
 ---
 
 # Build a scene from entities and components
@@ -66,7 +66,7 @@ spatial queries, draw-list building, and animation sampling.
 |---|---|
 | Physics & spatial | `Transform`, `PrevTransform`, `Velocity`, `Collider`, `ConvexHullCollider`, `CharacterController`, `Static` |
 | Animation & rendering | `AnimationState`, `SkeletonRef`, `MeshRef`, `MaterialRef`, `Color` |
-| Render flags | `Hidden`, `Highlighted`, `DoubleSided`, `Emissive`, `NoCastShadow` |
+| Render flags | `Hidden`, `Highlighted`, `DoubleSided`, `Emissive`, `NoCastShadow`, `Translucent` |
 
 Your components go in **your own struct**, registered on the same `World`:
 

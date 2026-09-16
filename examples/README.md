@@ -26,6 +26,7 @@ Each is a complete, self-contained `main()` — copy one and start editing.
 | 15 | `15-kitchen-sink` | Everything at once: character running over lit terrain, through grass, with a text overlay | Kenney + Quaternius CC0, Go Regular |
 | 16 | `16-materials` | Normal, metallic-roughness, occlusion and emissive maps, one added per panel; the emissive one emits above 1 and drives the bloom | none (all five generated at startup) |
 | 17 | `17-input` | Named actions across keyboard, mouse and gamepad, with a live device readout and runtime rebinding | none |
+| 18 | `18-translucent` | Blended world geometry: a placement ghost over solid buildings, and overlapping glass panes that prove the back-to-front sort | none |
 
 More land as the extraction proceeds — glTF loading, skinned animation,
 shadows, MSDF text, YAML UI, audio, and particles. Numbering has gaps on

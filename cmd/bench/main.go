@@ -53,6 +53,7 @@ var scenes = []scene{
 	{"lights", "11-lights", []string{"-frames", "200"}, "one shadowed point light plus fills"},
 	{"particles", "12-particles", []string{"-frames", "200"}, "three additive emitters"},
 	{"materials", "16-materials", []string{"-frames", "200"}, "the material pipeline"},
+	{"translucent", "18-translucent", []string{"-frames", "200"}, "the blended pass and its sort"},
 	{"kitchensink", "15-kitchen-sink", []string{"-demo", "-frames", "240"}, "everything at once"},
 }
 

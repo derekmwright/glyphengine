@@ -99,6 +99,33 @@ type Highlighted struct{}
 // Hidden is a tag component that prevents an entity from being rendered.
 type Hidden struct{}
 
+// Translucent draws an entity blended over the scene instead of opaque.
+//
+// It is a component rather than a field on MeshRef because MeshRef's zero value
+// has to stay opaque. An Alpha field there would make every existing MeshRef
+// read as fully transparent unless zero were special-cased to mean one, and
+// "0 means opaque except when it means invisible" is the kind of quiet
+// surprise that costs an afternoon.
+//
+//	ghost := e.Spawn()
+//	e.C.Transform.Set(ghost, &glyph.Transform{Position: at, Scale: one})
+//	e.C.MeshRef.Set(ghost, &glyph.MeshRef{Mesh: dome})
+//	e.C.Translucent.Set(ghost, &glyph.Translucent{Alpha: 0.4})
+//
+// Translucent entities are drawn after everything opaque, back to front, and do
+// not cast shadows — a placement preview that threw a solid shadow would read as
+// a real building. They compose with Emissive and DoubleSided.
+//
+// Not supported on entities that also carry a MaterialRef.PBR or a skinned
+// SkeletonRef: those route through their own pipelines, which have no blended
+// variant, so the engine leaves such an entity opaque rather than silently
+// dropping its maps or its skinning. See docs/agents/translucency.md.
+type Translucent struct {
+	// Alpha is opacity from 0 to 1. At or below 0 the entity is not drawn at
+	// all; at or above 1 it is drawn opaque, through the ordinary lit path.
+	Alpha float32
+}
+
 // NoCastShadow is a tag component that excludes an entity from the shadow pass.
 // The entity still receives shadows but does not cast them.
 type NoCastShadow struct{}
@@ -144,6 +171,7 @@ type Components struct {
 	Highlighted  *ecs.Store[Highlighted]
 	DoubleSided  *ecs.Store[DoubleSided]
 	Emissive     *ecs.Store[Emissive]
+	Translucent  *ecs.Store[Translucent]
 	NoCastShadow *ecs.Store[NoCastShadow]
 }
 
@@ -168,6 +196,7 @@ func NewComponents(w *ecs.World) *Components {
 		Highlighted:         ecs.NewStore[Highlighted](w),
 		DoubleSided:         ecs.NewStore[DoubleSided](w),
 		Emissive:            ecs.NewStore[Emissive](w),
+		Translucent:         ecs.NewStore[Translucent](w),
 		NoCastShadow:        ecs.NewStore[NoCastShadow](w),
 	}
 }

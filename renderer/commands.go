@@ -97,6 +97,7 @@ type RenderObject struct {
 	Metallic     float32          // 0 = dielectric, 1 = metal
 	Roughness    float32          // 0 = mirror, 1 = matte (default 0.5)
 	Emissive     bool             // bypass lighting in lit shader (tint.w = 1.0)
+	Alpha        float32          // per-object opacity; 0 means opaque (see IsTranslucent)
 	DoubleSided  bool             // render both front and back faces (no culling)
 	NoCastShadow bool             // skip this object in shadow pass (receives shadows only)
 	ShadowOnly   bool             // in light frustum but not camera frustum — shadow pass only
@@ -123,6 +124,48 @@ type WaterParams struct {
 	AbsorptionDepth float32
 	RefractStrength float32
 	WaveNoise       float32
+}
+
+// IsTranslucent reports whether this draw goes through the blended pipeline
+// rather than the opaque one.
+//
+// Zero Alpha means opaque, the same convention Roughness uses for "unset", so a
+// RenderObject built without thinking about translucency renders exactly as it
+// always has. One means opaque too: a game fading something in can run Alpha to
+// 1 and get the cheaper path back without special-casing it.
+//
+// The blended variants are built from lit.vert and lit.frag, so only the plain
+// lit path can take them. Terrain, water, material and skinned draws each have
+// their own pipeline with no blended twin, and they stay opaque rather than
+// being rerouted -- rerouting would silently drop the splat blend, the
+// refraction, the normal and occlusion maps, or the skinning, which is a worse
+// outcome than an object that is not as see-through as asked for. The engine
+// documents the combination; see docs/agents/translucency.md.
+//
+// This is deliberately one function rather than a condition written out in both
+// buildDrawList and the recorder: the two have to agree exactly, or a draw gets
+// skipped by the opaque loop and skipped again by the blended one and simply
+// vanishes.
+func (d *RenderObject) IsTranslucent() bool {
+	if d.Alpha <= 0 || d.Alpha >= 1 {
+		return false
+	}
+	return d.TerrainMat == nil && d.Water == nil && d.Material == nil && d.Joints == nil
+}
+
+// ViewDepth returns the squared distance from eye to this draw's world-space
+// bound centre, which is what the blended pass sorts on.
+//
+// Squared, because a back-to-front ordering does not need the square root and
+// the sort calls this on every comparison.
+func (d *RenderObject) ViewDepth(eye [3]float32) float32 {
+	m := &d.Model
+	c := d.Mesh.BoundCenter
+	cx := m[0]*c[0] + m[4]*c[1] + m[8]*c[2] + m[12]
+	cy := m[1]*c[0] + m[5]*c[1] + m[9]*c[2] + m[13]
+	cz := m[2]*c[0] + m[6]*c[1] + m[10]*c[2] + m[14]
+	dx, dy, dz := cx-eye[0], cy-eye[1], cz-eye[2]
+	return dx*dx + dy*dy + dz*dz
 }
 
 // SortKey groups draws to minimize state switches in the main pass: pipeline
@@ -362,6 +405,8 @@ func recordCommandBuffer(
 	framebuffer core1_0.Framebuffer,
 	pipeline core1_0.Pipeline,
 	litDoubleSidedPipeline core1_0.Pipeline,
+	translucentPipeline core1_0.Pipeline,
+	translucentDoubleSidedPipeline core1_0.Pipeline,
 	overlayPipeline core1_0.Pipeline,
 	skyPipeline core1_0.Pipeline,
 	starsPipeline core1_0.Pipeline,
@@ -469,6 +514,14 @@ func recordCommandBuffer(
 				d := &draws[i]
 				if d.Emissive || d.NoCastShadow || d.Water != nil {
 					continue // skip emissive (celestial bodies) and non-shadow-casters (ground)
+				}
+				// A translucent object casting a solid shadow is the giveaway
+				// that turns a placement preview back into a building. The
+				// engine also sets NoCastShadow on these where the draw is
+				// built, so this is the guard for a game driving the renderer
+				// directly.
+				if d.IsTranslucent() {
+					continue
 				}
 
 				// Cull casters outside this cascade's frustum.
@@ -739,6 +792,9 @@ func recordCommandBuffer(
 		}
 		if d.Water != nil {
 			continue // drawn by the water pipeline, after everything opaque
+		}
+		if d.IsTranslucent() {
+			continue // drawn blended, after the sky; see recordTranslucent
 		}
 		skinned := d.Joints != nil
 		material := d.Material != nil
@@ -1147,6 +1203,12 @@ func recordCommandBuffer(
 	}
 
 	timer.end(deviceDriver, cmdBuf, frame, PassSky)
+
+	timer.begin(deviceDriver, cmdBuf, frame, PassTranslucent)
+	recordTranslucent(deviceDriver, stats, cmdBuf, translucentPipeline, translucentDoubleSidedPipeline,
+		litPipelineLayout, viewport, scissor, draws, lighting, fallbackTexture, shadowDS)
+	timer.end(deviceDriver, cmdBuf, frame, PassTranslucent)
+
 	timer.begin(deviceDriver, cmdBuf, frame, PassParticles)
 	// Draw instanced billboard particles (additive blend, depth test only)
 	if particles != nil && particles.InstanceCount > 0 {
