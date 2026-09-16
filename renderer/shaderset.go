@@ -25,6 +25,7 @@ type ShaderSet struct {
 	TriangleVert, TriangleFrag   []byte // diagnostic tri-color triangle
 	MeshVert, MeshFrag           []byte // unlit textured mesh
 	LitVert, LitFrag             []byte // lit static geometry
+	LitInstancedVert             []byte // lit, model matrix per instance (shares LitFrag)
 	LitMaterialFrag              []byte // lit + normal/roughness/AO maps (shares LitVert)
 	TerrainFrag                  []byte // terrain splat blend (shares LitVert)
 	SkinnedLitVert               []byte // GPU-skinned lit geometry
@@ -32,6 +33,7 @@ type ShaderSet struct {
 	SkinnedLitMaterialFrag       []byte // skinned + material maps (shares SkinnedLitVert)
 	ShadowVert, ShadowFrag       []byte // depth-only shadow pass
 	ShadowSkinnedVert            []byte // depth-only, skinned
+	ShadowInstancedVert          []byte // depth-only, model matrix per instance
 	SkyVert, SkyFrag             []byte // sky gradient
 	StarsVert, StarsFrag         []byte // star field
 	GrassVert, GrassFrag         []byte // instanced grass
@@ -53,21 +55,23 @@ type ShaderSet struct {
 // the stages you care about, and pass the result to WithShaders.
 func DefaultShaders() ShaderSet {
 	return ShaderSet{
-		TriangleVert:    shaders.TriangleVertSpv,
-		TriangleFrag:    shaders.TriangleFragSpv,
-		MeshVert:        shaders.MeshVertSpv,
-		MeshFrag:        shaders.MeshFragSpv,
-		LitVert:         shaders.LitVertSpv,
-		LitFrag:         shaders.LitFragSpv,
-		LitMaterialFrag: shaders.LitMaterialFragSpv,
-		TerrainFrag:     shaders.TerrainFragSpv,
-		SkinnedLitVert:  shaders.SkinnedLitVertSpv,
-		SkinnedLitFrag:  shaders.SkinnedLitFragSpv,
+		TriangleVert:     shaders.TriangleVertSpv,
+		TriangleFrag:     shaders.TriangleFragSpv,
+		MeshVert:         shaders.MeshVertSpv,
+		MeshFrag:         shaders.MeshFragSpv,
+		LitVert:          shaders.LitVertSpv,
+		LitInstancedVert: shaders.LitInstancedVertSpv,
+		LitFrag:          shaders.LitFragSpv,
+		LitMaterialFrag:  shaders.LitMaterialFragSpv,
+		TerrainFrag:      shaders.TerrainFragSpv,
+		SkinnedLitVert:   shaders.SkinnedLitVertSpv,
+		SkinnedLitFrag:   shaders.SkinnedLitFragSpv,
 
 		SkinnedLitMaterialFrag: shaders.SkinnedLitMaterialFragSpv,
 		ShadowVert:             shaders.ShadowVertSpv,
 		ShadowFrag:             shaders.ShadowFragSpv,
 		ShadowSkinnedVert:      shaders.ShadowSkinnedVertSpv,
+		ShadowInstancedVert:    shaders.ShadowInstancedVertSpv,
 		SkyVert:                shaders.SkyVertSpv,
 		SkyFrag:                shaders.SkyFragSpv,
 		StarsVert:              shaders.StarsVertSpv,
@@ -107,12 +111,14 @@ func (s ShaderSet) withDefaults() ShaderSet {
 		{&s.TriangleVert, d.TriangleVert}, {&s.TriangleFrag, d.TriangleFrag},
 		{&s.MeshVert, d.MeshVert}, {&s.MeshFrag, d.MeshFrag},
 		{&s.LitVert, d.LitVert}, {&s.LitFrag, d.LitFrag},
+		{&s.LitInstancedVert, d.LitInstancedVert},
 		{&s.LitMaterialFrag, d.LitMaterialFrag},
 		{&s.TerrainFrag, d.TerrainFrag},
 		{&s.SkinnedLitVert, d.SkinnedLitVert}, {&s.SkinnedLitFrag, d.SkinnedLitFrag},
 		{&s.SkinnedLitMaterialFrag, d.SkinnedLitMaterialFrag},
 		{&s.ShadowVert, d.ShadowVert}, {&s.ShadowFrag, d.ShadowFrag},
 		{&s.ShadowSkinnedVert, d.ShadowSkinnedVert},
+		{&s.ShadowInstancedVert, d.ShadowInstancedVert},
 		{&s.SkyVert, d.SkyVert}, {&s.SkyFrag, d.SkyFrag},
 		{&s.StarsVert, d.StarsVert}, {&s.StarsFrag, d.StarsFrag},
 		{&s.GrassVert, d.GrassVert}, {&s.GrassFrag, d.GrassFrag},

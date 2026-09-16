@@ -67,6 +67,7 @@ spatial queries, draw-list building, and animation sampling.
 | Physics & spatial | `Transform`, `PrevTransform`, `Velocity`, `Collider`, `ConvexHullCollider`, `CharacterController`, `Static` |
 | Animation & rendering | `AnimationState`, `SkeletonRef`, `MeshRef`, `MaterialRef`, `Color` |
 | Render flags | `Hidden`, `Highlighted`, `DoubleSided`, `Emissive`, `NoCastShadow`, `Translucent` |
+| Instancing | `InstancedMesh` — one mesh at many placements, one draw call |
 
 Your components go in **your own struct**, registered on the same `World`:
 

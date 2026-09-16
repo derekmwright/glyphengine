@@ -17,6 +17,9 @@ var MeshFragSpv []byte
 //go:embed lit.vert.spv
 var LitVertSpv []byte
 
+//go:embed lit_instanced.vert.spv
+var LitInstancedVertSpv []byte
+
 //go:embed lit.frag.spv
 var LitFragSpv []byte
 
@@ -97,6 +100,9 @@ var ParticleFragSpv []byte
 
 //go:embed shadow.vert.spv
 var ShadowVertSpv []byte
+
+//go:embed shadow_instanced.vert.spv
+var ShadowInstancedVertSpv []byte
 
 //go:embed shadow_skinned.vert.spv
 var ShadowSkinnedVertSpv []byte

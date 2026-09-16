@@ -1096,6 +1096,12 @@ func (e *Engine) renderFrame() {
 	}
 }
 
+// identityModel fills the Model slot of an instanced draw. Nothing reads it --
+// lit_instanced.vert takes the model from its per-instance attribute and the
+// fragment stage never read pc.model -- but RenderObject.ViewDepth does, so a
+// zero matrix would put every set at the origin if one ever needed sorting.
+var identityModel = [16]float32{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1}
+
 // buildDrawList turns every entity with Transform+MeshRef into a RenderObject
 // with a combined view-projection-model matrix.
 //
@@ -1221,6 +1227,62 @@ func (e *Engine) buildDrawList(vp mgl32.Mat4, shadowEnabled bool, lightVP mgl32.
 			TerrainMat:   terrainMat,
 			Water:        water,
 			Material:     pbr,
+		})
+	})
+
+	// Instance sets. They have no Transform -- every placement carries its own
+	// model matrix -- so they are a second query rather than a branch inside the
+	// first, and they emit one RenderObject each however many placements they
+	// hold.
+	//
+	// Culling is against the set's whole bound. A set with one dome on screen
+	// therefore draws all of them, which is the trade this feature makes: the
+	// alternative is culling per placement and re-uploading the visible subset
+	// every frame, which is the CPU cost the instancing exists to remove. The
+	// GPU cost of the off-screen placements is vertex shading a few hundred
+	// thousand triangles, which is not where frames go. See
+	// docs/agents/instancing.md for the numbers.
+	c.InstancedMesh.Each(func(entity ecs.Entity, im *InstancedMesh) {
+		if im.Set == nil || im.Set.Count() == 0 || c.Hidden.Has(entity) {
+			return
+		}
+
+		center, radius := im.Set.Bounds()
+		shadowOnly := false
+		if radius > 0 && !cameraFrustum.SphereInFrustum(center[0], center[1], center[2], radius) {
+			if !shadowEnabled || !lightFrustum.SphereInFrustum(center[0], center[1], center[2], radius) {
+				return
+			}
+			shadowOnly = true
+		}
+
+		color := [3]float32{1, 1, 1}
+		if col, ok := c.Color.Get(entity); ok {
+			color = [3]float32{col.R, col.G, col.B}
+		}
+
+		var tex *renderer.Texture
+		if mat, ok := c.MaterialRef.Get(entity); ok {
+			tex = mat.Texture
+		}
+
+		var roughness, metallic float32
+		if mr, ok := c.MeshRef.Get(entity); ok {
+			roughness, metallic = mr.Roughness, mr.Metallic
+		}
+
+		draws = append(draws, renderer.RenderObject{
+			Mesh:         im.Set.Mesh,
+			Instances:    im.Set,
+			Texture:      tex,
+			Model:        identityModel,
+			Color:        color,
+			Roughness:    roughness,
+			Metallic:     metallic,
+			Emissive:     c.Emissive.Has(entity),
+			DoubleSided:  c.DoubleSided.Has(entity),
+			NoCastShadow: c.NoCastShadow.Has(entity),
+			ShadowOnly:   shadowOnly,
 		})
 	})
 
