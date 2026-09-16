@@ -158,7 +158,8 @@ type Environment struct {
 //
 // This is about what gets drawn. The colours are derived from sun elevation in
 // shaders/atmosphere.inc; to change those, replace the sky shaders through
-// renderer.WithShaders.
+// glyphengine.WithShaders, or renderer.WithShaders if you drive the renderer
+// directly.
 type Sky struct {
 	// Stars fade in as night falls.
 	Stars bool

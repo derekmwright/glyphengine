@@ -26,7 +26,7 @@ requires: []
 assets: none
 example: examples/09-water
 run: go run ./09-water
-verified: 2026-08-06
+verified: 2026-09-16
 ---
 
 # Environment
@@ -182,7 +182,9 @@ scene.Env = &weather{}
 
 **Values and pixels are separate concerns.** `EnvironmentSource` decides the
 numbers. To change how the sky is *drawn*, replace `sky.frag` through
-`renderer.WithShaders`. Neither forces the other.
+`glyphengine.WithShaders` — or `renderer.WithShaders` if you drive the renderer
+directly. Neither forces the other. See
+[`game-loop.md`](game-loop.md#replacing-an-engine-shader).
 
 ## SunDir is not the sun
 
