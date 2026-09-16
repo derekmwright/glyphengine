@@ -99,6 +99,34 @@ type Highlighted struct{}
 // Hidden is a tag component that prevents an entity from being rendered.
 type Hidden struct{}
 
+// InstancedMesh draws one mesh at many placements in a single draw call.
+//
+// It is for the case a builder-style game hits early: 900 identical habitat
+// domes are 900 draw calls of a 200-triangle mesh on the ordinary MeshRef path
+// — no GPU cost worth the name, and all of the cost in CPU-side command
+// recording. One InstancedMesh is one CmdDrawIndexed, one push-constant upload
+// and one frustum test, however many placements it holds.
+//
+//	set, err := e.Renderer().CreateInstanceSet(domeMesh, 1000, placements)
+//	colony := e.Spawn()
+//	e.C.InstancedMesh.Set(colony, &glyph.InstancedMesh{Set: set})
+//
+// The entity needs no Transform: every placement carries its own model matrix,
+// which is what separates this from merging props into one mesh per chunk. Add
+// a placement with Renderer.UpdateInstanceSet rather than rebuilding geometry.
+//
+// Color on the entity tints the whole set; MeshInstance.Tint tints one
+// placement. Emissive, DoubleSided and NoCastShadow all apply to the set as a
+// whole. Translucent does not — there is no blended instanced pipeline, and the
+// set stays opaque rather than silently losing its placements.
+//
+// Culling is per set, not per placement: a set with one dome on screen draws
+// all of them. See docs/agents/instancing.md for why, and for the measurement
+// that says where this starts to pay.
+type InstancedMesh struct {
+	Set *renderer.InstanceSet
+}
+
 // Translucent draws an entity blended over the scene instead of opaque.
 //
 // It is a component rather than a field on MeshRef because MeshRef's zero value
@@ -167,12 +195,13 @@ type Components struct {
 	Color          *ecs.Store[Color]
 
 	// Render flags
-	Hidden       *ecs.Store[Hidden]
-	Highlighted  *ecs.Store[Highlighted]
-	DoubleSided  *ecs.Store[DoubleSided]
-	Emissive     *ecs.Store[Emissive]
-	Translucent  *ecs.Store[Translucent]
-	NoCastShadow *ecs.Store[NoCastShadow]
+	Hidden        *ecs.Store[Hidden]
+	Highlighted   *ecs.Store[Highlighted]
+	DoubleSided   *ecs.Store[DoubleSided]
+	Emissive      *ecs.Store[Emissive]
+	Translucent   *ecs.Store[Translucent]
+	InstancedMesh *ecs.Store[InstancedMesh]
+	NoCastShadow  *ecs.Store[NoCastShadow]
 }
 
 // NewComponents creates the engine component stores and registers them with
@@ -197,6 +226,7 @@ func NewComponents(w *ecs.World) *Components {
 		DoubleSided:         ecs.NewStore[DoubleSided](w),
 		Emissive:            ecs.NewStore[Emissive](w),
 		Translucent:         ecs.NewStore[Translucent](w),
+		InstancedMesh:       ecs.NewStore[InstancedMesh](w),
 		NoCastShadow:        ecs.NewStore[NoCastShadow](w),
 	}
 }

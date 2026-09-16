@@ -98,6 +98,7 @@ type RenderObject struct {
 	Roughness    float32          // 0 = mirror, 1 = matte (default 0.5)
 	Emissive     bool             // bypass lighting in lit shader (tint.w = 1.0)
 	Alpha        float32          // per-object opacity; 0 means opaque (see IsTranslucent)
+	Instances    *InstanceSet     // non-nil = one instanced draw of the whole set
 	DoubleSided  bool             // render both front and back faces (no culling)
 	NoCastShadow bool             // skip this object in shadow pass (receives shadows only)
 	ShadowOnly   bool             // in light frustum but not camera frustum — shadow pass only
@@ -407,6 +408,8 @@ func recordCommandBuffer(
 	litDoubleSidedPipeline core1_0.Pipeline,
 	translucentPipeline core1_0.Pipeline,
 	translucentDoubleSidedPipeline core1_0.Pipeline,
+	instancedPipeline core1_0.Pipeline,
+	instancedDoubleSidedPipeline core1_0.Pipeline,
 	overlayPipeline core1_0.Pipeline,
 	skyPipeline core1_0.Pipeline,
 	starsPipeline core1_0.Pipeline,
@@ -515,6 +518,9 @@ func recordCommandBuffer(
 				if d.Emissive || d.NoCastShadow || d.Water != nil {
 					continue // skip emissive (celestial bodies) and non-shadow-casters (ground)
 				}
+				if d.Instances != nil {
+					continue // cast by recordInstancedShadow, below
+				}
 				// A translucent object casting a solid shadow is the giveaway
 				// that turns a placement preview back into a building. The
 				// engine also sets NoCastShadow on these where the draw is
@@ -567,6 +573,13 @@ func recordCommandBuffer(
 					deviceDriver.CmdDraw(cmdBuf, d.Mesh.VertexCount, 1, 0, 0)
 				}
 			}
+
+			// Instance sets, after the individual casters so the pipeline bind
+			// happens once rather than alternating with them.
+			var cvp [16]float32
+			copy(cvp[:], cascadeVP[:])
+			recordInstancedShadow(deviceDriver, stats, cmdBuf, shadow.instancedPipeline,
+				shadow.pipelineLayout, shadowViewport, shadowScissor, draws, cvp, cascadeFrustum)
 		}
 
 		deviceDriver.CmdEndRenderPass(cmdBuf)
@@ -796,6 +809,9 @@ func recordCommandBuffer(
 		if d.IsTranslucent() {
 			continue // drawn blended, after the sky; see recordTranslucent
 		}
+		if d.Instances != nil {
+			continue // one instanced draw, recorded by recordInstanced
+		}
 		skinned := d.Joints != nil
 		material := d.Material != nil
 
@@ -900,6 +916,11 @@ func recordCommandBuffer(
 			deviceDriver.CmdDraw(cmdBuf, d.Mesh.VertexCount, 1, 0, 0)
 		}
 	}
+
+	// Instance sets, inside the opaque pass so they depth-test against
+	// everything else exactly as individually drawn props would.
+	recordInstanced(deviceDriver, stats, cmdBuf, instancedPipeline, instancedDoubleSidedPipeline,
+		litPipelineLayout, viewport, scissor, draws, lighting, fallbackTexture, shadowDS)
 
 	timer.end(deviceDriver, cmdBuf, frame, PassOpaque)
 	timer.begin(deviceDriver, cmdBuf, frame, PassGrass)
