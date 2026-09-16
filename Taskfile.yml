@@ -262,6 +262,56 @@ tasks:
       - go run ./17-input -frames 60 -screenshot ../docs/images/17-input.png
       - go run ./15-kitchen-sink -demo -frames 260 -screenshot ../docs/images/15-kitchen-sink.png
 
+  hud:
+    desc: "Check that screen-space overlays survive the post-process chain"
+    dir: examples
+    cmds:
+      # Needs a GPU, so it sits with smoke, validate and determinism rather
+      # than in `task ci`.
+      #
+      # 09-water is the scene that catches this, because the failure needs both
+      # water and text in the same frame -- which is why neither `task smoke`
+      # nor `task validate` ever saw it. Overlays used to be recorded in the
+      # scene pass, so the HUD sat in the HDR image that water copies to refract
+      # through: the surface drew over text that writes no depth, and what came
+      # back was five lines missing outright and four more warped along the
+      # waves.
+      #
+      # -hud draws the same string on every line. Identical lines are the whole
+      # trick: a line over bright sky and a line over dark water are the same
+      # draw, so any difference in what survives between them is the renderer's,
+      # and hudcheck recovers per-line glyph coverage by differencing against the
+      # same frame with the HUD off. See cmd/hudcheck for the arithmetic.
+      - |
+        status=0
+        d=.hud
+        rm -rf $d && mkdir -p $d
+        shot() { GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./09-water -frames 90 -hud $1 -screenshot $d/$2.png $3 >/dev/null 2>&1; }
+        pair() {
+          name=$1; shift
+          shot 26 $name-hud "$*"
+          shot 0  $name-bare "$*"
+          if [ ! -s "$d/$name-hud.png" ] || [ ! -s "$d/$name-bare.png" ]; then
+            echo "$name: MISSING CAPTURE -- this gate proves nothing"
+            status=1
+            return
+          fi
+          echo "── $name ──"
+          go run ../cmd/hudcheck -a $d/$name-hud.png -b $d/$name-bare.png -lines 26 || status=1
+        }
+        # Stock scene: the text block crosses the waterline, which is the
+        # failure as reported.
+        pair water
+        # Bloom low enough that white text clears the threshold, and the camera
+        # pitched down so the sky does not blow out behind the text and take the
+        # measurement with it. This is the run that exercises the second half:
+        # overlays inside the scene target fed the bloom chain, so the HUD glowed
+        # into the frame around it. Before the move this pair reported 25 of 26
+        # lines lost and 74268 scene pixels perturbed.
+        pair bloom -pitch 0.45 -bloom 0.7 -bloomthreshold 0.5
+        rm -rf $d
+        exit $status
+
   bench:
     desc: Run the benchmark scenes and print CPU/GPU cost per pass
     cmds:

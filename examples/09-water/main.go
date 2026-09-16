@@ -17,6 +17,7 @@
 //	go run ./09-water              # windowed
 //	go run ./09-water -frames 200  # render 200 frames, then exit
 //	go run ./09-water -seed 3      # a different basin
+//	go run ./09-water -hud 26      # HUD lines across the waterline; see task hud
 //
 // WASD moves, mouse looks, Shift runs, Space jumps, R toggles refraction,
 // Escape releases the cursor.
@@ -58,6 +59,11 @@ const (
 	waterLevel = 3.0
 
 	playerHalfHeight = 0.9
+
+	// hudLine is what -hud repeats. Mixed case with ascenders, descenders and
+	// digits, so a row of it carries enough ink for a mean to be stable, and
+	// short enough at scale 20 to stay clear of the right edge at 1280.
+	hudLine = "HUD LEGIBILITY 0123456789 ABCDEFGHIJ abcdefghij"
 )
 
 type game struct {
@@ -79,6 +85,9 @@ type game struct {
 	yaw        float32
 	shafts     float32
 	pillars    bool
+	hud        int
+	bloom      float32
+	bloomThres float32
 }
 
 func (g *game) Init(e *glyph.Engine) error {
@@ -202,6 +211,12 @@ func (g *game) Init(e *glyph.Engine) error {
 	g.camera.EyeHeight = 0.7
 	g.camera.Yaw = g.yaw // 0 faces back toward the lake
 	g.camera.Pitch = g.pitch
+
+	// Off by default, so every other capture of this scene is unchanged.
+	if g.bloom > 0 {
+		e.Renderer().SetBloom(g.bloom, g.bloomThres, 0.2, 1.0)
+	}
+
 	e.Input().SetCursorLocked(true)
 
 	log.Println("09-water running. WASD moves, R toggles refraction, Escape releases the cursor.")
@@ -210,6 +225,15 @@ func (g *game) Init(e *glyph.Engine) error {
 
 func (g *game) Update(e *glyph.Engine, dt float32) {
 	in := e.Input()
+
+	// -hud draws a block of identical HUD lines down the frame, crossing the
+	// waterline. Every line is the same string on purpose: the lines are then
+	// interchangeable, so any difference in what reaches the screen between one
+	// row and the next is the renderer's doing and not the text's. `task hud`
+	// measures exactly that. See docs/agents/overlay-composite.md.
+	for i := 0; i < g.hud; i++ {
+		e.Debugf("%s", hudLine)
+	}
 
 	if in.KeyPressed(input.KeyEscape) {
 		if in.CursorLocked() {
@@ -395,6 +419,9 @@ func main() {
 	yaw := flag.Float64("yaw", 0, "initial camera yaw in radians")
 	shafts := flag.Float64("shafts", -1, "light shaft strength (0 disables; -1 keeps the default)")
 	pillars := flag.Bool("pillars", false, "spawn pillars between the spawn point and the setting sun")
+	hud := flag.Int("hud", 0, "draw N identical HUD lines down the frame, for the `task hud` legibility check")
+	bloom := flag.Float64("bloom", 0, "bloom intensity (0 disables)")
+	bloomThreshold := flag.Float64("bloomthreshold", 1.2, "luminance bloom starts above; bloom.md's starting point is 1.2")
 	tod := flag.Float64("time", -1, "freeze time of day in [0,1): 0=midnight, 0.25=sunrise, 0.5=noon, 0.75=sunset")
 	shot := flag.String("screenshot", "", "write a PNG of the last frame to this path")
 	flag.Parse()
@@ -419,7 +446,7 @@ func main() {
 		opts = append(opts, glyph.WithScreenshot(*shot))
 	}
 
-	e, err := glyph.New(&game{seed: *seed, refract: *refract, pitch: float32(*pitch), tod: float32(*tod), clouds: *clouds, stars: *stars, milkyway: *milkyway, band: *band, fogHeight: float32(*fogHeight), yaw: float32(*yaw), shafts: float32(*shafts), pillars: *pillars}, opts...)
+	e, err := glyph.New(&game{seed: *seed, refract: *refract, pitch: float32(*pitch), tod: float32(*tod), clouds: *clouds, stars: *stars, milkyway: *milkyway, band: *band, fogHeight: float32(*fogHeight), yaw: float32(*yaw), shafts: float32(*shafts), pillars: *pillars, hud: *hud, bloom: float32(*bloom), bloomThres: float32(*bloomThreshold)}, opts...)
 	if err != nil {
 		log.Fatalf("create engine: %v", err)
 	}

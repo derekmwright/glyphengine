@@ -1176,53 +1176,10 @@ func recordCommandBuffer(
 
 	timer.end(deviceDriver, cmdBuf, frame, PassParticles)
 	timer.begin(deviceDriver, cmdBuf, frame, PassOverlay)
-	// Draw UI panels (alpha blended, textured, 9-slice)
-	if len(uiOverlays) > 0 {
-		deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, uiPipeline)
-
-		for i := range uiOverlays {
-			d := &uiOverlays[i]
-			if d.Mesh.IndexCount == 0 && d.Mesh.VertexCount == 0 {
-				continue
-			}
-
-			tex := d.Texture
-			if tex == nil {
-				tex = fallbackTexture
-			}
-			deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, []core1_0.DescriptorSet{tex.DescriptorSet}, nil)
-			deviceDriver.CmdBindVertexBuffers(cmdBuf, 0, []core1_0.Buffer{d.Mesh.vertexBuffer}, []int{0})
-
-			var pc [64]float32
-			copy(pc[:16], d.MVP[:])
-			// model = identity
-			pc[16] = 1
-			pc[21] = 1
-			pc[26] = 1
-			pc[31] = 1
-			// tint.rgb = 1 (vertex color already tinted), tint.a = opacity
-			pc[32] = 1.0
-			pc[33] = 1.0
-			pc[34] = 1.0
-			pc[35] = d.Opacity
-			// sunDir.x reused as texture mode flag (0=panel 9-slice, 1=straight texture)
-			if d.TextureMode {
-				pc[36] = 1.0
-			}
-			pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
-			deviceDriver.CmdPushConstants(cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
-
-			stats.addDraw(1, d.Mesh.IndexCount, d.Mesh.VertexCount)
-			if d.Mesh.IndexCount > 0 {
-				deviceDriver.CmdBindIndexBuffer(cmdBuf, d.Mesh.indexBuffer, 0, d.Mesh.indexType)
-				deviceDriver.CmdDrawIndexed(cmdBuf, d.Mesh.IndexCount, 1, 0, 0, 0)
-			} else {
-				deviceDriver.CmdDraw(cmdBuf, d.Mesh.VertexCount, 1, 0, 0)
-			}
-		}
-	}
-
 	// Draw overlays (no depth test, no culling) — unlit path (bars, cooldowns)
+	//
+	// World space, so this one stays in the scene pass. The screen-space
+	// channels are composited after the tonemap instead; see recordUIComposite.
 	if len(overlays) > 0 {
 		deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, overlayPipeline)
 		deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, []core1_0.DescriptorSet{fallbackTexture.DescriptorSet}, nil)
@@ -1260,50 +1217,6 @@ func recordCommandBuffer(
 		}
 	}
 
-	// Draw MSDF text overlays (alpha blended, textured)
-	if len(msdfOverlays) > 0 {
-		deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, msdfPipeline)
-
-		for i := range msdfOverlays {
-			d := &msdfOverlays[i]
-			if d.Mesh.IndexCount == 0 && d.Mesh.VertexCount == 0 {
-				continue
-			}
-
-			// Bind the MSDF atlas texture descriptor set
-			tex := d.Texture
-			if tex == nil {
-				tex = fallbackTexture
-			}
-			deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, []core1_0.DescriptorSet{tex.DescriptorSet}, nil)
-			deviceDriver.CmdBindVertexBuffers(cmdBuf, 0, []core1_0.Buffer{d.Mesh.vertexBuffer}, []int{0})
-
-			// Push constants: MVP + identity model + tint(rgb=color, w=screenPxRange)
-			var pc [64]float32
-			copy(pc[:16], d.MVP[:])
-			// model = identity
-			pc[16] = 1
-			pc[21] = 1
-			pc[26] = 1
-			pc[31] = 1
-			// tint.rgb = 1 (per-vertex color handles text color), tint.w = screenPxRange
-			pc[32] = 1.0
-			pc[33] = 1.0
-			pc[34] = 1.0
-			pc[35] = d.Color[0] // screenPxRange
-			pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
-			deviceDriver.CmdPushConstants(cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
-
-			stats.addDraw(1, d.Mesh.IndexCount, d.Mesh.VertexCount)
-			if d.Mesh.IndexCount > 0 {
-				deviceDriver.CmdBindIndexBuffer(cmdBuf, d.Mesh.indexBuffer, 0, d.Mesh.indexType)
-				deviceDriver.CmdDrawIndexed(cmdBuf, d.Mesh.IndexCount, 1, 0, 0, 0)
-			} else {
-				deviceDriver.CmdDraw(cmdBuf, d.Mesh.VertexCount, 1, 0, 0)
-			}
-		}
-	}
-
 	deviceDriver.CmdEndRenderPass(cmdBuf)
 
 	// Water needs the finished opaque frame as a texture, so it runs in a
@@ -1327,11 +1240,15 @@ func recordCommandBuffer(
 	}
 	timer.end(deviceDriver, cmdBuf, frame, PassBloom)
 
-	timer.begin(deviceDriver, cmdBuf, frame, PassTonemap)
-	if err := recordTonemap(deviceDriver, cmdBuf, tonemap, tonemap.layout, extent); err != nil {
+	// Screen-space UI is composited inside this pass, after the resolve. The
+	// tonemap owns its own timing now that two intervals live in it.
+	if err := recordTonemap(deviceDriver, cmdBuf, tonemap, tonemap.layout, extent, timer, frame,
+		func(cmdBuf core1_0.CommandBuffer) {
+			recordUIComposite(deviceDriver, stats, cmdBuf, uiPipeline, msdfPipeline,
+				pipelineLayout, extent, uiOverlays, msdfOverlays, fallbackTexture)
+		}); err != nil {
 		return err
 	}
-	timer.end(deviceDriver, cmdBuf, frame, PassTonemap)
 
 	timer.end(deviceDriver, cmdBuf, frame, frameQuery)
 

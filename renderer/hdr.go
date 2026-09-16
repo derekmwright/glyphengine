@@ -438,7 +438,8 @@ func (r *Renderer) SetTonemap(exposure, curve, whitePoint float32) {
 	r.exposure, r.tonemapCurve, r.tonemapWhite = exposure, curve, whitePoint
 }
 
-// recordTonemap resolves the HDR scene into the swapchain image.
+// recordTonemap resolves the HDR scene into the swapchain image, then lets
+// composite draw on top of the result.
 //
 // Every path that renders a frame has to end with this, which is why it is a
 // function rather than a block inside recordCommandBuffer: the scene render
@@ -446,13 +447,28 @@ func (r *Renderer) SetTonemap(exposure, curve, whitePoint float32) {
 // presents whatever the swapchain happened to contain. The validation layer does
 // catch it -- an image presented in UNDEFINED layout -- but only because nothing
 // else transitions the swapchain any more.
+//
+// composite is where screen-space UI goes, and may be nil. It is called inside
+// this render pass rather than in one of its own because this pass already
+// holds the swapchain image at the right extent; see recordUIComposite for why
+// UI belongs on this side of the resolve at all.
+//
+// The timer comes in so the two intervals can be written here, adjacent and not
+// nested. Bracketing the composite from the caller would have put it inside
+// PassTonemap, and passes that contain each other sum to more than the frame
+// they are in -- which is the exact mismatch that caught this instrument's
+// first version.
 func recordTonemap(
 	deviceDriver core1_0.DeviceDriver,
 	cmdBuf core1_0.CommandBuffer,
 	tonemap tonemapPass,
 	pipelineLayout core1_0.PipelineLayout,
 	extent core1_0.Extent2D,
+	timer *gpuTimer,
+	frame int,
+	composite func(core1_0.CommandBuffer),
 ) error {
+	timer.begin(deviceDriver, cmdBuf, frame, PassTonemap)
 	if err := deviceDriver.CmdBeginRenderPass(cmdBuf, core1_0.SubpassContentsInline, core1_0.RenderPassBeginInfo{
 		RenderPass:  tonemap.renderPass,
 		Framebuffer: tonemap.framebuffer,
@@ -479,6 +495,14 @@ func recordTonemap(
 		unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize))
 
 	deviceDriver.CmdDraw(cmdBuf, 3, 1, 0, 0)
+	timer.end(deviceDriver, cmdBuf, frame, PassTonemap)
+
+	if composite != nil {
+		timer.begin(deviceDriver, cmdBuf, frame, PassComposite)
+		composite(cmdBuf)
+		timer.end(deviceDriver, cmdBuf, frame, PassComposite)
+	}
+
 	deviceDriver.CmdEndRenderPass(cmdBuf)
 	return nil
 }

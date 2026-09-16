@@ -12,7 +12,7 @@ api:
   - renderer.Renderer.SetTonemap
 assets: none
 run: task bench
-verified: 2026-08-02
+verified: 2026-09-16
 ---
 
 # HDR rendering and the tonemap resolve
@@ -157,6 +157,21 @@ is ALU-bound rather than fill-bound.
 
 - **Screenshots are unaffected.** `capture.go` reads the swapchain image, which
   is the tonemapped result.
+
+- **Screen-space overlays are composited inside this pass, after the resolve.**
+  `recordTonemap` takes a `composite` callback and calls it between the
+  fullscreen draw and `vkCmdEndRenderPass`; `recordUIComposite` fills it with
+  the UI panel and MSDF text channels. They used to be recorded in the scene
+  pass, which put a HUD in the HDR target where water refraction, this resolve
+  and bloom all ran over it. Consequence for this page: overlay colours are not
+  tonemapped, so exposure and the curve move the scene without moving the UI.
+  See [`overlay-composite.md`](overlay-composite.md).
+
+- **This pass writes two timestamp intervals, not one.** `PassTonemap` covers
+  the resolve and `PassComposite` covers the overlays, written adjacent rather
+  than nested so the passes still sum to less than the frame. The resolve's
+  0.013 ms below is still the resolve alone; the composite is 0.002 ms on
+  `15-kitchen-sink`.
 
 ## Not done
 

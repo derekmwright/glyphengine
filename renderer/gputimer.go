@@ -25,12 +25,20 @@ const (
 	PassSky                   // sky dome, volumetric clouds, stars
 	PassParticles             // billboard particles
 	PassWater                 // scene copy, refraction, god rays
-	PassOverlay               // UI panels, MSDF text, unlit overlays
+	PassOverlay               // world-space unlit overlays, plus the scene pass end
 	PassBloom                 // bright-pass, downsample and upsample chain
 	PassTonemap               // HDR resolve to the swapchain
+	PassComposite             // UI panels and MSDF text, onto the resolved image
 
 	passCount
 )
+
+// PassOverlay is a slightly dishonest name and has been since before the
+// screen-space channels moved out of it: its closing timestamp sits after
+// vkCmdEndRenderPass, so it charges the scene pass's MSAA resolve to "overlay".
+// On 15-kitchen-sink, which sets no world-space overlays at all, it still reads
+// 0.046 ms. Read it as "the end of the scene pass" rather than as the cost of
+// SetOverlays.
 
 // String is what shows up in the report; kept short so a per-frame line fits.
 func (p Pass) String() string {
@@ -57,6 +65,8 @@ func (p Pass) String() string {
 		return "bloom"
 	case PassTonemap:
 		return "tonemap"
+	case PassComposite:
+		return "composite"
 	default:
 		return fmt.Sprintf("pass%d", int(p))
 	}
