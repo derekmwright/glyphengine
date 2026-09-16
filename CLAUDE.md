@@ -22,6 +22,7 @@ worse than no page — an agent will trust it.
 task ci        # lint, build, test, race
 task smoke     # renders real frames of every example
 task validate  # every example under the Vulkan validation layer, must be silent
+task hud       # the HUD is still legible over water, bloom and the tonemap
 ```
 
 `task ci` is the minimum. Run `task validate` for anything touching the

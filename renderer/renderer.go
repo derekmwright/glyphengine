@@ -599,18 +599,6 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	}
 	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.skyPipeline, nil) })
 
-	r.msdfPipeline, err = createMSDFPipeline(r.deviceDriver, r.shaders, r.renderPass, r.pipelineLayout, r.sc.extent, r.msaaSamples)
-	if err != nil {
-		return nil, fmt.Errorf("renderer: create MSDF pipeline: %w", err)
-	}
-	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.msdfPipeline, nil) })
-
-	r.uiPipeline, err = createUIPipeline(r.deviceDriver, r.shaders, r.renderPass, r.pipelineLayout, r.sc.extent, r.msaaSamples)
-	if err != nil {
-		return nil, fmt.Errorf("renderer: create UI pipeline: %w", err)
-	}
-	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.uiPipeline, nil) })
-
 	r.skinnedPipelineLayout, err = createSkinnedPipelineLayout(r.deviceDriver, r.descriptorSetLayout, r.jointDescriptorSetLayout, r.shadow.descriptorSetLayout)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create skinned pipeline layout: %w", err)
@@ -800,6 +788,49 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 		return nil, fmt.Errorf("renderer: create tonemap pipeline: %w", err)
 	}
 	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.tonemapPipeline, nil) })
+
+	// The screen-space overlay pipelines belong to the tonemap pass, not the
+	// scene pass, which is why they are built down here rather than with the
+	// other pipelines above: a pipeline is tied to the render pass it was
+	// created against, and these draw onto the resolved swapchain image.
+	//
+	// Samples1 rather than r.msaaSamples for the same reason: a pipeline's
+	// rasterization sample count has to match the samples of the attachments in
+	// the render pass it is created against, and MSAA is resolved into the HDR
+	// target well before the tonemap runs, so the swapchain attachment here is
+	// single-sampled.
+	//
+	// What that costs was measured rather than assumed, capturing each example
+	// either side of the move under a fixed frame clock:
+	//
+	//	10-text          2801 px differ, max delta 1/255
+	//	15-kitchen-sink  1250 px differ, max delta 1/255
+	//	13-ui            6031 px differ, 30 of them above 1/255, max 47
+	//	17-input        20396 px differ, 136 of them above 1/255, max 23
+	//
+	// Text does not move at all -- everything in 10-text is one 8-bit rounding
+	// step, because MSDF antialiases in the fragment shader and never depended
+	// on the rasterizer's coverage. What does move is UI panel edges: the 30
+	// pixels in 13-ui are two border columns of one panel, and the 136 in
+	// 17-input are the outlines of the small button rects. A panel edge landing
+	// between pixels used to be smoothed by MSAA coverage and is now hard.
+	//
+	// That is the trade, and it is worth taking: a few hundred pixels of panel
+	// border against a HUD that survives water, keeps its colour independent of
+	// scene exposure, and stops feeding bloom. Antialiasing a panel edge is the
+	// UI shader's job anyway, the way the glyph edge is already the distance
+	// field's.
+	r.msdfPipeline, err = createMSDFPipeline(r.deviceDriver, r.shaders, r.tonemapRenderPass, r.pipelineLayout, r.sc.extent, core1_0.Samples1)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create MSDF pipeline: %w", err)
+	}
+	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.msdfPipeline, nil) })
+
+	r.uiPipeline, err = createUIPipeline(r.deviceDriver, r.shaders, r.tonemapRenderPass, r.pipelineLayout, r.sc.extent, core1_0.Samples1)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create UI pipeline: %w", err)
+	}
+	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.uiPipeline, nil) })
 
 	// The scene draws into the HDR views; only the tonemap pass touches the
 	// swapchain.

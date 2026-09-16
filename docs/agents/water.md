@@ -19,7 +19,7 @@ requires:
 assets: none
 example: examples/09-water
 run: go run ./09-water
-verified: 2026-07-29
+verified: 2026-09-16
 ---
 
 # Water
@@ -122,6 +122,13 @@ not ripple. Setting `RefractStrength` to 0 selects the same path deliberately.
 - **Water renders over geometry standing in it.** Water is drawn after
   everything opaque and does not write depth. Something submerged must be in
   the opaque pass to occlude it correctly.
+- **~~The HUD vanishes where the lake is.~~** Fixed, and worth knowing because
+  it is the shape of bug this pass invites. Screen-space overlays used to be
+  recorded in the opaque pass, so step 2 above copied the HUD along with the
+  scene and step 3 drew the surface over text that writes no depth. They are
+  composited after the tonemap now and the copy cannot contain them; see
+  [`overlay-composite.md`](overlay-composite.md). Anything else that reaches
+  the scene image before this pass runs is subject to the same thing.
 
 ## Vertex attributes carry water data
 
@@ -153,7 +160,7 @@ WaveLength * 0.26 >= 2 * w / Resolution
 ```
 
 Below that the shader fades the component out. Asking for short waves on a coarse
-grid therefore gets smooth water rather than choppy water — the detail is
+grid therefore gets smooth water rather than choppy water â€” the detail is
 dropped rather than faked, the same trade a mip level makes.
 
 `DefaultWaterOptions` at `Resolution` 160 over a 200-unit lake sits just under
@@ -163,7 +170,7 @@ the limit, so its finest component is faded. `Resolution` 256 carries it.
 `sum(steepness * k * amplitude)` stays below one. Past that adjacent vertices
 swap order and the surface passes through itself; the same sum also appears in
 the analytic normal, so those facets shade inside out. The shader clamps
-steepness against the real sum, so this cannot happen — but it means crests stop
+steepness against the real sum, so this cannot happen â€” but it means crests stop
 sharpening past roughly `WaveAmplitude = WaveLength / 11` and only get taller.
 
 ## Breaking up the periodicity
@@ -171,7 +178,7 @@ sharpening past roughly `WaveAmplitude = WaveLength / 11` and only get taller.
 A sum of sinusoids is exactly periodic, so on their own the surface tiles visibly:
 the same crest pattern marching away to the horizon, most obvious looking down
 at the field from a shallow angle. `WaveNoise` adds drifting fractal noise to the
-height — patches of chop, stretches of calm, crests that do not all agree.
+height â€” patches of chop, stretches of calm, crests that do not all agree.
 
 It is a fraction of `WaveAmplitude`, so it scales with the sea state. Zero
 restores the pure Gerstner sum. Its octaves are bounded by the grid exactly as

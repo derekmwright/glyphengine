@@ -21,5 +21,7 @@ Thumbs.db
 
 # NOTE: shaders/*.spv are intentionally NOT ignored -- see .gitattributes.
 
-# task determinism writes captures here; removed on success, left behind on failure.
+# task determinism and task hud write captures here; removed on success, left
+# behind on failure so the frame that failed can be looked at.
 examples/.determinism/
+examples/.hud/
