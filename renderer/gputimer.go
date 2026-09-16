@@ -17,17 +17,18 @@ import (
 type Pass int
 
 const (
-	PassShadow    Pass = iota // both sun cascades plus the point-light cube
-	PassTerrain               // the splat pipeline
-	PassOpaque                // lit and skinned geometry
-	PassGrass                 // instanced flora
-	PassClouds                // half-resolution volumetric cloud march
-	PassSky                   // sky dome, volumetric clouds, stars
-	PassParticles             // billboard particles
-	PassWater                 // scene copy, refraction, god rays
-	PassOverlay               // UI panels, MSDF text, unlit overlays
-	PassBloom                 // bright-pass, downsample and upsample chain
-	PassTonemap               // HDR resolve to the swapchain
+	PassShadow      Pass = iota // both sun cascades plus the point-light cube
+	PassTerrain                 // the splat pipeline
+	PassOpaque                  // lit and skinned geometry
+	PassGrass                   // instanced flora
+	PassClouds                  // half-resolution volumetric cloud march
+	PassSky                     // sky dome, volumetric clouds, stars
+	PassTranslucent             // blended world geometry, back to front
+	PassParticles               // billboard particles
+	PassWater                   // scene copy, refraction, god rays
+	PassOverlay                 // UI panels, MSDF text, unlit overlays
+	PassBloom                   // bright-pass, downsample and upsample chain
+	PassTonemap                 // HDR resolve to the swapchain
 
 	passCount
 )
@@ -47,6 +48,8 @@ func (p Pass) String() string {
 		return "clouds"
 	case PassSky:
 		return "sky"
+	case PassTranslucent:
+		return "translucent"
 	case PassParticles:
 		return "particles"
 	case PassWater:
