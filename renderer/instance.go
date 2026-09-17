@@ -8,6 +8,7 @@ import (
 	"github.com/vkngwrapper/core/v3/common"
 	"github.com/vkngwrapper/core/v3/core1_0"
 	"github.com/vkngwrapper/extensions/v3/ext_debug_utils"
+	"github.com/vkngwrapper/extensions/v3/khr_portability_enumeration"
 
 	"github.com/derekmwright/glyphengine/window"
 )
@@ -43,6 +44,38 @@ func createInstance(w *window.Window, appName string, appVersion common.Version,
 		log.Printf("Vulkan validation layer enabled")
 	}
 
+	// Portability drivers -- MoltenVK on macOS -- implement a subset of Vulkan
+	// and identify themselves as such, and since Vulkan SDK 1.3.216 the loader
+	// hides them unless the application says it can cope with one.
+	//
+	// The failure this prevents is not a failure here. CreateInstance succeeds
+	// either way; what happens without the opt-in is that
+	// vkEnumeratePhysicalDevices returns *zero* devices, so it surfaces later
+	// at device selection as "no Vulkan-capable GPU found" on a machine with a
+	// perfectly good GPU. That is a bad first five minutes for anyone trying
+	// the engine on a Mac, and nothing in the message points at the cause.
+	//
+	// Conditional because requesting an extension the loader does not advertise
+	// is itself an instance-creation error.
+	//
+	// Note that the condition is usually true everywhere, not just on macOS:
+	// this is a loader extension, and a Windows machine with a current Vulkan
+	// loader advertises it too, so the flag gets set there as well. That is
+	// harmless -- the flag only asks that portable devices be *included* in
+	// enumeration, and on a machine with none the device list is identical.
+	// Measured on Windows: the same device is selected, the device-level
+	// portability subset below is correctly not enabled because no conformant
+	// driver advertises it, and `task validate` stays silent.
+	var flags core1_0.InstanceCreateFlags
+	if available, _, err := globalDriver.AvailableExtensions(); err != nil {
+		log.Printf("instance extension enumeration failed (%v); continuing without portability enumeration", err)
+	} else if _, ok := available[khr_portability_enumeration.ExtensionName]; ok {
+		extensions = append(extensions, khr_portability_enumeration.ExtensionName)
+		flags |= khr_portability_enumeration.InstanceCreateEnumeratePortability
+		log.Printf("Portability enumeration enabled (%s); portable devices will be listed",
+			khr_portability_enumeration.ExtensionName)
+	}
+
 	if appName == "" {
 		appName = defaultApplicationName
 	}
@@ -56,6 +89,7 @@ func createInstance(w *window.Window, appName string, appVersion common.Version,
 		EngineName:            "GlyphEngine",
 		EngineVersion:         common.CreateVersion(0, 1, 0),
 		APIVersion:            common.Vulkan1_0,
+		Flags:                 flags,
 		EnabledExtensionNames: extensions,
 		EnabledLayerNames:     layers,
 	})
