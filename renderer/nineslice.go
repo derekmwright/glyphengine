@@ -1,11 +1,36 @@
 package renderer
 
+// PanelFill is what panel mode draws inside the frame.
+//
+// Colour is sRGB, the same as every other UI colour: what you write is what
+// reaches the display.
+//
+// Opacity is absolute rather than a fraction of the border's, which is what
+// makes an opaque panel reachable at all. The derived default caps the interior
+// at 0.7 of the border opacity, so a modal dialog or a title card drawn through
+// the panel path always showed the scene behind it.
+type PanelFill struct {
+	Color   [3]float32
+	Opacity float32
+}
+
 // NineSlice generates 9 textured quads from a texture with uniform insets.
 type NineSlice struct {
 	Texture *Texture
 	TexSize int // texture width in pixels (e.g. 48)
 	TexH    int // texture height; 0 means same as TexSize (square)
 	Inset   int // pixels from each edge for corner regions
+
+	// Fill overrides the panel's interior. Nil keeps the derived look: the
+	// border tint at 0.2, with 0.7 of its opacity.
+	//
+	// The split itself is what makes nine-slice artwork cheap -- the texture's
+	// alpha separates frame from fill, so the art only has to be an opaque
+	// border around a transparent middle. What the derived version could not
+	// express is any interior that is not a fixed fraction of the frame:
+	// darkening the fill darkened the bezel with it, and no tint produces a
+	// near-black interior under artwork that should stay light.
+	Fill *PanelFill
 }
 
 // NewNineSlice creates a NineSlice definition.

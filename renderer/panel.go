@@ -61,6 +61,11 @@ type UIRenderObject struct {
 	RenderObject
 	Opacity     float32
 	TextureMode bool // true = straight texture*color blending (icons); false = 9-slice panel mode
+
+	// Fill overrides the panel interior; nil derives it from the tint. Panels
+	// built through NineSlice carry theirs from there, and a game assembling
+	// UIRenderObjects itself sets this directly.
+	Fill *PanelFill
 }
 
 // UIRenderObjects returns UIRenderObjects with per-layer opacity for the UI pipeline.
@@ -83,6 +88,7 @@ func (p *Panel) UIRenderObjects(screenW, screenH float32) []UIRenderObject {
 			},
 			Opacity:     layer.Opacity,
 			TextureMode: layer.TextureMode,
+			Fill:        layer.NineSlice.Fill,
 		})
 	}
 	return objs

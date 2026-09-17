@@ -9,13 +9,15 @@ capability: rendering
 status: stable
 since: v0.5.0
 api:
+  - renderer.PanelFill
+  - renderer.NineSlice
   - glyphengine.Engine.SetUIOverlays
   - glyphengine.Engine.SetMSDFOverlays
   - glyphengine.Engine.SetOverlays
   - glyphengine.Engine.Debugf
 example: examples/13-ui
 run: task hud
-verified: 2026-09-16
+verified: 2026-09-17
 ---
 
 # Where screen-space overlays are drawn
@@ -41,9 +43,10 @@ resolved, which means:
   through. The HUD is not in that image any more, so it cannot end up inside the
   refraction and cannot be drawn over by the surface.
 - **Their colours are literal.** A UI colour is an sRGB value that reaches the
-  display as written. It does not move with `SetTonemap`'s exposure or curve,
-  which is what a UI colour is supposed to mean — a white label should be the
-  same white at midday and at dusk.
+  display as written, and it does not move with `SetTonemap`'s exposure or
+  curve — a white label is the same white at midday and at dusk. See
+  [what a UI colour means](#what-a-ui-colour-means) for why the first half of
+  that took a second change to become true.
 - **They do not bloom.** Bright text does not feed the glare chain, so it does
   not glow into the scene behind it.
 - **They are not multisampled.** See the cost below.
@@ -124,6 +127,70 @@ against the pre-move build to watch them fail.
 `task smoke` and `task validate` both stayed green through the original bug and
 would stay green through its return. Neither looks at whether text is readable,
 and the failure needs water and text in the same frame, which no example had.
+
+## What a UI colour means
+
+`[3]float32{0.05, 0.06, 0.08}` is sRGB. It reaches the display as
+`{0.05, 0.06, 0.08}`, which is the near-black a HUD author picking those numbers
+means.
+
+That was not true when the channels first moved. The swapchain is
+`B8G8R8A8_SRGB`, so the hardware applies the linear-to-sRGB encode on write, and
+a shader passing a game's colour straight through was declaring it *linear*.
+`0.05` chosen as "nearly black" arrived at `0.248` — a mid slate. To get `0.05`
+on screen you had to write `0.0039`. The error was largest exactly in the dark
+values a HUD is built from, and invisible until someone compared the colour they
+picked against the pixel they got.
+
+`ui.frag` and `msdf.frag` now decode with `srgbToLinear` (`shaders/srgb.inc`)
+before writing, so what a game writes is what it sees.
+
+**Texels do not go through it.** A colour texture is created as
+`R8G8B8A8_SRGB` (see `textureOptions.srgb`), so the sampler has already decoded
+it; decoding again would darken every texture the UI draws. Only the colour that
+came from the game — vertex colour times tint — is converted.
+
+**The world-space `overlays` channel is unchanged and still linear.** It renders
+in the scene pass and goes through the tonemap, so its colour is an HDR value
+like any other piece of geometry, not a display value. The two channels mean
+different things by a colour because they are composited at different points,
+which is the same split this page is about.
+
+What that change cost, captured either side of it back to back under a fixed
+frame clock:
+
+| example | pixels differing | max delta | where |
+| --- | --- | --- | --- |
+| `13-ui` | 46807 (5.1%) | 72/255 | the HUD panel and the caption, 135 rows |
+| `17-input` | 164736 (17.9%) | 73/255 | the bottom readout bar |
+
+The 3D scene does not move in either — every differing row is a row with UI in
+it. `13-ui` was left alone: its constants were already the values someone would
+pick meaning "nearly black" and "dark red", and it now draws them. `17-input`'s
+greys were re-picked, because they had been chosen by eye against the lifted
+output and landed too close together once they were taken literally.
+
+## Choosing a panel interior
+
+Panel mode splits a nine-slice by the texture's alpha: opaque border,
+transparent middle. The interior defaults to the border tint at `0.2` and `0.7`
+of its opacity, which is one look and was the only one:
+
+```go
+ns := renderer.NewNineSlice(tex, 48, 16)
+ns.Fill = &renderer.PanelFill{
+    Color:   [3]float32{0.04, 0.05, 0.07}, // sRGB, like every UI colour
+    Opacity: 1.0,
+}
+```
+
+`Fill` is a pointer because both ends of the opacity range are meaningful: `0`
+leaves just the frame, and `1` is what a modal dialog or a title card needs.
+Neither can double as "unset", so nil is the signal and the shader branches on a
+negative opacity. `packUIFill` is the one place that encodes it, and
+`TestPanelFillUnsetSignalsDerive` fails if the sentinel goes missing — the
+symptom otherwise is a panel whose background vanished, which points at the
+wrong file.
 
 ## What it costs
 

@@ -241,16 +241,21 @@ func (g *game) FixedUpdate(e *glyph.Engine, dt float32) {
 }
 
 // Panel colours, kept together so the readout reads as one thing.
+//
+// These are sRGB: what is written here is what reaches the display. The greys
+// were re-picked when that became true — they had been chosen by eye against a
+// build that decoded them as linear and so drew every one of them lighter than
+// it says, which put the whole readout a couple of stops up from these numbers.
 var (
-	panelBG   = [3]float32{0.05, 0.06, 0.08}
-	panelEdge = [3]float32{0.30, 0.34, 0.40}
-	armedEdge = [3]float32{0.85, 0.65, 0.22}
-	cellOff   = [3]float32{0.16, 0.18, 0.22}
-	cellOn    = [3]float32{0.42, 0.80, 0.52}
-	boxBG     = [3]float32{0.10, 0.12, 0.15}
-	dotColor  = [3]float32{0.95, 0.85, 0.35}
-	barFill   = [3]float32{0.35, 0.62, 0.88}
-	deadRing  = [3]float32{0.28, 0.22, 0.22}
+	panelBG   = [3]float32{0.06, 0.07, 0.09}
+	panelEdge = [3]float32{0.55, 0.60, 0.66}
+	armedEdge = [3]float32{0.93, 0.82, 0.48}
+	cellOff   = [3]float32{0.30, 0.33, 0.39}
+	cellOn    = [3]float32{0.55, 0.88, 0.64}
+	boxBG     = [3]float32{0.18, 0.20, 0.24}
+	dotColor  = [3]float32{0.97, 0.91, 0.58}
+	barFill   = [3]float32{0.48, 0.73, 0.93}
+	deadRing  = [3]float32{0.42, 0.35, 0.35}
 )
 
 // buildReadout draws the live device state, rebuilt wholesale each frame the way
