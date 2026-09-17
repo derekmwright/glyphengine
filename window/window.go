@@ -258,6 +258,19 @@ func (w *Window) GetRequiredInstanceExtensions() []string {
 }
 
 // GetVulkanProcAddr returns GLFW's Vulkan instance proc address loader.
+// VulkanSupported reports whether GLFW found a Vulkan loader at init.
+//
+// It has to be asked before GetVulkanProcAddr, because that returns NULL when
+// the answer is no and a null function pointer handed to a driver constructor
+// produces a message about a driver handle rather than about the machine. The
+// person reading it is most likely someone trying the engine on a Mac for the
+// first time, where no Vulkan implementation ships at all.
+//
+// GLFW must be initialized first, which it is by the time a Window exists.
+func VulkanSupported() bool {
+	return glfw.VulkanSupported()
+}
+
 func GetVulkanProcAddr() unsafe.Pointer {
 	return glfw.GetVulkanGetInstanceProcAddress()
 }

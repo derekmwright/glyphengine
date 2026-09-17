@@ -1,6 +1,7 @@
 package renderer
 
 import (
+	"errors"
 	"fmt"
 	"log"
 
@@ -26,6 +27,23 @@ const defaultApplicationName = "GlyphEngine Application"
 // the Vulkan runtime has no validation layer, and that must degrade to a
 // warning rather than a startup failure.
 func createInstance(w *window.Window, appName string, appVersion common.Version, wantValidation bool) (driver core1_0.CoreInstanceDriver, gotValidation bool, err error) {
+	// Asked before the proc address rather than after, because GLFW hands back
+	// NULL when there is no loader and the failure would otherwise surface as
+	// whatever CreateDriverFromProcAddr makes of a null pointer -- a message
+	// about a driver handle, when the useful sentence is about the machine.
+	//
+	// macOS is the default case for this: it ships no Vulkan implementation, so
+	// every Mac is here until someone installs the SDK or the application
+	// brings MoltenVK with it. A fresh Linux install without the loader package
+	// lands in the same place.
+	if !window.VulkanSupported() {
+		return nil, false, errors.New(
+			"no Vulkan loader found. On macOS, Vulkan is provided by MoltenVK: install the " +
+				"LunarG Vulkan SDK, or ship libMoltenVK.dylib and its ICD manifest inside the " +
+				"application bundle. On Linux, install your distribution's vulkan-loader package. " +
+				"On Windows, update your GPU driver")
+	}
+
 	procAddr := window.GetVulkanProcAddr()
 
 	globalDriver, err := core.CreateDriverFromProcAddr(procAddr)
