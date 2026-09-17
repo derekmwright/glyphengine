@@ -6,6 +6,26 @@ import (
 	"github.com/vkngwrapper/core/v3/core1_0"
 )
 
+// packUIFill writes the panel interior into the vec4 after params.
+//
+// A negative opacity is the "derive it from the tint" signal, and the sentinel
+// has to be negative rather than zero because zero is a legitimate fill and so
+// is one: a fully transparent interior leaves just the frame, and a fully
+// opaque one is what a modal dialog needs. Neither can double as "unset".
+//
+// Split out so the packing can be tested without a device, the same way
+// packLightingPC is.
+func packUIFill(pc *[64]float32, fill *PanelFill) {
+	if fill == nil {
+		pc[43] = -1
+		return
+	}
+	pc[40] = fill.Color[0]
+	pc[41] = fill.Color[1]
+	pc[42] = fill.Color[2]
+	pc[43] = fill.Opacity
+}
+
 // recordUIComposite draws the screen-space overlay channels onto the swapchain,
 // inside the tonemap pass and after its resolve triangle.
 //
@@ -93,6 +113,7 @@ func recordUIComposite(
 			if d.TextureMode {
 				pc[36] = 1.0
 			}
+			packUIFill(&pc, d.Fill)
 			pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
 			deviceDriver.CmdPushConstants(cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
 
