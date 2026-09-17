@@ -141,9 +141,47 @@ func (inp *Input) MouseReleased(button MouseButton) bool {
 
 // --- Cursor queries ---
 
-// MousePos returns the current cursor position in window coordinates.
+// MousePos returns the current cursor position in framebuffer pixels.
+//
+// GLFW reports the cursor in screen coordinates — points — and on a display
+// where the framebuffer is not the same size as the window those are different
+// units. Every other screen-space quantity in the engine is framebuffer pixels:
+// Renderer.Extent, the orthographic projections the UI builds out of it, and
+// Engine.ScreenRay, which divides by it. Returning points here made the two
+// calls that are meant to be used together disagree by the display's scale
+// factor.
+//
+// On a 2x Retina panel that put every NDC offset at half of what it should be,
+// so a ray cast at the pointer landed halfway between the pointer and the
+// top-left corner: pointing at something on the right of the screen picked
+// something near the middle. It is invisible on a typical Windows or Linux
+// setup, where GLFW reports the two sizes as equal, which is exactly why it
+// arrives as a surprise the first time anyone runs on a Mac.
+//
+// MouseDelta deliberately stays in points. It drives look sensitivity, which is
+// about how far the hand moved rather than how many pixels that covered, and
+// scaling it would double the turn rate on a Retina display.
 func (inp *Input) MousePos() (x, y float64) {
-	return inp.mouseX, inp.mouseY
+	ww, wh := inp.handle.GetSize()
+	fw, fh := inp.handle.GetFramebufferSize()
+	return scaleToFramebuffer(inp.mouseX, inp.mouseY, ww, wh, fw, fh)
+}
+
+// scaleToFramebuffer converts a point in screen coordinates to framebuffer
+// pixels.
+//
+// Split out from MousePos so the arithmetic can be tested without a display:
+// the bug being fixed is invisible on the hardware this is developed on, so a
+// test that needs a Retina panel to fail would never run.
+//
+// A non-positive window size means the window is minimized, and GLFW reports
+// zero for both. Scaling by zero would send the cursor to the origin and a
+// division would be worse, so the unscaled value is the only safe answer.
+func scaleToFramebuffer(x, y float64, winW, winH, fbW, fbH int) (float64, float64) {
+	if winW <= 0 || winH <= 0 {
+		return x, y
+	}
+	return x * float64(fbW) / float64(winW), y * float64(fbH) / float64(winH)
 }
 
 // IgnorePointer stops MouseDelta and the scroll queries reporting anything.
