@@ -9,6 +9,8 @@ status: stable
 since: v0.4.0
 api:
   - input.Input
+  - input.Input.MousePos
+  - input.Input.MouseDelta
   - input.Bindings
   - input.NewBindings
   - input.Bindings.Action
@@ -31,7 +33,7 @@ api:
 assets: none
 example: examples/17-input
 run: go run ./17-input
-verified: 2026-07-29
+verified: 2026-09-17
 ---
 
 # Input
@@ -162,6 +164,45 @@ versus the scroll wheel, which already arrives pre-quantised per frame.
 The two cameras also disagree on pitch sign — `FPCamera`'s positive pitch looks
 down, `Camera`'s looks up — which their field comments record and both stick
 paths honour.
+
+## MousePos is pixels, MouseDelta is points
+
+They are in different units on purpose, and the reason is the one above: a
+position is a place on the screen, a delta is how far the hand moved.
+
+`MousePos` returns **framebuffer pixels**, which is the space every other
+screen-space quantity in the engine uses — `Renderer.Extent`, the orthographic
+projections the UI builds out of it, and `Engine.ScreenRay`, which divides by
+it. So a position from here can be compared against a widget rect or handed
+straight to `PickEntity` without a conversion:
+
+```go
+mx, my := e.Input().MousePos()
+if hit, ok := e.PickEntity(mx, my, 100, 0); ok {
+    // ...
+}
+```
+
+`MouseDelta` returns **screen points**, unscaled, because it drives look
+sensitivity. `LookSensitivity` is radians per pixel of hand movement, and
+scaling the delta would double the turn rate on a display that happens to have
+a denser panel — the same physical flick would turn twice as far.
+
+### The failure this prevents
+
+GLFW reports the cursor in screen coordinates, and on any display where the
+framebuffer is not the same size as the window those are not the same unit.
+`MousePos` used to return them unscaled, so on a 2x Retina panel the cursor was
+reported in a 1440x900 space and `ScreenRay` divided it by a 2880x1800 extent.
+Every NDC offset came out at half what it should be, and a ray cast at the
+pointer landed halfway between the pointer and the top-left corner: pointing at
+something on the right of the screen picked something near the middle.
+
+It is invisible on a typical Windows or Linux setup, where GLFW reports the two
+sizes as equal, which is exactly why it arrived as a surprise on a Mac. For the
+same reason `scaleToFramebuffer` is tested with the scale factors supplied
+rather than read from a display — a test that needed a Retina panel to fail
+would never run.
 
 ## Rebinding
 
