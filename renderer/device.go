@@ -5,6 +5,7 @@ import (
 	"log"
 
 	"github.com/vkngwrapper/core/v3/core1_0"
+	"github.com/vkngwrapper/extensions/v3/khr_portability_subset"
 	"github.com/vkngwrapper/extensions/v3/khr_surface"
 	"github.com/vkngwrapper/extensions/v3/khr_swapchain"
 )
@@ -77,9 +78,25 @@ func createLogicalDevice(instanceDriver core1_0.CoreInstanceDriver, physicalDevi
 	// Renderer.New to size MaxAnisotropy for texture samplers).
 	supported := instanceDriver.GetPhysicalDeviceFeatures(physicalDevice)
 
+	// VUID-VkDeviceCreateInfo-pProperties-04451: if the physical device
+	// supports VK_KHR_portability_subset, it *must* be enabled here. Every
+	// MoltenVK device advertises it, and creating a device without it is
+	// invalid usage -- an error under validation, undefined without it.
+	//
+	// Conditional for the same reason the instance opt-in is: a conformant
+	// driver does not advertise this, and asking for it there would fail device
+	// creation on every machine that works today.
+	deviceExtensions := []string{khr_swapchain.ExtensionName}
+	if available, _, err := instanceDriver.EnumerateDeviceExtensionProperties(physicalDevice); err != nil {
+		log.Printf("device extension enumeration failed (%v); continuing without the portability subset", err)
+	} else if _, ok := available[khr_portability_subset.ExtensionName]; ok {
+		deviceExtensions = append(deviceExtensions, khr_portability_subset.ExtensionName)
+		log.Printf("Portability subset enabled (%s)", khr_portability_subset.ExtensionName)
+	}
+
 	deviceDriver, _, err := instanceDriver.CreateDevice(physicalDevice, nil, core1_0.DeviceCreateInfo{
 		QueueCreateInfos:      queueCreateInfos,
-		EnabledExtensionNames: []string{khr_swapchain.ExtensionName},
+		EnabledExtensionNames: deviceExtensions,
 		EnabledFeatures: &core1_0.PhysicalDeviceFeatures{
 			SamplerAnisotropy: supported.SamplerAnisotropy,
 		},
