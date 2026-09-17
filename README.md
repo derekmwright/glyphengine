@@ -20,6 +20,17 @@ cascaded shadow maps and a day/night sky, with MSDF text over the top. Every
 image in this README is captured by the engine itself with `-screenshot`, not
 taken by hand.*
 
+## The showcase game
+
+[**Vesper 3**](https://github.com/derekmwright/vesper3) — a colony builder on a
+hex grid, in true 3D, on a planet that is not Earth.
+
+It is the engine's proving ground as much as its shop window. Translucent
+placement ghosts, instanced props, glTF loading and a HUD that survives being
+looked at through water are all here because building Vesper 3 needed them, and
+a good share of the engine's sharper edges were found there first rather than
+in an example.
+
 ## Install
 
 ```
@@ -192,6 +203,10 @@ task example:11-lights        # point lights, cube shadow maps, emissive markers
 task example:12-particles     # CPU-simulated emitters, one instanced draw
 task example:13-ui            # immediate-mode HUD: panels, bars, MSDF labels
 task example:15-kitchen-sink  # all of the above at once
+task example:16-materials     # normal, metallic-roughness, occlusion and emissive maps
+task example:17-input         # named actions across keyboard, mouse and gamepad
+task example:18-translucent   # blended geometry: placement ghosts and glass
+task example:19-instanced     # 900 props one draw call at a time, or all at once
 ```
 
 ## Building
