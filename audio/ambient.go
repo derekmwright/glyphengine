@@ -5,7 +5,6 @@ package audio
 #include <stdlib.h>
 */
 import "C"
-import "unsafe"
 
 // ambientFadeMs is the crossfade duration when an ambient layer loops.
 const ambientFadeMs = 3000
@@ -13,11 +12,19 @@ const ambientFadeMs = 3000
 // ambientLayer manages a single looping ambient sound with seamless tail-to-head
 // crossfade. Two sound slots (a/b) ping-pong: when the active slot nears its end,
 // the other starts from the beginning with a fade-in while the active fades out.
+//
+// Each slot tracks whether it is initialized, because the ping-pong means a slot
+// spends most of its life retired. tick used to read and uninitialize the
+// inactive slot on every frame regardless: before the first crossfade that was a
+// read of memory no sound had ever been loaded into, and after one it was
+// ma_sound_uninit on an already-freed sound at frame rate, roughly 120 times a
+// second, until the next crossfade came round. miniaudio detects that as a
+// double free and aborts from the real-time audio thread. See soundSlot.
 type ambientLayer struct {
 	path   string
 	volume float32
 
-	a, b      *C.ma_sound
+	a, b      soundSlot
 	aActive   bool // true = a is the current slot, false = b
 	started   bool // true after first start
 	stopping  bool // fade-out in progress, will be removed after fade
@@ -28,8 +35,8 @@ func newAmbientLayer(path string, volume float32) *ambientLayer {
 	return &ambientLayer{
 		path:    path,
 		volume:  volume,
-		a:       (*C.ma_sound)(C.calloc(1, C.size_t(unsafe.Sizeof(C.ma_sound{})))),
-		b:       (*C.ma_sound)(C.calloc(1, C.size_t(unsafe.Sizeof(C.ma_sound{})))),
+		a:       newSoundSlot(),
+		b:       newSoundSlot(),
 		aActive: true,
 	}
 }
@@ -37,16 +44,10 @@ func newAmbientLayer(path string, volume float32) *ambientLayer {
 // start initialises and begins playback on the active slot with a fade-in.
 func (l *ambientLayer) start(eng *C.ma_engine) bool {
 	slot := l.activeSlot()
-	cpath := C.CString(l.path)
-	defer C.free(unsafe.Pointer(cpath))
-
-	flags := C.MA_SOUND_FLAG_STREAM | C.MA_SOUND_FLAG_NO_SPATIALIZATION
-	if C.ma_sound_init_from_file(eng, cpath, C.ma_uint32(flags), nil, nil, slot) != C.MA_SUCCESS {
+	if !slot.init(eng, l.path) {
 		return false
 	}
-	C.ma_sound_set_volume(slot, 0)
-	C.ma_sound_set_fade_in_milliseconds(slot, 0, C.float(l.volume), C.ma_uint64(ambientFadeMs))
-	C.ma_sound_start(slot)
+	slot.startFadedIn(l.volume, ambientFadeMs)
 	l.started = true
 	return true
 }
@@ -67,48 +68,37 @@ func (l *ambientLayer) tick(eng *C.ma_engine) bool {
 	}
 
 	active := l.activeSlot()
-
-	// Get total length and cursor in seconds.
-	var length, cursor C.float
-	C.ma_sound_get_length_in_seconds(active, &length)
-	C.ma_sound_get_cursor_in_seconds(active, &cursor)
-
-	if length <= 0 {
+	length, cursor, ok := active.lengthAndCursor()
+	if !ok || length <= 0 {
 		return true
 	}
 
-	fadeSeconds := C.float(ambientFadeMs) / 1000.0
+	fadeSeconds := float32(ambientFadeMs) / 1000.0
 	remaining := length - cursor
 
 	// When we're within the fade duration of the end, start the crossfade.
 	if remaining <= fadeSeconds && remaining > 0 {
 		next := l.inactiveSlot()
 
-		cpath := C.CString(l.path)
-		defer C.free(unsafe.Pointer(cpath))
-
-		flags := C.MA_SOUND_FLAG_STREAM | C.MA_SOUND_FLAG_NO_SPATIALIZATION
-		if C.ma_sound_init_from_file(eng, cpath, C.ma_uint32(flags), nil, nil, next) != C.MA_SUCCESS {
+		// init retires whatever the slot held, so a crossfade cannot leak the
+		// sound from two loops ago.
+		if !next.init(eng, l.path) {
 			return true
 		}
-
-		// Fade in the new slot.
-		C.ma_sound_set_volume(next, 0)
-		C.ma_sound_set_fade_in_milliseconds(next, 0, C.float(l.volume), C.ma_uint64(ambientFadeMs))
-		C.ma_sound_start(next)
+		next.startFadedIn(l.volume, ambientFadeMs)
 
 		// Fade out the old slot and schedule stop.
-		C.ma_sound_set_fade_in_milliseconds(active, -1, 0, C.ma_uint64(ambientFadeMs))
-		C.ma_sound_set_stop_time_in_milliseconds(active, C.ma_uint64(ambientFadeMs))
+		active.fadeOutAndStop(ambientFadeMs)
 
 		// Swap active slot.
 		l.aActive = !l.aActive
 	}
 
-	// Clean up the inactive slot if it has finished.
-	inactive := l.inactiveSlot()
-	if C.ma_sound_at_end(inactive) == C.MA_TRUE {
-		C.ma_sound_uninit(inactive)
+	// Retire the inactive slot once it has finished. This runs every frame and
+	// the slot stays inactive for the whole of the next loop, so it is only
+	// safe because uninit is a no-op on a slot that is already retired.
+	if inactive := l.inactiveSlot(); inactive.atEnd() {
+		inactive.uninit()
 	}
 
 	return true
@@ -122,40 +112,34 @@ func (l *ambientLayer) stop() {
 	l.stopping = true
 	l.stopTimer = int(ambientFadeMs/16) + 1
 
-	active := l.activeSlot()
-	C.ma_sound_set_fade_in_milliseconds(active, -1, 0, C.ma_uint64(ambientFadeMs))
-	C.ma_sound_set_stop_time_in_milliseconds(active, C.ma_uint64(ambientFadeMs))
+	l.activeSlot().fadeOutAndStop(ambientFadeMs)
 
 	// Also fade the inactive slot if it's still playing (mid-crossfade stop).
-	inactive := l.inactiveSlot()
-	if C.ma_sound_is_playing(inactive) == C.MA_TRUE {
-		C.ma_sound_set_fade_in_milliseconds(inactive, -1, 0, C.ma_uint64(ambientFadeMs))
-		C.ma_sound_set_stop_time_in_milliseconds(inactive, C.ma_uint64(ambientFadeMs))
+	if inactive := l.inactiveSlot(); inactive.isPlaying() {
+		inactive.fadeOutAndStop(ambientFadeMs)
 	}
 }
 
 // cleanup uninitialises both slots and frees C memory.
+//
+// Unconditional now: free retires a live slot and leaves a retired one alone,
+// so it no longer matters whether the layer ever started, whether slot b was
+// ever loaded, or whether tick already retired one of them.
 func (l *ambientLayer) cleanup() {
-	if l.started {
-		C.ma_sound_uninit(l.a)
-		C.ma_sound_uninit(l.b)
-	}
-	C.free(unsafe.Pointer(l.a))
-	C.free(unsafe.Pointer(l.b))
-	l.a = nil
-	l.b = nil
+	l.a.free()
+	l.b.free()
 }
 
-func (l *ambientLayer) activeSlot() *C.ma_sound {
+func (l *ambientLayer) activeSlot() *soundSlot {
 	if l.aActive {
-		return l.a
+		return &l.a
 	}
-	return l.b
+	return &l.b
 }
 
-func (l *ambientLayer) inactiveSlot() *C.ma_sound {
+func (l *ambientLayer) inactiveSlot() *soundSlot {
 	if l.aActive {
-		return l.b
+		return &l.b
 	}
-	return l.a
+	return &l.a
 }
