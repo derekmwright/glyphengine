@@ -26,10 +26,16 @@ type Engine struct {
 	poolInUse [soundPoolSize]bool
 
 	// Streaming music track (looping, no spatialization).
-	music         *C.ma_sound
-	musicOn       bool
-	musicOld      *C.ma_sound // previous track fading out during crossfade
-	musicOldTimer int         // frames remaining before old track can be freed
+	music   *C.ma_sound
+	musicOn bool
+	// musicRetiring holds tracks that are fading out and not yet safe to free.
+	//
+	// A slice rather than one slot: a second transition inside the fade window
+	// used to overwrite the pointer, which both leaked the C memory and left
+	// miniaudio holding a sound in its node graph that nothing would ever
+	// uninitialize. Three seconds is easily long enough for a player to change
+	// area twice.
+	musicRetiring []retiringSound
 	masterVol     float32
 
 	// Ambient layers keyed by ID (e.g. "crickets", "birds").
@@ -64,11 +70,11 @@ func (e *Engine) Destroy() {
 		C.ma_sound_uninit(e.music)
 		e.musicOn = false
 	}
-	if e.musicOld != nil {
-		C.ma_sound_uninit(e.musicOld)
-		C.free(unsafe.Pointer(e.musicOld))
-		e.musicOld = nil
+	for _, r := range e.musicRetiring {
+		C.ma_sound_uninit(r.snd)
+		C.free(unsafe.Pointer(r.snd))
 	}
+	e.musicRetiring = nil
 	for _, layer := range e.ambients {
 		layer.cleanup()
 	}
@@ -131,23 +137,36 @@ func (e *Engine) PlaySound(path string, x, y, z float32) {
 // musicFadeMs is the default fade duration for music transitions.
 const musicFadeMs = 5000
 
+// retiringSound is a track that has been faded out and is waiting for the fade
+// to finish before its memory can be released.
+type retiringSound struct {
+	snd   *C.ma_sound
+	timer int // frames remaining
+}
+
+// retireMusic fades the current track out and moves it to the retiring list.
+// The caller is left with a fresh, empty e.music.
+func (e *Engine) retireMusic() {
+	C.ma_sound_set_fade_in_milliseconds(e.music, -1, 0, C.ma_uint64(musicFadeMs))
+	C.ma_sound_set_stop_time_in_milliseconds(e.music, C.ma_uint64(musicFadeMs))
+
+	e.musicRetiring = append(e.musicRetiring, retiringSound{
+		snd:   e.music,
+		timer: int(musicFadeMs/16) + 1,
+	})
+	e.music = (*C.ma_sound)(C.calloc(1, C.size_t(unsafe.Sizeof(C.ma_sound{}))))
+}
+
 // PlayMusic starts a looping, non-spatialized music track with a fade-in.
 // Stops any currently playing music first (with crossfade).
 func (e *Engine) PlayMusic(path string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	// Fade out and uninit previous track if playing.
+	// Fade the previous track out onto the retiring list, so the new one can
+	// start immediately and the two overlap for the length of the crossfade.
 	if e.musicOn {
-		C.ma_sound_set_fade_in_milliseconds(e.music, -1, 0, C.ma_uint64(musicFadeMs))
-		// Schedule stop after fade completes — swap to new track immediately
-		// on a second sound slot so both can overlap during crossfade.
-		C.ma_sound_set_stop_time_in_milliseconds(e.music, C.ma_uint64(musicFadeMs))
-		// Move old music to crossfade slot for cleanup.
-		old := e.music
-		e.music = (*C.ma_sound)(C.calloc(1, C.size_t(unsafe.Sizeof(C.ma_sound{}))))
-		e.musicOld = old
-		e.musicOldTimer = int(musicFadeMs/16) + 1 // frames until safe to uninit
+		e.retireMusic()
 	}
 
 	cpath := C.CString(path)
@@ -171,27 +190,27 @@ func (e *Engine) StopMusic() {
 	defer e.mu.Unlock()
 
 	if e.musicOn {
-		C.ma_sound_set_fade_in_milliseconds(e.music, -1, 0, C.ma_uint64(musicFadeMs))
-		C.ma_sound_set_stop_time_in_milliseconds(e.music, C.ma_uint64(musicFadeMs))
 		e.musicOn = false
-		// Cleanup handled by recycleMusicOld after fade completes.
-		e.musicOld = e.music
-		e.musicOldTimer = int(musicFadeMs/16) + 1
-		e.music = (*C.ma_sound)(C.calloc(1, C.size_t(unsafe.Sizeof(C.ma_sound{}))))
+		e.retireMusic()
 	}
 }
 
-// recycleMusicOld cleans up a faded-out music track after the crossfade timer expires.
+// recycleMusicOld releases retiring tracks whose fade has finished.
+//
+// Every entry is independent, so overlapping transitions each get their full
+// fade rather than the newest one evicting the rest.
 func (e *Engine) recycleMusicOld() {
-	if e.musicOld == nil {
-		return
+	kept := e.musicRetiring[:0]
+	for _, r := range e.musicRetiring {
+		r.timer--
+		if r.timer > 0 {
+			kept = append(kept, r)
+			continue
+		}
+		C.ma_sound_uninit(r.snd)
+		C.free(unsafe.Pointer(r.snd))
 	}
-	e.musicOldTimer--
-	if e.musicOldTimer <= 0 {
-		C.ma_sound_uninit(e.musicOld)
-		C.free(unsafe.Pointer(e.musicOld))
-		e.musicOld = nil
-	}
+	e.musicRetiring = kept
 }
 
 // UpdateListener sets the 3D listener position and orientation from the camera.
