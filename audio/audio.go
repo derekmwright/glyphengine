@@ -2,6 +2,21 @@ package audio
 
 /*
 #cgo CFLAGS: -I${SRCDIR}
+
+// miniaudio calls into libm (sqrt, sin, pow) and dlopens the ALSA and
+// PulseAudio backends, neither of which the Go linker pulls in on its own.
+// Windows and macOS get their equivalents from the CRT and from libSystem, so
+// this only bites on Linux -- and it went unnoticed because nothing linked the
+// package at all: no other package in the repo imports it, and `go build` on a
+// library compiles without linking. The first test file in here is what made
+// CI link it and turned an undefined reference into a failure.
+#cgo linux LDFLAGS: -lm -ldl -lpthread
+
+// CoreAudio and its friends, per miniaudio's own build notes. Not verified on
+// a Mac -- there is none to hand -- but without them the package cannot link
+// there either, for the same reason it could not on Linux.
+#cgo darwin LDFLAGS: -framework CoreFoundation -framework CoreAudio -framework AudioToolbox
+
 #cgo windows LDFLAGS: -lole32
 #include "miniaudio.h"
 #include <stdlib.h>
