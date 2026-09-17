@@ -19,6 +19,20 @@ import (
 
 // ModelMesh pairs a GPU mesh with an optional texture loaded from a glTF file.
 type ModelMesh struct {
+	// Name is the glTF material's name, or "" if the material had none or the
+	// primitive had no material at all.
+	//
+	// It is how a game identifies a primitive when it has to drive one from
+	// somewhere other than the renderer -- a charge strip that fills, a lamp
+	// that changes with state. Everything else on this struct describes how the
+	// primitive is *drawn*, which leaves appearance as the only handle, and
+	// matching on a base colour needs a float tolerance to survive the
+	// exporter's round trip. A tolerance is exactly what makes that fragile: it
+	// is invisible in the art, it is not greppable, and a model re-exported
+	// with a colour a thousandth off loads without complaint and simply never
+	// lights up.
+	Name string
+
 	Mesh        *Mesh
 	Texture     *Texture
 	Skinned     bool       // true if this mesh uses skinned vertices
@@ -35,6 +49,35 @@ type ModelMesh struct {
 	// Metallic and Roughness above stay meaningful either way — the maps
 	// multiply them.
 	Material *Material
+
+	// Verts and Idx are the geometry this primitive was decoded from, in the
+	// engine's winding. They are retained so a model can be treated as geometry
+	// rather than only as a draw call: merged with its siblings, measured,
+	// turned into a collider, or validated at load.
+	//
+	// Retained by default because the decode allocated them anyway and
+	// discarding was the only reason they were unavailable. Model.ReleaseGeometry
+	// drops them for a caller that has finished with them and would rather have
+	// the memory.
+	//
+	// Empty on a skinned primitive. Those decode to SkinnedVertex, a different
+	// layout carrying joint indices and weights, so there is nothing to put
+	// here. Name is still set, and Model.Bounds reports that it cannot answer
+	// rather than answering from an empty set.
+	Verts []Vertex
+	Idx   []uint32
+}
+
+// materialName returns the name of the material a primitive references, or ""
+// when it references none or the material is unnamed.
+//
+// Index rather than pointer because glTF stores the reference as an index into
+// the document, and a nil one means "no material" rather than "material zero".
+func materialName(doc *gltf.Document, material *int) string {
+	if material == nil || *material < 0 || *material >= len(doc.Materials) {
+		return ""
+	}
+	return doc.Materials[*material].Name
 }
 
 // Model holds all meshes loaded from a single glTF/GLB file.
@@ -137,6 +180,7 @@ func (r *Renderer) LoadGLTF(fsys fs.FS, name string) (*Model, error) {
 			}
 
 			model.Meshes = append(model.Meshes, ModelMesh{
+				Name:        materialName(doc, prim.Material),
 				Mesh:        gpuMesh,
 				Texture:     tex,
 				Material:    material,
@@ -144,6 +188,8 @@ func (r *Renderer) LoadGLTF(fsys fs.FS, name string) (*Model, error) {
 				BaseColor:   baseColor,
 				Metallic:    metallic,
 				Roughness:   roughness,
+				Verts:       vertices,
+				Idx:         indices,
 			})
 		}
 	}
@@ -552,7 +598,13 @@ func (r *Renderer) LoadGLTFSkinned(fsys fs.FS, name string) (*SkinnedModel, erro
 				baseColor, metallic, roughness = resolveMaterial(doc, int(*prim.Material))
 			}
 
+			// Skinned primitives carry the name but not Verts: they decode to
+			// SkinnedVertex, which is a different layout, so there is nothing
+			// to put in a []Vertex. Model.Bounds and CombineModel therefore
+			// report "cannot answer" for a purely skinned model rather than
+			// answering from an empty set.
 			model.Meshes = append(model.Meshes, ModelMesh{
+				Name:      materialName(doc, prim.Material),
 				Mesh:      gpuMesh,
 				Texture:   tex,
 				Skinned:   true,
@@ -612,12 +664,15 @@ func (r *Renderer) LoadGLTFSkinned(fsys fs.FS, name string) (*SkinnedModel, erro
 			}
 
 			model.Meshes = append(model.Meshes, ModelMesh{
+				Name:      materialName(doc, prim.Material),
 				Mesh:      gpuMesh,
 				Texture:   tex,
 				Skinned:   false,
 				BaseColor: baseColor,
 				Metallic:  metallic,
 				Roughness: roughness,
+				Verts:     vertices,
+				Idx:       indices,
 			})
 		}
 	}
