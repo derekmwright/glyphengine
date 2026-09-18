@@ -180,27 +180,56 @@ func TestTranslucentDrawsDoNotCastShadows(t *testing.T) {
 	}
 }
 
-// The blended variants are built from lit.vert and lit.frag, so the paths with
-// their own pipeline stay opaque rather than being rerouted and quietly losing
-// the thing that made them special. Silent is the failure mode to avoid here:
-// a rerouted material draw renders, and just has no normal map.
-func TestPathsWithNoBlendedVariantStayOpaque(t *testing.T) {
+// Which paths have a blended variant, and which stay opaque rather than being
+// rerouted and quietly losing the thing that made them special.
+//
+// Silent is the failure mode to avoid: a rerouted material draw renders, and
+// just has no normal map. Better to draw it opaque, which is visible, than to
+// draw it blended and wrong.
+//
+// A skinned mesh that also carries a Material is the case worth pinning. It
+// goes through the skinned *material* pipeline, which has no blended twin, so
+// it stays opaque even though both of its halves look supported.
+func TestOnlyPathsWithABlendedVariantGoTranslucent(t *testing.T) {
 	mesh := &renderer.Mesh{BoundRadius: 1}
 	cases := []struct {
 		name string
+		want bool
 		d    renderer.RenderObject
 	}{
-		{"plain lit", renderer.RenderObject{Mesh: mesh, Alpha: 0.5}},
-		{"terrain", renderer.RenderObject{Mesh: mesh, Alpha: 0.5, TerrainMat: &renderer.TerrainMaterial{}}},
-		{"water", renderer.RenderObject{Mesh: mesh, Alpha: 0.5, Water: &renderer.WaterParams{}}},
-		{"material", renderer.RenderObject{Mesh: mesh, Alpha: 0.5, Material: &renderer.Material{}}},
-		{"skinned", renderer.RenderObject{Mesh: mesh, Alpha: 0.5, Joints: &renderer.JointBuffer{}}},
+		{"plain lit", true, renderer.RenderObject{Mesh: mesh, Alpha: 0.5}},
+		{"skinned", true, renderer.RenderObject{Mesh: mesh, Alpha: 0.5, Joints: &renderer.JointBuffer{}}},
+		{"terrain", false, renderer.RenderObject{Mesh: mesh, Alpha: 0.5, TerrainMat: &renderer.TerrainMaterial{}}},
+		{"water", false, renderer.RenderObject{Mesh: mesh, Alpha: 0.5, Water: &renderer.WaterParams{}}},
+		{"material", false, renderer.RenderObject{Mesh: mesh, Alpha: 0.5, Material: &renderer.Material{}}},
+		{"skinned material", false, renderer.RenderObject{
+			Mesh: mesh, Alpha: 0.5, Joints: &renderer.JointBuffer{}, Material: &renderer.Material{},
+		}},
 	}
 	for _, tc := range cases {
-		got := tc.d.IsTranslucent()
-		want := tc.name == "plain lit"
-		if got != want {
-			t.Errorf("%s: IsTranslucent() = %v, want %v", tc.name, got, want)
+		if got := tc.d.IsTranslucent(); got != tc.want {
+			t.Errorf("%s: IsTranslucent() = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+// A skinned character fading out must not keep casting a solid shadow, for the
+// same reason a placement ghost must not: the shadow is what gives away that
+// the thing is still really there.
+func TestTranslucentSkinnedDoesNotCastShadows(t *testing.T) {
+	mesh := &renderer.Mesh{BoundRadius: 1}
+	e := &Engine{Scene: NewScene(), cameraEye: mgl32.Vec3{0, 0, 0}}
+
+	ent := e.Scene.Spawn()
+	e.Scene.C.Transform.Set(ent, &Transform{Position: mgl32.Vec3{0, 0, -10}, Scale: mgl32.Vec3{1, 1, 1}})
+	e.Scene.C.MeshRef.Set(ent, &MeshRef{Mesh: mesh})
+	e.Scene.C.Translucent.Set(ent, &Translucent{Alpha: 0.5})
+
+	draws := e.buildDrawList(noCull(), false, mgl32.Mat4{})
+	if len(draws) != 1 {
+		t.Fatalf("expected 1 draw, got %d", len(draws))
+	}
+	if !draws[0].NoCastShadow {
+		t.Error("a translucent draw still casts a shadow")
 	}
 }

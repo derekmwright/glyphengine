@@ -18,7 +18,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-09-16
+verified: 2026-09-18
 ---
 
 # Draw translucent world geometry
@@ -99,32 +99,58 @@ entity with `NoCastShadow` cleared.
 - **Emissive** composes. A full-bright translucent object is the hologram
   variant of the same ghost, so alpha applies on the emissive early-out path too
   rather than one flag winning. Hold `E` in `18-translucent`.
-- **DoubleSided** composes, via a second blended pipeline. Without it, a glass
-  box would cull its back faces and leave nothing where the far wall should be.
+- **DoubleSided** composes on the static path, via a second blended pipeline.
+  Without it, a glass box would cull its back faces and leave nothing where the
+  far wall should be. It does nothing on a skinned draw; see above.
 - **Hidden** still wins; it is checked first.
 - **InstancedMesh** does not. There is no blended instanced pipeline, so a set
   stays opaque rather than silently losing its placements. See
   [`instancing.md`](instancing.md).
 
+## Skinned meshes
+
+A skinned mesh fades the same way, through its own blended pipeline:
+
+```go
+e.C.Translucent.Set(character, &glyph.Translucent{Alpha: 0.4})
+```
+
+Respawns, cloaked enemies, a dissolve, a preview of an animated unit — all of
+them are a character rather than a prop, and all of them were locked out until
+this existed.
+
+**There is no double-sided skinned variant, deliberately.** The opaque skinned
+path has none either, so adding one here would make a translucent character more
+capable than a solid one. `DoubleSided` therefore does not select a pipeline on
+a skinned draw, and the flat-shading signal that goes with it is suppressed.
+
+`task validate` covers it as `06-skinned -demo -plain -fade 0.4`, because no
+default run reaches the pipeline.
+
 ## Failure mode: the paths with no blended variant
 
-The blended pipelines are built from `lit.vert` and `lit.frag`. Terrain, water,
-material (`MaterialRef.PBR`) and skinned draws each go through a pipeline of
-their own, and none has a blended twin.
+Terrain, water and material (`MaterialRef.PBR`) draws each go through a pipeline
+of their own, and none has a blended twin.
 
 **An entity that carries `Translucent` alongside any of those stays opaque.** It
-is not rerouted through the lit blended path, because rerouting would silently
-drop the splat blend, the refraction, the normal and occlusion maps, or the
-skinning — a frame that renders and is quietly wrong, which is worse than an
-object that is not as see-through as asked for.
+is not rerouted, because rerouting would silently drop the splat blend, the
+refraction, or the normal and occlusion maps — a frame that renders and is
+quietly wrong, which is worse than an object that is not as see-through as asked
+for.
+
+The case worth knowing about is **a skinned mesh that also carries a
+`MaterialRef.PBR`**: it goes through the skinned *material* pipeline, which has
+no blended twin, so it stays opaque even though both of its halves look
+supported. `examples/06-skinned` is exactly this — its character gets a
+generated normal map — which is why the `-fade` flag there needs `-plain`
+alongside it.
 
 `renderer.RenderObject.IsTranslucent` is the single place that decides, so the
 draw-list build and the recorder cannot drift apart. They have to agree exactly:
 a draw the opaque loop skips and the blended loop also skips simply vanishes.
 
-Translucent PBR and translucent skinned meshes are the obvious next two. Neither
-is written because nothing needed them yet, and each is a pipeline plus a branch
-in `recordTranslucent`.
+Translucent PBR is the obvious remaining one — a pipeline and a branch, unwritten
+because nothing has needed it.
 
 ## Not done
 

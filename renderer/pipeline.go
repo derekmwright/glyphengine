@@ -1038,7 +1038,7 @@ func createSkinnedPipelineLayout(deviceDriver core1_0.DeviceDriver, texSetLayout
 // layout. The fragment shader is a parameter because there are two -- the plain
 // one and the material variant -- and they differ only in what set 0 holds.
 // Both put the shadow sampler at set 2, because set 1 is the joint UBO.
-func createSkinnedPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, fragSpv []byte, renderPass core1_0.RenderPass, skinnedPipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
+func createSkinnedPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, fragSpv []byte, renderPass core1_0.RenderPass, skinnedPipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags, blend bool) (core1_0.Pipeline, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
 		Code: bytesToUint32Slice(sh.SkinnedLitVert),
 	})
@@ -1089,13 +1089,19 @@ func createSkinnedPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, frag
 		},
 		DepthStencilState: &core1_0.PipelineDepthStencilStateCreateInfo{
 			DepthTestEnable:  true,
-			DepthWriteEnable: true,
+			DepthWriteEnable: !blend,
 			DepthCompareOp:   core1_0.CompareOpGreater,
 		},
 		ColorBlendState: &core1_0.PipelineColorBlendStateCreateInfo{
 			Attachments: []core1_0.PipelineColorBlendAttachmentState{{
-				ColorWriteMask: core1_0.ColorComponentRed | core1_0.ColorComponentGreen | core1_0.ColorComponentBlue | core1_0.ColorComponentAlpha,
-				BlendEnabled:   false,
+				ColorWriteMask:      core1_0.ColorComponentRed | core1_0.ColorComponentGreen | core1_0.ColorComponentBlue | core1_0.ColorComponentAlpha,
+				BlendEnabled:        blend,
+				SrcColorBlendFactor: core1_0.BlendFactorSrcAlpha,
+				DstColorBlendFactor: core1_0.BlendFactorOneMinusSrcAlpha,
+				ColorBlendOp:        core1_0.BlendOpAdd,
+				SrcAlphaBlendFactor: core1_0.BlendFactorOne,
+				DstAlphaBlendFactor: core1_0.BlendFactorZero,
+				AlphaBlendOp:        core1_0.BlendOpAdd,
 			}},
 		},
 		DynamicState: &core1_0.PipelineDynamicStateCreateInfo{

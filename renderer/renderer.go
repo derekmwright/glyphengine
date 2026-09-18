@@ -70,6 +70,9 @@ type Renderer struct {
 	jointDescriptorSetLayout core1_0.DescriptorSetLayout
 	skinnedPipelineLayout    core1_0.PipelineLayout // skinned: set 0=tex, set 1=joints, set 2=shadow
 	skinnedPipeline          core1_0.Pipeline
+	// skinnedTranslucentPipeline is the blended twin; see createTranslucentPipeline
+	// for why the blended variants exist and translucency.md for what they cover.
+	skinnedTranslucentPipeline core1_0.Pipeline
 	// Skinned + Material: set 0=material, set 1=joints, set 2=shadow.
 	skinnedMaterialPipelineLayout core1_0.PipelineLayout
 	skinnedMaterialPipeline       core1_0.Pipeline
@@ -676,11 +679,24 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	}
 	r.onInit(func() { r.deviceDriver.DestroyPipelineLayout(r.skinnedPipelineLayout, nil) })
 
-	r.skinnedPipeline, err = createSkinnedPipeline(r.deviceDriver, r.shaders, r.shaders.SkinnedLitFrag, r.renderPass, r.skinnedPipelineLayout, r.sc.extent, r.msaaSamples)
+	r.skinnedPipeline, err = createSkinnedPipeline(r.deviceDriver, r.shaders, r.shaders.SkinnedLitFrag, r.renderPass, r.skinnedPipelineLayout, r.sc.extent, r.msaaSamples, false)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create skinned pipeline: %w", err)
 	}
 	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.skinnedPipeline, nil) })
+
+	// The blended skinned variant. It shares skinnedPipelineLayout, so it needs
+	// no layout of its own -- unlike the lit variants, whose layout is built
+	// per call by createLitVariantPipeline.
+	//
+	// There is no double-sided twin, and that is deliberate rather than an
+	// omission: the opaque skinned path does not have one either, so adding one
+	// here would make a translucent character more capable than a solid one.
+	r.skinnedTranslucentPipeline, err = createSkinnedPipeline(r.deviceDriver, r.shaders, r.shaders.SkinnedLitFrag, r.renderPass, r.skinnedPipelineLayout, r.sc.extent, r.msaaSamples, true)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create translucent skinned pipeline: %w", err)
+	}
+	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.skinnedTranslucentPipeline, nil) })
 
 	// Same three sets as the plain skinned pipeline, with the material's layout
 	// in place of the single texture at set 0. That is the whole difference, and
@@ -691,7 +707,7 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	}
 	r.onInit(func() { r.deviceDriver.DestroyPipelineLayout(r.skinnedMaterialPipelineLayout, nil) })
 
-	r.skinnedMaterialPipeline, err = createSkinnedPipeline(r.deviceDriver, r.shaders, r.shaders.SkinnedLitMaterialFrag, r.renderPass, r.skinnedMaterialPipelineLayout, r.sc.extent, r.msaaSamples)
+	r.skinnedMaterialPipeline, err = createSkinnedPipeline(r.deviceDriver, r.shaders, r.shaders.SkinnedLitMaterialFrag, r.renderPass, r.skinnedMaterialPipelineLayout, r.sc.extent, r.msaaSamples, false)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create skinned material pipeline: %w", err)
 	}
@@ -1340,7 +1356,7 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 		return err
 	}
 	recordStart := time.Now()
-	err = recordCommandBuffer(r.deviceDriver, cmdBuf, r.renderPass, r.framebuffers[imageIndex], r.pipeline, r.litDoubleSidedPipeline, r.translucentPipeline, r.translucentDoubleSidedPipeline, r.instancedPipeline, r.instancedDoubleSidedPipeline, r.overlayPipeline, r.skyPipeline, r.starsPipeline, r.celestialPipeline, r.uiPipeline, r.msdfPipeline, r.skinnedPipeline, r.grassPipeline, r.waterPipeline, r.godRayPipeline, r.waterRenderPass, waterFB, r.sceneColor, r.hdr.images[imageIndex],
+	err = recordCommandBuffer(r.deviceDriver, cmdBuf, r.renderPass, r.framebuffers[imageIndex], r.pipeline, r.litDoubleSidedPipeline, r.translucentPipeline, r.translucentDoubleSidedPipeline, r.skinnedTranslucentPipeline, r.instancedPipeline, r.instancedDoubleSidedPipeline, r.overlayPipeline, r.skyPipeline, r.starsPipeline, r.celestialPipeline, r.uiPipeline, r.msdfPipeline, r.skinnedPipeline, r.grassPipeline, r.waterPipeline, r.godRayPipeline, r.waterRenderPass, waterFB, r.sceneColor, r.hdr.images[imageIndex],
 		func(cb core1_0.CommandBuffer) error { return r.recordClouds(cb, lighting) },
 		r.cloudSetFor(),
 		r.bloomFor(imageIndex), r.tonemapFor(imageIndex), r.particlePipeline, r.terrainPipeline, r.materialPipelines(), &r.stats, r.pipelineLayout, r.litPipelineLayout, r.skinnedPipelineLayout, r.terrainPipelineLayout, r.sc.extent, draws, overlays, celestials, uiOverlays, msdfOverlays, lighting, r.fallbackTexture, r.milkyWayTex, r.shadow, r.grass, r.grassLOD, r.grassImpostor, r.grassImpostorPipeline, r.particles, f, r.msaa != nil, r.gpuTimer)
