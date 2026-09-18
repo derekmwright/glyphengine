@@ -229,6 +229,20 @@ tasks:
             status=1
           fi
         done
+        # A paused world must be frozen, not merely slowed. 09-water is the
+        # scene for it because the things that move there run off different
+        # clocks: the waves and shoreline foam off the elapsed clock the shaders
+        # read, the sun off Scene.Tick. Two captures taken 60 frames apart after
+        # the pause are identical only if SetTimeScale stopped all of them.
+        GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./09-water -frames 60 -pauseat 30 -screenshot $d/p1.png >/dev/null 2>&1
+        GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./09-water -frames 120 -pauseat 30 -screenshot $d/p2.png >/dev/null 2>&1
+        if same p1 p2; then
+          echo "pause: world frozen, as it must be"
+        else
+          echo "pause: THE WORLD KEPT MOVING WHILE PAUSED"
+          status=1
+        fi
+
         # Prove the check is not vacuous: with the real clock the same two runs
         # must NOT match, or it is passing on a scene that never moves -- or on
         # captures that were never written.

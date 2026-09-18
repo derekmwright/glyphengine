@@ -442,6 +442,18 @@ type Engine struct {
 	debugKeys  bool
 	debugBloom float32
 
+	// timeScale multiplies the simulation clock; see SetTimeScale. 1 is real
+	// time, 0 is paused. Not persisted anywhere -- a game that wants to resume
+	// at a particular speed sets it again.
+	timeScale float32
+
+	// accumulator is the unspent simulation time carried between frames. It is
+	// engine state rather than a local in Run so that advanceSimulation can be
+	// driven directly by a test: the frame loop itself needs a window and a
+	// GPU, and a test that re-implemented its arithmetic would be testing the
+	// copy rather than the engine.
+	accumulator time.Duration
+
 	// cpu accumulates per-phase CPU cost; see cputimer.go.
 	cpu cpuTimer
 }
@@ -534,6 +546,7 @@ func New(g Game, opts ...Option) (*Engine, error) {
 		renderer:       r,
 		input:          input.New(w.Handle()),
 		game:           g,
+		timeScale:      1,
 		cameraEye:      mgl32.Vec3{0, 1, 3},
 		cameraCenter:   mgl32.Vec3{0, 0, 0},
 		cameraUp:       mgl32.Vec3{0, 1, 0},
@@ -712,6 +725,92 @@ func (e *Engine) InterpolatedTransform(entity ecs.Entity) (Transform, bool) {
 	return e.Scene.InterpolatedTransform(entity, e.alpha)
 }
 
+// advanceSimulation banks one frame of simulation time and drains it into
+// fixed ticks, leaving e.alpha as how far the frame sits past the last one.
+//
+// Split out of Run because Run needs a window and a GPU, and this is the part
+// worth testing: a paused engine that still ticks is the failure this exists to
+// prevent, and it is silent. A test that re-implemented the arithmetic instead
+// would pass while the loop did the wrong thing.
+//
+// frameDelta is real time; the scaling to simulation time happens here, and
+// the tick step comes from e.tickDuration rather than the caller.
+func (e *Engine) advanceSimulation(frameDelta time.Duration) {
+	// The simulation clock is the real one scaled. Scaling what goes into the
+	// accumulator rather than the tick delta is the whole design: a fixed
+	// timestep is only fixed if tickDt never moves, and slow motion that
+	// shortened the step would change how the integrator behaves and break
+	// determinism with it. Half speed is half as many ticks of the same size.
+	e.accumulator += time.Duration(float64(frameDelta) * float64(e.timeScale))
+
+	// Bound catch-up work so a long stall cannot spiral. Past the budget the
+	// simulation falls behind instead — see WithMaxCatchUp.
+	if e.accumulator > e.maxCatchUp {
+		e.accumulator = e.maxCatchUp
+	}
+
+	step := float32(e.tickDuration.Seconds())
+	for e.accumulator >= e.tickDuration {
+		e.Scene.Tick(step)
+		if e.fixedUpdate != nil {
+			e.fixedUpdate.FixedUpdate(e, step)
+		}
+		e.accumulator -= e.tickDuration
+	}
+
+	// Whatever is left over is how far this frame sits past the last tick, in
+	// [0,1). Rendering blends by it so motion is smooth between simulation
+	// steps rather than stepping at the tick rate. Frozen while paused, which
+	// is what holds a paused frame at a consistent pose.
+	e.alpha = float32(e.accumulator) / float32(e.tickDuration)
+}
+
+// SetTimeScale multiplies the rate of the simulation clock.
+//
+// 1 is real time. 0 pauses: Scene.Tick and FixedUpdate stop being called,
+// animation stops advancing, and the wind and waves stop moving. Values between
+// run slow motion, and above 1 runs fast — a difficulty setting, a bullet-time
+// effect, or stepping through a bug at a tenth speed.
+//
+//	func (g *game) Update(e *glyph.Engine, dt float32) {
+//	    if e.Input().KeyPressed(input.KeyEscape) {
+//	        g.paused = !g.paused
+//	        if g.paused {
+//	            e.SetTimeScale(0)
+//	        } else {
+//	            e.SetTimeScale(1)
+//	        }
+//	    }
+//	}
+//
+// What keeps running is everything a paused game needs to still be a program:
+// Update, LateUpdate, and rendering. They receive the real frame delta, not the
+// scaled one, so a menu animates and a camera moves at full speed while the
+// world behind them is stopped. A game that wants its camera slowed too can
+// multiply by TimeScale itself.
+//
+// Pausing is not something a game can do for itself. Returning early from
+// FixedUpdate stops the game's own simulation and none of the engine's: rigid
+// bodies keep integrating, character controllers keep moving, the transform
+// snapshots interpolation reads keep being taken, and animation keeps playing.
+// A game with no physics and no skinned meshes gets away with it by luck.
+//
+// Negative values are clamped to zero. Running a fixed-timestep simulation
+// backwards is not a thing this engine can do — the integrator is not
+// reversible — and the useful reading of a negative scale is "stopped".
+func (e *Engine) SetTimeScale(s float32) {
+	if s < 0 {
+		s = 0
+	}
+	e.timeScale = s
+}
+
+// TimeScale returns the current simulation rate; see SetTimeScale.
+func (e *Engine) TimeScale() float32 { return e.timeScale }
+
+// Paused reports whether the simulation clock is stopped.
+func (e *Engine) Paused() bool { return e.timeScale == 0 }
+
 // Elapsed returns the running wall-clock time in seconds since Run started.
 func (e *Engine) Elapsed() float32 { return e.elapsed }
 
@@ -822,9 +921,7 @@ func (e *Engine) PickEntity(screenX, screenY float64, maxDist float32, exclude e
 // display the window is on; with it off the loop runs unbounded. There is
 // deliberately no software frame limiter here — see WithVSync.
 func (e *Engine) Run() {
-	var accumulator time.Duration
 	prev := time.Now()
-	tickDt := float32(e.tickDuration.Seconds())
 
 	// Deferred so it covers both exits: the frame budget running out and
 	// the window closing.
@@ -855,14 +952,11 @@ func (e *Engine) Run() {
 		if e.fixedFrameTime > 0 {
 			frameDelta = e.fixedFrameTime
 		}
-		accumulator += frameDelta
-
-		// Bound catch-up work so a long pause cannot spiral. Past the budget
-		// the simulation falls behind instead — see WithMaxCatchUp.
-		if accumulator > e.maxCatchUp {
-			accumulator = e.maxCatchUp
-		}
-
+		// The simulation clock is the real one scaled. Scaling the accumulator
+		// rather than the tick delta is the whole design: a fixed timestep is
+		// only fixed if tickDt never moves, and slow motion that shortened the
+		// step would change how physics integrates and break determinism with
+		// it. Half speed means half as many ticks of the same size.
 		dt := frameDelta.Seconds()
 		if e.smoothDelta <= 0 {
 			e.smoothDelta = dt
@@ -903,26 +997,18 @@ func (e *Engine) Run() {
 		// Fixed-timestep simulation. Runs zero or more times per frame — which
 		// is exactly why input belongs in Update above, not in here.
 		e.cpu.begin(CPUTick)
-		for accumulator >= e.tickDuration {
-			e.Scene.Tick(tickDt)
-			if e.fixedUpdate != nil {
-				e.fixedUpdate.FixedUpdate(e, tickDt)
-			}
-			accumulator -= e.tickDuration
-		}
-
-		// Whatever time is left over is how far this frame sits past the last
-		// tick, in [0,1). Rendering blends by it so motion is smooth between
-		// simulation steps rather than stepping at the tick rate.
-		e.alpha = float32(accumulator) / float32(e.tickDuration)
+		e.advanceSimulation(frameDelta)
 
 		// Animation sampling is presentation, not simulation — advance it once
-		// per rendered frame by the real delta. Clamped so a long pause does
-		// not lurch poses forward.
+		// per rendered frame rather than per tick. Clamped so a long stall does
+		// not lurch poses forward, then scaled: a paused game with a walk cycle
+		// still playing is not paused, and slow motion wants the walk slowed to
+		// match.
 		animDt := float32(dt)
 		if animDt > 0.25 {
 			animDt = 0.25
 		}
+		animDt *= e.timeScale
 		e.cpu.begin(CPUAnimate)
 		e.TickAnimations(animDt)
 
@@ -940,7 +1026,15 @@ func (e *Engine) Run() {
 			continue
 		}
 
-		e.elapsed += float32(frameDelta.Seconds())
+		// Scaled for the same reason as animation. This clock reaches the
+		// shaders as lighting.Time and drives grass wind, water waves and the
+		// cloud march; a paused world whose lake is still rippling has not
+		// stopped, and under slow motion unscaled waves would run visibly fast
+		// against the characters in front of them.
+		//
+		// The sun needs no handling here: time of day advances inside
+		// Scene.Tick, so it stops when the ticks do.
+		e.elapsed += float32(frameDelta.Seconds()) * e.timeScale
 		e.renderFrame()
 
 		// The fence wait happens inside the renderer, so it is folded in rather

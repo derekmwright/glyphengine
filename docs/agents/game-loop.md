@@ -38,6 +38,9 @@ api:
   - glyphengine.WithMaxCatchUp
   - glyphengine.WithProjection
   - glyphengine.WithScene
+  - glyphengine.Engine.SetTimeScale
+  - glyphengine.Engine.TimeScale
+  - glyphengine.Engine.Paused
   - glyphengine.WithShaders
   - renderer.Renderer.Shaders
 example: examples/02-cube
@@ -46,7 +49,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-09-16
+verified: 2026-09-18
 ---
 
 # Run a game loop with Engine and Game
@@ -339,6 +342,44 @@ Authoring is unchanged: write GLSL, run `task shaders`, commit the `.spv`, and
 
 `Renderer.Shaders()` reports what is actually in effect, defaults filled in, for
 a harness that wants to check rather than assume.
+
+## Pausing, and slow motion
+
+```go
+e.SetTimeScale(0)   // paused
+e.SetTimeScale(0.25) // quarter speed
+e.SetTimeScale(1)   // back to real time
+```
+
+**A game cannot pause itself.** Returning early from `FixedUpdate` stops the
+game's own simulation and none of the engine's: `Scene.Tick` is called before
+`FixedUpdate` and keeps integrating rigid bodies, moving character controllers
+and taking the transform snapshots interpolation reads, while animation advances
+separately again on the frame delta. A game with no physics and no skinned
+meshes gets away with it by luck, and the moment it gains either, a crate keeps
+sliding behind the menu with nothing to say so.
+
+What stops at scale 0: `Scene.Tick`, `FixedUpdate`, animation, and the elapsed
+clock the shaders read for grass wind, water waves and the cloud march.
+
+What keeps running: `Update`, `LateUpdate`, and rendering — everything a paused
+game needs to still be a program. They get the **real** frame delta, not the
+scaled one, so a menu animates and a camera moves at full speed over a stopped
+world. A game that wants its camera slowed too multiplies by `TimeScale` itself.
+
+**Scaling goes into the accumulator, never into the tick delta.** A fixed
+timestep is only fixed if `tickDt` never moves; slow motion that shortened the
+step would change how the integrator behaves and take determinism with it. Half
+speed is half as many ticks of the same size.
+
+Negative values clamp to zero. The integrator is not reversible, so the useful
+reading of a negative scale is "stopped".
+
+`task determinism` gates it: `09-water` captured 60 frames apart after a pause
+must be byte-identical. That scene is the one to use because the things moving
+in it run off different clocks — waves off the elapsed clock, the sun off
+`Scene.Tick` — so the captures match only if both stopped. Deleting either
+scaling makes it fail, which was checked rather than assumed.
 
 ## Headless and CI
 

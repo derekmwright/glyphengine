@@ -85,6 +85,7 @@ type game struct {
 	yaw        float32
 	shafts     float32
 	pillars    bool
+	pauseAt    int
 	hud        int
 	bloom      float32
 	bloomThres float32
@@ -225,6 +226,15 @@ func (g *game) Init(e *glyph.Engine) error {
 
 func (g *game) Update(e *glyph.Engine, dt float32) {
 	in := e.Input()
+
+	// -pauseat stops the world at a chosen frame. Everything that moves on its
+	// own here is driven by a different clock -- the waves and the shoreline
+	// foam by the elapsed clock the shaders read, the sun by Scene.Tick -- so
+	// two captures taken at different frames after the pause are identical only
+	// if SetTimeScale stopped all of them.
+	if g.pauseAt > 0 && e.FrameCount() >= g.pauseAt {
+		e.SetTimeScale(0)
+	}
 
 	// -hud draws a block of identical HUD lines down the frame, crossing the
 	// waterline. Every line is the same string on purpose: the lines are then
@@ -419,6 +429,7 @@ func main() {
 	yaw := flag.Float64("yaw", 0, "initial camera yaw in radians")
 	shafts := flag.Float64("shafts", -1, "light shaft strength (0 disables; -1 keeps the default)")
 	pillars := flag.Bool("pillars", false, "spawn pillars between the spawn point and the setting sun")
+	pauseAt := flag.Int("pauseat", 0, "pause the simulation at frame N (0 = never); the world should stop dead")
 	hud := flag.Int("hud", 0, "draw N identical HUD lines down the frame, for the `task hud` legibility check")
 	bloom := flag.Float64("bloom", 0, "bloom intensity (0 disables)")
 	bloomThreshold := flag.Float64("bloomthreshold", 1.2, "luminance bloom starts above; bloom.md's starting point is 1.2")
@@ -446,7 +457,7 @@ func main() {
 		opts = append(opts, glyph.WithScreenshot(*shot))
 	}
 
-	e, err := glyph.New(&game{seed: *seed, refract: *refract, pitch: float32(*pitch), tod: float32(*tod), clouds: *clouds, stars: *stars, milkyway: *milkyway, band: *band, fogHeight: float32(*fogHeight), yaw: float32(*yaw), shafts: float32(*shafts), pillars: *pillars, hud: *hud, bloom: float32(*bloom), bloomThres: float32(*bloomThreshold)}, opts...)
+	e, err := glyph.New(&game{seed: *seed, refract: *refract, pitch: float32(*pitch), tod: float32(*tod), clouds: *clouds, stars: *stars, milkyway: *milkyway, band: *band, fogHeight: float32(*fogHeight), yaw: float32(*yaw), shafts: float32(*shafts), pillars: *pillars, pauseAt: *pauseAt, hud: *hud, bloom: float32(*bloom), bloomThres: float32(*bloomThreshold)}, opts...)
 	if err != nil {
 		log.Fatalf("create engine: %v", err)
 	}
