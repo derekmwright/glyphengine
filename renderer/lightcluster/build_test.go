@@ -403,9 +403,21 @@ func TestStatsAccountForEveryLight(t *testing.T) {
 	if res.Stats.Uploaded != 3 {
 		t.Errorf("Uploaded = %d, want 3", res.Stats.Uploaded)
 	}
+	// The light straddling the near plane cannot be bounded on screen, so every
+	// tile is a candidate; at 2 m of range it really does reach every tile of
+	// the first slice, so it is screen-wide in the sense the stat claims. The
+	// two counts mean different things and this is the case that separates
+	// them: UnboundedLights is what the cell test had to sort out, and
+	// ScreenWideLights is what it could not narrow.
+	if res.Stats.UnboundedLights != 1 {
+		t.Errorf("UnboundedLights = %d, want 1 (the one straddling the near plane)",
+			res.Stats.UnboundedLights)
+	}
 	if res.Stats.ScreenWideLights != 1 {
-		t.Errorf("ScreenWideLights = %d, want 1 (the one straddling the near plane)",
-			res.Stats.ScreenWideLights)
+		t.Errorf("ScreenWideLights = %d, want 1", res.Stats.ScreenWideLights)
+	}
+	if res.Stats.CellsBinned > res.Stats.CellsTested || res.Stats.CellsBinned == 0 {
+		t.Errorf("binned %d of %d candidate cells", res.Stats.CellsBinned, res.Stats.CellsTested)
 	}
 	if res.Stats.NonEmptyCells == 0 || res.Stats.MaxCellLights == 0 {
 		t.Errorf("stats say nothing landed anywhere: %+v", res.Stats)

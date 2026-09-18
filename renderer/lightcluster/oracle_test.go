@@ -281,6 +281,29 @@ func oracleScenarios(t testing.TB) []scenario {
 		}
 		out = append(out, scenario{name: cam.name, params: p, lights: makeLights(rng, cam.lightCount, p)})
 	}
+
+	// The consumer game's camera, which is the shape the froxel refinement
+	// exists for and therefore the shape most likely to break it: an orbit
+	// camera at minimum zoom over a hex grid of lamps, with the eye inside 18
+	// lamp spheres at once. Every one of those is a light whose screen bound
+	// does not exist, so every one of them goes through the cell test rather
+	// than the tangent bounds, and a hole in a lamp here is a hole a player
+	// would be looking straight at.
+	//
+	// Two of them: plain point lamps, and the same layout with every third lamp
+	// a downward spot, so the sector bound goes through the cell test too.
+	for _, spots := range []bool{false, true} {
+		lights, p := colonyScene(120, 4, 6, 0.22)
+		name := "colony, eye among the lamps"
+		if spots {
+			name += " (spots)"
+			for i := 2; i < len(lights); i += 3 {
+				lights[i].Dir = mgl32.Vec3{0, -1, 0}
+				lights[i].CosOuter = float32(math.Cos(40 * math.Pi / 180))
+			}
+		}
+		out = append(out, scenario{name: name, params: p, lights: lights})
+	}
 	return out
 }
 
@@ -392,6 +415,27 @@ func clamp1(v float32) float32 {
 // The exact counts move with the seed. What matters is that a bound that is
 // too small in any of the three axes fails loudly, and that the two changes
 // that only cost speed do not.
+//
+// The froxel refinement added a second way to lose a light — a cell whose box
+// is too small, or a sphere tested too tightly against it — so it was broken
+// the same way, against the six scenarios (16189 / 14578 / 18229 / 16276 /
+// 22681 / 16527 lit pairs):
+//
+//	bin tests the sphere with 0.9*radius
+//	  -> FAIL 142 / 654 / 75 / 1691 / 373 / 273
+//	sliceDepths starts slice 0 at the log formula's boundary instead of the
+//	near plane, so the near metre falls out of its box
+//	  -> FAIL 70 / 0 / 0 / 0 / 54 / 0, in exactly the two scenarios with the
+//	     camera down among its lights
+//	axisExtent shrinks each cell box 10% towards its centre
+//	  -> FAIL, but only 1 point per scenario: a box that is slightly too small
+//	     only loses a light when the sphere touches that cell near its edge and
+//	     nowhere else. TestCellBoundsContainTheirFroxel is the sharp version of
+//	     this one, and the same change costs it 14074 of 80000 points.
+//	sliceDepths stops the last slice at the formula instead of the far plane
+//	  -> PASS, and it should: the formula's last boundary IS the far plane, to
+//	     the precision of a float. The clamp is there for the rounding, not for
+//	     the geometry, and the comment now says so.
 func TestOracleNoFalseNegatives(t *testing.T) {
 	b := New()
 	rng := rand.New(rand.NewPCG(7, 11))
