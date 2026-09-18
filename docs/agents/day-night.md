@@ -21,6 +21,10 @@ api:
   - glyphengine.DayNight.Twilight
   - glyphengine.DayNight.StarVisibility
   - glyphengine.DayNight.AmbientColor
+  - glyphengine.NightGrade
+  - glyphengine.DefaultNightGrade
+  - glyphengine.Scene.SetNightGrade
+  - glyphengine.Scene.NightGrade
   - glyphengine.Engine.SetTimeOfDay
   - glyphengine.Engine.SetDayCycleSpeed
 requires:
@@ -137,6 +141,31 @@ share as a third argument. The blend is scaled by `1 - share`, which is the same
 thing as mixing the shifted colour back toward the unshifted one and keeps a
 single early-out covering both "it is daytime" and "this is lamplight".
 
+**How far it goes and what colour it goes are yours.** The strength and the tint
+were constants in `atmosphere.inc`, which every lit surface includes — so a game
+whose nights were "too grey-blue and dulled out" had to vendor the whole
+lighting chain to reach two numbers. They are Scene state now:
+
+```go
+g := e.Scene.NightGrade()   // DefaultNightGrade(): Strength 0.8, Tint 0.72/0.86/1.30
+g.Strength = 0.5            // a gentler night
+g.Tint = mgl32.Vec3{0.80, 0.88, 1.15}
+e.Scene.SetNightGrade(g)
+```
+
+`Strength 0` turns the shift off entirely. `examples/21-streetlights -nightshift 0`
+and `-nighttint r,g,b` are the quickest way to see what each does; measured on
+that scene's moonlit ground, strength `0.8` gives `31/36/43`, `0.4` gives
+`30/38/42`, `0` gives `29/40/41` (the grass tint's own green) and a reversed
+tint at full strength gives `41/36/33`.
+
+It is on `Scene`, initialised by `NewScene`, rather than on `EnvironmentState`
+beside fog and ambient — see [environment](environment.md#convenience-methods)
+for why. The values ride to the shaders in the per-frame `ShadowData` uniform
+block, appended after the cascade matrices because the push constant block is
+full at its 256-byte guaranteed minimum; all seven lit fragment shaders declare
+that block and must agree with `renderer/shadow.go`'s `litUBOSize`.
+
 Two consequences worth knowing:
 
 - **A scene with no local lights is bit-for-bit unaffected.** The share is
@@ -147,6 +176,17 @@ Two consequences worth knowing:
 - **Fog is inside the ratio.** What fog mixes in is scattered skylight, so a pool
   far enough away to have faded into the haze stops counting as local and takes
   the same full shift the sky does. Lamps do not punch warm holes in blue fog.
+- **A material's emission counts as lamp light.** A glowing surface is not a dark
+  surface. `material_shading.inc` adds `matl.emissive` to the local side, so an
+  emissive panel keeps its own colour at night instead of washing to blue-white,
+  and it blends — a dim emissive over moonlit albedo keeps a share of the grade
+  in proportion to how much of the fragment's light it is, with no brightness at
+  which it snaps. A material with no emissive factor contributes exactly `0.0`
+  and cannot be moved by this.
+
+The debug light heatmap (`Engine.SetLightDebugMode`) is exempt: it is a number
+drawn in false colour, not a surface, and grading it turned the whole ramp
+indigo at midnight. `applyFog` hands it back untouched.
 
 Before this, the blend keyed on `sunY` alone, and at full night it was provably
 one-sided: expanding it gives `g - b = 0.2*(c.g - c.b) - 0.352*luminance(c)`, and
