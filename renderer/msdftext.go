@@ -14,6 +14,16 @@ const (
 type MSDFText struct {
 	mesh *Mesh
 	font *Font
+
+	// verts and idx are the geometry scratch, kept between calls and reset to
+	// length zero rather than rebuilt from nil. A text overlay is redrawn
+	// every frame by definition, and growing two slices from nothing each
+	// time was 73% of everything a consumer game allocated -- about 390 KB a
+	// frame, a garbage collection every fifteen frames in a game that
+	// otherwise allocated almost nothing. UpdateMeshData copies out of them
+	// into its own staging buffer, so keeping them aliases nothing.
+	verts []Vertex
+	idx   []uint16
 }
 
 // NewMSDFText allocates a dynamic indexed mesh for MSDF text rendering.
@@ -27,9 +37,29 @@ func NewMSDFText(r *Renderer, font *Font) (*MSDFText, error) {
 
 // SetText rebuilds the mesh with textured quads for each character in the given lines.
 func (t *MSDFText) SetText(r *Renderer, lines []TextLine, screenW, screenH float32) {
-	var vertices []Vertex
-	var indices []uint16
+	t.rebuild(lines, screenW)
+	r.UpdateMeshData(t.mesh, t.verts, t.idx)
+}
 
+// rebuild regenerates the geometry into the retained buffers. It is the part of
+// SetText that does not need a device, split out so a test can hold the
+// retention itself to zero allocations -- testing only the builder below would
+// pass just as happily if SetText handed it nil every frame.
+func (t *MSDFText) rebuild(lines []TextLine, screenW float32) {
+	t.verts, t.idx = appendMSDFGeometry(t.verts[:0], t.idx[:0], t.font, lines, screenW)
+}
+
+// appendMSDFGeometry appends one quad per visible glyph to vertices and
+// indices and returns them. It is a function of its arguments and nothing
+// else so that it can be tested, and held to zero allocations, without a
+// device: SetText itself needs a Renderer.
+//
+// It stops at the mesh's capacity instead of building everything and
+// truncating afterwards. The output is the same first msdfMaxChars glyphs
+// either way, but a retained buffer that grew to fit one absurdly long string
+// would stay that size for the life of the overlay, and the uint16 index base
+// would have wrapped long before the truncation threw the evidence away.
+func appendMSDFGeometry(vertices []Vertex, indices []uint16, font *Font, lines []TextLine, screenW float32) ([]Vertex, []uint16) {
 	for _, line := range lines {
 		fontSize := line.Scale // Scale = pixel height of 1 EM
 		cellW := fontSize      // used for rough width estimate (right-align)
@@ -37,7 +67,7 @@ func (t *MSDFText) SetText(r *Renderer, lines []TextLine, screenW, screenH float
 		// Estimate text width for right-alignment
 		textW := float32(0)
 		for _, ch := range line.Text {
-			if g, ok := t.font.Glyphs[ch]; ok {
+			if g, ok := font.Glyphs[ch]; ok {
 				textW += g.Advance * fontSize
 			} else {
 				textW += cellW * 0.5
@@ -52,7 +82,7 @@ func (t *MSDFText) SetText(r *Renderer, lines []TextLine, screenW, screenH float
 		cursorY := line.Y
 
 		for _, ch := range line.Text {
-			g, ok := t.font.Glyphs[ch]
+			g, ok := font.Glyphs[ch]
 			if !ok {
 				cursorX += cellW * 0.5
 				continue
@@ -60,13 +90,17 @@ func (t *MSDFText) SetText(r *Renderer, lines []TextLine, screenW, screenH float
 
 			// Only emit a quad if the glyph has visible bounds (skip space, etc.)
 			if g.PlaneBounds != [4]float32{} {
+				if len(vertices)+4 > msdfMaxVerts {
+					return vertices, indices
+				}
+
 				// Screen-space quad corners from planeBounds * fontSize
 				// planeBounds: left, bottom, right, top (in EM units)
 				// In our screen space: Y=0 is top, Y increases downward
 				x0 := cursorX + g.PlaneBounds[0]*fontSize
-				y0 := cursorY + (t.font.Ascender-g.PlaneBounds[3])*fontSize
+				y0 := cursorY + (font.Ascender-g.PlaneBounds[3])*fontSize
 				x1 := cursorX + g.PlaneBounds[2]*fontSize
-				y1 := cursorY + (t.font.Ascender-g.PlaneBounds[1])*fontSize
+				y1 := cursorY + (font.Ascender-g.PlaneBounds[1])*fontSize
 
 				// Atlas UVs: left, bottom, right, top (normalized)
 				// MSDF atlas has Y=0 at top in PNG, but atlasBounds.bottom < atlasBounds.top
@@ -82,8 +116,8 @@ func (t *MSDFText) SetText(r *Renderer, lines []TextLine, screenW, screenH float
 					alpha = 1.0
 				}
 				// Per-glyph screenPxRange so mixed font sizes render at correct weight.
-				spr := fontSize / t.font.PxPerEM * t.font.PxRange
-				norm := [3]float32{alpha, spr, t.font.BoldBias}
+				spr := fontSize / font.PxPerEM * font.PxRange
+				norm := [3]float32{alpha, spr, font.BoldBias}
 
 				base := uint16(len(vertices))
 				vertices = append(vertices,
@@ -99,13 +133,7 @@ func (t *MSDFText) SetText(r *Renderer, lines []TextLine, screenW, screenH float
 		}
 	}
 
-	// Clamp to buffer limits
-	if len(vertices) > msdfMaxVerts {
-		vertices = vertices[:msdfMaxVerts]
-		indices = indices[:msdfMaxIndices]
-	}
-
-	r.UpdateMeshData(t.mesh, vertices, indices)
+	return vertices, indices
 }
 
 // RenderObject returns a RenderObject for drawing this MSDF text overlay.
