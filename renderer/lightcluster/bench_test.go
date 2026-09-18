@@ -249,8 +249,9 @@ func BenchmarkBuildColony(b *testing.B) {
 // itself against, and the check that the scene still reproduces the camera it
 // was modelled on. Run it with -v.
 func TestColonyOccupancy(t *testing.T) {
-	t.Logf("%-14s %6s %5s %10s %8s %6s %6s %8s %8s",
-		"camera", "eye up", "in", "eye-inside", "avg/cell", "max", "wide", "nonempty", "indices")
+	t.Logf("%-14s %6s %5s %10s %8s %6s %6s %6s %8s %8s %9s %9s",
+		"camera", "eye up", "in", "eye-inside", "avg/cell", "max", "wide", "unbnd",
+		"nonempty", "indices", "tested", "binned")
 	for _, c := range colonyCases {
 		lights, p := colonyScene(400, c.lampRange, c.distance, c.pitch)
 		res := New().Build(lights, p)
@@ -265,10 +266,11 @@ func TestColonyOccupancy(t *testing.T) {
 		if res.Stats.NonEmptyCells > 0 {
 			avg = float64(res.Stats.TotalCellLights) / float64(res.Stats.NonEmptyCells)
 		}
-		t.Logf("%-14s %6.2f %5d %10d %8.2f %6d %6d %8d %8d",
+		t.Logf("%-14s %6.2f %5d %10d %8.2f %6d %6d %6d %8d %8d %9d %9d",
 			c.name, eye[1], res.Stats.Uploaded, inside, avg,
-			res.Stats.MaxCellDemand, res.Stats.ScreenWideLights,
-			res.Stats.NonEmptyCells, res.Stats.IndexCount)
+			res.Stats.MaxCellDemand, res.Stats.ScreenWideLights, res.Stats.UnboundedLights,
+			res.Stats.NonEmptyCells, res.Stats.IndexCount,
+			res.Stats.CellsTested, res.Stats.CellsBinned)
 		if inside < c.wantInside {
 			t.Errorf("%s: only %d lamps contain the eye, want at least %d; this scene "+
 				"has stopped reproducing the camera it was built from", c.name, inside, c.wantInside)
