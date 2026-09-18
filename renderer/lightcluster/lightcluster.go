@@ -32,10 +32,18 @@
 // cell overflowed, both of which are counted in [Stats]. A false positive costs
 // a few shader instructions. A false negative is a tile-shaped hole in the
 // light, which is what a clustered renderer looks like when it is subtly wrong,
-// and it will not show up in an average-error metric. Where an exact bound is
-// awkward — a light sphere that reaches past the near plane, a projection that
-// is not a plain symmetric perspective — the binner widens to the whole screen
-// rather than guess.
+// and it will not show up in an average-error metric.
+//
+// Binning is two steps, both conservative. A light gets a candidate box: the
+// exact screen extent of its bounding sphere where that can be computed, and
+// the whole screen where it cannot — a sphere reaching past the near plane, a
+// sphere containing the eye, a projection that is not a plain symmetric
+// perspective. Then every candidate cell is tested against the light's sphere
+// with the cell's own view-space box, which contains the froxel, so a cell the
+// light really reaches is never rejected. The second step is what keeps a light
+// containing the eye from being listed in all 144 tiles of every slice it
+// touches, which with the consumer game's camera is the common case and not the
+// corner one.
 //
 // # Scope
 //
@@ -55,39 +63,42 @@ import (
 // Stats.DroppedOverBudget, so the loss is visible rather than silent.
 //
 // 1024 lights at 48 bytes is a 48 KB storage buffer, which is nothing, and
-// BenchmarkBuild bins 1024 submitted lights in 86 us on a Ryzen 9 5900X
-// (median of five runs, spread 80 to 91). The ceiling exists so the buffers
-// can be sized once at startup, not because the cost demands it.
+// BenchmarkBuild bins 1024 submitted lights in 89 us on a Ryzen 9 5900X
+// (median of interleaved runs, spread 77 to 109). The ceiling exists so the
+// buffers can be sized once at startup, not because the cost demands it.
 const MaxLights = 1024
 
 // MaxLightsPerCell caps one cell's light list, and so caps the shader's inner
 // loop.
 //
-// Measured, not chosen. BenchmarkBuild's street scene — lights of range 5 to
-// 15 m scattered over a 400 m square, a quarter of them downward spots, camera
-// 30 m up looking down 45 degrees, 1920x1080, the 16x9x24 grid — peaks at 20
-// lights in a cell with 1024 submitted and 64 with 4096 submitted (168 and 602
-// of them in the frustum), against averages of 2.3 and 12.2 over the non-empty
-// cells. Dropping the camera to 2 m, where lights reach past the near plane
-// and widen to the whole screen, peaks lower (30) but fills more cells. 128 is
-// twice the worst of those.
+// Measured, not chosen. Two scenes, both at 1920x1080 on the 16x9x24 grid, peak
+// cell demand:
 //
-// It cannot be sized for the worst case, because the worst case is unbounded:
-// BenchmarkBuildPathological puts 1024 lights around the camera with ranges
-// past 40 m and every one of them lands in every cell. That is what
-// Stats.CellsOverflowed is for. Overflow keeps the first 128 in priority
-// order, which is the 128 whose surfaces are nearest the camera.
+//	street lights (range 5-15 m over 400 m, camera 30 m up): 18 at 1024
+//	  submitted, 52 at 4096
+//	the game's colony (400 lamps on hexes, orbit camera at minimum zoom): 50 at
+//	  lamp range 4, 82 at range 6
+//
+// 128 clears both with half again to spare. Denser colonies at range 6 reach it:
+// 1600 lamps overflows 2 cells (demand 130) and 3000 lamps overflows 19 (demand
+// 143). That is the right place for it to give way -- a cell holding 143 lights
+// is 143 light evaluations for every fragment in it, and the cap is the only
+// thing bounding what one fragment can cost -- and Stats.CellsOverflowed says
+// when it happens. Overflow keeps the first 128 in priority order, which is the
+// 128 whose surfaces are nearest the camera.
 const MaxLightsPerCell = 128
 
-// MaxLightIndices caps the whole index buffer. Every cell full would be
-// 3456 x 128 = 442k entries and nothing like that is ever wanted.
+// MaxLightIndices caps the whole index buffer, which is the real memory cost of
+// clustering: every cell full would be 3456 x 128 = 442k entries.
 //
-// Measured on the same scenes: 5626 indices at 1024 submitted and 14701 at
-// 4096 (22 KB and 57 KB), worst of all the variants 37k at 4096 lights with
-// the camera at 2 m. 131072 entries is 512 KB, three times that worst case,
-// and it is a fixed allocation rather than a per-frame one. Cells that do not
-// fit are truncated in cell order and counted in Stats.CellsTruncated.
-const MaxLightIndices = 128 * 1024
+// Measured: the street scenes want 10.5k entries at 4096 submitted lights; the
+// game's colony wants 41670 at 400 lamps of range 4 and 90167 at range 6, and
+// a 3000-lamp colony at range 6 wants 115331. That last one is 88% of a 131072
+// entry buffer, which is not enough headroom for a failure that darkens the far
+// end of the grid: truncation takes whole cells in cell order, unlike the
+// per-cell cap. 262144 entries is 1 MB, allocated once, and puts the worst
+// measured case at 44%.
+const MaxLightIndices = 256 * 1024
 
 // DefaultSliceStart is the view depth where logarithmic slicing begins, in
 // metres. It is deliberately not the near plane.
@@ -101,17 +112,19 @@ const MaxLightIndices = 128 * 1024
 // plus a clamp, as the GPU contract requires.
 //
 // Measured with TestGridOccupancy, average lights per non-empty cell, 1 m
-// start against 0.1 m start: 12.2 vs 13.6 at 4096 lights with the camera 30 m
-// up, 6.8 vs 7.4 at 1024 lights with the camera at 2 m, 19.0 vs 20.3 at 4096
-// and 2 m — and 2.33 vs 2.00 at 1024 lights 30 m up, which is the one case it
-// makes worse, and the sparsest (168 lights in view over 2420 occupied cells,
-// where the average is dominated by cells holding one or two lights).
+// start against 0.1 m start: 3.57 vs 4.06 at 1024 lights with the camera 30 m
+// up, 11.87 vs 13.00 at 4096, 2.81 vs 3.38 at 1024 with the camera at 2 m, and
+// 4.64 vs 4.54 at 4096 and 2 m, which is the one it makes worse and by 2%.
 //
 // It is not free either: finer slices split a light across more of them, so
-// the index buffer grows in the sparse case (57 KB vs 47 KB at 4096 lights,
-// 30 m up) and shrinks in the dense one (145 KB vs 188 KB at 2 m). Both are
-// far inside MaxLightIndices, and the dense case is the one that hurts, so the
-// trade goes this way. Set Params.SliceStart to Near to turn it off.
+// the index buffer grows in the sparse case (41 KB against 35 KB at 4096
+// lights, 30 m up) and shrinks in the dense one (33 KB against 40 KB at 2 m).
+// Both are far inside MaxLightIndices, and the dense case is the one that
+// hurts, so the trade goes this way. Set Params.SliceStart to Near to turn it
+// off.
+//
+// These numbers moved when the froxel cell test landed and were re-measured
+// rather than left; the conclusion did not change.
 const DefaultSliceStart = 1.0
 
 // DefaultGrid is the starting grid: 16x9 matches a 16:9 framebuffer so the
