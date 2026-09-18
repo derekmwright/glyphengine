@@ -187,6 +187,7 @@ takes `-screenshot out.png` to capture its last frame.
 | ![](docs/images/02-cube.png) `02-cube` | ![](docs/images/03-physics.png) `03-physics` |
 | ![](docs/images/05-textures.png) `05-textures` | ![](docs/images/06-skinned.png) `06-skinned` |
 | ![](docs/images/08-grass.png) `08-grass` | ![](docs/images/09-water.png) `09-water` |
+| ![](docs/images/11-lights.png) `11-lights` | ![](docs/images/21-streetlights.png) `21-streetlights` |
 
 ```
 task example:01-triangle      # window, renderer, input loop
@@ -208,6 +209,7 @@ task example:17-input         # named actions across keyboard, mouse and gamepad
 task example:18-translucent   # blended geometry: placement ghosts and glass
 task example:19-instanced     # 900 props one draw call at a time, or all at once
 task example:20-screens       # main menu, pause menu, scene swapping, keyboard menus
+task example:21-streetlights  # clustered spot and point lights on terrain at night
 ```
 
 ## Building
