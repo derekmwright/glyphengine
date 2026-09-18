@@ -130,17 +130,27 @@ func (ps *ParticleSystem) splitAtWater(split blendSplit) {
 
 	ps.front = ps.front[:0]
 	k := 0
+	moved := false
 	for i := 0; i < n; i++ {
 		p := ps.staging[i]
 		if split.behind(p.X, p.Y, p.Z) {
+			// k lags i by however many instances have gone to the front half,
+			// so k != i is exactly "this instance is not where it started".
+			// "The front half is non-empty" is not the same test, and was the
+			// first one written: a buffer entirely in front of the water has
+			// not been reordered at all, and re-uploading it every frame on
+			// that basis is work for nothing. The unit test caught it.
+			if k != i {
+				moved = true
+			}
 			ps.staging[k] = p
 			k++
 		} else {
 			ps.front = append(ps.front, p)
 		}
 	}
-	if len(ps.front) > 0 {
-		copy(ps.staging[k:], ps.front)
+	copy(ps.staging[k:], ps.front)
+	if moved {
 		for i := range ps.dirty {
 			ps.dirty[i] = true
 		}
