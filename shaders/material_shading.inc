@@ -103,5 +103,21 @@ void main() {
     }
     lit += emission;
 
+    // Emission is lamplight for the purpose of the night shift: a glowing
+    // surface is not a dark surface, and the shift exists because rods take
+    // over when little light reaches the eye. Without this an emissive panel
+    // in 16-materials went from cyan to blue-white at night, and a game's
+    // emissive building accents all went the same grey.
+    //
+    // Added to the local side rather than switched on, so it blends: a dim
+    // emissive over moonlit albedo keeps a share of the shift in proportion
+    // to how much of the fragment's light it actually is, and there is no
+    // brightness at which the surface snaps from graded to ungraded.
+    //
+    // A material that emits nothing has matl.emissive.rgb exactly zero -- it
+    // is EmissiveFactor times EmissiveStrength, both zero by default -- so
+    // this adds exactly +0.0 and cannot move a non-emissive fragment.
+    lightLocalLum += lightLum(emission);
+
     outColor = vec4(applyFog(lit, fragWorldPos), 1.0);
 }
