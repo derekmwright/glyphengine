@@ -131,8 +131,31 @@ vec3 atmSunGlow(vec3 dir, vec3 sunDir, vec3 sunCol, float sunY) {
 //
 // The shift is deliberately partial. Going fully monochrome is accurate for
 // starlight and looks dead in a game.
-vec3 atmNightShift(vec3 color, float sunY) {
-    float night = 1.0 - atmDaylight(sunY);
+//
+// `local` is the share, 0 to 1, of the light reaching the eye from this
+// fragment that came from a lamp rather than from the moon, the sky or the air
+// -- lighting.inc's nightLocalShare. It backs the blend off by exactly that
+// much, because rods taking over is a statement about how much light reaches
+// the eye from a surface, not about what hour it is. A doorstep under a lamp
+// is not dark, and keying the blend on sun altitude alone shifted it anyway.
+//
+// That was not only wrong in principle, it was one-sided: with `night` at its
+// full 1, expanding the blend gives
+//
+//	g - b = 0.2*(c.g - c.b) - 0.352*luminance(c)
+//
+// and for every colour with no negative channel the right-hand term wins, so
+// the shifted blue always came out above the shifted green. No lamp of any
+// colour or intensity could put an amber pool on the ground -- measured on
+// 21-streetlights' doorway, which read R 151 G 126 B 143 through the shift and
+// R 228 G 103 B 27 with it ablated, off the same light.
+vec3 atmNightShift(vec3 color, float sunY, float local) {
+    // Scaling `night` is the same operation as blending the shifted colour
+    // back toward the unshifted one -- mix(mix(c,s,t), c, w) is mix(c,s,t*(1-w))
+    // -- and this form keeps the early-out below covering both "it is daytime"
+    // and "this surface is lit by a lamp", and keeps local == 0 bit-for-bit
+    // what it was before there was a second term at all.
+    float night = (1.0 - atmDaylight(sunY)) * (1.0 - local);
     if (night <= 0.0) {
         return color;
     }
