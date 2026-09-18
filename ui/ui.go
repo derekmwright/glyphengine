@@ -77,14 +77,45 @@ func ResolveAnchor(anchor Anchor, offsetX, offsetY, refW, refH, screenW, screenH
 	return Rect{X: x, Y: y, W: w, H: h}
 }
 
+// edgeSkirt is how far a quad is grown past its own edge, in pixels, to give
+// ui.frag's coverage ramp an outside half.
+//
+// Half a pixel is the whole ramp: a pixel centre exactly on the edge is half
+// covered, and one a full pixel outside is not covered at all. The rasterizer
+// only generates fragments whose centre lies inside the geometry, so without
+// the skirt the shader only ever sees the inner half and the shape sits half a
+// pixel fat.
+const edgeSkirt = 0.5
+
 // AppendQuad appends 4 vertices and 6 indices for a solid-color rectangle.
+//
+// The quad is emitted half a pixel larger than asked for on every side, with
+// UVs running from just below 0 to just above 1 so that UV 0 and 1 land on the
+// requested edge. ui.frag turns that into coverage; see edgeCoverage there.
+//
+// A zero-width or zero-height quad is dropped rather than grown. An empty
+// progress bar asks for exactly that, and a skirt around nothing is a visible
+// one-pixel sliver where the bar is supposed to be empty.
 func AppendQuad(verts []renderer.Vertex, idxs []uint16, x, y, w, h float32, col [3]float32) ([]renderer.Vertex, []uint16) {
+	if w <= 0 || h <= 0 {
+		return verts, idxs
+	}
+
+	// UV extent of the skirt, in this quad's own UV units.
+	eu := edgeSkirt / w
+	ev := edgeSkirt / h
+
+	x0, x1 := x-edgeSkirt, x+w+edgeSkirt
+	y0, y1 := y-edgeSkirt, y+h+edgeSkirt
+	u0, u1 := -eu, 1+eu
+	v0, v1 := -ev, 1+ev
+
 	base := uint16(len(verts))
 	verts = append(verts,
-		renderer.Vertex{Pos: [3]float32{x, y, 0}, Color: col},
-		renderer.Vertex{Pos: [3]float32{x + w, y, 0}, Color: col},
-		renderer.Vertex{Pos: [3]float32{x + w, y + h, 0}, Color: col},
-		renderer.Vertex{Pos: [3]float32{x, y + h, 0}, Color: col},
+		renderer.Vertex{Pos: [3]float32{x0, y0, 0}, Color: col, UV: [2]float32{u0, v0}},
+		renderer.Vertex{Pos: [3]float32{x1, y0, 0}, Color: col, UV: [2]float32{u1, v0}},
+		renderer.Vertex{Pos: [3]float32{x1, y1, 0}, Color: col, UV: [2]float32{u1, v1}},
+		renderer.Vertex{Pos: [3]float32{x0, y1, 0}, Color: col, UV: [2]float32{u0, v1}},
 	)
 	idxs = append(idxs, base, base+1, base+2, base+2, base+3, base)
 	return verts, idxs

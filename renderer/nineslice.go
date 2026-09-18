@@ -14,6 +14,11 @@ type PanelFill struct {
 	Opacity float32
 }
 
+// edgeSkirt is how far a panel's outer boundary is grown past itself, in
+// pixels, to give ui.frag's coverage ramp an outside half. It matches
+// ui.edgeSkirt, which cannot be shared because renderer does not import ui.
+const edgeSkirt = 0.5
+
 // NineSlice generates 9 textured quads from a texture with uniform insets.
 type NineSlice struct {
 	Texture *Texture
@@ -69,6 +74,33 @@ func (ns *NineSlice) GenerateQuads(x, y, w, h, scale float32, color [3]float32) 
 	// UV breakpoints
 	u := [4]float32{0, uBreak, 1 - uBreak, 1}
 	v := [4]float32{0, vBreak, 1 - vBreak, 1}
+
+	// Grow the panel's outer boundary half a pixel outward, so ui.frag's
+	// coverage ramp has an outside half; see edgeCoverage there and edgeSkirt
+	// in the ui package.
+	//
+	// Only the outer breakpoints move. The inner two are where the nine quads
+	// abut each other, and shifting those would either overlap or gap the
+	// seams, which is exactly the visible line the UV-distance formulation was
+	// chosen to avoid.
+	//
+	// The UVs move with them, by the same fraction of each edge quad's own
+	// extent, so UV 0 and 1 stay on the requested boundary rather than on the
+	// grown one. That is what makes the shader's distance zero at the real edge.
+	if cornerX > 0 {
+		du := edgeSkirt * uBreak / cornerX
+		sx[0] -= edgeSkirt
+		sx[3] += edgeSkirt
+		u[0] -= du
+		u[3] += du
+	}
+	if cornerY > 0 {
+		dv := edgeSkirt * vBreak / cornerY
+		sy[0] -= edgeSkirt
+		sy[3] += edgeSkirt
+		v[0] -= dv
+		v[3] += dv
+	}
 
 	var vertices []Vertex
 	var indices []uint16
