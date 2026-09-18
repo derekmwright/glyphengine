@@ -27,7 +27,7 @@ layout(push_constant) uniform PushConstants {
     mat4 mvp;
     mat4 model;
     vec4 tint;
-    vec4 sunDir;    // xyz = direction toward sun
+    vec4 sunDir;    // xyz = direction toward sun, w = alpha (0 = opaque)
     vec4 sunColor;  // rgb
     vec4 pointPos;  // xyz = position, w = range
     vec4 pointColor;// rgb, w = roughness
@@ -45,9 +45,18 @@ void main() {
     if (texSample.a < 0.5) discard; // alpha test for foliage cutout
     vec3 baseColor = fragColor * texSample.rgb;
 
+    // Per-object opacity for the translucent pipeline, matching lit.frag. It
+    // rides in sunDir.w because tint.w is already a mode selector and the
+    // push-constant block is full at 256 bytes; sunDir.w is padding on this
+    // path, since skinned_lit.vert reads only its xyz.
+    //
+    // Zero means opaque, so every draw that does not set it is unaffected and
+    // the opaque pipeline -- which does not blend anyway -- keeps writing 1.
+    float alpha = pc.sunDir.w > 0.0 ? pc.sunDir.w : 1.0;
+
     // Emissive early-out: tint.w > 0 bypasses lighting (used for moon disc etc.)
     if (pc.tint.w > 0.0) {
-        outColor = vec4(baseColor, 1.0);
+        outColor = vec4(baseColor, alpha);
         return;
     }
 
@@ -65,5 +74,5 @@ void main() {
     if (!gl_FrontFacing) N = -N;
 
     vec3 lit = evalLighting(diffuseColor, F0, shininess, N, V, fragWorldPos, fragShadowPos);
-    outColor = vec4(applyFog(lit, fragWorldPos), 1.0);
+    outColor = vec4(applyFog(lit, fragWorldPos), alpha);
 }

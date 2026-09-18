@@ -68,6 +68,7 @@ type game struct {
 	parts []glyph.Entity
 
 	demo      bool
+	fade      float32
 	plain     bool
 	demoAngle float32
 
@@ -187,6 +188,15 @@ func (g *game) Init(e *glyph.Engine) error {
 			Skinned:     true,
 		})
 		e.C.AnimationState.Set(ent, &glyph.AnimationState{})
+
+		// A fading character: the same skinned mesh, the same animation, drawn
+		// blended. Needs -plain, because the generated normal map routes the
+		// character through the skinned *material* pipeline, which has no
+		// blended variant and so stays opaque.
+		if g.fade > 0 {
+			e.C.Translucent.Set(ent, &glyph.Translucent{Alpha: g.fade})
+		}
+
 		g.parts = append(g.parts, ent)
 	}
 
@@ -343,6 +353,7 @@ func main() {
 	shot := flag.String("screenshot", "", "write a PNG of the last frame to this path")
 	demo := flag.Bool("demo", false, "walk a circle automatically, no input needed")
 	plain := flag.Bool("plain", false, "skip the generated normal map, for comparison")
+	fade := flag.Float64("fade", 0, "draw the character translucent at this opacity, 0 to 1 (0 = opaque)")
 	flag.Parse()
 
 	opts := []glyph.Option{
@@ -360,7 +371,7 @@ func main() {
 		opts = append(opts, glyph.WithScreenshot(*shot))
 	}
 
-	e, err := glyph.New(&game{demo: *demo, plain: *plain}, opts...)
+	e, err := glyph.New(&game{demo: *demo, plain: *plain, fade: float32(*fade)}, opts...)
 	if err != nil {
 		log.Fatalf("create engine: %v", err)
 	}

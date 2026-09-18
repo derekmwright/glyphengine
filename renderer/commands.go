@@ -135,13 +135,14 @@ type WaterParams struct {
 // always has. One means opaque too: a game fading something in can run Alpha to
 // 1 and get the cheaper path back without special-casing it.
 //
-// The blended variants are built from lit.vert and lit.frag, so only the plain
-// lit path can take them. Terrain, water, material and skinned draws each have
-// their own pipeline with no blended twin, and they stay opaque rather than
-// being rerouted -- rerouting would silently drop the splat blend, the
-// refraction, the normal and occlusion maps, or the skinning, which is a worse
-// outcome than an object that is not as see-through as asked for. The engine
-// documents the combination; see docs/agents/translucency.md.
+// The plain lit path and the skinned path both have blended variants, built
+// from their own vertex and fragment stages. Terrain, water and material draws
+// do not, and they stay opaque rather than being rerouted -- rerouting would
+// silently drop the splat blend, the refraction, or the normal and occlusion
+// maps, which is a worse outcome than an object that is not as see-through as
+// asked for. A skinned mesh that also carries a Material is excluded for that
+// reason: it goes through the skinned *material* pipeline, which has no blended
+// twin. See docs/agents/translucency.md.
 //
 // This is deliberately one function rather than a condition written out in both
 // buildDrawList and the recorder: the two have to agree exactly, or a draw gets
@@ -151,7 +152,7 @@ func (d *RenderObject) IsTranslucent() bool {
 	if d.Alpha <= 0 || d.Alpha >= 1 {
 		return false
 	}
-	return d.TerrainMat == nil && d.Water == nil && d.Material == nil && d.Joints == nil
+	return d.TerrainMat == nil && d.Water == nil && d.Material == nil
 }
 
 // ViewDepth returns the squared distance from eye to this draw's world-space
@@ -408,6 +409,7 @@ func recordCommandBuffer(
 	litDoubleSidedPipeline core1_0.Pipeline,
 	translucentPipeline core1_0.Pipeline,
 	translucentDoubleSidedPipeline core1_0.Pipeline,
+	skinnedTranslucentPipeline core1_0.Pipeline,
 	instancedPipeline core1_0.Pipeline,
 	instancedDoubleSidedPipeline core1_0.Pipeline,
 	overlayPipeline core1_0.Pipeline,
@@ -1227,7 +1229,8 @@ func recordCommandBuffer(
 
 	timer.begin(deviceDriver, cmdBuf, frame, PassTranslucent)
 	recordTranslucent(deviceDriver, stats, cmdBuf, translucentPipeline, translucentDoubleSidedPipeline,
-		litPipelineLayout, viewport, scissor, draws, lighting, fallbackTexture, shadowDS)
+		skinnedTranslucentPipeline, litPipelineLayout, skinnedPipelineLayout, viewport, scissor,
+		draws, lighting, fallbackTexture, shadowDS, frame)
 	timer.end(deviceDriver, cmdBuf, frame, PassTranslucent)
 
 	timer.begin(deviceDriver, cmdBuf, frame, PassParticles)

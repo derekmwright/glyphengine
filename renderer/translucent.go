@@ -25,6 +25,11 @@ import (
 // because that is where the camera is. A game driving the renderer directly
 // sorts its own, exactly as it already has to for the opaque path's batching.
 //
+// Skinned meshes take the same path, through their own blended pipeline and
+// their own descriptor layout. They have no double-sided twin, deliberately:
+// the opaque skinned path has none either, so adding one would make a
+// translucent character more capable than a solid one.
+//
 // Alpha travels in sunDir.w rather than in tint.w, which is already a mode
 // selector — positive emissive, negative flat-shaded foliage. The push-constant
 // block is full at 256 bytes, so there was nowhere to put a fifth vec4, and
@@ -36,17 +41,22 @@ func recordTranslucent(
 	cmdBuf core1_0.CommandBuffer,
 	translucentPipeline core1_0.Pipeline,
 	translucentDoubleSidedPipeline core1_0.Pipeline,
+	skinnedTranslucentPipeline core1_0.Pipeline,
 	litPipelineLayout core1_0.PipelineLayout,
+	skinnedPipelineLayout core1_0.PipelineLayout,
 	viewport core1_0.Viewport,
 	scissor core1_0.Rect2D,
 	draws []RenderObject,
 	lighting SceneLighting,
 	fallbackTexture *Texture,
 	shadowDS core1_0.DescriptorSet,
+	frame int,
 ) {
 	var lastTex *Texture
+	var lastJoints *JointBuffer
 	bound := false
 	currentDoubleSided := false
+	currentSkinned := false
 
 	for i := range draws {
 		d := &draws[i]
@@ -54,19 +64,30 @@ func recordTranslucent(
 			continue
 		}
 
-		if !bound || d.DoubleSided != currentDoubleSided {
-			p := translucentPipeline
-			if d.DoubleSided {
+		skinned := d.Joints != nil
+		// Skinned draws have one blended pipeline and no double-sided twin, so
+		// DoubleSided does not select between them; the opaque skinned path has
+		// no double-sided variant either, and a translucent character should
+		// not be more capable than a solid one.
+		if !bound || skinned != currentSkinned || (!skinned && d.DoubleSided != currentDoubleSided) {
+			var p core1_0.Pipeline
+			switch {
+			case skinned:
+				p = skinnedTranslucentPipeline
+			case d.DoubleSided:
 				p = translucentDoubleSidedPipeline
+			default:
+				p = translucentPipeline
 			}
 			deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, p)
 			deviceDriver.CmdSetViewport(cmdBuf, viewport)
 			deviceDriver.CmdSetScissor(cmdBuf, scissor)
 			currentDoubleSided = d.DoubleSided
+			currentSkinned = skinned
 			// The pipeline bind invalidates nothing about descriptors, but the
 			// cache below is keyed on "since we last bound", so reset it with
 			// the pipeline rather than tracking two lifetimes.
-			lastTex = nil
+			lastTex, lastJoints = nil, nil
 			bound = true
 		}
 
@@ -74,7 +95,17 @@ func recordTranslucent(
 		if tex == nil {
 			tex = fallbackTexture
 		}
-		if tex != lastTex {
+		activeLayout := litPipelineLayout
+		if skinned {
+			// Skinned: set 0 = tex, set 1 = joints, set 2 = shadow, the layout
+			// the opaque skinned path has always used.
+			activeLayout = skinnedPipelineLayout
+			if tex != lastTex || d.Joints != lastJoints {
+				deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, activeLayout, 0,
+					[]core1_0.DescriptorSet{tex.DescriptorSet, d.Joints.descriptorSets[frame], shadowDS}, nil)
+				lastTex, lastJoints = tex, d.Joints
+			}
+		} else if tex != lastTex {
 			deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, litPipelineLayout, 0,
 				[]core1_0.DescriptorSet{tex.DescriptorSet, shadowDS}, nil)
 			lastTex = tex
@@ -91,7 +122,7 @@ func recordTranslucent(
 		pc[35] = 0.0
 		if d.Emissive {
 			pc[35] = 1.0
-		} else if d.DoubleSided {
+		} else if d.DoubleSided && !skinned {
 			pc[35] = -1.0 // flat shading, same as the opaque path
 		}
 		packLightingPC(&pc, lighting)
@@ -103,7 +134,7 @@ func recordTranslucent(
 		pc[51] = roughness
 		pc[55] = d.Metallic
 		pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
-		deviceDriver.CmdPushConstants(cmdBuf, litPipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
+		deviceDriver.CmdPushConstants(cmdBuf, activeLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
 
 		stats.addDraw(1, d.Mesh.IndexCount, d.Mesh.VertexCount)
 		if d.Mesh.IndexCount > 0 {
