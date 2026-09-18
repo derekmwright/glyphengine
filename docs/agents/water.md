@@ -149,8 +149,28 @@ the behind-the-water instances first and the frame issues two draws over the
 two ranges. The renderer has no idea how many emitters produced them, which is
 the right level — "per system" would be too coarse even if it were reachable.
 
-The cost shows up as `gpu overwater` in `task bench`, separately from
-`gpu water`, so the reorder is attributable rather than charged to the surface.
+### What it costs
+
+`gpu overwater` in `task bench`, separately from `gpu water`, so the reorder is
+attributable rather than charged to the surface. Measured on this machine at
+1280x720, 200 frames, three interleaved runs each:
+
+| scene | `gpu water` | `gpu overwater` |
+|---|---|---|
+| `09-water` — water, nothing blended in front of it | 0.049 / 0.050 / 0.050 ms | 0.026 / 0.023 / 0.023 ms |
+| `09-water -plume -ghost -marker -submerged` | 0.051 / 0.051 / 0.051 ms | 0.034 / 0.038 / 0.038 ms |
+
+`gpu overwater` is not zero in the first row: it carries the water pass's own
+MSAA resolve, which `gpu water` used to. The two together, 0.073 ms, are what
+`gpu water` alone read before the split (0.069 / 0.071 / 0.072). The reorder
+itself is the 0.013 ms of difference between the rows, over a flame of ~340
+instances, a double-sided pane and an overlay disc.
+
+Against the same scene recorded in the old order, the blended passes sum to
+0.088–0.128 ms before and 0.095–0.120 ms after, three runs each: the same work,
+moved. Whole-frame totals say nothing here — the same build measured three times
+spans 1.99 to 2.60 ms on this machine, which swamps anything above.
+
 `task waterblend` is the gate.
 
 ### When refraction is unavailable
