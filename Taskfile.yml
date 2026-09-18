@@ -150,6 +150,7 @@ tasks:
       - go run ./18-translucent -frames 60
       - go run ./19-instanced -frames 60
       - go run ./20-screens -frames 60
+      - go run ./21-streetlights -frames 60
       - go run ./15-kitchen-sink -demo -frames 60
 
   validate:
@@ -184,7 +185,7 @@ tasks:
             echo "$label: clean"
           fi
         }
-        for ex in 01-triangle 02-cube 03-physics 04-first-person 05-textures 06-skinned 07-terrain 08-grass 09-water 10-text 11-lights 12-particles 13-ui 16-materials 17-input 18-translucent 19-instanced 20-screens 15-kitchen-sink; do
+        for ex in 01-triangle 02-cube 03-physics 04-first-person 05-textures 06-skinned 07-terrain 08-grass 09-water 10-text 11-lights 12-particles 13-ui 16-materials 17-input 18-translucent 19-instanced 20-screens 21-streetlights 15-kitchen-sink; do
           check $ex
         done
         # Render paths no example turns on by default. Everything above runs
@@ -195,6 +196,13 @@ tasks:
         # character carries a generated normal map, which routes it through the
         # skinned material pipeline instead.
         check 06-skinned -demo -plain -fade 0.4
+        # 21-streetlights' non-default paths: the moving sweep, the cleared
+        # spotlight set, a lamp count well past the default, and the debug
+        # heatmap. None of these run under stock settings above.
+        check 21-streetlights -sweep
+        check 21-streetlights -off
+        check 21-streetlights -lamps 300
+        check 21-streetlights -lightdebug heatmap
         exit $status
 
   sky:
@@ -317,6 +325,7 @@ tasks:
       - go run ./18-translucent -frames 120 -screenshot ../docs/images/18-translucent.png
       - go run ./19-instanced -frames 60 -screenshot ../docs/images/19-instanced.png
       - go run ./20-screens -frames 60 -screenshot ../docs/images/20-screens.png
+      - go run ./21-streetlights -frames 90 -screenshot ../docs/images/21-streetlights.png
       - go run ./15-kitchen-sink -demo -frames 260 -screenshot ../docs/images/15-kitchen-sink.png
 
   hud:
