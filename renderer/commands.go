@@ -72,6 +72,12 @@ type SceneLighting struct {
 	CascadeVPs    [ShadowCascades]mgl32.Mat4 // per-cascade light view-projections for shadow mapping
 	ShadowEnabled bool                       // true when the sun is above the horizon
 
+	// NightGrade is the scotopic grade the lit shaders apply as daylight goes.
+	// Nil means DefaultNightGrade, which is deliberately not the same as a
+	// zero-valued NightGrade: that would read as Strength 0, and a caller who
+	// has never heard of this field would silently lose its nights.
+	NightGrade *NightGrade
+
 	// Lights are the unshadowed point + spot lights for the GPU light buffer
 	// (see shaders/lights.inc), in Clusters.Order: the cell lists in Clusters
 	// index this slice, so the two must come from the same frame's binning.

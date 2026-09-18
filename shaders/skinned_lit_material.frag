@@ -38,6 +38,11 @@ layout(set = 0, binding = 5) uniform MaterialBlock {
 // reads. Same contents as the static variant's set 1.
 layout(set = 2, binding = 0) uniform ShadowData {
     mat4 cascadeVP[2];
+    // Environment values the fragment shaders grade with, appended
+    // because the push constant block is full at 256 bytes. rgb is the
+    // scotopic tint, w the strength (0 disables). All seven ShadowData
+    // declarations and renderer/shadow.go's litUBOSize must agree.
+    vec4 nightGrade;
 } shadow;
 layout(set = 2, binding = 1) uniform sampler2DArrayShadow shadowMap;
 layout(set = 2, binding = 2) uniform samplerCube pointShadowMap;

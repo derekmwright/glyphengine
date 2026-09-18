@@ -1,6 +1,7 @@
 package renderer
 
 import (
+	"encoding/binary"
 	"fmt"
 	"log"
 	"math"
@@ -24,8 +25,49 @@ const ShadowCascades = 2
 // units, centered on the camera.
 var cascadeRadii = [ShadowCascades]float32{15, 90}
 
-// cascadeUBOSize holds one mat4 light VP per cascade.
-const cascadeUBOSize = ShadowCascades * 64
+// The per-frame uniform block every lit pipeline binds at binding 0 of the
+// shadow/light set -- set 1 for the static pipelines, set 2 for the skinned
+// ones, where set 1 is already the joint matrices. Declared as ShadowData in
+// lit.frag, lit_material.frag, skinned_lit.frag, skinned_lit_material.frag,
+// terrain.frag, grass.frag and water.frag; all seven must agree with this.
+//
+// It starts as the cascade matrices and continues with environment values the
+// fragment shaders grade with. That second region exists because the push
+// constant block is full at its 256-byte guaranteed minimum and there is
+// nowhere to put a fifth vec4, and because a look value a game is expected to
+// set has no business being a constant compiled into a shader every lit
+// surface includes. Add to the tail rather than the middle: each new vec4 is
+// one more offset here, one more line in seven shader declarations, and no
+// change to anything already at a lower offset.
+const (
+	cascadeUBOSize   = ShadowCascades * 64 // mat4 cascadeVP[ShadowCascades]
+	nightGradeOffset = cascadeUBOSize      // vec4 nightGrade
+	litUBOSize       = nightGradeOffset + 16
+)
+
+// NightGrade is the scotopic colour grade the lit shaders apply as daylight
+// goes -- see atmNightShift in shaders/atmosphere.inc. Strength 0 turns it off
+// entirely; Tint is what a fully shifted surface's luminance is multiplied by,
+// and is blue-biased because rods are.
+//
+// It is a render-side value rather than a constant so a game can tune its
+// night to taste without vendoring the whole lighting chain. SceneLighting
+// carries it as a pointer for one reason: a zero-valued struct would mean
+// Strength 0, which means "no night shift at all", and a caller driving this
+// package directly who has never heard of the field would silently lose the
+// look it had. Nil means DefaultNightGrade.
+type NightGrade struct {
+	Strength float32
+	Tint     [3]float32
+}
+
+// DefaultNightGrade is the grade every scene had before it was tunable, and
+// the one a caller gets by saying nothing. Changing these numbers changes
+// every existing game's nights, which is the whole reason they are reachable
+// from outside now.
+func DefaultNightGrade() NightGrade {
+	return NightGrade{Strength: 0.8, Tint: [3]float32{0.72, 0.86, 1.30}}
+}
 
 // shadowResources holds all Vulkan resources for the shadow mapping pass.
 // Per-frame images/views/framebuffers prevent read-write conflicts between frames in flight.
@@ -279,7 +321,7 @@ func createShadowResources(
 	// Per-frame UBOs (one mat4 light VP per cascade)
 	for i := 0; i < maxFramesInFlight; i++ {
 		s.lightVPBuffers[i], _, err = deviceDriver.CreateBuffer(nil, core1_0.BufferCreateInfo{
-			Size:        cascadeUBOSize,
+			Size:        litUBOSize,
 			Usage:       core1_0.BufferUsageUniformBuffer,
 			SharingMode: core1_0.SharingModeExclusive,
 		})
@@ -311,12 +353,12 @@ func createShadowResources(
 			return nil, fmt.Errorf("bind shadow UBO %d: %w", i, err)
 		}
 
-		ptr, _, err := deviceDriver.MapMemory(s.lightVPMemories[i], 0, cascadeUBOSize, 0)
+		ptr, _, err := deviceDriver.MapMemory(s.lightVPMemories[i], 0, litUBOSize, 0)
 		if err != nil {
 			s.destroy(deviceDriver)
 			return nil, fmt.Errorf("map shadow UBO %d: %w", i, err)
 		}
-		s.lightVPMapped[i] = unsafe.Slice((*byte)(ptr), cascadeUBOSize)
+		s.lightVPMapped[i] = unsafe.Slice((*byte)(ptr), litUBOSize)
 	}
 
 	// Per-frame storage buffers for the clustered light data: LightBuffer,
@@ -637,7 +679,7 @@ func createShadowResources(
 					{
 						Buffer: s.lightVPBuffers[i],
 						Offset: 0,
-						Range:  cascadeUBOSize,
+						Range:  litUBOSize,
 					},
 				},
 			},
@@ -814,11 +856,30 @@ func createShadowPipelineWithInput(deviceDriver core1_0.DeviceDriver, sh ShaderS
 	return pipelines[0], nil
 }
 
-// uploadCascadeVPs writes the per-cascade light VP matrices to the per-frame
-// UBO (persistently mapped).
-func (s *shadowResources) uploadCascadeVPs(frame int, vps [ShadowCascades]mgl32.Mat4) {
+// uploadLitUBO writes this frame's cascade matrices and environment grade to
+// the per-frame UBO (persistently mapped).
+func (s *shadowResources) uploadLitUBO(frame int, vps [ShadowCascades]mgl32.Mat4, grade *NightGrade) {
+	packLitUBO(s.lightVPMapped[frame], vps, grade)
+}
+
+// packLitUBO writes the whole block, every frame. Partial writes would leave
+// whatever the last frame using this buffer put there, and with two frames in
+// flight that is not even the previous frame's value.
+//
+// grade nil means DefaultNightGrade -- see NightGrade for why the caller's
+// zero value must not be read as "no shift".
+func packLitUBO(dst []byte, vps [ShadowCascades]mgl32.Mat4, grade *NightGrade) {
 	src := unsafe.Slice((*byte)(unsafe.Pointer(&vps[0][0])), cascadeUBOSize)
-	copy(s.lightVPMapped[frame], src)
+	copy(dst[:cascadeUBOSize], src)
+
+	g := DefaultNightGrade()
+	if grade != nil {
+		g = *grade
+	}
+	off := nightGradeOffset
+	for i, v := range [4]float32{g.Tint[0], g.Tint[1], g.Tint[2], g.Strength} {
+		binary.LittleEndian.PutUint32(dst[off+i*4:], math.Float32bits(v))
+	}
 }
 
 // uploadLights writes this frame's light data into the three storage buffers

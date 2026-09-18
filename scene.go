@@ -115,6 +115,12 @@ type Scene struct {
 	pointLights []PointLight
 	spotLights  []SpotLight
 
+	// nightGrade is the scotopic grade; see SetNightGrade for why it is here
+	// and not on EnvironmentState. NewScene sets it to DefaultNightGrade, and
+	// that initialisation is the whole safety property -- a zero value here
+	// would mean "no night shift" for anyone who never called the setter.
+	nightGrade NightGrade
+
 	// staticColliderXZ caches XZ positions of static colliders for the
 	// linear-scan fallback used when StaticGrid is nil.
 	staticColliderXZ [][2]float32
@@ -134,10 +140,11 @@ type Scene struct {
 func NewScene() *Scene {
 	w := ecs.NewWorld()
 	return &Scene{
-		world:   w,
-		C:       NewComponents(w),
-		Env:     DefaultEnvironment(),
-		Gravity: DefaultGravity,
+		world:      w,
+		C:          NewComponents(w),
+		Env:        DefaultEnvironment(),
+		Gravity:    DefaultGravity,
+		nightGrade: DefaultNightGrade(),
 	}
 }
 
@@ -281,6 +288,51 @@ func (s *Scene) SetSpotLights(lights []SpotLight) { s.spotLights = lights }
 
 // SpotLights returns the current unshadowed spot lights.
 func (s *Scene) SpotLights() []SpotLight { return s.spotLights }
+
+// NightGrade is the colour grade lit surfaces take on as daylight goes: the
+// scotopic shift that stops a night scene being a dimmed day scene. Strength
+// is how far a surface with no lamp on it goes toward that grade at full
+// night, and Tint is what its luminance is multiplied by to get there —
+// blue-biased, because rods are.
+//
+// These are look decisions, not physics. The defaults are what this engine
+// has always used and are documented in docs/agents/day-night.md; a game with
+// a different artistic direction is meant to change them rather than vendor
+// the lighting chain to get at two constants.
+type NightGrade struct {
+	// Strength 0 turns the shift off completely, leaving night dim but
+	// otherwise ungraded.
+	Strength float32
+	Tint     mgl32.Vec3
+}
+
+// DefaultNightGrade is the grade every scene had before it was tunable.
+func DefaultNightGrade() NightGrade {
+	return NightGrade{Strength: 0.8, Tint: mgl32.Vec3{0.72, 0.86, 1.30}}
+}
+
+// SetNightGrade sets the scotopic grade for this scene.
+//
+// It lives on Scene, initialised by NewScene, rather than on EnvironmentState
+// beside fog and ambient — which is where it otherwise belongs. The reason is
+// upgrades. EnvironmentState is produced wholesale by EnvironmentSource.State,
+// so a game that has replaced the environment model returns a struct it wrote
+// before this field existed, and the field arrives as its zero value: Strength
+// 0, which means no night shift at all. That game's nights would change on a
+// dependency bump with nobody choosing it, and the only ways out are a
+// sentinel (0 meaning "default", so nothing could ever mean "off") or a
+// separate "did you set it" flag, both of which are the silent traps the
+// capability docs exist to warn about. A Scene field initialised at
+// construction, the way Gravity is, cannot be zeroed by a source that does not
+// know about it.
+//
+// A source that legitimately wants the grade to move — moon phase, a storm —
+// still can: call this from Update, the same place SetPointLights is called
+// from. Varying it per frame never required it to be inside the environment.
+func (s *Scene) SetNightGrade(g NightGrade) { s.nightGrade = g }
+
+// NightGrade returns the scene's scotopic grade.
+func (s *Scene) NightGrade() NightGrade { return s.nightGrade }
 
 // ─────────────────────────── spatial ───────────────────────────
 

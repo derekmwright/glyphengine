@@ -12,6 +12,11 @@ layout(set = 0, binding = 0) uniform sampler2D texSampler;
 // Shadow at set 1 for static lit pipeline: cascade VPs + 2-layer array map
 layout(set = 1, binding = 0) uniform ShadowData {
     mat4 cascadeVP[2];
+    // Environment values the fragment shaders grade with, appended
+    // because the push constant block is full at 256 bytes. rgb is the
+    // scotopic tint, w the strength (0 disables). All seven ShadowData
+    // declarations and renderer/shadow.go's litUBOSize must agree.
+    vec4 nightGrade;
 } shadow;
 layout(set = 1, binding = 1) uniform sampler2DArrayShadow shadowMap;
 layout(set = 1, binding = 2) uniform samplerCube pointShadowMap;

@@ -180,7 +180,7 @@ float nightLocalShare(float fogAmount, vec3 fogCol) {
 vec3 applyFog(vec3 color, vec3 worldPos) {
     float density = pc.cameraPos.w;
     if (density <= 0.0) {
-        return atmNightShift(color, pc.sunColor.w, nightLocalShare(0.0, vec3(0.0)));
+        return atmNightShift(color, pc.sunColor.w, nightLocalShare(0.0, vec3(0.0)), shadow.nightGrade);
     }
 
     vec3 toFrag = worldPos - pc.cameraPos.xyz;
@@ -216,7 +216,7 @@ vec3 applyFog(vec3 color, vec3 worldPos) {
     float f = clamp(1.0 - exp(-d * d), 0.0, 1.0);
 
     vec3 fogCol = fogColor(viewDir);
-    return atmNightShift(mix(color, fogCol, f), pc.sunColor.w, nightLocalShare(f, fogCol));
+    return atmNightShift(mix(color, fogCol, f), pc.sunColor.w, nightLocalShare(f, fogCol), shadow.nightGrade);
 }
 
 // Blinn-Phong specular BRDF (returns unscaled specular color).
