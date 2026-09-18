@@ -147,6 +147,8 @@ entry point for a task, then read the body for working code.
 | `task sky` | Celestial bodies are occluded by terrain, not drawn over it (needs a GPU) |
 | `task hud` | Screen-space overlays survive water, bloom and the tonemap (needs a GPU) |
 | `task bench` | Per-pass GPU and per-phase CPU cost over a fixed scene set (needs a GPU) |
+| `task lights` | Clustered and brute-force light renderers produce byte-identical images (needs a GPU) |
+| `task nightlight` | Warm lamps stay warm on the ground after the night shift (needs a GPU) |
 | `task ci` | Lint, build, test, race |
 
 ### Signing off a fix
