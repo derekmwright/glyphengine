@@ -22,11 +22,12 @@ api:
   - glyphengine.Scene.SetTimeOfDay
   - glyphengine.Scene.SetDayCycleSpeed
   - glyphengine.Engine.SetFogDensity
+  - glyphengine.Scene.SetNightGrade
 requires: []
 assets: none
 example: examples/09-water
 run: go run ./09-water
-verified: 2026-09-16
+verified: 2026-09-18
 ---
 
 # Environment
@@ -206,6 +207,16 @@ through to the built-in `Environment`. They are **no-ops** under a custom
 `EnvironmentSource`, which owns its own state — `Scene.DayNight()` returns nil
 there, and that is the signal to configure your own type directly.
 
+`Scene.SetNightGrade` is deliberately **not** one of those. The night colour
+grade — see [day-night](day-night.md#night-is-desaturated-not-merely-dim--except-under-a-lamp)
+— is Scene state initialised by `NewScene`, so it works the same under a custom
+source as under the built-in one. It would read more naturally as a field on
+`EnvironmentState` beside fog and ambient, and it is not one for a specific
+reason: a source written before the field existed would return it as the zero
+value, zero strength means no night shift at all, and that game's nights would
+change on a dependency bump with nobody choosing it. Vary it per frame from
+`Update` if it should move with the moon phase.
+
 ## Failure modes
 
 - **A sky appears in an interior scene.** Something is still using
@@ -218,3 +229,6 @@ there, and that is the signal to configure your own type directly.
   zero. See above.
 - **Lighting flickers between frames.** A `State()` implementation is mutating.
   Move the change into `Advance`.
+- **A custom source's nights went flat after an upgrade.** Not this field —
+  `NightGrade` is on `Scene` precisely so that cannot happen. Look for a new
+  `EnvironmentState` field the source is returning as its zero value.
