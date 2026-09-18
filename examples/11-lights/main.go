@@ -23,6 +23,9 @@
 //	go run ./11-lights -count 200   # raise the fill lights past the old 32-light ceiling
 //	go run ./11-lights -spots 6     # add downward-aimed warm spotlights over the ground
 //	go run ./11-lights -spots 6 -spothardedge  # same, with a crisp cone edge instead of a soft one
+//	go run ./11-lights -lamps 400   # a floor of small static lamps instead of the orbiting ring
+//	go run ./11-lights -camdist 0.8 -campitch 0.6 -camtarget 0.05 -camlook 0   # down among them
+//	go run ./11-lights -lightdebug heatmap -lightstats   # what the froxel grid holds
 //
 // The camera orbits on its own. Escape quits.
 package main
@@ -73,6 +76,27 @@ type game struct {
 	// for looking at the crisp-edged cone that produces instead of the
 	// default soft one. Has no effect when spotCount is 0.
 	spotHardEdge bool
+
+	// lamps replaces the orbiting ring with a static grid of short-range
+	// lamps over the floor (-lamps). Built once in Init: they never move, so
+	// rebuilding the slice every frame would be an allocation per frame for
+	// nothing, and the scene is deterministic without depending on the clock.
+	//
+	// This layout is what a clustered renderer is for, and the ring is not:
+	// every one of the ring's lights reaches most of the scene, so every
+	// froxel lists all of them and clustering has nothing to remove. Hundreds
+	// of range-4 lamps a metre and a half apart is the case where a cell holds
+	// a handful and the rest of the grid never hears about them.
+	lamps []glyph.PointLight
+	// lampCount is -lamps: 0 keeps the ring, so the default output is
+	// unchanged.
+	lampCount int
+
+	// Camera pose (-camdist, -campitch, -camtarget, -camlook). The defaults
+	// are the pose this example has always used; they are flags so a capture
+	// can be taken from down among the lamps, where the froxel grid's first
+	// slice is doing all the work, without a second example to maintain.
+	camDist, camPitch, camTarget, camLook float32
 
 	t float32
 }
@@ -131,6 +155,16 @@ func (g *game) Init(e *glyph.Engine) error {
 	e.C.Color.Set(g.lantern, &glyph.Color{R: 1, G: 0.96, B: 0.88})
 	e.C.Emissive.Set(g.lantern, &glyph.Emissive{})
 
+	// A floor of lamps (-lamps) replaces the ring outright, markers included:
+	// at this spacing a marker cube sits within arm's reach of the near camera
+	// pose and would fill the frame with emissive geometry, which is not what
+	// is being looked at.
+	if g.lampCount > 0 {
+		g.lamps = buildLamps(g.lampCount)
+		g.finishInit()
+		return nil
+	}
+
 	// One marker per fill light: the built-in four by default, or -count of
 	// them once that flag raises the fill-light total past the old 32-light
 	// ceiling (see renderer.MaxLights). fillCount is also what Update uses to
@@ -149,12 +183,58 @@ func (g *game) Init(e *glyph.Engine) error {
 		g.fills = append(g.fills, f)
 	}
 
-	g.camera = glyph.NewCamera(17)
-	g.camera.Pitch = 0.42
-	g.camera.Target = mgl32.Vec3{0, 2, 0}
+	g.finishInit()
+	return nil
+}
+
+// finishInit places the camera. NewCamera rather than assignment, because the
+// distance it is constructed with is also the collision-clamped distance the
+// view is actually built from, and setting only the field leaves the two
+// disagreeing.
+func (g *game) finishInit() {
+	g.camera = glyph.NewCamera(g.camDist)
+	g.camera.Pitch = g.camPitch
+	g.camera.LookOffset = g.camLook
+	g.camera.Target = mgl32.Vec3{0, g.camTarget, 0}
 
 	log.Println("11-lights running. One shadow-casting light, several fill lights. Escape quits.")
-	return nil
+}
+
+// lampSpacing, lampY and lampRange lay out the -lamps floor: lamps far enough
+// apart that no froxel is asked to hold an unreasonable number of them, low
+// enough that a camera among them is inside several at once, and short enough
+// ranged that most of the grid lists none of them.
+// lampIntensity is dim on purpose. A lamp every 1.6 m with a range of 4 puts
+// about twenty of them on any point of the floor, and at full intensity the
+// sum clips to white over most of the frame -- which is the worst thing a
+// scene used to compare two renderers can do, because a clipped pixel is the
+// same white whether or not it was given the right lights.
+const (
+	lampSpacing   = 1.6
+	lampY         = 0.55
+	lampRange     = 4.0
+	lampIntensity = 0.15
+)
+
+// buildLamps returns n lamps on a square grid centred on the origin, sized so
+// the grid stays on the 46x46 floor.
+func buildLamps(n int) []glyph.PointLight {
+	side := 1
+	for side*side < n {
+		side++
+	}
+	lamps := make([]glyph.PointLight, 0, n)
+	for i := 0; i < n; i++ {
+		q := float32(i%side - side/2)
+		r := float32(i/side - side/2)
+		c := hueColor(float64(i) / float64(n))
+		lamps = append(lamps, glyph.PointLight{
+			Pos:   mgl32.Vec3{lampSpacing * q, lampY, lampSpacing * r},
+			Range: lampRange,
+			Color: mgl32.Vec3{c[0], c[1], c[2]}.Mul(lampIntensity),
+		})
+	}
+	return lamps
 }
 
 // fillColors are the unshadowed lights: saturated, so it is easy to see which
@@ -239,6 +319,12 @@ func (g *game) Update(e *glyph.Engine, dt float32) {
 	// These pass through the whole scene without occlusion, so they light the
 	// far side of a pillar as happily as the near side. That is the trade:
 	// many of them, none of them casting.
+	if len(g.lamps) > 0 {
+		e.Scene.SetPointLights(g.lamps)
+		g.updateSpots(e)
+		return
+	}
+
 	n := g.fillCount()
 	lights := make([]glyph.PointLight, 0, n)
 	for i := 0; i < n; i++ {
@@ -263,6 +349,13 @@ func (g *game) Update(e *glyph.Engine, dt float32) {
 	}
 	e.Scene.SetPointLights(lights)
 
+	g.updateSpots(e)
+}
+
+// updateSpots places the -spots lights. Its own method because both light
+// layouts -- the orbiting ring and the -lamps floor -- end with it, and a
+// second copy is a second thing to keep in step.
+func (g *game) updateSpots(e *glyph.Engine) {
 	// ── the unshadowed spot lights (-spots) ──
 	// Posts around the same ring the pillars stand on, aimed down and
 	// outward so the cone lands on the ground ahead of its post instead of
@@ -306,6 +399,13 @@ func main() {
 	spots := flag.Int("spots", 0, "add N downward/outward-aimed warm spotlights over the ground")
 	spotHardEdge := flag.Bool("spothardedge", false, "give the -spots cones a hard edge (Inner == Outer) instead of the default soft one")
 	lightDebug := flag.String("lightdebug", "", "light debug mode: heatmap or bruteforce (default: off)")
+	lightStats := flag.Bool("lightstats", false, "log the light binner's stats for the last frame on exit")
+	lamps := flag.Int("lamps", 0, "replace the orbiting fill lights with N short-range lamps on a grid over the floor")
+	// The defaults are the pose this example has always used.
+	camDist := flag.Float64("camdist", 17, "camera orbit distance")
+	camPitch := flag.Float64("campitch", 0.42, "camera pitch in radians")
+	camTarget := flag.Float64("camtarget", 2, "height of the point the camera orbits")
+	camLook := flag.Float64("camlook", 0.75, "how far above the target the camera looks")
 	flag.Parse()
 
 	opts := []glyph.Option{
@@ -325,7 +425,18 @@ func main() {
 		opts = append(opts, glyph.WithScreenshot(*shot))
 	}
 
-	e, err := glyph.New(&game{static: *static, pointCount: *count, spotCount: *spots, spotHardEdge: *spotHardEdge}, opts...)
+	g := &game{
+		static:       *static,
+		pointCount:   *count,
+		spotCount:    *spots,
+		spotHardEdge: *spotHardEdge,
+		lampCount:    *lamps,
+		camDist:      float32(*camDist),
+		camPitch:     float32(*camPitch),
+		camTarget:    float32(*camTarget),
+		camLook:      float32(*camLook),
+	}
+	e, err := glyph.New(g, opts...)
 	if err != nil {
 		log.Fatalf("create engine: %v", err)
 	}
@@ -344,4 +455,8 @@ func main() {
 
 	e.Run()
 	log.Printf("rendered %d frames", e.FrameCount())
+	if *lightStats {
+		// The last frame's binning, which is the frame a -screenshot captured.
+		log.Printf("light stats: %+v", e.LightStats())
+	}
 }
