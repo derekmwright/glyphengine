@@ -498,6 +498,48 @@ tasks:
         fi
         exit $status
 
+  nightlight:
+    desc: "Check that lamplight still reads as lamplight after the night shift"
+    dir: examples
+    cmds:
+      # Needs a GPU, so it sits with smoke, validate, determinism and lights
+      # rather than in `task ci`.
+      #
+      # atmNightShift blends night-time surfaces toward a blue-weighted grey,
+      # and it used to do that on sun altitude alone. At full night that blend
+      # is one-sided -- the shifted blue channel lands above the shifted green
+      # for every colour with no negative channel -- so a warm lamp could not
+      # put a warm pool on the ground no matter what colour or intensity it
+      # was given. Nothing else here notices: `task smoke` renders the frame,
+      # `task validate` says the layer is happy and `task determinism` says
+      # two runs agree, and all three were green for as long as it lasted.
+      #
+      # The capture is the doorway close-up rather than the overview, because
+      # the pool has to be a large enough patch of one surface to average.
+      # See cmd/lampcheck for the boxes and for the ablation that shows this
+      # fails when the weighting is removed.
+      - |
+        status=0
+        d=.nightlight
+        rm -rf $d && mkdir -p $d
+        GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./21-streetlights -frames 90 \
+          -width 1280 -height 720 \
+          -camtargetx 22 -camtargety 1.5 -camtargetz 0 \
+          -camyaw -1.5708 -campitch 0.25 -camdist 9 -camlook 0.6 \
+          -screenshot $d/doorway.png >/dev/null 2>&1
+        if [ ! -s $d/doorway.png ]; then
+          echo "MISSING CAPTURE -- this gate proves nothing"
+          exit 1
+        fi
+        go run ../cmd/lampcheck -i $d/doorway.png -pool 560,650,160,60 -unlit 110,640,110,60 || status=1
+        # A failure here is a picture. Keep it, the way `task lights` does.
+        if [ $status -ne 0 ]; then
+          echo "capture kept in examples/$d"
+        else
+          rm -rf $d
+        fi
+        exit $status
+
   bench:
     desc: Run the benchmark scenes and print CPU/GPU cost per pass
     cmds:
