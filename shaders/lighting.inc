@@ -90,6 +90,62 @@ vec3 fogColor(vec3 viewDir) {
     return horizon + atmSunGlow(viewDir, sunDir, pc.sunColor.rgb, sunY);
 }
 
+// Rec. 709 luminance, the same weights atmNightShift builds its grey from.
+float lightLum(vec3 c) {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+// How much light this fragment sends to the eye, split by where it came from:
+// lamps -- the clustered point and spot lights plus the shadowed point light
+// in the push constants -- against the moon or sun, and ambient. Luminance
+// rather than colour, because the only thing read off them is a ratio.
+//
+// File scope rather than another parameter because the producers are the two
+// evalLighting* functions below and the consumer is applyFog, and all seven
+// fragment shaders that include this file call one of the first and then the
+// second, in that order, with nothing in between. Threading it through would
+// mean changing every one of those call sites to carry a value none of them
+// has an opinion about.
+//
+// The zero initialiser is load-bearing rather than tidiness: water.frag
+// includes this file for calcShadow, fogColor and applyFog but shades its own
+// surface, so neither producer ever runs there. Zero is the true answer for it
+// -- the water surface is not in the local-light loop at all -- and it makes
+// applyFog's local share exactly 0.0, which is what keeps water byte-identical.
+float lightLocalLum = 0.0;
+float lightSkyLum = 0.0;
+
+// nightLocalShare is the fraction of the light leaving this fragment toward
+// the eye that came from a lamp. atmNightShift backs its scotopic blend off by
+// exactly this much.
+//
+// A ratio rather than a threshold on absolute luminance, which would read more
+// literally as "is this surface bright enough for cones to work". Two reasons,
+// one of them measured. The engine's radiometric units are arbitrary, so the
+// two thresholds would be numbers with nothing behind them; and a threshold
+// catches every bright fragment whatever lit it. Tried: smoothstep(0.03, 0.15)
+// on the shaded luminance, a pair chosen to spare this scene's doorway pool.
+// It also moved 41.5% of 08-grass at midnight by up to 47/255, 18.3% of
+// 16-materials at midnight and 18.2% at dusk by up to 18/255, and 4.7% of
+// 15-kitchen-sink at dusk -- scenes with no lamp in them at all. A ratio is
+// exactly zero when nothing local contributed, so those scenes cannot move:
+// that is the property worth having, and gate 1 below checks it by hash.
+//
+// The fog belongs inside the ratio, not outside it. What fog mixes in is
+// scattered skylight, which is nobody's lamp, so a pool far enough away to
+// have faded into the haze must not keep punching a warm hole in it -- at
+// f == 1 the local share is 0 and the fogged fragment takes the same full
+// shift the sky does, which is the only answer that lets geometry keep melting
+// into the horizon.
+float nightLocalShare(float fogAmount, vec3 fogCol) {
+    float through = 1.0 - fogAmount;
+    float local = through * lightLocalLum;
+    float rest = through * lightSkyLum + fogAmount * lightLum(fogCol);
+    // The epsilon exists only so an entirely black fragment does not divide
+    // zero by zero. It is orders below anything the shift could make visible.
+    return local / (local + rest + 1e-6);
+}
+
 // applyFog blends toward the horizon colour, then applies the night shift.
 //
 // Two modes, chosen by pc.fog.x:
@@ -123,7 +179,7 @@ vec3 fogColor(vec3 viewDir) {
 vec3 applyFog(vec3 color, vec3 worldPos) {
     float density = pc.cameraPos.w;
     if (density <= 0.0) {
-        return atmNightShift(color, pc.sunColor.w);
+        return atmNightShift(color, pc.sunColor.w, nightLocalShare(0.0, vec3(0.0)));
     }
 
     vec3 toFrag = worldPos - pc.cameraPos.xyz;
@@ -156,9 +212,10 @@ vec3 applyFog(vec3 color, vec3 worldPos) {
     // naturally gives -- is linear in distance where the other is quadratic,
     // and turning Height on then thickens every scene at the same Density.
     float d = dist * density * amount;
-    float f = 1.0 - exp(-d * d);
+    float f = clamp(1.0 - exp(-d * d), 0.0, 1.0);
 
-    return atmNightShift(mix(color, fogColor(viewDir), clamp(f, 0.0, 1.0)), pc.sunColor.w);
+    vec3 fogCol = fogColor(viewDir);
+    return atmNightShift(mix(color, fogCol, f), pc.sunColor.w, nightLocalShare(f, fogCol));
 }
 
 // Blinn-Phong specular BRDF (returns unscaled specular color).
@@ -254,6 +311,19 @@ vec3 evalLightingAO(vec3 diffuseColor, vec3 F0, float shininess,
     }
 
     vec3 ambientTerm = diffuseColor * pc.ambient.rgb * ao;
+
+    // What applyFog needs to decide how much of the night shift this fragment
+    // has earned. Summed from the finished terms rather than accumulated
+    // inside the loop, which costs two dot products instead of one per light
+    // and, more to the point, leaves the returned expression below untouched
+    // -- so no scene's pixels can move through a regrouped float add, and
+    // clustered and brute force cannot disagree about a summation order they
+    // never take. The lamp's specular is lamplight too: it is the lamp's
+    // colour reflected off the surface, so it belongs on the same side as its
+    // diffuse.
+    lightLocalLum = lightLum(pointDiffuse + pointSpecular + uDiffuse + uSpecular);
+    lightSkyLum = lightLum(ambientTerm + sunDiffuse + sunSpecular);
+
     return ambientTerm + sunDiffuse + sunSpecular + pointDiffuse + pointSpecular + uDiffuse + uSpecular;
 }
 
@@ -282,7 +352,16 @@ vec3 evalLightingDiffuse(vec3 diffuseColor, vec3 N, vec3 worldPos, vec3 shadowPo
     vec3 L = normalize(pc.sunDir.xyz);
     float NdotL = clamp(dot(N, L), 0.0, 1.0);
     float sunShadow = calcShadow(shadowPos, NdotL);
-    vec3 color = NdotL * pc.sunColor.rgb * sunShadow * diffuseColor;
+    vec3 sunTerm = NdotL * pc.sunColor.rgb * sunShadow * diffuseColor;
+    vec3 color = sunTerm;
+
+    // The lamp half of the same sum, accumulated alongside rather than teased
+    // back out of `color` afterwards. A second running total leaves every add
+    // that builds `color` exactly where it was, which is what keeps a scene
+    // with no lamps byte-identical, and it adds the same +0.0 for a light that
+    // does not reach this fragment that `color` does -- so the clustered and
+    // brute-force paths stay bit-for-bit equal here too.
+    vec3 localColor = vec3(0.0);
 
     // --- Shadowed point light ---
     vec3 toLight = pc.pointPos.xyz - worldPos;
@@ -294,7 +373,9 @@ vec3 evalLightingDiffuse(vec3 diffuseColor, vec3 N, vec3 worldPos, vec3 shadowPo
         atten = atten * atten;
         float NdotPL = clamp(dot(N, normalize(toLight)), 0.0, 1.0);
         float ptShadow = calcPointShadow(worldPos, pc.pointPos.xyz, range);
-        color += NdotPL * atten * pc.pointColor.rgb * ptShadow * diffuseColor;
+        vec3 ptTerm = NdotPL * atten * pc.pointColor.rgb * ptShadow * diffuseColor;
+        color += ptTerm;
+        localColor += ptTerm;
     }
 
     // --- Unshadowed lights (point + spot) ---
@@ -302,8 +383,14 @@ vec3 evalLightingDiffuse(vec3 diffuseColor, vec3 N, vec3 worldPos, vec3 shadowPo
     for (uint i = 0u; i < lr.count; i++) {
         GpuLight light = lightAt(lr, i);
         vec3 uL;
-        color += lightIrradiance(light, worldPos, N, uL) * diffuseColor;
+        vec3 term = lightIrradiance(light, worldPos, N, uL) * diffuseColor;
+        color += term;
+        localColor += term;
     }
 
-    return diffuseColor * pc.ambient.rgb + color;
+    vec3 ambientTerm = diffuseColor * pc.ambient.rgb;
+    lightLocalLum = lightLum(localColor);
+    lightSkyLum = lightLum(ambientTerm + sunTerm);
+
+    return ambientTerm + color;
 }
