@@ -1351,10 +1351,19 @@ func createWaterPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, render
 // createGodRayPipeline creates the light-shaft pipeline: a fullscreen triangle
 // blended additively over the frame.
 //
-// It runs in the water render pass rather than one of its own. That pass
-// already loads the finished colour and has the scene bound as a texture,
-// which is exactly what a screen-space effect needs, and reusing it avoids a
-// third pass and a second copy of the frame for one draw call.
+// **Nothing draws with it.** The pipeline is created, handed to
+// recordCommandBuffer and then to recordWaterPass, and never bound; no push
+// constant or uniform carries SceneLighting.LightShafts or SunScreenPos either,
+// so godray.frag could not read where the sun is if it did run. The effect is
+// wired up to the point of pipeline creation and stops there. This comment used
+// to say "it runs in the water render pass rather than one of its own", which
+// is where it was *meant* to run and where its render pass says it would.
+//
+// It is left in place rather than deleted because finishing it is a small
+// change -- one bind, one draw, two floats in the push block -- and because
+// `LightShafts > 0` is still what makes a shafts-and-no-water frame enter the
+// water pass at all. Deleting one without the other changes which frames
+// resolve twice.
 //
 // No depth test: the shafts are light in the air between the eye and
 // everything else, so there is nothing for them to be behind.
