@@ -27,6 +27,7 @@
 //	go run ./21-streetlights -lamps 120          # more street lamps
 //	go run ./21-streetlights -sweep              # rotate building 0's spotlight
 //	go run ./21-streetlights -off                # start with spotlights cleared
+//	go run ./21-streetlights -nightshift 0       # no scotopic night grade at all
 //	go run ./21-streetlights -lightdebug heatmap # see the froxel grid instead
 //	go run ./21-streetlights -lightstats         # log the binner's stats on exit
 //
@@ -35,6 +36,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"math"
 	"runtime"
@@ -137,6 +139,12 @@ type game struct {
 	// good overview, and moving these is how a scripted capture gets a close
 	// view of one doorway without a second example to maintain.
 	camDist, camPitch, camYaw, camTargetX, camTargetY, camTargetZ, camLook float32
+
+	// nightShift below zero and nightTint nil both mean "leave the engine's
+	// default alone", so the example's stock output does not depend on the
+	// flags existing.
+	nightShift float32
+	nightTint  *mgl32.Vec3
 }
 
 func (g *game) Init(e *glyph.Engine) error {
@@ -287,6 +295,22 @@ func (g *game) Init(e *glyph.Engine) error {
 	e.Scene.Env = env
 	e.SetTimeOfDay(0.03)
 	e.SetDayCycleSpeed(0)
+
+	// The night grade is the engine's default unless asked otherwise, so the
+	// stock frame of this example is what it always was. -nightshift and
+	// -nighttint exist because this is the scene the grade is easiest to see
+	// in: it has lamplight, moonlight and bare ground in one frame, so what
+	// the grade touches and what it does not are both on screen at once.
+	// -nightshift 0 is also the quickest way to see what the shift is for --
+	// the ground stops being blue and the whole scene reads as a dim day.
+	grade := e.Scene.NightGrade()
+	if g.nightShift >= 0 {
+		grade.Strength = g.nightShift
+	}
+	if g.nightTint != nil {
+		grade.Tint = *g.nightTint
+	}
+	e.Scene.SetNightGrade(grade)
 
 	g.camera = glyph.NewCamera(g.camDist)
 	g.camera.Pitch = g.camPitch
@@ -618,6 +642,8 @@ func main() {
 	off := flag.Bool("off", false, "start with the spotlight set cleared (SetSpotLights(nil))")
 	lightDebug := flag.String("lightdebug", "", "light debug mode: heatmap or bruteforce (default: off)")
 	lightStats := flag.Bool("lightstats", false, "log the light binner's stats for the last frame on exit")
+	nightShift := flag.Float64("nightshift", -1, "night grade strength 0..1 (0 turns the scotopic shift off; <0 keeps the engine default)")
+	nightTint := flag.String("nighttint", "", "night grade tint as r,g,b in linear RGB (empty keeps the engine default 0.72,0.86,1.30)")
 	camDist := flag.Float64("camdist", 42, "camera orbit distance")
 	camPitch := flag.Float64("campitch", 0.5, "camera pitch in radians")
 	camYaw := flag.Float64("camyaw", 0.4, "camera yaw in radians")
@@ -654,6 +680,14 @@ func main() {
 		camTargetY: float32(*camTargetY),
 		camTargetZ: float32(*camTargetZ),
 		camLook:    float32(*camLook),
+		nightShift: float32(*nightShift),
+	}
+	if *nightTint != "" {
+		var t mgl32.Vec3
+		if _, err := fmt.Sscanf(*nightTint, "%g,%g,%g", &t[0], &t[1], &t[2]); err != nil {
+			log.Fatalf("-nighttint %q: want r,g,b", *nightTint)
+		}
+		g.nightTint = &t
 	}
 	e, err := glyph.New(g, opts...)
 	if err != nil {
