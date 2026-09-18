@@ -421,6 +421,10 @@ type Engine struct {
 	sunMesh  *renderer.Mesh
 	elapsed  float32 // running time counter for shader animation
 
+	// nightGrade is Scene.NightGrade in the renderer's own shape, kept here
+	// so the per-frame SceneLighting can point at it without allocating.
+	nightGrade renderer.NightGrade
+
 	drawBuf     []renderer.RenderObject // reused each frame to avoid allocs
 	animScratch renderer.AnimScratch    // reused each frame by TickAnimations
 
@@ -1403,6 +1407,16 @@ func (e *Engine) renderFrame() {
 	camRight := camForward.Cross(mgl32.Vec3{0, 1, 0}).Normalize()
 	camUp := camRight.Cross(camForward).Normalize()
 
+	// Refreshed into an Engine field rather than allocated fresh each frame:
+	// SceneLighting takes a pointer because nil there has to mean "the
+	// default" (see renderer.NightGrade), and a per-frame &NightGrade{} would
+	// be an allocation in the draw path for a value that almost never moves.
+	g := e.Scene.NightGrade()
+	e.nightGrade = renderer.NightGrade{
+		Strength: g.Strength,
+		Tint:     [3]float32{g.Tint.X(), g.Tint.Y(), g.Tint.Z()},
+	}
+
 	lighting := renderer.SceneLighting{
 		VP:            vp,
 		CameraRight:   [3]float32{camRight.X(), camRight.Y(), camRight.Z()},
@@ -1422,6 +1436,7 @@ func (e *Engine) renderFrame() {
 		RealSunDir:    env.RealSunDir,
 		CascadeVPs:    cascadeVPs,
 		ShadowEnabled: shadowEnabled,
+		NightGrade:    &e.nightGrade,
 		FogDensity:    env.FogDensity,
 		FogHeight:     env.FogHeight,
 		FogBaseHeight: env.FogBaseHeight,

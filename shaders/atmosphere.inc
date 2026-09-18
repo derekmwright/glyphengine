@@ -149,17 +149,24 @@ vec3 atmSunGlow(vec3 dir, vec3 sunDir, vec3 sunCol, float sunY) {
 // colour or intensity could put an amber pool on the ground -- measured on
 // 21-streetlights' doorway, which read R 151 G 126 B 143 through the shift and
 // R 228 G 103 B 27 with it ablated, off the same light.
-vec3 atmNightShift(vec3 color, float sunY, float local) {
-    // Scaling `night` is the same operation as blending the shifted colour
-    // back toward the unshifted one -- mix(mix(c,s,t), c, w) is mix(c,s,t*(1-w))
-    // -- and this form keeps the early-out below covering both "it is daytime"
-    // and "this surface is lit by a lamp", and keeps local == 0 bit-for-bit
-    // what it was before there was a second term at all.
-    float night = (1.0 - atmDaylight(sunY)) * (1.0 - local);
+// `grade` is the look, and it is a uniform rather than the constants that used
+// to sit here: how far night goes and what colour it goes is an artistic
+// decision, and baking it into a file every lit surface includes meant a game
+// had to vendor the whole lighting chain to change two numbers. rgb is the
+// tint a fully shifted surface's luminance is multiplied by, w the strength.
+// It arrives in the per-frame ShadowData UBO; see renderer.NightGrade for the
+// defaults, which are exactly the constants this replaced.
+vec3 atmNightShift(vec3 color, float sunY, float local, vec4 grade) {
+    // Three factors, all of which mean "do less of this": the sun is up, the
+    // fragment is lamplit, the game asked for a weaker grade. Folding them
+    // into one term keeps a single early-out covering all three, and keeps the
+    // arithmetic in the order it was before any of them existed -- with the
+    // default grade and no lamp, `night` is the same float to the bit.
+    float night = (1.0 - atmDaylight(sunY)) * (1.0 - local) * grade.w;
     if (night <= 0.0) {
         return color;
     }
     float l = dot(color, vec3(0.2126, 0.7152, 0.0722));
-    vec3 scotopic = vec3(l) * vec3(0.72, 0.86, 1.30);
-    return mix(color, scotopic, night * 0.8);
+    vec3 scotopic = vec3(l) * grade.rgb;
+    return mix(color, scotopic, night);
 }

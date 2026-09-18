@@ -1350,7 +1350,7 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 	// stale data. When shadows are disabled, the VPs are zero matrices, causing
 	// all fragments to project to the shadow map origin where depth=1.0
 	// (cleared) → fully lit.
-	r.shadow.uploadCascadeVPs(f, lighting.CascadeVPs)
+	r.shadow.uploadLitUBO(f, lighting.CascadeVPs, lighting.NightGrade)
 	r.shadow.uploadLights(f, lighting.Lights, lighting.Clusters, lighting.LightFlags, r.sc.extent)
 
 	// The water pass is optional: a device without TRANSFER_SRC on its
