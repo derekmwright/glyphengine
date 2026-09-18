@@ -1673,8 +1673,19 @@ func recordWaterPass(
 			viewport, scissor, ow.overlays, ow.fallback)
 	}
 
-	timer.end(deviceDriver, cmdBuf, ow.frame, PassOverWater)
-
 	deviceDriver.CmdEndRenderPass(cmdBuf)
+
+	// After the end of the pass, not before it, exactly as PassOverlay closes
+	// after the scene pass ends. The water pass resolves its MSAA colour on the
+	// way out, and that resolve used to fall inside PassWater; closing here
+	// keeps it charged to the frame instead of to the gap between two passes.
+	//
+	// Measured on 09-water, which has water and nothing blended in front of it,
+	// three runs each: PassWater alone read 0.069/0.071/0.072 ms before the
+	// split. After it, with this timestamp inside the pass, PassWater read
+	// 0.049/0.050/0.051 and PassOverWater 0.000 -- 0.021 ms of resolve
+	// belonging to neither. With it here the two sum back to what the one used
+	// to be.
+	timer.end(deviceDriver, cmdBuf, ow.frame, PassOverWater)
 	return nil
 }

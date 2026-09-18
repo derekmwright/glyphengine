@@ -50,7 +50,13 @@ const (
 // PassWater so that the cost of the reorder is visible and separable — folding
 // it in would make water look more expensive than it is, and folding it back
 // into PassTranslucent and PassParticles would need intervals that straddle the
-// water pass and overlap it. It reads zero in every frame without water.
+// water pass and overlap it.
+//
+// It carries the end of the water pass the way PassOverlay carries the end of
+// the scene pass, so in a frame with water but nothing blended in front of it
+// the number is that pass's MSAA resolve rather than zero: 0.021 ms on
+// 09-water. PassWater plus PassOverWater is what PassWater alone used to be.
+// In a frame with no water at all both are empty and read zero.
 
 // String is what shows up in the report; kept short so a per-frame line fits.
 func (p Pass) String() string {
