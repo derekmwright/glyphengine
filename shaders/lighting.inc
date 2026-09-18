@@ -231,6 +231,17 @@ vec3 evalLightingAO(vec3 diffuseColor, vec3 F0, float shininess,
         GpuLight light = lightAt(lr, i);
         vec3 uL;
         vec3 irradiance = lightIrradiance(light, worldPos, N, uL);
+        // Out of range, facing away, or outside the cone: this light adds
+        // exactly +0.0 to both sums, and x + 0.0 is x for every value either
+        // sum can hold. So skipping is bit-for-bit what going round was --
+        // which is what lets clustered and brute force be required to match
+        // exactly -- and it saves brdfSpecular's two pow() calls on every
+        // light that contributes nothing. The old inline loop only paid them
+        // inside its range test; hoisting the loop out of seven shaders lost
+        // that, in both modes.
+        if (irradiance == vec3(0.0)) {
+            continue;
+        }
         uDiffuse  += irradiance * diffuseColor;
         uSpecular += irradiance * brdfSpecular(uL, V, N, F0, shininess);
     }
