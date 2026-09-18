@@ -6,10 +6,16 @@ import (
 	"github.com/vkngwrapper/core/v3/core1_0"
 )
 
-// recordTranslucent draws the blended subset of the draw list.
+// recordTranslucent draws one half of the blended subset of the draw list.
 //
-// It runs inside the scene render pass, after the sky and before particles.
-// Both ends of that matter:
+// over selects the half: false is the group recorded inside the scene pass,
+// before the water's refraction copy, and true is the group recorded after the
+// water surface in the water pass. split decides which draw is which; with no
+// water in the frame it puts everything in the first group and the second call
+// never happens. See waterorder.go for the rule and what it approximates.
+//
+// The first group runs inside the scene render pass, after the sky and before
+// particles. Both ends of that matter:
 //
 //   - After the sky. The sky is a fullscreen triangle drawn last on purpose, so
 //     it only shades pixels nothing else landed on. Translucent geometry writes
@@ -51,6 +57,8 @@ func recordTranslucent(
 	fallbackTexture *Texture,
 	shadowDS core1_0.DescriptorSet,
 	frame int,
+	split blendSplit,
+	over bool,
 ) {
 	var lastTex *Texture
 	var lastJoints *JointBuffer
@@ -61,6 +69,12 @@ func recordTranslucent(
 	for i := range draws {
 		d := &draws[i]
 		if d.ShadowOnly || !d.IsTranslucent() {
+			continue
+		}
+		// Filtering the sorted list rather than resorting each half is what
+		// keeps the back-to-front order inside a group: a subsequence of a
+		// sorted sequence is sorted.
+		if cx, cy, cz := d.worldCenter(); !split.keep(over, cx, cy, cz) {
 			continue
 		}
 

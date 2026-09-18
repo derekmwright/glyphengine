@@ -84,6 +84,10 @@ type Renderer struct {
 	waterFramebuffers             []core1_0.Framebuffer
 	sceneColor                    *sceneColorTarget
 	grass                         *GrassSystem
+	// waterPlanes is scratch for the per-frame split of blended draws onto
+	// either side of the water, kept so a frame that draws water does not
+	// allocate to classify against it. See waterorder.go.
+	waterPlanes []waterPlane
 	// grassLOD is the distance tuning grass thins, fades and culls by.
 	// Defaulted at construction so a zero value never culls grass at zero.
 	grassLOD GrassLOD
@@ -1341,7 +1345,23 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 	// into this frame's buffers now that its fence has signaled (the GPU is
 	// done reading them).
 	r.flushJointUploads(f)
+
+	// Which side of the water each blended draw is on, worked out once. The
+	// recorder needs it to decide where to record, and the particle instance
+	// buffer has to be partitioned on the same answer BEFORE it is uploaded --
+	// two computations of the same thing could disagree, and the failure would
+	// be a few particles in the wrong pass, which nothing would flag.
+	//
+	// Guarded on sceneColor because that is what the water pass is guarded on:
+	// a device whose swapchain images are not transfer-capable draws no water
+	// at all, so there is nothing for blended geometry to be in front of.
+	var split blendSplit
+	if r.sceneColor != nil {
+		r.waterPlanes = appendWaterPlanes(r.waterPlanes[:0], draws)
+		split = blendSplit{planes: r.waterPlanes, eyeY: lighting.CameraPos[1]}
+	}
 	if r.particles != nil {
+		r.particles.splitAtWater(split)
 		r.particles.flushUploads(f)
 	}
 	r.flushDynamicMeshes(f)
@@ -1371,7 +1391,7 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 	err = recordCommandBuffer(r.deviceDriver, cmdBuf, r.renderPass, r.framebuffers[imageIndex], r.pipeline, r.litDoubleSidedPipeline, r.translucentPipeline, r.translucentDoubleSidedPipeline, r.skinnedTranslucentPipeline, r.instancedPipeline, r.instancedDoubleSidedPipeline, r.overlayPipeline, r.skyPipeline, r.starsPipeline, r.celestialPipeline, r.uiPipeline, r.msdfPipeline, r.skinnedPipeline, r.grassPipeline, r.waterPipeline, r.godRayPipeline, r.waterRenderPass, waterFB, r.sceneColor, r.hdr.images[imageIndex],
 		func(cb core1_0.CommandBuffer) error { return r.recordClouds(cb, lighting) },
 		r.cloudSetFor(),
-		r.bloomFor(imageIndex), r.tonemapFor(imageIndex), r.particlePipeline, r.terrainPipeline, r.materialPipelines(), &r.stats, r.pipelineLayout, r.litPipelineLayout, r.skinnedPipelineLayout, r.terrainPipelineLayout, r.sc.extent, draws, overlays, celestials, uiOverlays, msdfOverlays, lighting, r.fallbackTexture, r.milkyWayTex, r.shadow, r.grass, r.grassLOD, r.grassImpostor, r.grassImpostorPipeline, r.particles, f, r.msaa != nil, r.gpuTimer)
+		r.bloomFor(imageIndex), r.tonemapFor(imageIndex), r.particlePipeline, r.terrainPipeline, r.materialPipelines(), &r.stats, r.pipelineLayout, r.litPipelineLayout, r.skinnedPipelineLayout, r.terrainPipelineLayout, r.sc.extent, draws, overlays, celestials, uiOverlays, msdfOverlays, lighting, split, r.fallbackTexture, r.milkyWayTex, r.shadow, r.grass, r.grassLOD, r.grassImpostor, r.grassImpostorPipeline, r.particles, f, r.msaa != nil, r.gpuTimer)
 	if err != nil {
 		return err
 	}

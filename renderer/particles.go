@@ -29,6 +29,15 @@ type ParticleSystem struct {
 	dirty            [maxFramesInFlight]bool
 	InstanceCount    int
 	MaxInstances     int
+
+	// behind is how many of the staged instances are behind the water surface
+	// and belong before the refraction copy; the rest follow them in the buffer
+	// and are drawn after the water. See splitAtWater and waterorder.go.
+	behind int
+
+	// front is scratch for the stable partition, kept so a frame that splits
+	// does not allocate for it.
+	front []ParticleInstance
 }
 
 // CreateParticleSystem allocates a unit quad mesh and per-frame host-visible
@@ -92,6 +101,51 @@ func (ps *ParticleSystem) UpdateInstances(r *Renderer, instances []ParticleInsta
 	for i := range ps.dirty {
 		ps.dirty[i] = true
 	}
+}
+
+// splitAtWater partitions the staged instances so that everything behind the
+// water comes first, and records how many that is.
+//
+// The instance buffer is the only thing there is to split. A frame's particles
+// are one instanced draw and the renderer has no idea how many emitters
+// produced them, so "per system" is not a unit it could work in even if that
+// were the right one — and it is not: a plume rising out of a lake straddles
+// the surface, and half of it has to be refracted while the other half is
+// drawn over the water. Two contiguous ranges and two draws is the cheapest
+// thing that expresses that.
+//
+// The partition is stable, so within each half the instances keep the order the
+// game handed them over in.
+//
+// Reordering makes every frame slot's uploaded copy stale, so the dirty flags
+// are set when anything actually moved. Without that, a game that stopped
+// calling UpdateInstances would keep drawing an old partition against a new
+// camera — and the split would go quietly wrong rather than loudly.
+func (ps *ParticleSystem) splitAtWater(split blendSplit) {
+	n := len(ps.staging)
+	ps.behind = n
+	if !split.active() || n == 0 {
+		return
+	}
+
+	ps.front = ps.front[:0]
+	k := 0
+	for i := 0; i < n; i++ {
+		p := ps.staging[i]
+		if split.behind(p.X, p.Y, p.Z) {
+			ps.staging[k] = p
+			k++
+		} else {
+			ps.front = append(ps.front, p)
+		}
+	}
+	if len(ps.front) > 0 {
+		copy(ps.staging[k:], ps.front)
+		for i := range ps.dirty {
+			ps.dirty[i] = true
+		}
+	}
+	ps.behind = k
 }
 
 // flushUploads copies staged instance data into the given frame's buffer.

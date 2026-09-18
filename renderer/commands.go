@@ -167,11 +167,7 @@ func (d *RenderObject) IsTranslucent() bool {
 // Squared, because a back-to-front ordering does not need the square root and
 // the sort calls this on every comparison.
 func (d *RenderObject) ViewDepth(eye [3]float32) float32 {
-	m := &d.Model
-	c := d.Mesh.BoundCenter
-	cx := m[0]*c[0] + m[4]*c[1] + m[8]*c[2] + m[12]
-	cy := m[1]*c[0] + m[5]*c[1] + m[9]*c[2] + m[13]
-	cz := m[2]*c[0] + m[6]*c[1] + m[10]*c[2] + m[14]
+	cx, cy, cz := d.worldCenter()
 	dx, dy, dz := cx-eye[0], cy-eye[1], cz-eye[2]
 	return dx*dx + dy*dy + dz*dz
 }
@@ -202,22 +198,37 @@ func (d *RenderObject) SortKey() uint64 {
 	return key
 }
 
+// worldCenter returns the draw's mesh bound centre in world space.
+//
+// It is the one point that stands for a draw: what the blended pass sorts on
+// and what the water split classifies. Sharing it means a draw cannot sort as
+// if it were somewhere the split does not think it is.
+func (d *RenderObject) worldCenter() (cx, cy, cz float32) {
+	m := &d.Model
+	c := d.Mesh.BoundCenter
+	return m[0]*c[0] + m[4]*c[1] + m[8]*c[2] + m[12],
+		m[1]*c[0] + m[5]*c[1] + m[9]*c[2] + m[13],
+		m[2]*c[0] + m[6]*c[1] + m[10]*c[2] + m[14]
+}
+
+// modelScale is the largest axis scale in the draw's model matrix, which is
+// what a bounding sphere has to be grown by.
+func (d *RenderObject) modelScale() float32 {
+	m := &d.Model
+	sx := float32(math.Sqrt(float64(m[0]*m[0] + m[1]*m[1] + m[2]*m[2])))
+	sy := float32(math.Sqrt(float64(m[4]*m[4] + m[5]*m[5] + m[6]*m[6])))
+	sz := float32(math.Sqrt(float64(m[8]*m[8] + m[9]*m[9] + m[10]*m[10])))
+	return max(sx, sy, sz)
+}
+
 // worldBoundSphere returns the draw's mesh bounding sphere transformed to
 // world space. A zero radius means the mesh has no bounds (always draw).
 func (d *RenderObject) worldBoundSphere() (cx, cy, cz, r float32) {
 	if d.Mesh.BoundRadius <= 0 {
 		return 0, 0, 0, 0
 	}
-	m := &d.Model
-	c := d.Mesh.BoundCenter
-	cx = m[0]*c[0] + m[4]*c[1] + m[8]*c[2] + m[12]
-	cy = m[1]*c[0] + m[5]*c[1] + m[9]*c[2] + m[13]
-	cz = m[2]*c[0] + m[6]*c[1] + m[10]*c[2] + m[14]
-	sx := float32(math.Sqrt(float64(m[0]*m[0] + m[1]*m[1] + m[2]*m[2])))
-	sy := float32(math.Sqrt(float64(m[4]*m[4] + m[5]*m[5] + m[6]*m[6])))
-	sz := float32(math.Sqrt(float64(m[8]*m[8] + m[9]*m[9] + m[10]*m[10])))
-	r = d.Mesh.BoundRadius * max(sx, sy, sz)
-	return cx, cy, cz, r
+	cx, cy, cz = d.worldCenter()
+	return cx, cy, cz, d.Mesh.BoundRadius * d.modelScale()
 }
 
 // pushConstantSize is the total push constant block size in bytes.
@@ -451,6 +462,7 @@ func recordCommandBuffer(
 	uiOverlays []UIRenderObject,
 	msdfOverlays []RenderObject,
 	lighting SceneLighting,
+	split blendSplit,
 	fallbackTexture *Texture,
 	milkyWayTex *Texture,
 	shadow *shadowResources,
@@ -1236,77 +1248,29 @@ func recordCommandBuffer(
 	timer.begin(deviceDriver, cmdBuf, frame, PassTranslucent)
 	recordTranslucent(deviceDriver, stats, cmdBuf, translucentPipeline, translucentDoubleSidedPipeline,
 		skinnedTranslucentPipeline, litPipelineLayout, skinnedPipelineLayout, viewport, scissor,
-		draws, lighting, fallbackTexture, shadowDS, frame)
+		draws, lighting, fallbackTexture, shadowDS, frame, split, false)
 	timer.end(deviceDriver, cmdBuf, frame, PassTranslucent)
 
 	timer.begin(deviceDriver, cmdBuf, frame, PassParticles)
-	// Draw instanced billboard particles (additive blend, depth test only)
-	if particles != nil && particles.InstanceCount > 0 {
-		deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, particlePipeline)
-		deviceDriver.CmdSetViewport(cmdBuf, viewport)
-		deviceDriver.CmdSetScissor(cmdBuf, scissor)
-		deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, []core1_0.DescriptorSet{fallbackTexture.DescriptorSet}, nil)
-
-		// Push constants: VP at [0..15], cameraRight packed into model col 0, cameraUp into model col 1
-		var pc [64]float32
-		copy(pc[:16], lighting.VP[:])
-		// model column 0 = cameraRight
-		pc[16] = lighting.CameraRight[0]
-		pc[17] = lighting.CameraRight[1]
-		pc[18] = lighting.CameraRight[2]
-		// model column 1 = cameraUp
-		pc[20] = lighting.CameraUp[0]
-		pc[21] = lighting.CameraUp[1]
-		pc[22] = lighting.CameraUp[2]
-		pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
-		deviceDriver.CmdPushConstants(cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
-
-		deviceDriver.CmdBindVertexBuffers(cmdBuf, 0, []core1_0.Buffer{particles.QuadMesh.vertexBuffer, particles.InstanceBuffers[frame]}, []int{0, 0})
-		deviceDriver.CmdBindIndexBuffer(cmdBuf, particles.QuadMesh.indexBuffer, 0, particles.QuadMesh.indexType)
-		deviceDriver.CmdDrawIndexed(cmdBuf, particles.QuadMesh.IndexCount, particles.InstanceCount, 0, 0, 0)
-	}
+	// Billboard particles, the instances behind the water. With no water in the
+	// frame that is all of them and this is the only particle draw, exactly as
+	// it was before the split existed.
+	recordParticles(deviceDriver, cmdBuf, particlePipeline, pipelineLayout, viewport, scissor,
+		particles, lighting, fallbackTexture, frame, 0, particleBehind(particles))
 
 	timer.end(deviceDriver, cmdBuf, frame, PassParticles)
 	timer.begin(deviceDriver, cmdBuf, frame, PassOverlay)
-	// Draw overlays (no depth test, no culling) — unlit path (bars, cooldowns)
+	// World-space overlays (bars, markers): no depth test, no culling, and
+	// always the topmost thing in the scene. The screen-space channels are
+	// composited after the tonemap instead; see recordUIComposite.
 	//
-	// World space, so this one stays in the scene pass. The screen-space
-	// channels are composited after the tonemap instead; see recordUIComposite.
-	if len(overlays) > 0 {
-		deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, overlayPipeline)
-		deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, []core1_0.DescriptorSet{fallbackTexture.DescriptorSet}, nil)
-
-		for i := range overlays {
-			d := &overlays[i]
-			if d.Mesh.IndexCount == 0 && d.Mesh.VertexCount == 0 {
-				continue
-			}
-			deviceDriver.CmdBindVertexBuffers(cmdBuf, 0, []core1_0.Buffer{d.Mesh.vertexBuffer}, []int{0})
-
-			// Overlay: MVP + identity model + tint, lighting zeroed
-			var pc [64]float32
-			copy(pc[:16], d.MVP[:])
-			// model = identity
-			pc[16] = 1
-			pc[21] = 1
-			pc[26] = 1
-			pc[31] = 1
-			pc[32] = d.Color[0]
-			pc[33] = d.Color[1]
-			pc[34] = d.Color[2]
-			pc[35] = 1.0
-			// lighting fields stay zero — overlay shader ignores them
-			pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
-			deviceDriver.CmdPushConstants(cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
-
-			stats.addDraw(1, d.Mesh.IndexCount, d.Mesh.VertexCount)
-			if d.Mesh.IndexCount > 0 {
-				deviceDriver.CmdBindIndexBuffer(cmdBuf, d.Mesh.indexBuffer, 0, d.Mesh.indexType)
-				deviceDriver.CmdDrawIndexed(cmdBuf, d.Mesh.IndexCount, 1, 0, 0, 0)
-			} else {
-				deviceDriver.CmdDraw(cmdBuf, d.Mesh.VertexCount, 1, 0, 0)
-			}
-		}
+	// With water in the frame they move to the water pass. "On top" has to mean
+	// on top of the water as well, and an overlay recorded here would also be
+	// inside the refraction copy — a marker smeared through the waves and then
+	// painted over is two wrongs rather than one.
+	if !split.active() {
+		recordOverlays(deviceDriver, stats, cmdBuf, overlayPipeline, pipelineLayout,
+			viewport, scissor, overlays, fallbackTexture)
 	}
 
 	deviceDriver.CmdEndRenderPass(cmdBuf)
@@ -1319,12 +1283,29 @@ func recordCommandBuffer(
 	if sceneColor != nil && (hasWater(draws) || lighting.LightShafts > 0) {
 		if err := recordWaterPass(deviceDriver, stats, cmdBuf, waterRenderPass, waterFramebuffer,
 			waterPipeline, godRayPipeline, pipelineLayout, litPipelineLayout, extent, draws, lighting,
-			sceneColor, sceneImage, shadowDS, msaaEnabled); err != nil {
+			sceneColor, sceneImage, shadowDS, msaaEnabled, overWater{
+				translucent:        translucentPipeline,
+				translucentDouble:  translucentDoubleSidedPipeline,
+				skinnedTranslucent: skinnedTranslucentPipeline,
+				particlePipeline:   particlePipeline,
+				overlayPipeline:    overlayPipeline,
+				skinnedLayout:      skinnedPipelineLayout,
+				overlays:           overlays,
+				particles:          particles,
+				fallback:           fallbackTexture,
+				split:              split,
+				frame:              frame,
+			}, timer); err != nil {
 			return err
 		}
+	} else {
+		// Every pass has to write both of its timestamps every frame. A query
+		// that is reset and never written is not "not ready", it makes the
+		// whole frame's readback come back NotReady and the timings vanish.
+		timer.end(deviceDriver, cmdBuf, frame, PassWater)
+		timer.begin(deviceDriver, cmdBuf, frame, PassOverWater)
+		timer.end(deviceDriver, cmdBuf, frame, PassOverWater)
 	}
-
-	timer.end(deviceDriver, cmdBuf, frame, PassWater)
 
 	timer.begin(deviceDriver, cmdBuf, frame, PassBloom)
 	if err := recordBloom(deviceDriver, cmdBuf, bloom); err != nil {
@@ -1348,6 +1329,154 @@ func recordCommandBuffer(
 	return err
 }
 
+// particleBehind is how many instances belong before the refraction copy.
+// Zero for a frame with no particle system, and all of them when the frame has
+// no water; see ParticleSystem.splitAtWater.
+func particleBehind(particles *ParticleSystem) int {
+	if particles == nil {
+		return 0
+	}
+	return particles.behind
+}
+
+// recordParticles draws instances [first, first+count) of the frame's billboard
+// particles: additive, depth-tested, writing no depth.
+//
+// One contiguous range rather than the whole buffer, because a frame with water
+// draws this twice — the instances behind the surface before the refraction
+// copy and the ones in front of it after the water. firstInstance is what makes
+// that free: the vertex fetch is offset by it, and particle.vert reads no
+// gl_InstanceIndex, so the second draw sees exactly the instances it should.
+func recordParticles(
+	deviceDriver core1_0.DeviceDriver,
+	cmdBuf core1_0.CommandBuffer,
+	particlePipeline core1_0.Pipeline,
+	pipelineLayout core1_0.PipelineLayout,
+	viewport core1_0.Viewport,
+	scissor core1_0.Rect2D,
+	particles *ParticleSystem,
+	lighting SceneLighting,
+	fallbackTexture *Texture,
+	frame, first, count int,
+) {
+	if particles == nil || count <= 0 {
+		return
+	}
+	deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, particlePipeline)
+	deviceDriver.CmdSetViewport(cmdBuf, viewport)
+	deviceDriver.CmdSetScissor(cmdBuf, scissor)
+	deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, []core1_0.DescriptorSet{fallbackTexture.DescriptorSet}, nil)
+
+	// Push constants: VP at [0..15], cameraRight packed into model col 0, cameraUp into model col 1
+	var pc [64]float32
+	copy(pc[:16], lighting.VP[:])
+	// model column 0 = cameraRight
+	pc[16] = lighting.CameraRight[0]
+	pc[17] = lighting.CameraRight[1]
+	pc[18] = lighting.CameraRight[2]
+	// model column 1 = cameraUp
+	pc[20] = lighting.CameraUp[0]
+	pc[21] = lighting.CameraUp[1]
+	pc[22] = lighting.CameraUp[2]
+	pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
+	deviceDriver.CmdPushConstants(cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
+
+	deviceDriver.CmdBindVertexBuffers(cmdBuf, 0, []core1_0.Buffer{particles.QuadMesh.vertexBuffer, particles.InstanceBuffers[frame]}, []int{0, 0})
+	deviceDriver.CmdBindIndexBuffer(cmdBuf, particles.QuadMesh.indexBuffer, 0, particles.QuadMesh.indexType)
+	deviceDriver.CmdDrawIndexed(cmdBuf, particles.QuadMesh.IndexCount, count, 0, 0, uint32(first))
+}
+
+// recordOverlays draws the world-space unlit overlays: no depth test, no
+// culling, one draw each.
+//
+// It sets the viewport and scissor itself rather than inheriting whatever the
+// last pipeline bind left behind. That was safe while this only ever ran at the
+// end of the scene pass behind half a dozen other draws; it runs in the water
+// pass now as well, and a group that depends on something else having been
+// drawn first is a trap rather than a saving.
+func recordOverlays(
+	deviceDriver core1_0.DeviceDriver,
+	stats *RenderStats,
+	cmdBuf core1_0.CommandBuffer,
+	overlayPipeline core1_0.Pipeline,
+	pipelineLayout core1_0.PipelineLayout,
+	viewport core1_0.Viewport,
+	scissor core1_0.Rect2D,
+	overlays []RenderObject,
+	fallbackTexture *Texture,
+) {
+	if len(overlays) == 0 {
+		return
+	}
+	deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, overlayPipeline)
+	deviceDriver.CmdSetViewport(cmdBuf, viewport)
+	deviceDriver.CmdSetScissor(cmdBuf, scissor)
+	deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, []core1_0.DescriptorSet{fallbackTexture.DescriptorSet}, nil)
+
+	for i := range overlays {
+		d := &overlays[i]
+		if d.Mesh.IndexCount == 0 && d.Mesh.VertexCount == 0 {
+			continue
+		}
+		deviceDriver.CmdBindVertexBuffers(cmdBuf, 0, []core1_0.Buffer{d.Mesh.vertexBuffer}, []int{0})
+
+		// Overlay: MVP + identity model + tint, lighting zeroed
+		var pc [64]float32
+		copy(pc[:16], d.MVP[:])
+		// model = identity
+		pc[16] = 1
+		pc[21] = 1
+		pc[26] = 1
+		pc[31] = 1
+		pc[32] = d.Color[0]
+		pc[33] = d.Color[1]
+		pc[34] = d.Color[2]
+		pc[35] = 1.0
+		// lighting fields stay zero — overlay shader ignores them
+		pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
+		deviceDriver.CmdPushConstants(cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
+
+		stats.addDraw(1, d.Mesh.IndexCount, d.Mesh.VertexCount)
+		if d.Mesh.IndexCount > 0 {
+			deviceDriver.CmdBindIndexBuffer(cmdBuf, d.Mesh.indexBuffer, 0, d.Mesh.indexType)
+			deviceDriver.CmdDrawIndexed(cmdBuf, d.Mesh.IndexCount, 1, 0, 0, 0)
+		} else {
+			deviceDriver.CmdDraw(cmdBuf, d.Mesh.VertexCount, 1, 0, 0)
+		}
+	}
+}
+
+// overWater is everything the water pass needs to draw after the surface.
+//
+// Grouped rather than passed loose for the same reason materialPipelines is:
+// recordWaterPass's parameter list is long enough already, and five more
+// positional handles of two repeated types would be easy to transpose in a way
+// only the validation layer would catch.
+//
+// Every pipeline here was created against the SCENE render pass and is bound
+// inside the water one. That is legal because the two passes are render pass
+// compatible: same attachment count, formats, sample counts, subpass references
+// and subpass dependencies, differing only in load and store ops and in image
+// layouts, which compatibility explicitly allows. The dependency is the part
+// that is easy to get wrong and the layer does catch — see sceneEntryDependency,
+// which exists so the two passes cannot drift apart. Building a second set of
+// identical pipelines would double their startup cost to say the same thing.
+type overWater struct {
+	translucent        core1_0.Pipeline
+	translucentDouble  core1_0.Pipeline
+	skinnedTranslucent core1_0.Pipeline
+	particlePipeline   core1_0.Pipeline
+	overlayPipeline    core1_0.Pipeline
+
+	skinnedLayout core1_0.PipelineLayout
+
+	overlays  []RenderObject
+	particles *ParticleSystem
+	fallback  *Texture
+	split     blendSplit
+	frame     int
+}
+
 // hasWater reports whether any draw needs the refraction pass.
 func hasWater(draws []RenderObject) bool {
 	for i := range draws {
@@ -1358,12 +1487,19 @@ func hasWater(draws []RenderObject) bool {
 	return false
 }
 
-// recordWaterPass copies the opaque scene into a sampled image and draws the
-// water surfaces against it in a second render pass.
+// recordWaterPass copies the opaque scene into a sampled image, draws the water
+// surfaces against it in a second render pass, and then draws the blended
+// geometry that belongs in front of the water.
 //
 // The copy is the only way a fragment shader can read what is already on
 // screen; the alternative, an input attachment, can only read the pixel being
 // written, and refraction is precisely a read of a *different* pixel.
+//
+// The blended group after it is issue #45. Water does not write depth, so those
+// draws depth-test against the opaque scene exactly as they did in the scene
+// pass — a flame behind a hill is still behind the hill — and they composite
+// over the surface rather than under it. What decides which draws come here and
+// which stay before the copy is blendSplit; see waterorder.go.
 func recordWaterPass(
 	deviceDriver core1_0.DeviceDriver,
 	stats *RenderStats,
@@ -1381,6 +1517,8 @@ func recordWaterPass(
 	sceneImage core1_0.Image,
 	shadowDS core1_0.DescriptorSet,
 	msaa bool,
+	ow overWater,
+	timer *gpuTimer,
 ) error {
 	colorRange := core1_0.ImageSubresourceRange{
 		AspectMask: core1_0.ImageAspectColor,
@@ -1508,6 +1646,34 @@ func recordWaterPass(
 			deviceDriver.CmdDraw(cmdBuf, d.Mesh.VertexCount, 1, 0, 0)
 		}
 	}
+
+	// The surface is on screen; the rest of this pass is the blended geometry
+	// in front of it, which is a different thing to attribute. Closing PassWater
+	// here rather than around the whole call keeps the two intervals disjoint --
+	// nested ones would make the passes sum to more than the frame, which is the
+	// signal this instrument uses to say it is broken.
+	timer.end(deviceDriver, cmdBuf, ow.frame, PassWater)
+	timer.begin(deviceDriver, cmdBuf, ow.frame, PassOverWater)
+
+	// Same order the scene pass uses for these three: translucent meshes back
+	// to front, then additive particles over them, then overlays on top of
+	// everything. Only the water now sits underneath instead of on top.
+	recordTranslucent(deviceDriver, stats, cmdBuf, ow.translucent, ow.translucentDouble,
+		ow.skinnedTranslucent, litPipelineLayout, ow.skinnedLayout, viewport, scissor,
+		draws, lighting, ow.fallback, shadowDS, ow.frame, ow.split, true)
+
+	behind := particleBehind(ow.particles)
+	if ow.particles != nil {
+		recordParticles(deviceDriver, cmdBuf, ow.particlePipeline, pipelineLayout, viewport, scissor,
+			ow.particles, lighting, ow.fallback, ow.frame, behind, ow.particles.InstanceCount-behind)
+	}
+
+	if ow.split.active() {
+		recordOverlays(deviceDriver, stats, cmdBuf, ow.overlayPipeline, pipelineLayout,
+			viewport, scissor, ow.overlays, ow.fallback)
+	}
+
+	timer.end(deviceDriver, cmdBuf, ow.frame, PassOverWater)
 
 	deviceDriver.CmdEndRenderPass(cmdBuf)
 	return nil
