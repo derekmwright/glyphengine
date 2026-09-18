@@ -24,6 +24,24 @@ type PointLight struct {
 	Color mgl32.Vec3
 }
 
+// SpotLight describes an unshadowed spot light for the renderer: a point
+// light narrowed to a cone. Dir is the direction the light points (need not
+// be unit length -- the engine normalizes it); a zero Dir is treated as
+// omnidirectional, i.e. an ordinary point light, rather than as an error.
+//
+// Inner and Outer are half-angles in radians measured from Dir: full
+// intensity inside Inner, a smooth falloff to zero between Inner and Outer,
+// and nothing beyond Outer. Inner must not exceed Outer -- see
+// Scene.SetSpotLights.
+type SpotLight struct {
+	Pos   mgl32.Vec3
+	Dir   mgl32.Vec3
+	Range float32
+	Color mgl32.Vec3
+	Inner float32
+	Outer float32
+}
+
 // Scene owns simulation state: the ECS world, component stores, physics
 // acceleration structures, terrain, and the day/night cycle. It has no
 // renderer or window dependency, so a headless tool or test can drive one
@@ -79,6 +97,7 @@ type Scene struct {
 	pointRange  float32
 	pointColor  [3]float32
 	pointLights []PointLight
+	spotLights  []SpotLight
 
 	// staticColliderXZ caches XZ positions of static colliders for the
 	// linear-scan fallback used when StaticGrid is nil.
@@ -225,12 +244,22 @@ func (s *Scene) SetPointLight(pos, color mgl32.Vec3, r float32) {
 	s.pointRange = r
 }
 
-// SetPointLights sets the unshadowed point lights. The renderer uses at most
-// renderer.MaxPointLights of them.
+// SetPointLights sets the unshadowed point lights. Combined with the spot
+// lights (see SetSpotLights), the renderer uses at most renderer.MaxLights of
+// them; renderer.MaxPointLights is kept as an alias for renderer.MaxLights,
+// which is why this doc still names it.
 func (s *Scene) SetPointLights(lights []PointLight) { s.pointLights = lights }
 
 // PointLights returns the current unshadowed point lights.
 func (s *Scene) PointLights() []PointLight { return s.pointLights }
+
+// SetSpotLights sets the unshadowed spot lights. Combined with the point
+// lights, the renderer uses at most renderer.MaxLights of them, points first
+// then spots -- see Engine.gatherLights.
+func (s *Scene) SetSpotLights(lights []SpotLight) { s.spotLights = lights }
+
+// SpotLights returns the current unshadowed spot lights.
+func (s *Scene) SpotLights() []SpotLight { return s.spotLights }
 
 // ─────────────────────────── spatial ───────────────────────────
 
