@@ -6,6 +6,44 @@ import (
 	"github.com/vkngwrapper/core/v3/core1_0"
 )
 
+// sceneEntryDependency is the external-to-subpass-0 dependency BOTH scene-sized
+// render passes declare, and they have to declare the same one.
+//
+// Render pass compatibility, which is what lets a pipeline created against one
+// pass be bound inside the other, allows the two to differ only in load and
+// store operations and in image layouts (Vulkan spec, Render Pass
+// Compatibility). Subpass dependencies are not on that list, so two passes with
+// different dependencies are incompatible however identical their attachments
+// are. The validation layer says so in as many words:
+//
+//	VUID-vkCmdDrawIndexed-renderPass-02684: RenderPasses incompatible ...
+//	First srcStageMask is ...TRANSFER..., but second srcStageMask is ...
+//
+// which is how the blended draws that now run inside the water pass were caught
+// the first time they were recorded there. The alternative was a second copy of
+// five pipelines built against the water pass to say the same thing.
+//
+// The masks are the union of what the two passes separately needed: the scene
+// pass's colour and depth attachment writes, and the water pass's wait on the
+// transfer that produced its refraction source. A union is safe in the
+// direction that matters — each pass still waits for everything it used to, and
+// waiting for a little more at the top of a pass is not measurable here.
+func sceneEntryDependency() core1_0.SubpassDependency {
+	return core1_0.SubpassDependency{
+		SrcSubpass: core1_0.SubpassExternal,
+		DstSubpass: 0,
+		SrcStageMask: core1_0.PipelineStageTransfer | core1_0.PipelineStageColorAttachmentOutput |
+			core1_0.PipelineStageEarlyFragmentTests | core1_0.PipelineStageLateFragmentTests,
+		DstStageMask: core1_0.PipelineStageFragmentShader | core1_0.PipelineStageColorAttachmentOutput |
+			core1_0.PipelineStageEarlyFragmentTests,
+		SrcAccessMask: core1_0.AccessTransferWrite | core1_0.AccessColorAttachmentWrite |
+			core1_0.AccessDepthStencilAttachmentWrite,
+		DstAccessMask: core1_0.AccessShaderRead | core1_0.AccessColorAttachmentRead |
+			core1_0.AccessColorAttachmentWrite | core1_0.AccessDepthStencilAttachmentRead |
+			core1_0.AccessDepthStencilAttachmentWrite,
+	}
+}
+
 // createRenderPass builds a single-subpass render pass. When samples > Samples1,
 // it uses 3 attachments (MSAA color, depth, resolve); otherwise 2 (color, depth).
 func createRenderPass(deviceDriver core1_0.DeviceDriver, imageFormat core1_0.Format, depthFormat core1_0.Format, samples core1_0.SampleCountFlags) (core1_0.RenderPass, error) {
@@ -108,18 +146,9 @@ func createRenderPass(deviceDriver core1_0.DeviceDriver, imageFormat core1_0.For
 	}
 
 	renderPass, _, err := deviceDriver.CreateRenderPass(nil, core1_0.RenderPassCreateInfo{
-		Attachments: attachments,
-		Subpasses:   subpasses,
-		SubpassDependencies: []core1_0.SubpassDependency{
-			{
-				SrcSubpass:    core1_0.SubpassExternal,
-				DstSubpass:    0,
-				SrcStageMask:  core1_0.PipelineStageColorAttachmentOutput | core1_0.PipelineStageEarlyFragmentTests,
-				DstStageMask:  core1_0.PipelineStageColorAttachmentOutput | core1_0.PipelineStageEarlyFragmentTests,
-				SrcAccessMask: 0,
-				DstAccessMask: core1_0.AccessColorAttachmentWrite | core1_0.AccessDepthStencilAttachmentWrite,
-			},
-		},
+		Attachments:         attachments,
+		Subpasses:           subpasses,
+		SubpassDependencies: []core1_0.SubpassDependency{sceneEntryDependency()},
 	})
 	if err != nil {
 		return core1_0.RenderPass{}, err
