@@ -3,15 +3,20 @@
 // street lamps along the path between them.
 //
 // It exists to demonstrate what clustered spot lights are for outside a test
-// pattern. Each building mounts one downward, slightly outward-aimed spot
-// over its door -- soft-edged, so the pool of light on the ground fades
-// rather than cuts off, and the same cone lights the wall above the door on
-// its way down. The buildings' walls carry a Material (albedo, normal and
-// roughness maps, generated at startup the way 16-materials does it), so the
-// spotlight's grazing light catches real relief rather than a flat texture.
-// The street lamps are unshadowed point lights on posts, doing what
-// SetPointLights is for: a few dozen small lights scattered along a path
+// pattern. Each building mounts one downward, slightly outward-aimed spot on
+// a bracket over its door -- soft-edged, so the pool of light on the ground
+// fades rather than cuts off, and the same cone washes the brick either side
+// of the door on its way down. The buildings' walls carry a Material (albedo,
+// normal and roughness maps, generated at startup the way 16-materials does
+// it), so the spotlight's grazing light catches real relief rather than a
+// flat texture. The street lamps are unshadowed point lights on posts, doing
+// what SetPointLights is for: a few dozen small lights scattered along a path
 // rather than one light trying to cover the whole scene.
+//
+// The doorway bulbs are a plain 2800 K incandescent and the street lamps a
+// cooler white, on the terrain's own tint, with no prop under either: warm
+// light at night stays warm because atmosphere.inc weights its scotopic shift
+// by how much of a fragment's light came from a lamp. See spotColor.
 //
 // The scene is set just after midnight, with the moon low and the sky kept
 // deliberately understated -- see day-night.md -- so the warm door light
@@ -71,30 +76,28 @@ const (
 	doorHeight    = 2.5
 	doorThickness = 0.14
 
-	// The doorstep patch approximates the spotlight's footprint on the
-	// ground: wide enough to sit under the whole pool, and centred on where
-	// the cone's axis actually lands (see buildingSpot) rather than jammed
-	// against the wall.
-	doorstepWidth   = 4.0
-	doorstepDepth   = 3.2
-	doorstepOutward = 1.3
-
-	// The fixture sits above the door, proud of the wall by just enough that
-	// its marker cube does not z-fight with the wall it is mounted on -- kept
-	// small deliberately, because the fixture position doubles as the cone's
-	// apex, and pushing it far from the wall aims the cone's near edge away
-	// from the wall it is supposed to be lighting on the way down.
+	// The fixture sits above the door on a short bracket, the way a porch
+	// lantern does. The stand-off is what lets the wall catch anything at all,
+	// and it is geometry rather than taste: the fixture position doubles as
+	// the cone's apex, so for a wall-mounted downlight N dot L on its own wall
+	// is the stand-off over the drop and nothing else. At 0.06 a metre of wall
+	// gets 0.06 of the light, which is why the brick used to go black either
+	// side of a bright pool; at 0.45 it gets 0.41 and the masonry's relief
+	// reads. See spotOuter below -- the two have to move together.
 	fixtureHeight  = doorHeight + 0.7
-	fixtureForward = 0.06
+	fixtureForward = 0.45
 
 	// Soft cone: smooth falloff between Inner and Outer rather than a crisp
 	// edge, per the acceptance criteria. Aimed mostly down with a shallow
-	// outward lean, so the near edge of the cone grazes the wall and the door
-	// lintel right below the fixture on its way to the ground, instead of
-	// leaning away from the wall from the apex out.
+	// outward lean, and wide enough that the wall the bracket above exposes is
+	// actually inside it. Standing the lamp off the wall moves the wall from
+	// 3 degrees off the cone's axis to 24, so the two constants go together:
+	// an outer half-angle of 47 against a lean of 11 puts the cone's wall-side
+	// edge at 36 degrees and clears it, where the 38-and-19 pair that suited a
+	// flush fixture would now cut the wall off 5 degrees short.
 	spotRange = 10.0
-	spotInner = 18 * math.Pi / 180
-	spotOuter = 38 * math.Pi / 180
+	spotInner = 22 * math.Pi / 180
+	spotOuter = 47 * math.Pi / 180
 
 	// sweepRate is how fast -sweep rotates building 0's spotlight around the
 	// vertical axis, in radians per second. Slow enough that two captures a
@@ -225,38 +228,6 @@ func (g *game) Init(e *glyph.Engine) error {
 		e.C.Color.Set(door, &glyph.Color{R: 0.26, G: 0.16, B: 0.09})
 		e.C.Static.Set(door, &glyph.Static{})
 
-		// Doorstep: a worn dirt patch under the spotlight's pool, in place of
-		// the terrain's own grass tint there.
-		//
-		// Measured, not assumed (AGENTS.md rule 13): atmosphere.inc's
-		// atmNightShift blends every lit fragment toward a blue-weighted grey
-		// at this time of night (80% at TimeOfDay 0.03), on the SHADED colour
-		// -- light times albedo -- not on the light alone. It is also
-		// provably one-sided: for any non-negative colour with no blue
-		// component, the maths of the blend (scotopic weights 0.72/0.86/1.30
-		// against luminance weights 0.2126/0.7152/0.0722) make the shifted
-		// blue channel exceed the shifted green channel every time, so true
-		// orange (red > green > blue) cannot survive full night in this
-		// engine -- the best reachable ordering is red > blue > green, a
-		// warm rose rather than amber. Grass albedo (0.20, 0.30, 0.18) is
-		// green-dominant, and green carries most of the luminance the shift
-		// keys off, so a warm spot straight on grass measured red 151, green
-		// 159, blue 175 in the rendered PNG -- cooler than the light aimed at
-		// it. This dirt-brown patch under the pool, paired with spotColor below,
-		// measures red 154, green 129, blue 147: warm side wins clearly
-		// against the moonlit ground nearby, which measures red 42, green
-		// 47, blue 55.
-		patch := e.Spawn()
-		e.C.Transform.Set(patch, &glyph.Transform{
-			Position: b.pos.Add(rotateY(yaw, mgl32.Vec3{0, 0.02, buildingDepth/2 + doorstepOutward})),
-			Rotation: mgl32.Vec3{0, yaw, 0},
-			Scale:    mgl32.Vec3{doorstepWidth, 0.04, doorstepDepth},
-		})
-		e.C.MeshRef.Set(patch, &glyph.MeshRef{Mesh: cube, Roughness: 0.9})
-		e.C.Color.Set(patch, &glyph.Color{R: 0.42, G: 0.22, B: 0.08})
-		e.C.Static.Set(patch, &glyph.Static{})
-		e.C.NoCastShadow.Set(patch, &glyph.NoCastShadow{})
-
 		// Roof slab.
 		roof := e.Spawn()
 		e.C.Transform.Set(roof, &glyph.Transform{
@@ -360,15 +331,24 @@ func (g *game) Update(e *glyph.Engine, dt float32) {
 	e.Scene.SetSpotLights(spots)
 }
 
-// spotColor is pushed redder than a real 2800K incandescent would be -- see
-// the doorstep comment in Init for why: at this time of night the shader's
-// night shift takes 80% of every lit fragment toward a blue-weighted grey,
-// so a colour with green anywhere near incandescent's real proportion loses
-// the fight for luminance (green carries 0.7152 of it) and reads pale blue
-// instead of warm. This is the colour that measured out ahead once, paired
-// with the doorstep patch's albedo -- not a physical 2800K, but what reads
-// as "warm doorway" after the shift this engine applies at night.
-var spotColor = mgl32.Vec3{1.0, 0.28, 0.0}.Mul(2.4)
+// spotColor is a 2800 K incandescent bulb -- the ordinary warm porch light --
+// at roughly (1.0, 0.58, 0.28) in linear RGB, scaled for brightness.
+//
+// The hue is not tuned to the renderer, and it is worth saying so because it
+// used to be: the light here was a saturated (1.0, 0.28, 0.0) aimed at a
+// dirt-brown patch laid under the pool, because atmNightShift keyed its
+// scotopic blend on sun altitude alone and no lamp could reach red > green >
+// blue through it. Now that the blend is weighted by how much of a fragment's
+// light came from a lamp, a plausible bulb colour survives to the ground on
+// the scene's own grass tint. Measured on the doorway close-up at 1280x720:
+// the pool centre is red 181, green 169, blue 109 against red 30, green 35,
+// blue 43 on the moonlit ground beside it.
+//
+// The intensity is tuned, to fill the pool and the brick around the door
+// without the ground clipping -- the brightest ground pixel reaches red 193.
+// The only pixels at 255 anywhere in the frame are the emissive bulb markers,
+// which is what an emissive bulb is for.
+var spotColor = mgl32.Vec3{1.0, 0.58, 0.28}.Mul(2.8)
 
 // buildingSpot returns building i's current spotlight. Only building 0's
 // beam direction turns under -sweep -- the fixture and every other building
@@ -379,7 +359,7 @@ func (g *game) buildingSpot(i int, b building) glyph.SpotLight {
 	if g.sweep && i == 0 {
 		yaw += g.t * sweepRate
 	}
-	dir := rotateY(yaw, mgl32.Vec3{0, -1, 0.35})
+	dir := rotateY(yaw, mgl32.Vec3{0, -1, 0.20})
 	pos := b.pos.Add(rotateY(b.yaw, mgl32.Vec3{0, fixtureHeight, buildingDepth/2 + fixtureForward}))
 	return glyph.SpotLight{
 		Pos:   pos,
@@ -417,10 +397,11 @@ func buildLamps(hm *glyph.Heightmap, n int) []glyph.PointLight {
 		lamps = append(lamps, glyph.PointLight{
 			Pos:   mgl32.Vec3{x, y + lampPoleHeight, z},
 			Range: lampRange,
-			// Warm sodium amber, dimmer than the door spots: these are meant
-			// to read as a path of small lights, not as a second set of
-			// doorways.
-			Color: mgl32.Vec3{1.0, 0.68, 0.32}.Mul(0.45),
+			// A cooler warm white than the doorway bulbs, and dimmer: street
+			// lighting is not the same fixture as a porch light, and the
+			// difference in temperature is what makes the ring read as a path
+			// of small lights rather than as a second set of doorways.
+			Color: mgl32.Vec3{1.0, 0.74, 0.50}.Mul(0.6),
 		})
 	}
 	return lamps
