@@ -14,10 +14,23 @@
 // Refraction samples the opaque scene, so water draws in a second pass after
 // everything else. Press R to toggle it and watch the lake bed stop rippling.
 //
+// Four opt-in flags put blended effects on either side of the surface, which
+// is the case issue #45 was about and the one no other example reaches:
+//
+//	-plume      an additive flame rising from a stack in the shallows
+//	-ghost      a Translucent pane standing at the shoreline
+//	-marker     a world-space overlay disc over the water
+//	-submerged  a Translucent block on the lake bed, and bubbles above it
+//
+// The first three straddle eye height, so their lower halves land on water and
+// their upper halves on sky; the fourth sits entirely under the surface and has
+// to stay behind it. See `task waterblend` and docs/agents/water.md.
+//
 //	go run ./09-water              # windowed
 //	go run ./09-water -frames 200  # render 200 frames, then exit
 //	go run ./09-water -seed 3      # a different basin
 //	go run ./09-water -hud 26      # HUD lines across the waterline; see task hud
+//	go run ./09-water -plume -ghost -marker -submerged
 //
 // WASD moves, mouse looks, Shift runs, Space jumps, R toggles refraction,
 // Escape releases the cursor.
@@ -64,6 +77,41 @@ const (
 	// digits, so a row of it carries enough ink for a mean to be stable, and
 	// short enough at scale 20 to stay clear of the right edge at 1280.
 	hudLine = "HUD LEGIBILITY 0123456789 ABCDEFGHIJ abcdefghij"
+
+	// ── the blended effects, for issue #45 ──
+	//
+	// Heights are chosen against the eye, which stands on the shore at 6.46
+	// with -seed 1 (ground 4.86, plus a 0.9 half-height and a 0.7 eye offset)
+	// while the surface is at 3.0.
+	//
+	// That is what these numbers are for, and "near the water" is not it. A
+	// point above the surface is in front of the water exactly when the ray
+	// through it keeps descending to meet the surface -- which is to say when
+	// it is BELOW the eye. So each of these spans 6.46: the part under it
+	// lands on the lake and vanished before the fix, the part over it lands on
+	// sky and never did. That split down the middle of one object is the
+	// symptom as reported.
+	effectStackTop = waterLevel + 0.6 // 3.6, under the eye; the flame carries it to about 7.8
+	effectPaneLow  = waterLevel + 0.2 // 3.2
+	effectPaneHigh = waterLevel + 3.6 // 6.6
+	effectMarkerY  = waterLevel + 1.0 // 4.0, squarely on the water
+
+	// Where in the lake each effect stands, as a distance from the spawn and a
+	// depth of water, rather than a hardcoded Z: -seed moves the shoreline.
+	//
+	// The distance floor matters as much as the depth. The eye is 3.46 above
+	// the surface looking level, and the frame bottom is 25 degrees down, so
+	// the nearest water on screen is 3.46/tan(25) = 7.4 units out. A perfectly
+	// placed object closer than that is simply below the frame, which is how
+	// the first version of the submerged pair came out empty.
+	effectShoreDist  = 8.0
+	effectShoreDepth = 1.0
+	effectDeepDist   = 13.0
+	effectDeepDepth  = 2.0
+
+	// One instance buffer holds every emitter, so this is the ceiling for the
+	// flame and the bubbles together.
+	effectParticles = 640
 )
 
 type game struct {
@@ -89,6 +137,20 @@ type game struct {
 	hud        int
 	bloom      float32
 	bloomThres float32
+
+	// Blended effects across the waterline. Off by default, so every other
+	// capture of this scene is byte for byte what it was.
+	plume     bool
+	ghost     bool
+	marker    bool
+	submerged bool
+
+	flame   *glyph.ParticleEmitter
+	bubbles *glyph.ParticleEmitter
+
+	markerMesh  *renderer.Mesh
+	markerModel mgl32.Mat4
+	overlays    []renderer.RenderObject
 }
 
 func (g *game) Init(e *glyph.Engine) error {
@@ -181,6 +243,15 @@ func (g *game) Init(e *glyph.Engine) error {
 	cc := glyph.NewCharacterController()
 	e.C.CharacterController.Set(g.player, &cc)
 
+	// ── blended effects across the waterline ──
+	//
+	// Everything here is opt-in. Nothing is spawned, no particle system is
+	// allocated and no overlay is set unless a flag asked for it, so the
+	// default frame is unchanged.
+	if err := g.spawnEffects(e, hm, spawnZ); err != nil {
+		return err
+	}
+
 	e.SetDayCycleSpeed(1.0 / 300.0)
 	e.SetTimeOfDay(0.32)
 	if g.tod >= 0 {
@@ -224,6 +295,205 @@ func (g *game) Init(e *glyph.Engine) error {
 	return nil
 }
 
+// spawnEffects places blended geometry on both sides of the water surface.
+//
+// This is the scene issue #45 needed and no example had: water and a blended
+// effect in the same frame. Water is drawn last because refraction samples the
+// finished frame, and nothing blended writes depth, so before the fix every one
+// of these was painted over wherever it crossed the lake -- cut off at the
+// waterline exactly as reported from Vesper III.
+//
+// Positions are found from the heightmap rather than hardcoded so that -seed
+// keeps working, the same way the player spawn is.
+func (g *game) spawnEffects(e *glyph.Engine, hm *glyph.Heightmap, spawnZ float32) error {
+	if !g.plume && !g.ghost && !g.marker && !g.submerged {
+		return nil
+	}
+	r := e.Renderer()
+
+	// Walk from the spawn toward the middle of the basin until the bed has
+	// dropped a clear margin below the waterline, starting no closer than
+	// dist so the result is inside the frame as well as inside the lake.
+	find := func(x, dist, depth float32) (z, bed float32) {
+		start := spawnZ - dist
+		for probe := start; probe > -lakeRadius; probe -= 0.25 {
+			if h, ok := hm.HeightAt(x, probe); ok && h < waterLevel-depth {
+				return probe, h
+			}
+		}
+		return start, waterLevel - depth
+	}
+
+	if g.plume || g.submerged {
+		r.InitParticles(effectParticles)
+	}
+
+	if g.plume {
+		// A stack standing in the shallows with a flame on top. The stack is
+		// opaque and writes depth, which is the control: the flame in front of
+		// it is blended and does not, and only the blended half ever went
+		// missing.
+		stackZ, bed := find(-3.0, effectShoreDist, effectShoreDepth)
+		stack, err := r.CreateCube(1.0)
+		if err != nil {
+			return err
+		}
+		ent := e.Spawn()
+		e.C.Transform.Set(ent, &glyph.Transform{
+			Position: mgl32.Vec3{-3.0, (bed + effectStackTop) / 2, stackZ},
+			Scale:    mgl32.Vec3{0.9, effectStackTop - bed, 0.9},
+		})
+		e.C.MeshRef.Set(ent, &glyph.MeshRef{Mesh: stack, Roughness: 0.9})
+		e.C.Color.Set(ent, &glyph.Color{R: 0.26, G: 0.23, B: 0.21})
+		e.C.Static.Set(ent, &glyph.Static{})
+
+		g.flame = glyph.NewParticleEmitter(flameConfig(),
+			-3.25, -2.75, stackZ-0.25, stackZ+0.25, effectStackTop, 0, 0.15)
+	}
+
+	if g.ghost {
+		// A pane at the shoreline. DoubleSided so the far face is there too,
+		// which is the case that routes it through the second blended pipeline.
+		paneZ, _ := find(3.2, effectShoreDist, effectShoreDepth)
+		pane, err := r.CreateCube(1.0)
+		if err != nil {
+			return err
+		}
+		ent := e.Spawn()
+		e.C.Transform.Set(ent, &glyph.Transform{
+			Position: mgl32.Vec3{3.2, (effectPaneLow + effectPaneHigh) / 2, paneZ},
+			Scale:    mgl32.Vec3{2.4, effectPaneHigh - effectPaneLow, 0.08},
+		})
+		e.C.MeshRef.Set(ent, &glyph.MeshRef{Mesh: pane, Roughness: 0.25, Metallic: 0.2})
+		e.C.Color.Set(ent, &glyph.Color{R: 0.45, G: 0.9, B: 1.0})
+		e.C.DoubleSided.Set(ent, &glyph.DoubleSided{})
+		e.C.Translucent.Set(ent, &glyph.Translucent{Alpha: 0.5})
+		e.C.Static.Set(ent, &glyph.Static{})
+	}
+
+	if g.marker {
+		// A world-space overlay: the objective pin a game puts over a thing.
+		// It is depth-tested against nothing at all, so "the water drew over
+		// it" is unambiguous -- there is no other reason for it to be missing.
+		markerZ, _ := find(0, effectShoreDist, effectShoreDepth)
+		disc, err := r.CreateDisc(0.55, 24)
+		if err != nil {
+			return err
+		}
+		g.markerMesh = disc
+		g.markerModel = mgl32.Translate3D(0, effectMarkerY, markerZ)
+		g.overlays = []renderer.RenderObject{{Mesh: disc, Color: [3]float32{1.0, 0.35, 0.2}}}
+	}
+
+	if g.submerged {
+		// Under the surface, and it has to stay there: the water refracts and
+		// absorbs what is behind it, so a submerged object drawn after the
+		// water would sit on top of the lake at full brightness with no
+		// distortion at all. This is the half of the split that must NOT move.
+		deepZ, bed := find(0, effectDeepDist, effectDeepDepth)
+		block, err := r.CreateCube(1.0)
+		if err != nil {
+			return err
+		}
+		// From the bed up to just under the surface. Water absorbs along the
+		// travelled path, not the vertical depth, so a slab sitting on a bed
+		// three units down is looked at through nine units of water at this
+		// grazing angle and reads as nothing at all. Coming up to within half
+		// a unit of the surface leaves it clearly submerged and clearly there.
+		const top float32 = waterLevel - 0.5
+		ent := e.Spawn()
+		e.C.Transform.Set(ent, &glyph.Transform{
+			Position: mgl32.Vec3{0, (bed + top) / 2, deepZ},
+			Scale:    mgl32.Vec3{3.2, top - bed, 3.2},
+		})
+		e.C.MeshRef.Set(ent, &glyph.MeshRef{Mesh: block, Roughness: 0.4})
+		e.C.Color.Set(ent, &glyph.Color{R: 1.0, G: 0.72, B: 0.25})
+		e.C.Translucent.Set(ent, &glyph.Translucent{Alpha: 0.6})
+		e.C.Static.Set(ent, &glyph.Static{})
+
+		// Bubbles in a column between the block and the camera. The height
+		// range is written as a distance to the surface rather than to the
+		// bed, so the top of the column is waterLevel-0.7 whatever the bed
+		// happens to be under it -- they must never break the surface, or the
+		// same emitter would be proving two things at once.
+		g.bubbles = glyph.NewParticleEmitter(bubbleConfig(),
+			-1.2, 1.2, deepZ+1.6, deepZ+2.8, bed, 0.3, waterLevel-0.7-bed)
+	}
+
+	return nil
+}
+
+// flameConfig is a warm additive plume: fast rise, little gravity, and a life
+// long enough to carry it a few units up. Bigger and slower than SparkConfig,
+// which is a spark shower rather than a flame.
+func flameConfig() *glyph.EmitterConfig {
+	return &glyph.EmitterConfig{
+		Spawn:        glyph.SpawnContinuous,
+		SpawnRate:    110,
+		MaxParticles: 380,
+
+		LifeMin: 1.9,
+		LifeMax: 2.6,
+
+		SizeMin: 0.30,
+		SizeMax: 0.55,
+
+		RMin: 0.95, RMax: 1.0,
+		GMin: 0.34, GMax: 0.62,
+		BMin: 0.04, BMax: 0.14,
+
+		Move:           glyph.MoveGravity,
+		InitialSpeedXZ: 0.22,
+		InitialSpeedY:  1.55,
+		MaxSpeed:       3.0,
+		TurbulenceXZ:   0.5,
+		TurbulenceY:    0.2,
+		Gravity:        0.32,
+
+		Fade:        glyph.FadePlain,
+		FadeInTime:  0.15,
+		FadeOutTime: 0.9,
+		AlphaMax:    0.55,
+
+		Loop: true,
+	}
+}
+
+// bubbleConfig is a slow pale drift that bounces off its own bounds, so it
+// stays under the surface instead of breaking it.
+func bubbleConfig() *glyph.EmitterConfig {
+	return &glyph.EmitterConfig{
+		Spawn:        glyph.SpawnContinuous,
+		SpawnRate:    28,
+		MaxParticles: 120,
+
+		LifeMin: 3.0,
+		LifeMax: 5.0,
+
+		SizeMin: 0.10,
+		SizeMax: 0.20,
+
+		RMin: 0.75, RMax: 0.9,
+		GMin: 0.9, GMax: 1.0,
+		BMin: 0.9, BMax: 1.0,
+
+		Move:           glyph.MoveDrift,
+		InitialSpeedXZ: 0.08,
+		InitialSpeedY:  0.35,
+		MaxSpeed:       0.7,
+		TurbulenceXZ:   0.2,
+		TurbulenceY:    0.4,
+		BounceAtBounds: true,
+
+		Fade:        glyph.FadePlain,
+		FadeInTime:  0.4,
+		FadeOutTime: 1.2,
+		AlphaMax:    0.8,
+
+		Loop: true,
+	}
+}
+
 func (g *game) Update(e *glyph.Engine, dt float32) {
 	in := e.Input()
 
@@ -243,6 +513,27 @@ func (g *game) Update(e *glyph.Engine, dt float32) {
 	// measures exactly that. See docs/agents/overlay-composite.md.
 	for i := 0; i < g.hud; i++ {
 		e.Debugf("%s", hudLine)
+	}
+
+	// The emitters both feed one instance buffer, and the bubbles go in first
+	// on purpose: the submerged half and the above-water half arrive
+	// interleaved, so the renderer's split has to sort them out per instance
+	// rather than per emitter. It has no idea there were two emitters.
+	if g.flame != nil || g.bubbles != nil {
+		night := e.Scene.StarVisibility()
+		instances := make([]renderer.ParticleInstance, 0, effectParticles)
+		if g.bubbles != nil {
+			g.bubbles.Tick(dt, night)
+			instances = append(instances, g.bubbles.BuildInstances(night)...)
+		}
+		if g.flame != nil {
+			g.flame.Tick(dt, night)
+			instances = append(instances, g.flame.BuildInstances(night)...)
+		}
+		if len(instances) > effectParticles {
+			instances = instances[:effectParticles]
+		}
+		e.Renderer().UpdateParticleInstances(instances)
 	}
 
 	if in.KeyPressed(input.KeyEscape) {
@@ -306,6 +597,13 @@ func (g *game) LateUpdate(e *glyph.Engine, _ float32) {
 		g.camera.Follow(&t)
 	}
 	e.SetCamera(g.camera.ViewVectors())
+
+	// The overlay carries a finished MVP, so it has to be rebuilt after the
+	// camera moves -- which is here, not in Update.
+	if g.markerMesh != nil {
+		g.overlays[0].MVP = e.ViewProjection().Mul4(g.markerModel)
+		e.SetOverlays(g.overlays)
+	}
 }
 
 // tint colors terrain by height and slope. The band just above the waterline is
@@ -435,6 +733,10 @@ func main() {
 	bloomThreshold := flag.Float64("bloomthreshold", 1.2, "luminance bloom starts above; bloom.md's starting point is 1.2")
 	tod := flag.Float64("time", -1, "freeze time of day in [0,1): 0=midnight, 0.25=sunrise, 0.5=noon, 0.75=sunset")
 	shot := flag.String("screenshot", "", "write a PNG of the last frame to this path")
+	plume := flag.Bool("plume", false, "additive flame on a stack in the shallows, crossing the waterline")
+	ghost := flag.Bool("ghost", false, "translucent pane at the shoreline, crossing the waterline")
+	marker := flag.Bool("marker", false, "world-space overlay disc over the water")
+	submerged := flag.Bool("submerged", false, "translucent block and bubbles under the surface")
 	flag.Parse()
 
 	opts := []glyph.Option{
@@ -457,7 +759,7 @@ func main() {
 		opts = append(opts, glyph.WithScreenshot(*shot))
 	}
 
-	e, err := glyph.New(&game{seed: *seed, refract: *refract, pitch: float32(*pitch), tod: float32(*tod), clouds: *clouds, stars: *stars, milkyway: *milkyway, band: *band, fogHeight: float32(*fogHeight), yaw: float32(*yaw), shafts: float32(*shafts), pillars: *pillars, pauseAt: *pauseAt, hud: *hud, bloom: float32(*bloom), bloomThres: float32(*bloomThreshold)}, opts...)
+	e, err := glyph.New(&game{seed: *seed, refract: *refract, pitch: float32(*pitch), tod: float32(*tod), clouds: *clouds, stars: *stars, milkyway: *milkyway, band: *band, fogHeight: float32(*fogHeight), yaw: float32(*yaw), shafts: float32(*shafts), pillars: *pillars, pauseAt: *pauseAt, hud: *hud, bloom: float32(*bloom), bloomThres: float32(*bloomThreshold), plume: *plume, ghost: *ghost, marker: *marker, submerged: *submerged}, opts...)
 	if err != nil {
 		log.Fatalf("create engine: %v", err)
 	}
