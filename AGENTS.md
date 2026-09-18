@@ -144,6 +144,7 @@ entry point for a task, then read the body for working code.
 | `task smoke` | Renders real frames of every example, exits non-zero on failure |
 | `task validate` | Every example under the Vulkan validation layer; must be completely silent (needs a GPU and the SDK) |
 | `task determinism` | Renders repeat byte for byte under a fixed frame clock (needs a GPU) |
+| `task sky` | Celestial bodies are occluded by terrain, not drawn over it (needs a GPU) |
 | `task hud` | Screen-space overlays survive water, bloom and the tonemap (needs a GPU) |
 | `task bench` | Per-pass GPU and per-phase CPU cost over a fixed scene set (needs a GPU) |
 | `task ci` | Lint, build, test, race |

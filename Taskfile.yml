@@ -197,6 +197,39 @@ tasks:
         check 06-skinned -demo -plain -fade 0.4
         exit $status
 
+  sky:
+    desc: "Check that celestial bodies are occluded by the terrain in front of them"
+    dir: examples
+    cmds:
+      # Needs a GPU, so it sits with smoke, validate and determinism rather than
+      # in `task ci`.
+      #
+      # The sun and moon draw after the sky, so clouds can cover them. What they
+      # must still be is depth tested: geometry writes alpha 1.0, so the sky's
+      # alpha cannot mask them against terrain and never could. Without the
+      # depth test a sun that has set draws on top of the hills it set behind.
+      #
+      # This camera puts the setting sun squarely behind a headland. Nothing in
+      # the lower two thirds should be brighter than the dark terrain there, and
+      # the disc is pale yellow against nearly black, so the margin is enormous.
+      #
+      # Light shafts are off on purpose. They sample the scene and would react
+      # to the disc too, which is a real second symptom -- the sun bleeding
+      # through terrain fed false light into the shaft pass -- but it makes the
+      # measurement indirect.
+      - |
+        status=0
+        d=.sky
+        rm -rf $d && mkdir -p $d
+        GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./09-water -frames 60           -time 0.77 -pitch 0.18 -yaw 2.4 -clouds 0 -stars 0 -band 0 -shafts 0           -screenshot $d/sun.png >/dev/null 2>&1
+        if [ ! -s $d/sun.png ]; then
+          echo "MISSING CAPTURE -- this gate proves nothing"
+          exit 1
+        fi
+        go run ../cmd/skycheck -in $d/sun.png -y0 240 -max 120 || status=1
+        rm -rf $d
+        exit $status
+
   determinism:
     desc: "Check that a fixed frame clock makes renders byte-identical"
     dir: examples

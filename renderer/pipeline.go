@@ -457,7 +457,12 @@ func createOverlayPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, rend
 // are composited -- was depth-rejected on exactly those pixels, and a cloud
 // could never be drawn in front of the sun. Drawing them here instead, blended
 // against the destination alpha the sky pass writes, puts the clouds back in
-// front and keeps terrain occlusion working.
+// front.
+//
+// Terrain occlusion is the depth test's job, not the blend's. The first version
+// of this turned the depth test off and expected the destination alpha to mask
+// geometry as well as cloud; it does not, because geometry writes alpha 1.0,
+// and the result was a sun disc drawn on top of the hills it had set behind.
 
 func createCelestialPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
@@ -508,20 +513,27 @@ func createCelestialPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, re
 		MultisampleState: &core1_0.PipelineMultisampleStateCreateInfo{
 			RasterizationSamples: samples,
 		},
-		DepthStencilState: &core1_0.PipelineDepthStencilStateCreateInfo{
-			DepthTestEnable:  false,
-			DepthWriteEnable: false,
-		},
+		// The same state the stars use, and for the same reason: the disc sits at
+		// far * 0.98, so GreaterOrEqual passes where nothing has been drawn --
+		// depth is cleared to 0 under reverse-Z -- and fails wherever geometry
+		// is nearer. No depth write, because nothing needs to test against a
+		// celestial body.
+		DepthStencilState: farPlaneDepthState(),
 		ColorBlendState: &core1_0.PipelineColorBlendStateCreateInfo{
 			Attachments: []core1_0.PipelineColorBlendAttachmentState{{
 				ColorWriteMask: core1_0.ColorComponentRed | core1_0.ColorComponentGreen | core1_0.ColorComponentBlue | core1_0.ColorComponentAlpha,
 				BlendEnabled:   true,
 
 				// Gated on destination alpha, exactly as the stars are. The sky
-				// pass writes coverage there, so a cloud drawn over the sun
-				// masks the disc for free, and geometry masks it too -- which is
-				// what stops the sun shining through a hillside now that it no
-				// longer depth-tests.
+				// pass writes cloud transmittance there, so a cloud drawn over
+				// the sun masks the disc for free.
+				//
+				// It does *not* mask against geometry, which is what this used
+				// to claim. lit.frag and terrain.frag write alpha 1.0, so over
+				// a hillside the destination alpha is 1 and the disc was added
+				// at full strength -- a sun below the horizon drawn on top of
+				// the terrain in front of it. The depth test above is what
+				// actually handles geometry.
 				SrcColorBlendFactor: core1_0.BlendFactorDstAlpha,
 				DstColorBlendFactor: core1_0.BlendFactorOne,
 				ColorBlendOp:        core1_0.BlendOpAdd,
