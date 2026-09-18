@@ -15,6 +15,7 @@ import (
 	"github.com/derekmwright/glyphengine/ecs"
 	"github.com/derekmwright/glyphengine/input"
 	"github.com/derekmwright/glyphengine/renderer"
+	"github.com/derekmwright/glyphengine/renderer/lightcluster"
 	"github.com/derekmwright/glyphengine/window"
 )
 
@@ -459,8 +460,20 @@ type Engine struct {
 	// SetLightDebugMode.
 	lightDebugMode LightDebugMode
 
-	// lightBuf is reused each frame to avoid allocs, like drawBuf.
-	lightBuf []renderer.GpuLight
+	// lightBuf, lightGeomBuf and lightUploadBuf are reused each frame to avoid
+	// allocs, like drawBuf: the packed lights in submission order, the
+	// geometry the binner sees, and the packed lights again in the binner's
+	// upload order. Three buffers rather than one sort in place, because the
+	// cell lists index the upload order while the binner works in submission
+	// indices, and reordering underneath it would invalidate both.
+	lightBuf       []renderer.GpuLight
+	lightGeomBuf   []lightcluster.Light
+	lightUploadBuf []renderer.GpuLight
+
+	// lightCluster bins the lights into froxels once per frame; lightStats is
+	// what that did, for LightStats.
+	lightCluster *lightcluster.Builder
+	lightStats   lightcluster.Stats
 
 	// cpu accumulates per-phase CPU cost; see cputimer.go.
 	cpu cpuTimer
@@ -471,19 +484,21 @@ type Engine struct {
 type LightDebugMode int
 
 const (
-	// LightDebugOff renders normally.
-	//
-	// Phase 2 of clustered lighting has no clusterer yet (renderer/lightcluster
-	// does not exist), so lightFlags below still forces brute force under
-	// this mode -- see the comment there for the one line to flip once it does.
+	// LightDebugOff renders normally: every fragment evaluates the lights its
+	// froxel lists, which is the path games ship.
 	LightDebugOff LightDebugMode = iota
 	// LightDebugHeatmap replaces the lit colour with a ramp of each fragment's
 	// cluster cell light count, for inspecting how lights distribute across
 	// the grid.
 	LightDebugHeatmap
 	// LightDebugBruteForce forces the reference loop-every-light path
-	// regardless of the cluster grid, for A/B comparison against clustered
-	// rendering.
+	// regardless of the cluster grid.
+	//
+	// It is the same lights in the same order as the clustered path -- only
+	// the iteration differs -- so the two must render pixel for pixel alike,
+	// and `task lights` requires exactly that. A difference between them is a
+	// binning bug and nothing else, which is what makes this worth carrying in
+	// the shipped shader rather than in a test build.
 	LightDebugBruteForce
 )
 
@@ -501,12 +516,10 @@ func (e *Engine) lightFlags() uint32 {
 	case LightDebugBruteForce:
 		return renderer.LightFlagBruteForce
 	default:
-		// No clusterer exists yet (renderer/lightcluster). "Off" has nothing
-		// to fall back to except brute force, or every unshadowed light
-		// would silently go dark the moment this phase lands. Flip this to
-		// `return 0` once the integration phase wires a real clusterer into
-		// DrawFrame and "off" can mean "use the grid".
-		return renderer.LightFlagBruteForce
+		// Clustered: no flags. The grid is filled every frame by
+		// clusterFrameLights, so this is the path unless a debug mode asks
+		// for something else.
+		return 0
 	}
 }
 
@@ -533,20 +546,91 @@ func (e *Engine) gatherLights() []renderer.GpuLight {
 		lights = append(lights, spotLightGpuLight(sl))
 	}
 
-	// Truncates in submission order once the combined list exceeds
-	// MaxLights, the same "keep the first N, drop the rest" behaviour the
-	// old fixed 32-slot array had when a scene exceeded it. That is
-	// deliberately not a considered budget policy -- a real one would
-	// prioritize by distance or screen coverage -- it is a placeholder for
-	// whatever eventually replaces this function with the output of a real
-	// light binner.
-	if len(lights) > renderer.MaxLights {
-		lights = lights[:renderer.MaxLights]
-	}
-
+	// No truncation here. The binner owns the budget: it drops the lights
+	// whose surfaces are furthest from the camera, not whichever ones the
+	// scene happened to append last, and counts what it dropped in
+	// Stats.DroppedOverBudget. Cutting the list here would take that decision
+	// away from it and report nothing.
+	//
+	// The list can therefore be as long as the scene likes, which is why it
+	// lives in a reused buffer: a colony handing over 3000 lamps must not
+	// allocate 3000 lights every frame.
 	e.lightBuf = lights
 	return lights
 }
+
+// clusterFrameLights bins this frame's lights and returns them in the order
+// the GPU will see them, together with the grid the shader reads.
+//
+// The binner is given the geometry of the PACKED lights, not of the scene's
+// SpotLight values. spotLightGpuLight nudges cosOuter down when a caller asks
+// for a cone the smoothstep cannot express, so the cone the shader evaluates
+// is a hair wider than the one the scene asked for -- and it is the shader's
+// cone that has to be bounded. Reading it back out of the packed light also
+// means there is one conversion from scene lights to light geometry rather
+// than two that can disagree.
+//
+// view and proj must be the matrices this frame renders with, and w/h its
+// framebuffer: the cell a fragment reads is computed from gl_FragCoord and the
+// header, so a grid built for a different camera is not approximately right,
+// it is tile-shaped nonsense.
+func (e *Engine) clusterFrameLights(view, proj mgl32.Mat4, w, h int) ([]renderer.GpuLight, *lightcluster.Result) {
+	lights := e.gatherLights()
+
+	geom := e.lightGeomBuf[:0]
+	for i := range lights {
+		l := &lights[i]
+		geom = append(geom, lightcluster.Light{
+			Pos:      mgl32.Vec3{l.PosRange[0], l.PosRange[1], l.PosRange[2]},
+			Range:    l.PosRange[3],
+			Dir:      mgl32.Vec3{l.DirCone[0], l.DirCone[1], l.DirCone[2]},
+			CosOuter: l.DirCone[3],
+		})
+	}
+	e.lightGeomBuf = geom
+
+	res := e.lightCluster.Build(geom, lightcluster.Params{
+		View:   view,
+		Proj:   proj,
+		Width:  w,
+		Height: h,
+		Near:   e.near,
+		Far:    e.far,
+		Grid:   lightcluster.DefaultGrid,
+	})
+	e.lightStats = res.Stats
+
+	// Reorder into the array the cell lists index. Brute force uploads the
+	// same array in the same order, so the two modes iterate the same lights
+	// in the same relative order and a light that reaches no fragment adds
+	// exactly zero to it -- which is why they can be required to match to the
+	// bit rather than to a tolerance.
+	out := e.lightUploadBuf[:0]
+	for _, i := range res.Order {
+		out = append(out, lights[i])
+	}
+	e.lightUploadBuf = out
+	return out, res
+}
+
+// LightStats reports what the last frame's light binning did.
+//
+// Four of the fields are the ones a game should watch, because each is a way
+// light can go missing that nothing else will report:
+//
+//   - DroppedOverBudget: more lights passed the frustum test than
+//     renderer.MaxLights. The furthest-from-lighting-anything are dropped.
+//   - CellsOverflowed: a froxel wanted more lights than it can hold. It keeps
+//     the ones nearest the camera; the rest do not light that cell.
+//   - CellsTruncated: the whole index buffer filled up. Worse than an
+//     overflowed cell, because it takes whole cells in cell order rather than
+//     the tail of one list.
+//   - ScreenWideLights: lights that reached every tile of a slice. These are
+//     the ones clustering did not help with, so a scene where this grows is a
+//     scene drifting back towards the every-light loop.
+//
+// The rest are for tuning the grid; see lightcluster.Stats.
+func (e *Engine) LightStats() lightcluster.Stats { return e.lightStats }
 
 // spotLightGpuLight converts one SpotLight into the GpuLight the shader
 // reads (shaders/lights.inc's packed form): DirCone.xyz is the unit
@@ -736,6 +820,7 @@ func New(g Game, opts ...Option) (*Engine, error) {
 		quitKey:        cfg.quitKey,
 		hasQuitKey:     cfg.hasQuitKey,
 		debugKeys:      cfg.debugKeys,
+		lightCluster:   lightcluster.New(),
 	}
 
 	// A fixed clock is only half of a repeatable run: particle spawns draw from
@@ -1051,9 +1136,18 @@ func reverseZProjection(fovDegrees, aspect, near, far float32) mgl32.Mat4 {
 
 // ViewProjection returns the current view-projection matrix.
 func (e *Engine) ViewProjection() mgl32.Mat4 {
-	proj := reverseZProjection(e.fov, e.renderer.Aspect(), e.near, e.far)
-	view := mgl32.LookAtV(e.cameraEye, e.cameraCenter, e.cameraUp)
-	return proj.Mul4(view)
+	_, _, vp := e.viewProjection()
+	return vp
+}
+
+// viewProjection returns the two matrices and their product together, for the
+// one caller that needs them apart: the light binner works in view space and
+// reads the projection's own elements, so handing it the product would make it
+// take them apart again and guess at which half was which.
+func (e *Engine) viewProjection() (view, proj, vp mgl32.Mat4) {
+	proj = reverseZProjection(e.fov, e.renderer.Aspect(), e.near, e.far)
+	view = mgl32.LookAtV(e.cameraEye, e.cameraCenter, e.cameraUp)
+	return view, proj, proj.Mul4(view)
 }
 
 // ScreenRay converts a screen-space position in pixels into a world-space ray.
@@ -1253,7 +1347,7 @@ func (e *Engine) captureIfRequested() {
 // renderFrame builds the draw list and lighting for the current camera and
 // day/night state, then submits one frame.
 func (e *Engine) renderFrame() {
-	vp := e.ViewProjection()
+	view, proj, vp := e.viewProjection()
 
 	// Compute cascade VPs first so buildDrawList can include shadow casters
 	// that are outside the camera frustum. The far cascade's frustum is a
@@ -1340,10 +1434,23 @@ func (e *Engine) renderFrame() {
 		SunScreenPos:  sunScreen,
 	}
 
-	lighting.Lights = e.gatherLights()
+	// Bin the lights for THIS frame's camera and framebuffer. proj came from
+	// Aspect() and the extent below comes from the same swapchain, which is
+	// the one the frame is about to be recorded against -- so the grid, the
+	// matrices and gl_FragCoord cannot be describing different cameras.
+	//
+	// A resize does not leave the grid stale, not even for a frame. DrawFrame
+	// recreates the swapchain in two places and neither of them renders
+	// afterwards: on an out-of-date acquire it returns immediately, so the
+	// frame that would have used the old extent is never drawn at all, and
+	// after present the frame is already recorded. Either way the next
+	// renderFrame reads the new extent here before it bins anything. Nothing
+	// is resized on the GPU side either -- the grid is a cell COUNT, so only
+	// the header's screen scale changes.
+	e.cpu.begin(CPUCluster)
+	fbWidth, fbHeight := e.renderer.Extent()
+	lighting.Lights, lighting.Clusters = e.clusterFrameLights(view, proj, fbWidth, fbHeight)
 	lighting.LightFlags = e.lightFlags()
-	lighting.Near = e.near
-	lighting.Far = e.far
 
 	e.cpu.begin(CPUSubmit)
 	// Debug text rides in its own channel, appended rather than merged, so a

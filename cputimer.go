@@ -23,6 +23,14 @@ const (
 	CPULateUpdate
 	// CPUDrawList is building, culling and sorting the draw list.
 	CPUDrawList
+	// CPUCluster is binning the unshadowed lights into the froxel grid:
+	// gathering them, culling them against the frustum, and filling the cells.
+	//
+	// It scales with the light count rather than with the scene, so it is the
+	// phase that answers "what are those thousand lamps costing me on the CPU"
+	// -- a question the GPU table cannot answer, since clustering is what
+	// keeps the GPU cost from scaling with them at all.
+	CPUCluster
 	// CPUGPUWait is time blocked on the previous frame's fence and on acquiring
 	// a swapchain image.
 	//
@@ -61,6 +69,8 @@ func (p CPUPhase) String() string {
 		return "lateupdate"
 	case CPUDrawList:
 		return "drawlist"
+	case CPUCluster:
+		return "cluster"
 	case CPUGPUWait:
 		return "gpuwait"
 	case CPUSubmit:

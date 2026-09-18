@@ -8,6 +8,8 @@ import (
 
 	"github.com/go-gl/mathgl/mgl32"
 	"github.com/vkngwrapper/core/v3/core1_0"
+
+	"github.com/derekmwright/glyphengine/renderer/lightcluster"
 )
 
 // SceneLighting holds global lighting parameters passed via push constants.
@@ -71,18 +73,16 @@ type SceneLighting struct {
 	ShadowEnabled bool                       // true when the sun is above the horizon
 
 	// Lights are the unshadowed point + spot lights for the GPU light buffer
-	// (see shaders/lights.inc), points first then spots, truncated to at
-	// most MaxLights -- see Engine.gatherLights for the TODO naming who owns
-	// overflow once a real clusterer exists.
+	// (see shaders/lights.inc), in Clusters.Order: the cell lists in Clusters
+	// index this slice, so the two must come from the same frame's binning.
 	Lights []GpuLight
+	// Clusters is that binning -- the froxel lookup, the cells and their
+	// light lists. Nil means the caller did no binning, and the frame is
+	// uploaded with no lights at all rather than with a stale grid.
+	Clusters *lightcluster.Result
 	// LightFlags is the header flag word: bit0 = brute force, bit1 = debug
 	// heatmap. See Engine.SetLightDebugMode.
 	LightFlags uint32
-	// Near and Far are the camera's projection planes, needed to derive the
-	// cluster grid's log-depth z-slicing (see lightZSliceParams). Not read
-	// for anything else -- the shader's own depth math is independent of
-	// them (reverse-Z: viewDepth = 1/gl_FragCoord.w).
-	Near, Far float32
 
 	FogDensity float32 // exp² distance fog density (0 disables fog)
 }
