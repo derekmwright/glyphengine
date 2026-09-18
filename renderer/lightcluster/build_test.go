@@ -298,9 +298,11 @@ func TestCellOverflowKeepsThePriorityPrefix(t *testing.T) {
 // the test is that it stays inside the buffer and says so in stats.
 func TestIndexBudgetTruncatesInCellOrder(t *testing.T) {
 	p := testParams(DefaultGrid)
-	// Lights around the camera, each covering the whole screen and most of the
-	// depth range: 3456 cells times 40 lights is well past MaxLightIndices.
-	n := 60
+	// Lights around the camera, each reaching every cell, and enough of them to
+	// want a quarter more index entries than the budget allows. Counted from
+	// the constants rather than written down, because the last time
+	// MaxLightIndices moved this test quietly stopped testing anything.
+	n := MaxLightIndices/DefaultGrid.Cells() + MaxLightIndices/DefaultGrid.Cells()/4 + 2
 	lights := make([]Light, n)
 	for i := range lights {
 		lights[i] = Light{Pos: mgl32.Vec3{0, 0, float32(i) * 0.01}, Range: 400}
