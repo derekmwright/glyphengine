@@ -587,3 +587,116 @@ func TestSectorSphereContainsCone(t *testing.T) {
 		}
 	}
 }
+
+// TestOracleNearGeometryUnderTheSliceStart is the same no-false-negative
+// question as above, asked only of the depths slice 0 has to cover on its own.
+//
+// The scenario is a colony-builder orbit camera at minimum zoom: the eye 1.31 m
+// above a hex grid of lamps, looking at the ground it is standing on. Ground
+// that close projects to a view depth well under DefaultSliceStart, so every
+// one of those fragments reads slice 0 -- the one slice whose box is not the
+// log formula's, and the one place where "the grid covers the frustum" is a
+// claim about a clamp rather than about arithmetic. The general oracle samples
+// the whole frustum and would put only a handful of points down here; this one
+// samples nothing else.
+//
+// shallow is a coverage floor, not decoration: without it the scenario passes
+// by sampling depths the ordinary slices already cover, which is exactly how a
+// test of the near metre stops testing the near metre.
+//
+// Broken on purpose, against build.go and cellbounds.go with this test
+// unchanged:
+//
+//	sliceDepths starts slice 0 at the log formula's first boundary instead of
+//	at Near, so the near metre falls out of every light's box
+//	  -> FAIL, 20648 of 1120269 lit pairs have a cell that omits their lamp.
+//	bin tests the sphere with 0.8*radius
+//	  -> FAIL, 87410 lit pairs missed.
+func TestOracleNearGeometryUnderTheSliceStart(t *testing.T) {
+	const (
+		w, h      = 1920, 1080
+		near, far = 0.1, 500
+		lampY     = 0.55
+		lampRange = 4.0
+		spacing   = 1.73
+	)
+	// distance 6 at pitch 0.22 is the zoom a player builds at: the eye ends up
+	// 1.31 m up, inside the spheres of every lamp within 3.93 m of it.
+	eye := mgl32.Vec3{0, 6 * float32(math.Sin(0.22)), 6 * float32(math.Cos(0.22))}
+	p := Params{
+		View:  viewMatrix(eye, mgl32.Vec3{0, 0, 0}),
+		Proj:  reverseZProjection(45, float32(w)/float32(h), near, far),
+		Width: w, Height: h,
+		Near: near, Far: far,
+		Grid: DefaultGrid,
+	}
+
+	// A lamp on every tile of a hex patch 24 tiles across, which is denser than
+	// the game builds. A sparser patch leaves the near cells holding one lamp
+	// each, and a bound that is too small in one axis can still contain the
+	// sample points of the only lamp it has.
+	var lights []Light
+	for r := -12; r <= 12; r++ {
+		for q := -12; q <= 12; q++ {
+			x := spacing * (float32(q) + float32(r)*0.5)
+			z := spacing * float32(r) * 0.8660254
+			lights = append(lights, Light{Pos: mgl32.Vec3{x, lampY, z + 5}, Range: lampRange})
+		}
+	}
+
+	res := New().Build(lights, p)
+	if res.Stats.DroppedOverBudget != 0 || res.Stats.CellsOverflowed != 0 || res.Stats.CellsTruncated != 0 {
+		t.Fatalf("scenario is not a clean oracle: %+v", res.Stats)
+	}
+	t.Logf("stats: %+v", res.Stats)
+
+	vp := p.Proj.Mul4(p.View)
+	rng := rand.New(rand.NewPCG(37, 0x9e37))
+	var pairs, shallow, missed int
+	for i := 0; i < 60000; i++ {
+		// Uniform in the frustum between the near plane and 1.3 m, which is the
+		// band slice 0 and its neighbour own.
+		d := near + rng.Float32()*(1.3-near)
+		pt := unproject(p, rng.Float32()*2-1, rng.Float32()*2-1, d)
+		px, py, depth, visible := project(vp, p, pt)
+		if !visible {
+			continue
+		}
+		cell := res.Cells[res.Mapping.CellIndex(px, py, depth)]
+		listed := res.Indices[cell.Offset : cell.Offset+cell.Count]
+
+		for li := range lights {
+			// 0.999 of the range, so a point exactly on the boundary -- where
+			// the shader's attenuation is zero anyway -- is not counted as a
+			// miss.
+			if pt.Sub(lights[li].Pos).Len() >= lights[li].Range*0.999 {
+				continue
+			}
+			pairs++
+			if depth < DefaultSliceStart {
+				shallow++
+			}
+			found := false
+			for _, k := range listed {
+				if int(res.Order[k]) == li {
+					found = true
+					break
+				}
+			}
+			if !found {
+				missed++
+				if missed <= 5 {
+					t.Errorf("depth %.3f pixel (%.1f,%.1f): cell omits lamp %d at %v", depth, px, py, li, lights[li].Pos)
+				}
+			}
+		}
+	}
+	t.Logf("lit pairs %d, of which shallower than the %g m slice start: %d, missed %d",
+		pairs, DefaultSliceStart, shallow, missed)
+	if shallow < 100000 {
+		t.Fatalf("only %d lit pairs under the slice start: the scenario is not asking the question", shallow)
+	}
+	if missed > 0 {
+		t.Fatalf("%d lit points have a cell that omits their lamp", missed)
+	}
+}
