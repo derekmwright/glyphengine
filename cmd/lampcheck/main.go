@@ -23,6 +23,12 @@
 // red 181, green 169, blue 109 to red 154, green 160, blue 177 and this check
 // reports POOL IS NOT WARM. The unlit box is unchanged at red 30, green 35,
 // blue 43, because nothing local reaches it either way.
+//
+// And proved to bite short of that, which it did not at first: scaling the
+// local term to 0.15 rather than zeroing it left the pool at red 177, green
+// 168, blue 128 -- still red above green above blue, so the ordering test
+// passed on a weighting that had lost 85% of its effect. -span is what catches
+// that; see the measured curve on the flag.
 package main
 
 import (
@@ -45,6 +51,25 @@ func main() {
 	// a neutral grey that happens to lean, and calling that "warm" would let
 	// the check pass on an image no one would describe that way.
 	margin := flag.Float64("margin", 6, "how far apart the channels must be, in 8-bit steps")
+
+	// The ordering alone only catches the weighting being gone. It does not
+	// catch it being weak, because a doorway pool is so lamp-dominated that
+	// the share saturates near 1 and most of it can be thrown away before the
+	// hue flips. Measured on 21-streetlights' doorway by scaling the local
+	// term inside nightLocalShare, red minus blue across the pool box:
+	//
+	//	weight  1.00   72.5    (shipping)
+	//	weight  0.35   63.1
+	//	weight  0.15   48.8
+	//	weight  0.00  -23.3    (the old behaviour)
+	//
+	// So a floor here bites where the ordering does not. -span 60 in `task
+	// nightlight` sits 12.5 steps below shipping and 11 above a weight of
+	// 0.15. It does NOT catch 0.35, which clears it by 3: that is 65% of the
+	// weighting thrown away and still a warm pool, and a floor tight enough to
+	// catch it would go red on any honest retune of the lamp. Say so rather
+	// than imply the check covers more than it does.
+	span := flag.Float64("span", 0, "minimum red-minus-blue across the pool, in 8-bit steps (0 skips the test)")
 
 	// The floor that stops this passing on a black frame, a missing capture or
 	// a scene whose lights never got uploaded -- the shape of green result
@@ -89,6 +114,15 @@ func main() {
 		fail = true
 	} else {
 		fmt.Printf("pool is warm: R-G %.1f, G-B %.1f\n", pool[0]-pool[1], pool[1]-pool[2])
+	}
+
+	if *span > 0 {
+		if got := pool[0] - pool[2]; got < *span {
+			fmt.Printf("POOL IS WASHED OUT: red minus blue %.1f, want at least %.0f\n", got, *span)
+			fail = true
+		} else {
+			fmt.Printf("pool keeps its span: R-B %.1f, floor %.0f\n", got, *span)
+		}
 	}
 
 	// The other half. Backing the night shift off inside a pool is only right
