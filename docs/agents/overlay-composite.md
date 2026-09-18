@@ -17,7 +17,7 @@ api:
   - glyphengine.Engine.Debugf
 example: examples/13-ui
 run: task hud
-verified: 2026-09-17
+verified: 2026-09-18
 ---
 
 # Where screen-space overlays are drawn
@@ -169,6 +169,55 @@ it. `13-ui` was left alone: its constants were already the values someone would
 pick meaning "nearly black" and "dark red", and it now draws them. `17-input`'s
 greys were re-picked, because they had been chosen by eye against the lifted
 output and landed too close together once they were taken literally.
+
+## Edges are antialiased in the shader
+
+The swapchain is single-sampled, so there is no MSAA coverage to smooth a panel
+edge — and none to be had, because MSAA is resolved into the HDR target long
+before this pass runs. Every engine that composites its UI after tone mapping is
+in the same position, and they all compute coverage analytically instead. Text
+already did: MSDF antialiases in the fragment shader and never depended on the
+rasterizer.
+
+`ui.frag` does the same for quads. `min(uv, 1 - uv)` is the distance to the
+nearest *outer* edge, `fwidth` converts it to pixels, and the result multiplies
+alpha.
+
+Two details carry the whole thing:
+
+- **The distance is in UV, not in the quad's own space.** That is what makes it
+  correct for a nine-slice. The nine quads tile the atlas, so the panel's outer
+  boundary is exactly where UV reaches 0 or 1, while the interior seams sit at
+  `inset/texSize` and keep a positive distance. A formulation based on each
+  quad's own extent would antialias the seams too and draw a visible line down
+  the middle of every panel where two quads abut.
+- **Quads are grown half a pixel outward,** with UVs extended to match so 0 and
+  1 stay on the requested edge. The rasterizer only generates fragments whose
+  centre is inside the geometry, so without that skirt the distance never goes
+  negative and only the inner half of the ramp exists — a softer edge biased
+  half a pixel inward rather than a hard step. Emitters that have not been
+  updated still get that half, which is why this degrades gracefully.
+
+A zero-width or zero-height quad is dropped rather than grown. An empty progress
+bar asks for exactly that, and a skirt around nothing is a one-pixel sliver
+where the bar is supposed to be empty.
+
+### What it measures
+
+`13-ui`'s health bar fills on a sine, so each frame puts its fill edge at a
+different sub-pixel position. Collecting every luminance strictly between the
+bar's background and its fill, across twelve captures under a fixed frame clock:
+
+| | distinct intermediate levels |
+| --- | --- |
+| before | 2 |
+| after | 10 |
+
+The two before are the bar's own gradient, not coverage — the edge itself is a
+hard step from 29 to 97 with nothing in between. Ten after is continuous
+coverage, and it is worth noting 4x MSAA could produce at most three, since five
+coverage levels leaves three strictly between the endpoints. **This is a better
+edge than the one the overlay move cost, not a restoration of it.**
 
 ## Choosing a panel interior
 
