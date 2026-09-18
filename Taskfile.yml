@@ -449,6 +449,24 @@ tasks:
         pair overview 1920 1080
         pair near 1280 720  -camdist 0.8 -campitch 0.6 -camtarget 0.05 -camlook 0
         pair near 1920 1080 -camdist 0.8 -campitch 0.6 -camtarget 0.05 -camlook 0
+        # The two modes are only required to agree while nothing is being
+        # dropped. A cell over its light cap, a spent index buffer or a light
+        # over the frame budget all make clustered differ from brute force for
+        # a reason that is not a binning bug -- so if the scene ever grows
+        # into one of them, say that instead of blaming the binner. The
+        # denser overview pose is the one that would hit it first: it peaks at
+        # 67 lights in a cell against the near pose's 36, of a cap of 128.
+        # Checked against a scene that does drop lights (-count 1024, which
+        # overflows 1956 cells and drops 30 over budget): the case below
+        # rejects it.
+        stats=$(GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./11-lights -frames 30 \
+          -lamps 400 -spots 32 -lightstats 2>&1 | sed -n 's/.*light stats: //p')
+        echo "binner: $stats"
+        case "$stats" in
+          *DroppedOverBudget:0\ *CellsOverflowed:0\ *CellsTruncated:0\ *) ;;
+          *) echo "the scene drops lights before the comparison starts -- it is not a clean oracle"
+             status=1 ;;
+        esac
         # Prove the comparison can say no. One lamp fewer, everything else the
         # same: if these match, the captures are not of the scene that was
         # asked for and every "identical" above means nothing.
