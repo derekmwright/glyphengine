@@ -61,6 +61,22 @@ var scenes = []scene{
 	// against an identical field.
 	{"instanced", "19-instanced", []string{"-count", "900", "-instanced=true", "-frames", "200"}, "900 props, one draw call"},
 	{"individual", "19-instanced", []string{"-count", "900", "-instanced=false", "-frames", "200"}, "the same 900, one draw each"},
+
+	// Clustered vs. brute force at three light counts, all on -lamps -- a
+	// spread-out grid of short-range lights, not the default ring, where
+	// every light reaches most of the scene and clustering has nothing to
+	// remove (see the -lamps doc comment in 11-lights). Paired so the same
+	// scene runs both ways: a difference here is what clustering costs or
+	// saves on real work, not two different workloads.
+	{"lights32-clustered", "11-lights", []string{"-lamps", "32", "-frames", "200"}, "32 lamps, clustered"},
+	{"lights32-brute", "11-lights", []string{"-lamps", "32", "-lightdebug", "bruteforce", "-frames", "200"}, "32 lamps, brute force"},
+	{"lights256-clustered", "11-lights", []string{"-lamps", "256", "-frames", "200"}, "256 lamps, clustered"},
+	{"lights256-brute", "11-lights", []string{"-lamps", "256", "-lightdebug", "bruteforce", "-frames", "200"}, "256 lamps, brute force"},
+	{"lights1024-clustered", "11-lights", []string{"-lamps", "1024", "-frames", "200"}, "1024 lamps (the cap), clustered"},
+	{"lights1024-brute", "11-lights", []string{"-lamps", "1024", "-lightdebug", "bruteforce", "-frames", "200"}, "1024 lamps (the cap), brute force"},
+
+	{"streetlights", "21-streetlights", []string{"-frames", "200"}, "a settlement: PBR walls, door spots, lamp posts"},
+
 	{"kitchensink", "15-kitchen-sink", []string{"-demo", "-frames", "240"}, "everything at once"},
 }
 
