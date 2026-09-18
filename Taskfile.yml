@@ -458,6 +458,36 @@ tasks:
         pair overview 1920 1080
         pair near 1280 720  -camdist 0.8 -campitch 0.6 -camtarget 0.05 -camlook 0
         pair near 1920 1080 -camdist 0.8 -campitch 0.6 -camtarget 0.05 -camlook 0
+        # 21-streetlights is the other scene that places lights, and a
+        # different shape of one: six cones thrown down walls onto terrain
+        # plus a ring of lamps, rather than a floor of hundreds of spheres.
+        # Cones are the part 11-lights' grid does not exercise the same way --
+        # a spot's bound is its range sphere, so every froxel a cone misses
+        # inside that sphere is a light the shader has to reject rather than
+        # one the binner dropped -- and -lamps 300 packs the ring tightly
+        # enough that cells hold both kinds at once.
+        sshot() {
+          mode=$1; out=$2; shift 2
+          GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./21-streetlights -frames 60 \
+            -width 1280 -height 720 -lightdebug "$mode" "$@" \
+            -screenshot $d/$out.png >/dev/null 2>&1
+        }
+        spair() {
+          name=$1; shift
+          sshot ""           street-$name-clustered "$@"
+          sshot bruteforce   street-$name-brute     "$@"
+          if same street-$name-clustered street-$name-brute; then
+            echo "21-streetlights $name: identical"
+          elif [ $? -eq 1 ]; then
+            echo "21-streetlights $name: CLUSTERED AND BRUTE FORCE DIFFER"
+            status=1
+          else
+            echo "21-streetlights $name: MISSING CAPTURE -- this gate proves nothing"
+            status=1
+          fi
+        }
+        spair default
+        spair lamps300 -lamps 300
         # The two modes are only required to agree while nothing is being
         # dropped. A cell over its light cap, a spent index buffer or a light
         # over the frame budget all make clustered differ from brute force for
