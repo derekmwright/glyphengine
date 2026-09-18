@@ -146,6 +146,7 @@ entry point for a task, then read the body for working code.
 | `task determinism` | Renders repeat byte for byte under a fixed frame clock (needs a GPU) |
 | `task sky` | Celestial bodies are occluded by terrain, not drawn over it (needs a GPU) |
 | `task hud` | Screen-space overlays survive water, bloom and the tonemap (needs a GPU) |
+| `task waterblend` | A blended effect in front of the water is not painted over by it (needs a GPU) |
 | `task bench` | Per-pass GPU and per-phase CPU cost over a fixed scene set (needs a GPU) |
 | `task lights` | Clustered and brute-force light renderers produce byte-identical images (needs a GPU) |
 | `task nightlight` | Warm lamps stay warm on the ground after the night shift (needs a GPU) |
