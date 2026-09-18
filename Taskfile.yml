@@ -234,10 +234,13 @@ tasks:
       # the lower two thirds should be brighter than the dark terrain there, and
       # the disc is pale yellow against nearly black, so the margin is enormous.
       #
-      # Light shafts are off on purpose. They sample the scene and would react
-      # to the disc too, which is a real second symptom -- the sun bleeding
-      # through terrain fed false light into the shaft pass -- but it makes the
-      # measurement indirect.
+      # -shafts 0 changes nothing today and is here for the day it does. An
+      # earlier version of this comment said the shaft pass "samples the scene
+      # and would react to the disc", and the fix's commit message blamed a
+      # 32 % frame difference on it. Both were wrong: the god-ray pipeline is
+      # built and never drawn (#50), and -shafts 0, 1 and 3 render byte-identical
+      # frames. The flag stays so that wiring shafts up cannot quietly turn this
+      # from a test of the disc into a test of the disc plus a radial blur.
       - |
         status=0
         d=.sky
