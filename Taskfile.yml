@@ -548,6 +548,13 @@ tasks:
       # the pool has to be a large enough patch of one surface to average.
       # See cmd/lampcheck for the boxes and for the ablation that shows this
       # fails when the weighting is removed.
+      #
+      # -span 60 is there because the ordering test alone only catches the
+      # weighting being gone, not being weak: a doorway pool is lamp-dominated
+      # enough that 85% of the weighting can be thrown away and the hue still
+      # comes out red above green above blue. Measured red-minus-blue across
+      # the pool box at local-term weights 1.00 / 0.35 / 0.15 / 0.00: 72.5 /
+      # 63.1 / 48.8 / -23.3. The floor sits between the first and the third.
       - |
         status=0
         d=.nightlight
@@ -561,7 +568,7 @@ tasks:
           echo "MISSING CAPTURE -- this gate proves nothing"
           exit 1
         fi
-        go run ../cmd/lampcheck -i $d/doorway.png -pool 560,650,160,60 -unlit 110,640,110,60 || status=1
+        go run ../cmd/lampcheck -i $d/doorway.png -pool 560,650,160,60 -unlit 110,640,110,60 -span 60 || status=1
         # A failure here is a picture. Keep it, the way `task lights` does.
         if [ $status -ne 0 ]; then
           echo "capture kept in examples/$d"
