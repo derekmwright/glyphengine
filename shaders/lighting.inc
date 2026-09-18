@@ -180,14 +180,17 @@ vec3 brdfSpecular(vec3 L, vec3 V, vec3 N, vec3 F0, float shininess) {
 vec3 evalLightingAO(vec3 diffuseColor, vec3 F0, float shininess,
                     vec3 N, vec3 V,
                     vec3 worldPos, vec3 shadowPos, float ao) {
-    // Reverse-Z: view-space depth is 1/w regardless of near/far (see the
-    // "Facts" section of the clustered-lighting spec) -- both the cluster
-    // lookup and the debug heatmap key off this.
+    // Reverse-Z (near maps to 1, far to 0; see reverseZProjection in app.go)
+    // uses a projection whose w-row leaves clip.w equal to the positive
+    // view-space depth, so after the perspective divide gl_FragCoord.w is
+    // 1/viewDepth -- inverting it here recovers viewDepth without needing
+    // near or far. Both the cluster lookup and the debug heatmap key off
+    // this.
     float viewDepth = 1.0 / gl_FragCoord.w;
 
-    // Debug heatmap replaces the lit colour outright ("keep it simple"); it
-    // reports the grid regardless of the brute-force bit, since the point of
-    // the view is to see what binning produced.
+    // Debug heatmap replaces the lit colour outright; it reports the grid
+    // regardless of the brute-force bit, since the point of the view is to
+    // see what binning produced.
     if ((lb.flags.x & 2u) != 0u) {
         return lightHeatmap(cellLightCount(gl_FragCoord.xy, viewDepth));
     }

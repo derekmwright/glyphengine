@@ -8,10 +8,11 @@
 // (3, 4, 5) because they sit on the descriptor set the shadow data owns; see
 // renderer/shadow.go.
 //
-// This replaces the sixteen-copy LightBlock UBO (a struct + block declared
-// in each of seven fragment shaders) with one declaration, and replaces the
-// fixed 32-light cap with a runtime light count -- see MaxLights in
-// renderer/lights.go.
+// This replaces a LightBlock UBO struct and block that used to be
+// copy-pasted into each of seven fragment shaders (lit, lit_material,
+// skinned_lit, skinned_lit_material, terrain, grass, water) with one
+// declaration, and replaces their fixed 32-light cap with a runtime light
+// count -- see MaxLights in renderer/lights.go.
 
 struct GpuLight {            // 48 bytes, std430
     vec4 posRange;            // xyz world position, w range (<=0 = disabled)
@@ -50,8 +51,8 @@ uint cellLightCount(vec2 fragCoordXY, float viewDepth) {
 }
 
 // lightHeatmap is a plain blue -> green -> red ramp of a cell's light count.
-// "Keep it simple" per the clustered-lighting spec: this is a debug view, not
-// a deliverable image, so it does not need to be perceptually uniform.
+// It exists to answer "which cells are hot", not to look good, so it stays
+// this simple rather than chasing a perceptually uniform ramp.
 vec3 lightHeatmap(uint count) {
     float t = clamp(float(count) / 16.0, 0.0, 1.0);
     vec3 lo = vec3(0.0, 0.0, 1.0);
@@ -69,9 +70,10 @@ LightRange resolveLightRange(vec2 fragCoordXY, float viewDepth) {
     LightRange r;
     if ((lb.flags.x & 1u) != 0u) {
         // Brute force: the reference path. Loops every uploaded light,
-        // ignoring cg/li entirely -- this is the oracle G1 and G2 compare
-        // clustered rendering against, so it has to stay independent of
-        // whatever the grid contains.
+        // ignoring cg/li entirely, so a scene lights correctly even before
+        // anything fills the grid, and so a clustered result can be checked
+        // against a path whose correctness never depends on binning being
+        // right.
         r.offset = 0u;
         r.count = lb.grid.w;
         r.brute = true;
@@ -94,10 +96,10 @@ GpuLight lightAt(LightRange r, uint i) {
 // lightSpotFactor is the smooth cone falloff for a spot light. dirCone.xyz
 // == 0 means omnidirectional -- the zero value of the new fields keeps
 // meaning what it always meant for a plain point light, so this returns 1.0
-// (no attenuation at all from the cone) rather than skipping the multiply,
-// which matters for G1: multiplying by exactly 1.0 introduces no rounding,
-// so existing point lights stay bit-for-bit what they were before spots
-// existed.
+// (an explicit no-op factor) rather than skipping the multiply below: a
+// multiply by exactly 1.0 introduces no rounding of its own, which is what
+// keeps a plain point light's attenuation as close as possible to what it
+// was before spot lights existed.
 float lightSpotFactor(GpuLight light, vec3 L) {
     vec3 dir = light.dirCone.xyz;
     if (dir == vec3(0.0)) {
@@ -110,12 +112,11 @@ float lightSpotFactor(GpuLight light, vec3 L) {
 }
 
 // lightIrradiance is the one routine both lighting.inc loops call per light:
-// point-light attenuation (unchanged since before clustering -- see the G1
-// gate in the clustered-lighting spec) times the spot cone factor. L is
-// written with the unit direction toward the light, for callers that need it
-// for specular; it is left at the zero vector when the light contributes
-// nothing, matching the "unnormalized" state the old inline loops left
-// unused variables in.
+// the same point-light falloff math the old inline loops used, times the
+// spot cone factor. L is written with the unit direction toward the light,
+// for callers that need it for specular; it is left at the zero vector when
+// the light contributes nothing, matching the "unnormalized" state the old
+// inline loops left unused variables in.
 vec3 lightIrradiance(GpuLight light, vec3 worldPos, vec3 N, out vec3 L) {
     vec3 toLight = light.posRange.xyz - worldPos;
     float dist = length(toLight);

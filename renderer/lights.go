@@ -17,9 +17,10 @@ const MaxLights = 1024
 const MaxPointLights = MaxLights
 
 // LightGridX, LightGridY and LightGridZ are the cluster grid's fixed cell
-// counts (not pixel size, so buffers do not depend on resolution -- see
-// decision 2 in the clustered-lighting spec). Starting values, to be
-// justified by measurement once a real clusterer exists to measure.
+// counts, not a pixel size, so the light buffers stay the same size across a
+// resize -- only their contents change. These are unmeasured starting
+// values: whoever adds real per-cell light binning should tune them against
+// actual scenes rather than trust them as given.
 const (
 	LightGridX     = 16
 	LightGridY     = 9
@@ -168,9 +169,19 @@ func packIndices(dst []byte, indices []uint32) int {
 	return n
 }
 
-// lightZSliceParams derives the log-depth slicing constants so that
-// slice(near) == 0 and slice(far) == slices-1 (decision 2 in the
-// clustered-lighting spec: slice = floor(log(viewDepth)*scale + bias)).
+// lightZSliceParams derives log-depth slicing constants for
+// slice = floor(log(viewDepth)*scale + bias), such that slice(near) == 0 and
+// slice(far) == slices-1. Log rather than linear because most
+// light-occluding detail sits close to the camera, where a linear split
+// would spend most of its slices on the distant, mostly-empty half of the
+// view frustum.
+//
+// This is a placeholder, not something to build on: it slices from the
+// camera's near plane, and a real per-cell light binner may reasonably want
+// its first slice to start further out, since near-plane detail is
+// dominated by geometry a light binner has no reason to distinguish.
+// Whoever adds one should take these numbers from wherever it derives its
+// own slicing rather than assume this function already agrees with it.
 //
 // Falls back to the engine's documented default near/far (0.1/500) for a
 // degenerate input (zero, negative, or far <= near) rather than feeding

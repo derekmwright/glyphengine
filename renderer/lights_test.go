@@ -135,10 +135,11 @@ func TestPackCellsAndIndices(t *testing.T) {
 	}
 }
 
-// TestLightZSliceParams checks the two endpoints decision 2 in the
-// clustered-lighting spec requires: slice(near) == 0 and slice(far) ==
-// slices-1. Broken by dropping the "-1" off slices in the scale formula, the
-// far endpoint lands one slice short of the top instead of exactly on it.
+// TestLightZSliceParams checks the two endpoints the log-depth slicing
+// formula in lightZSliceParams is built around: slice(near) == 0 and
+// slice(far) == slices-1. Broken by dropping the "-1" off slices in the
+// scale formula, the far endpoint lands one slice short of the top instead
+// of exactly on it.
 func TestLightZSliceParams(t *testing.T) {
 	slice := func(scale, bias, viewDepth float32) int {
 		s := math.Floor(float64(float32(math.Log(float64(viewDepth)))*scale + bias))
