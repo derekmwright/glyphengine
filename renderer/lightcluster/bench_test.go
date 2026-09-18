@@ -221,6 +221,21 @@ var colonyCases = []colonyCase{
 	{"r6 d6 p0.22", 6, 6, 0.22, 35},  // the same camera with a longer lamp range
 }
 
+// BenchmarkBuildColony is what the froxel cell test was built against, and what
+// it has to keep justifying. Measured on a Ryzen 9 5900X with the two versions
+// run alternately, three rounds, medians — sequential runs on this machine
+// drift by 30%, which is more than the difference being measured:
+//
+//	scene            CPU before -> after      index entries      peak cell
+//	r4 d6 p0.22       315 -> 502 us  (+59%)   61803 -> 41670       57 -> 50
+//	r4 d9 p0.45       337 -> 482 us  (+43%)   64746 -> 36339       61 -> 52
+//	r4 d16 p0.45      255 -> 357 us  (+40%)   44106 -> 22459       68 -> 59
+//	r6 d6 p0.22       654 -> 937 us  (+43%)  138946 -> 90167       94 -> 82
+//
+// An index entry is one light that every fragment of one cell evaluates, and a
+// cell is 120x120 pixels at 1080p, so a third to a half of them going away is
+// worth a good deal more than the CPU it costs. The GPU side of that is G2 and
+// G5's to confirm; this package cannot see it.
 func BenchmarkBuildColony(b *testing.B) {
 	for _, c := range colonyCases {
 		b.Run(c.name, func(b *testing.B) {
