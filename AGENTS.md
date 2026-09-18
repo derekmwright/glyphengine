@@ -86,6 +86,31 @@ deliberate: `go get` of the engine never pulls example code or assets, while
     have already produced a "50 percent improvement" that five runs each showed
     to be nothing. See `WithFixedFrameTime`.
 
+14. **Unblock a path; do not ship an opinion.** The bar for adding a feature is
+    that a game cannot reach it from outside the engine — not that having it
+    provided would be convenient. Convenience approves everything.
+
+    Pausing qualifies: `Scene.Tick` runs before `FixedUpdate`, so a game that
+    returns early has stopped its own simulation and none of the engine's, and
+    no amount of game code can stop the engine's. Translucency, instancing and
+    a replaceable `ShaderSet` qualify for the same reason — a pipeline or a
+    push-constant layout is not reachable from a consuming game.
+
+    Scene management is the counter-example, and it is why this rule is
+    written down. `Engine` embeds `*Scene` as an exported field, so swapping
+    scenes is `e.Scene = other`, and GPU resources live on the `Renderer` and
+    survive the swap. A `SceneManager` with push, pop and transitions would add
+    no capability; it would add *structure*, and the README's promise is that
+    your program owns `main()`. Loading screens are the same shape — the real
+    question underneath them is whether assets can be uploaded off the frame
+    thread, which is a threading contract rather than a screen feature.
+
+    The one narrower case that also qualifies: **completing a seam the engine
+    already committed to.** Shipping `Button`, `Panel` and `InputField` and
+    then having no focus traversal means the toolkit has to be abandoned
+    wholesale for the first screen of most games. That is not unblocking, it is
+    finishing.
+
 ## Getting a window on screen
 
 ```

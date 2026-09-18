@@ -11,12 +11,17 @@ type Button struct {
 	FontSize         float32 // reference pixels
 	LabelColor       [3]float32
 	OnClickFn        func()
-	panel            *renderer.Panel
-	fillColor        [3]float32
-	hovered          bool
-	pressed          bool
-	Hidden           bool
-	bounds           Rect
+
+	// Disabled greys the button out and takes it out of the keyboard traversal
+	// order. A disabled item the highlight can still land on is a dead end the
+	// player has to arrow back out of.
+	Disabled  bool
+	panel     *renderer.Panel
+	fillColor [3]float32
+	hovered   bool
+	pressed   bool
+	Hidden    bool
+	bounds    Rect
 }
 
 // NewButton creates a button with a single 9-slice layer.
@@ -40,11 +45,16 @@ func (b *Button) Build(r *renderer.Renderer, scale, sw, sh float32, font *render
 	}
 	b.bounds = ResolveAnchor(b.Anchor, b.OffsetX, b.OffsetY, b.Width, b.Height, sw, sh, scale)
 
-	// Adjust fill color for hover/pressed states.
+	// Adjust fill color for disabled/hover/pressed states. Disabled is checked
+	// first: a disabled button cannot be pressed or highlighted, so showing it
+	// either way would invite a click that does nothing.
 	fc := b.fillColor
-	if b.pressed {
+	switch {
+	case b.Disabled:
+		fc = [3]float32{fc[0] * 0.45, fc[1] * 0.45, fc[2] * 0.45}
+	case b.pressed:
 		fc = [3]float32{fc[0] * 0.6, fc[1] * 0.6, fc[2] * 0.6}
-	} else if b.hovered {
+	case b.hovered:
 		fc = [3]float32{fc[0] * 1.5, fc[1] * 1.5, fc[2] * 1.5}
 	}
 	b.panel.Layers[0].Color = fc
@@ -73,9 +83,34 @@ func (b *Button) Build(r *renderer.Renderer, scale, sw, sh float32, font *render
 }
 
 // UpdateHover sets the hover state based on mouse position.
+//
+// Not needed, and not safe, for a button registered with
+// UIManager.RegisterNavigable: the manager drives the highlight from both the
+// keyboard and the pointer, and this would overwrite it from the pointer alone
+// every frame, which makes the arrow keys look broken.
 func (b *Button) UpdateHover(mx, my float32) {
 	b.hovered = b.bounds.Contains(mx, my)
 }
+
+// Navigable interface implementation.
+
+// SetHighlighted is the single writer of the button's highlight when it is
+// registered for navigation; the UIManager drives it from both the keyboard and
+// the pointer. One highlight rather than two is the whole point: a menu where
+// the pointer and the keyboard each keep their own is a menu where the mouse
+// says one thing and Enter does another.
+func (b *Button) SetHighlighted(v bool) { b.hovered = v }
+
+// Activate runs the click handler, which is what Enter, Space and a mouse
+// release all do.
+func (b *Button) Activate() {
+	if b.OnClickFn != nil {
+		b.OnClickFn()
+	}
+}
+
+// Enabled reports whether the highlight may rest here.
+func (b *Button) Enabled() bool { return !b.Disabled && !b.Hidden }
 
 // Clickable interface implementation.
 
@@ -84,10 +119,19 @@ func (b *Button) Bounds() Rect                 { return b.bounds }
 func (b *Button) Visible() bool                { return !b.Hidden }
 func (b *Button) SetPressed(v bool)            { b.pressed = v }
 
-func (b *Button) OnMouseDown() { b.pressed = true }
+// A disabled button takes no press and fires nothing. Traversal already skips
+// it, but the pointer does not go through traversal, so without this a greyed
+// out item would still be clickable -- which is worse than not greying it out
+// at all, because it looks unavailable and acts available.
+func (b *Button) OnMouseDown() {
+	if b.Disabled {
+		return
+	}
+	b.pressed = true
+}
 
 func (b *Button) OnMouseUp() {
-	if b.pressed && b.OnClickFn != nil {
+	if b.pressed && !b.Disabled && b.OnClickFn != nil {
 		b.OnClickFn()
 	}
 	b.pressed = false

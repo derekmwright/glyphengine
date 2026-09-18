@@ -35,17 +35,40 @@ type UIManager struct {
 	mouseX, mouseY  float32
 	mouseConsumed   bool
 	keyConsumed     bool
+
+	// navigables is the keyboard traversal order and hot is where the
+	// highlight rests in it, -1 for nowhere. See navigate.go.
+	navigables []Navigable
+	hot        int
+
+	// prevMouseX/Y detect pointer motion. The pointer may only claim the
+	// highlight when it actually moves; a mouse left sitting over one item
+	// would otherwise drag the highlight back every frame and make the arrow
+	// keys look broken.
+	prevMouseX, prevMouseY float32
+	hasPrevMouse           bool
 }
 
 // NewUIManager creates an empty UIManager.
 func NewUIManager() *UIManager {
-	return &UIManager{scale: 1.0}
+	return &UIManager{scale: 1.0, hot: -1}
 }
 
 // RegisterClickable adds a clickable widget for hit testing.
 // Widgets registered later have higher z-order (tested first).
 func (m *UIManager) RegisterClickable(c Clickable) {
 	m.clickables = append(m.clickables, c)
+}
+
+// ClearClickables empties the hit-test list, for a menu that is rebuilt or
+// swapped for another screen.
+//
+// Without it a rebuilt menu keeps every button it ever had registered, so a
+// click lands on a widget from a screen that is gone — invisible, because a
+// hidden widget fails the Visible check, right up until one is reused.
+func (m *UIManager) ClearClickables() {
+	m.clickables = nil
+	m.activeClickable = nil
 }
 
 // SetFocused sets the currently focused widget for keyboard routing.
@@ -74,6 +97,9 @@ func (m *UIManager) HandleInput(inp *input.Input) {
 	m.mouseX = float32(mx)
 	m.mouseY = float32(my)
 
+	mouseMoved := !m.hasPrevMouse || m.mouseX != m.prevMouseX || m.mouseY != m.prevMouseY
+	m.prevMouseX, m.prevMouseY, m.hasPrevMouse = m.mouseX, m.mouseY, true
+
 	// Route keyboard to focused widget.
 	chars := inp.ConsumeChars()
 	if m.focused != nil && m.focused.Focused() {
@@ -90,6 +116,12 @@ func (m *UIManager) HandleInput(inp *input.Input) {
 		if m.focused != nil && !m.focused.Focused() {
 			m.focused = nil
 		}
+	}
+
+	// Keyboard and pointer traversal, but not while a text field has focus --
+	// arrow keys belong to whoever is typing.
+	if !m.HasFocus() {
+		m.handleNavigation(inp, mouseMoved)
 	}
 
 	// Mouse down: reverse-order hit test.

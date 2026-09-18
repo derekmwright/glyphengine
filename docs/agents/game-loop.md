@@ -381,6 +381,67 @@ in it run off different clocks — waves off the elapsed clock, the sun off
 `Scene.Tick` — so the captures match only if both stopped. Deleting either
 scaling makes it fail, which was checked rather than assumed.
 
+## Screens, menus and swapping scenes
+
+The engine ships no scene manager, no screen stack and no transition system.
+That is a deliberate omission rather than a missing feature, and the reason is
+worth knowing before you go looking for one: **swapping scenes is an
+assignment.**
+
+```go
+e.Scene = g.menuScene   // that is the whole of it
+```
+
+`Engine` embeds `*Scene` as an exported field, and GPU resources — meshes,
+textures, materials, pipelines — live on the `Renderer` rather than the `Scene`,
+so a swap re-uploads nothing and leaks nothing. Build both scenes up front and a
+screen change costs one pointer write.
+
+A manager on top of that would add no capability, only structure, and the shape
+of a game's screens is the game's business. `examples/20-screens` is the whole
+pattern — a main menu, a world, and a pause menu over it — in about ninety lines
+of game code, using three primitives that *are* the engine's business:
+
+| | why the engine has to provide it |
+| --- | --- |
+| `e.Scene = other` | already there; `Scene` is an exported embedded field |
+| `e.SetTimeScale(0)` | a game cannot stop `Scene.Tick`; see above |
+| `ui.UIManager` traversal | the toolkit owns the widgets |
+
+### Pausing to a menu
+
+```go
+func (g *game) pause(e *glyph.Engine) {
+    g.screen = screenPaused
+    e.SetTimeScale(0)     // the world stops
+    g.showPauseMenu(e)    // Update and rendering carry on, so the menu works
+}
+```
+
+The camera still moves and the menu still animates, because those run in
+`Update` and `LateUpdate` on the real frame delta. What stops is everything that
+would make the world move on without the player.
+
+### What to watch for
+
+- **Clear the widget lists when a menu is replaced.** `ClearNavigables` and
+  `ClearClickables` exist for this. A rebuilt menu that keeps its old
+  registrations has a highlight pointing into a screen that is gone, and clicks
+  landing on widgets nobody can see.
+- **Do not call `Button.UpdateHover` on a registered widget.** The manager
+  drives the highlight from both the keyboard and the pointer; `UpdateHover`
+  recomputes it from the pointer alone, so the two fight and the arrow keys
+  appear to do nothing.
+- **A scene keeps its own environment.** `SetTimeOfDay` on a menu scene does not
+  touch the world's, which is how `20-screens` gets a dusk menu over a midday
+  world.
+
+### What is genuinely missing
+
+Renderer-side world state has no teardown: `InitGrass` and `InitParticles` have
+no counterpart, so swapping from a grassy world to a menu scene leaves the grass
+drawing. Clear it game-side for now.
+
 ## Headless and CI
 
 `WithMaxFrames(n)` stops the loop after `n` rendered frames. Every example

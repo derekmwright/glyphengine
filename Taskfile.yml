@@ -149,6 +149,7 @@ tasks:
       - go run ./17-input -frames 60
       - go run ./18-translucent -frames 60
       - go run ./19-instanced -frames 60
+      - go run ./20-screens -frames 60
       - go run ./15-kitchen-sink -demo -frames 60
 
   validate:
@@ -183,7 +184,7 @@ tasks:
             echo "$label: clean"
           fi
         }
-        for ex in 01-triangle 02-cube 03-physics 04-first-person 05-textures 06-skinned 07-terrain 08-grass 09-water 10-text 11-lights 12-particles 13-ui 16-materials 17-input 18-translucent 19-instanced 15-kitchen-sink; do
+        for ex in 01-triangle 02-cube 03-physics 04-first-person 05-textures 06-skinned 07-terrain 08-grass 09-water 10-text 11-lights 12-particles 13-ui 16-materials 17-input 18-translucent 19-instanced 20-screens 15-kitchen-sink; do
           check $ex
         done
         # Render paths no example turns on by default. Everything above runs
@@ -282,6 +283,7 @@ tasks:
       - go run ./17-input -frames 60 -screenshot ../docs/images/17-input.png
       - go run ./18-translucent -frames 120 -screenshot ../docs/images/18-translucent.png
       - go run ./19-instanced -frames 60 -screenshot ../docs/images/19-instanced.png
+      - go run ./20-screens -frames 60 -screenshot ../docs/images/20-screens.png
       - go run ./15-kitchen-sink -demo -frames 260 -screenshot ../docs/images/15-kitchen-sink.png
 
   hud:
