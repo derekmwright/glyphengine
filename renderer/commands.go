@@ -57,6 +57,11 @@ type SceneLighting struct {
 
 	// LightShafts is the god-ray strength; zero disables them. SunScreenPos is
 	// where the sun lands in UV space, which is what the effect radiates from.
+	//
+	// Neither reaches a shader today: nothing packs them into the push constant
+	// block and nothing binds godRayPipeline. A non-zero LightShafts does still
+	// make the frame enter the water pass, so it is not inert -- it costs a
+	// scene copy and an empty pass. See createGodRayPipeline.
 	LightShafts  float32
 	SunScreenPos [2]float32
 
@@ -1275,8 +1280,15 @@ func recordCommandBuffer(
 
 	deviceDriver.CmdEndRenderPass(cmdBuf)
 
-	// Water needs the finished opaque frame as a texture, so it runs in a
-	// second pass. Scenes without water skip it entirely.
+	// Water needs the finished scene as a texture, so it runs in a second pass.
+	//
+	// The LightShafts arm of the condition below is dead weight and has been:
+	// godRayPipeline is created, passed down here, and never bound by anything,
+	// and neither LightShafts nor SunScreenPos is packed into any push constant
+	// or uniform. So a shafts-and-no-water frame pays for the scene copy and an
+	// empty render pass and draws nothing. Kept as it is rather than tidied in
+	// passing, because removing it changes which frames resolve twice and that
+	// wants its own before-and-after; see the note on createGodRayPipeline.
 	timer.end(deviceDriver, cmdBuf, frame, PassOverlay)
 
 	timer.begin(deviceDriver, cmdBuf, frame, PassWater)
