@@ -208,6 +208,14 @@ tasks:
         # cover both sides of it with a uniform the layer can object to.
         check 21-streetlights -nightshift 0
         check 21-streetlights -nighttint 1.30,0.86,0.72
+        # Blended draws on both sides of the water surface. This is the one run
+        # that records the translucent, particle and overlay pipelines inside
+        # the WATER render pass, which no stock run reaches -- and render pass
+        # compatibility is exactly the kind of thing only the layer sees. It
+        # caught the first version of it on frame one, with a subpass
+        # dependency mismatch the attachments gave no hint of. See
+        # sceneEntryDependency.
+        check 09-water -plume -ghost -marker -submerged
         exit $status
 
   sky:
@@ -264,7 +272,11 @@ tasks:
           [ -s "$d/$1.png" ] && [ -s "$d/$2.png" ] || { echo "MISSING CAPTURE -- this gate proves nothing"; status=1; return 1; }
           [ "$(sha256sum < $d/$1.png)" = "$(sha256sum < $d/$2.png)" ]
         }
-        for ex in "08-grass" "09-water" "12-particles" "06-skinned -demo" "15-kitchen-sink -demo"; do
+        # The water/blended split is in here because it reorders a buffer every
+        # frame from the camera's position: a partition that was not stable, or
+        # that read a stale upload, would show up as two runs disagreeing long
+        # before anyone noticed it in a picture.
+        for ex in "08-grass" "09-water" "12-particles" "06-skinned -demo" "15-kitchen-sink -demo" "09-water -plume -ghost -marker -submerged"; do
           set -- $ex
           name=$1; shift
           shot 16.667ms $name a "$*"
@@ -526,6 +538,59 @@ tasks:
         # brute-force captures of the pose that failed are what say whether the
         # difference is tile-shaped, and re-running to get them back means
         # guessing which pose it was.
+        if [ $status -ne 0 ]; then
+          echo "captures kept in examples/$d"
+        else
+          rm -rf $d
+        fi
+        exit $status
+
+  waterblend:
+    desc: "Check that a blended effect in front of the water is not painted over by it"
+    dir: examples
+    cmds:
+      # Needs a GPU, so it sits with smoke, validate and determinism rather
+      # than in `task ci`.
+      #
+      # Water is drawn last, in a second pass, because refraction samples the
+      # finished frame. Nothing blended writes depth, so where a flame stood in
+      # front of the lake the depth buffer held the lake BED, the water passed
+      # the depth test, and the flame was painted over: cut off dead flat at
+      # the waterline, fine against sky and gone against water. Issue #45.
+      #
+      # Nothing else saw it and nothing else could. `task smoke` renders the
+      # frame, `task validate` is silent, `task determinism` is happy because
+      # the wrong image is wrong the same way every time -- and no example had
+      # water and a blended effect in the same scene at all until 09-water grew
+      # these flags.
+      #
+      # The pair is the whole trick, the same way it is in `task hud`. A single
+      # frame cannot say what should have been there, so the plume is toggled
+      # and the difference is the light it ADDED: a bright lake cannot fake
+      # that, because the same lake is under both captures and subtracts out.
+      # The -ref box over sky is the same plume in the same pair, and it makes
+      # the reading self-calibrating -- "as present below the waterline as
+      # above it" is a claim no fixed threshold can carry.
+      #
+      # Green here reads: box over water +76.9 mean luma, control over sky
+      # +36.7, ratio 2.10. The break experiment that these thresholds are set
+      # from is recorded below once it has been run.
+      - |
+        status=0
+        d=.waterblend
+        rm -rf $d && mkdir -p $d
+        shot() { GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./09-water -frames 150 "$@" >/dev/null 2>&1; }
+        shot -plume -ghost -marker -submerged -screenshot $d/plume.png
+        shot -ghost -marker -submerged -screenshot $d/bare.png
+        if [ ! -s $d/plume.png ] || [ ! -s $d/bare.png ]; then
+          echo "MISSING CAPTURE -- this gate proves nothing"
+          exit 1
+        fi
+        go run ../cmd/blendcheck -a $d/plume.png -b $d/bare.png \
+          -box 300,420,90,200 -ref 300,250,90,130 -min 25 -minref 20 -ratio 0.8 || status=1
+        # A failure here is a picture: whether the plume stops at the waterline
+        # or is merely dimmer is the difference between this bug and a lighting
+        # change, and re-running to get the captures back wastes the evidence.
         if [ $status -ne 0 ]; then
           echo "captures kept in examples/$d"
         else
