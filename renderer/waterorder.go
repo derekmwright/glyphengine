@@ -34,6 +34,23 @@ package renderer
 // behind the water are the ones below it; from below the surface they are the
 // ones above it. Both are "the eye and the object are on opposite sides".
 //
+// # Why the in-front half can simply be drawn afterwards
+//
+// Because the water pipeline does not write depth — createWaterPipeline sets
+// DepthWriteEnable false, so the surface can blend without wave crests
+// depth-fighting each other. The depth buffer a draw after the water tests
+// against is therefore still the opaque scene's, exactly as it was in the scene
+// pass: a flame behind a hill is still behind the hill, and it composites over
+// the surface because the surface left no depth to reject it.
+//
+// If water did write depth this would not work. Everything in front of it would
+// have to pass a depth test against the surface, which is what a correct order
+// would want and is also not what the surface is: it is displaced per vertex by
+// Gerstner waves, so its depth is the wave geometry rather than the still plane,
+// and a flame standing in a trough would be cut by the crest in front of it.
+// The submerged half is unaffected either way, being drawn before the water
+// exists.
+//
 // # What this is not
 //
 // It is a per-draw answer, not a per-pixel one, and the places it is only
