@@ -369,6 +369,108 @@ tasks:
         rm -rf $d
         exit $status
 
+  lights:
+    desc: "Check that clustered lighting renders exactly what brute force does"
+    dir: examples
+    cmds:
+      # Needs a GPU, so it sits with smoke, validate and determinism rather
+      # than in `task ci`.
+      #
+      # Why exact equality is the right bar, rather than a tolerance: both
+      # modes run the same shader over the same uploaded light array in the
+      # same relative order, and a light that does not reach a fragment adds
+      # exactly +0.0 to that fragment's sum. Clustering can only change which
+      # lights a fragment skips, so if it skips only lights that contribute
+      # nothing the bytes are identical. Any difference is therefore a light
+      # missing from a froxel it belongs in, and it will be tile-shaped --
+      # which is also why a tolerance would be the wrong instrument: a lost
+      # light is a few percent of one tile's brightness, and any threshold
+      # loose enough to absorb "noise" absorbs that too.
+      #
+      # The scene is 400 dim lamps of range 4 on a 1.6 m grid plus 32 spots.
+      # The ring the example lights by default would not do: every one of its
+      # lights reaches most of the scene, so every froxel lists all of them
+      # and the two modes would agree even with the binner deleted.
+      #
+      # The near pose is the one that matters. -camdist 0.8 puts the eye half
+      # a metre up with the floor 0.6 m away, inside about forty lamp spheres:
+      # lights whose screen bound does not exist, fragments in the first depth
+      # slice, and a camera the consumer game's players spend their time in.
+      # 40 unbounded lights and 21 screen-wide ones, against 8 and 0 from the
+      # overview pose.
+      #
+      # PROVED: with the sphere test in lightcluster's Builder.bin shrunk to
+      # 0.8*radius -- a binner that is fast, plausible and not conservative --
+      # all four pose/resolution pairs report CLUSTERED AND BRUTE FORCE
+      # DIFFER. Restored immediately after.
+      #
+      # What that failure looks like is the argument for comparing bytes.
+      # Measured on the kept captures at 1920x1080: the near pose differs on
+      # 25.8% of its pixels and the overview on 0.36%, and in both the largest
+      # channel difference anywhere is ONE of 255. The lights a shrunk sphere
+      # loses are the ones whose range barely reaches the froxel, so what goes
+      # missing is the dim tail of a falloff, not a tile of black -- almost
+      # invisible to the eye and to any RMS threshold, on a binner that is
+      # genuinely wrong. An exact comparison is the only instrument that
+      # reports it, and it is free.
+      - |
+        status=0
+        d=.lights
+        rm -rf $d && mkdir -p $d
+        shot() {
+          mode=$1; out=$2; w=$3; h=$4; shift 4
+          GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./11-lights -frames 60 \
+            -width $w -height $h -lightdebug "$mode" "$@" \
+            -screenshot $d/$out.png >/dev/null 2>&1
+        }
+        # A missing capture returns 2, not 1, so "the run died" cannot be read
+        # as "the images match". Every call site is an `if`, because the task
+        # runner's shell exits on the first failing command otherwise -- which
+        # would report the first bad pose and never look at the other three.
+        same() {
+          [ -s "$d/$1.png" ] && [ -s "$d/$2.png" ] || return 2
+          [ "$(sha256sum < $d/$1.png)" = "$(sha256sum < $d/$2.png)" ]
+        }
+        pair() {
+          name=$1; w=$2; h=$3; shift 3
+          shot ""           $name-clustered $w $h -lamps 400 -spots 32 "$@"
+          shot bruteforce   $name-brute     $w $h -lamps 400 -spots 32 "$@"
+          if same $name-clustered $name-brute; then
+            echo "$name ${w}x${h}: identical"
+          elif [ $? -eq 1 ]; then
+            echo "$name ${w}x${h}: CLUSTERED AND BRUTE FORCE DIFFER"
+            status=1
+          else
+            echo "$name ${w}x${h}: MISSING CAPTURE -- this gate proves nothing"
+            status=1
+          fi
+        }
+        pair overview 1280 720
+        pair overview 1920 1080
+        pair near 1280 720  -camdist 0.8 -campitch 0.6 -camtarget 0.05 -camlook 0
+        pair near 1920 1080 -camdist 0.8 -campitch 0.6 -camtarget 0.05 -camlook 0
+        # Prove the comparison can say no. One lamp fewer, everything else the
+        # same: if these match, the captures are not of the scene that was
+        # asked for and every "identical" above means nothing.
+        shot "" control-400 1280 720 -lamps 400 -spots 32
+        shot "" control-399 1280 720 -lamps 399 -spots 32
+        if same control-400 control-399; then
+          echo "control: dropping a lamp changed nothing -- this gate proves nothing"
+          status=1
+        else
+          echo "control: one lamp fewer changes the capture, as it must"
+        fi
+        # A failure here is a picture, so keep the pictures: the clustered and
+        # brute-force captures of the pose that failed are what say whether the
+        # difference is tile-shaped, and re-running to get them back means
+        # guessing which pose it was.
+        if [ $status -ne 0 ]; then
+          echo "captures kept in examples/$d"
+        else
+          rm -rf $d
+        fi
+        exit $status
+
   bench:
     desc: Run the benchmark scenes and print CPU/GPU cost per pass
     cmds:
