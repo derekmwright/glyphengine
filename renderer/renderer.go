@@ -1351,7 +1351,7 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 	// all fragments to project to the shadow map origin where depth=1.0
 	// (cleared) → fully lit.
 	r.shadow.uploadCascadeVPs(f, lighting.CascadeVPs)
-	r.shadow.uploadLights(f, lighting.Lights, lighting.LightFlags, lighting.Near, lighting.Far, r.sc.extent)
+	r.shadow.uploadLights(f, lighting.Lights, lighting.Clusters, lighting.LightFlags, r.sc.extent)
 
 	// The water pass is optional: a device without TRANSFER_SRC on its
 	// swapchain images cannot supply the refraction source, and scenes with no

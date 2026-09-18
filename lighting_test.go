@@ -7,6 +7,7 @@ import (
 	"github.com/go-gl/mathgl/mgl32"
 
 	"github.com/derekmwright/glyphengine/renderer"
+	"github.com/derekmwright/glyphengine/renderer/lightcluster"
 )
 
 // The tests below were checked against the pre-fix spotLightGpuLight (no
@@ -186,5 +187,110 @@ func TestSpotLightGpuLightAngleClamping(t *testing.T) {
 	wantCosInner := float32(1) // Inner sanitizes to 0, whose cosine is 1
 	if !almostEqual(g.Color[3], wantCosInner, spotAngleEpsilon) {
 		t.Errorf("cosInner = %g, want %g (Inner clamped to 0)", g.Color[3], wantCosInner)
+	}
+}
+
+// clusterTestEngine is an Engine with just enough filled in to bin lights: no
+// window, no renderer, no GPU. clusterFrameLights takes the framebuffer size
+// as an argument precisely so it can be called like this -- the light path is
+// the half of the frame that can be tested on a machine with no Vulkan at all.
+func clusterTestEngine(points, spots int) *Engine {
+	e := &Engine{Scene: NewScene(), lightCluster: lightcluster.New(), near: 0.1, far: 500}
+
+	pl := make([]PointLight, 0, points)
+	for i := 0; i < points; i++ {
+		a := float64(i) * 0.61803398
+		pl = append(pl, PointLight{
+			Pos:   mgl32.Vec3{float32(math.Cos(a) * float64(i%37)), 1.5, float32(math.Sin(a) * float64(i%41))},
+			Range: 6,
+			Color: mgl32.Vec3{1, 0.8, 0.6},
+		})
+	}
+	sl := make([]SpotLight, 0, spots)
+	for i := 0; i < spots; i++ {
+		a := float64(i) * 0.41421356
+		sl = append(sl, SpotLight{
+			Pos:   mgl32.Vec3{float32(math.Cos(a) * 12), 5, float32(math.Sin(a) * 12)},
+			Dir:   mgl32.Vec3{0, -1, 0},
+			Range: 14,
+			Color: mgl32.Vec3{1, 0.75, 0.4},
+			Inner: mgl32.DegToRad(18),
+			Outer: mgl32.DegToRad(32),
+		})
+	}
+	e.Scene.SetPointLights(pl)
+	e.Scene.SetSpotLights(sl)
+	return e
+}
+
+func clusterTestCamera() (view, proj mgl32.Mat4) {
+	return mgl32.LookAtV(mgl32.Vec3{0, 3, 18}, mgl32.Vec3{0, 1, 0}, mgl32.Vec3{0, 1, 0}),
+		reverseZProjection(60, 1920.0/1080.0, 0.1, 500)
+}
+
+// TestClusterFrameLightsDoesNotAllocate is the steady-state requirement on the
+// per-frame light path. It runs every frame with however many lights the scene
+// submitted, so an allocation here is an allocation per frame that scales with
+// the light count -- exactly the cost clustering exists to avoid paying.
+//
+// Broken on purpose by gathering into a fresh slice (`lights := []GpuLight{}`
+// in gatherLights instead of e.lightBuf[:0]): 11 allocs/op for 800 lights.
+// The order test below was broken the same way, by uploading in submission
+// order instead of res.Order, and reported the first light that moved.
+func TestClusterFrameLightsDoesNotAllocate(t *testing.T) {
+	e := clusterTestEngine(600, 200)
+	view, proj := clusterTestCamera()
+
+	// Warm up: the buffers grow on the first frames and are reused after, and
+	// it is the reuse this is measuring.
+	uploaded, res := e.clusterFrameLights(view, proj, 1920, 1080)
+	if len(uploaded) == 0 || res.Stats.IndexCount == 0 {
+		t.Fatalf("nothing was binned, so the measurement below means nothing: %+v", res.Stats)
+	}
+
+	if n := testing.AllocsPerRun(20, func() { e.clusterFrameLights(view, proj, 1920, 1080) }); n != 0 {
+		t.Errorf("clusterFrameLights allocates %g times per frame, want 0", n)
+	}
+}
+
+// TestClusterFrameLightsUploadsInBinnerOrder pins the contract between the two
+// halves of the light path: the shader's lights[i] must be the light the cell
+// lists mean by i. Getting this wrong lights the scene with the right number
+// of lights in the wrong places, which is a much harder thing to see than a
+// black screen.
+//
+// It also pins where the cone comes from. spotLightGpuLight can widen cosOuter
+// to keep the shader's smoothstep defined, so the cone the shader evaluates is
+// not always the one the SpotLight asked for, and it is the shader's cone the
+// binner has to bound. Reading the geometry back out of the packed light is
+// what makes those the same number; building it from the SpotLight instead
+// would bound a cone a hair narrower than the one being drawn, and lose a rim
+// of the spot at tile edges.
+func TestClusterFrameLightsUploadsInBinnerOrder(t *testing.T) {
+	e := clusterTestEngine(40, 8)
+	view, proj := clusterTestCamera()
+	uploaded, res := e.clusterFrameLights(view, proj, 1280, 720)
+
+	submitted := e.gatherLights()
+	if len(res.Order) != len(uploaded) {
+		t.Fatalf("Order has %d entries, uploaded %d", len(res.Order), len(uploaded))
+	}
+	if len(uploaded) == 0 {
+		t.Fatal("no lights survived, so the order below is not being checked")
+	}
+	for i, idx := range res.Order {
+		if uploaded[i] != submitted[idx] {
+			t.Fatalf("uploaded[%d] is not submitted[%d]", i, idx)
+		}
+	}
+
+	// Every spot's cone in the binner's input is the packed cone, bit for bit.
+	for i := range submitted {
+		g := e.lightGeomBuf[i]
+		if g.CosOuter != submitted[i].DirCone[3] || g.Dir[0] != submitted[i].DirCone[0] ||
+			g.Dir[1] != submitted[i].DirCone[1] || g.Dir[2] != submitted[i].DirCone[2] {
+			t.Fatalf("light %d: binner cone %v/%g is not the packed cone %v/%g",
+				i, g.Dir, g.CosOuter, submitted[i].DirCone[:3], submitted[i].DirCone[3])
+		}
 	}
 }

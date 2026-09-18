@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"math"
 	"testing"
+
+	"github.com/derekmwright/glyphengine/renderer/lightcluster"
 )
 
 // TestPackLightHeaderLayout pins the LightBuffer header's byte layout against
@@ -11,13 +13,25 @@ import (
 // fields (grid, zParams, screen, flags), including the derived screen.zw =
 // grid.xy / framebuffer size the shader's cluster lookup depends on.
 //
+// The Mapping is built by hand rather than taken from lightcluster.NewMapping,
+// so this stays a test of the byte layout: a change to how the binner derives
+// its slice scale should be caught by that package's tests, not by this one
+// going red for a reason that has nothing to do with bytes.
+//
 // Verified to catch a real mistake: swapping which of screenW/screenH is
 // written to dst[32:36] vs dst[36:40] makes this fail on screen.x/screen.y
 // immediately (720 where 1280 was wanted, and vice versa) rather than
 // passing on a coincidence.
 func TestPackLightHeaderLayout(t *testing.T) {
 	buf := make([]byte, lightHeaderSize)
-	packLightHeader(buf, 16, 9, 24, 200, 1.5, -2.5, 1280, 720, LightFlagHeatmap)
+	m := lightcluster.Mapping{
+		Grid:         lightcluster.Grid{X: 16, Y: 9, Z: 24},
+		ScreenScaleX: 16.0 / 1280,
+		ScreenScaleY: 9.0 / 720,
+		SliceScale:   1.5,
+		SliceBias:    -2.5,
+	}
+	packLightHeader(buf, m, 200, 1280, 720, LightFlagHeatmap)
 
 	u32 := func(off int) uint32 { return binary.LittleEndian.Uint32(buf[off:]) }
 	f32 := func(off int) float32 { return math.Float32frombits(u32(off)) }
@@ -132,42 +146,5 @@ func TestPackCellsAndIndices(t *testing.T) {
 	}
 	if n := packIndices(make([]byte, 4), indices); n != 1 {
 		t.Errorf("packIndices on a 1-uint buffer wrote %d, want 1", n)
-	}
-}
-
-// TestLightZSliceParams checks the two endpoints the log-depth slicing
-// formula in lightZSliceParams is built around: slice(near) == 0 and
-// slice(far) == slices-1. Broken by dropping the "-1" off slices in the
-// scale formula, the far endpoint lands one slice short of the top instead
-// of exactly on it.
-func TestLightZSliceParams(t *testing.T) {
-	slice := func(scale, bias, viewDepth float32) int {
-		s := math.Floor(float64(float32(math.Log(float64(viewDepth)))*scale + bias))
-		return int(s)
-	}
-
-	for _, tc := range []struct {
-		near, far float32
-		slices    uint32
-	}{
-		{0.1, 500, 24},
-		{1, 100, 16},
-	} {
-		scale, bias := lightZSliceParams(tc.near, tc.far, tc.slices)
-		if got := slice(scale, bias, tc.near); got != 0 {
-			t.Errorf("near=%g far=%g: slice(near) = %d, want 0", tc.near, tc.far, got)
-		}
-		if got, want := slice(scale, bias, tc.far), int(tc.slices)-1; got != want {
-			t.Errorf("near=%g far=%g: slice(far) = %d, want %d", tc.near, tc.far, got, want)
-		}
-	}
-
-	// Degenerate input must not send log() into NaN territory -- it should
-	// fall back to the documented default range instead.
-	if scale, bias := lightZSliceParams(0, 0, 24); scale == 0 && bias == 0 {
-		t.Error("degenerate near/far produced a zero scale/bias, want the 0.1/500 fallback")
-	}
-	if scale, _ := lightZSliceParams(-1, 5, 24); math.IsNaN(float64(scale)) {
-		t.Error("negative near produced NaN scale, want the fallback range")
 	}
 }

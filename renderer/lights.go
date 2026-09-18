@@ -3,42 +3,32 @@ package renderer
 import (
 	"encoding/binary"
 	"math"
+
+	"github.com/derekmwright/glyphengine/renderer/lightcluster"
 )
 
 // MaxLights is the maximum number of lights (point + spot combined) the GPU
-// light buffer holds. MaxPointLights is kept as an alias, not a separate
-// constant, so existing code that checked against the old 32-light ceiling
-// gets the raised one for free rather than silently keeping the old cap.
-const MaxLights = 1024
+// light buffer holds.
+//
+// It is lightcluster's budget rather than a second opinion about one: the
+// binner decides which lights survive a frame, and a renderer-side ceiling
+// that disagreed would either waste a buffer or drop lights the binner kept,
+// with nothing to say which had happened.
+const MaxLights = lightcluster.MaxLights
 
 // MaxPointLights is an alias for MaxLights; see the comment there. It exists
 // only for source compatibility with code written against the pre-clustering
-// engine.
+// engine, which capped unshadowed point lights at 32.
 const MaxPointLights = MaxLights
-
-// LightGridX, LightGridY and LightGridZ are the cluster grid's fixed cell
-// counts, not a pixel size, so the light buffers stay the same size across a
-// resize -- only their contents change. These are unmeasured starting
-// values: whoever adds real per-cell light binning should tune them against
-// actual scenes rather than trust them as given.
-const (
-	LightGridX     = 16
-	LightGridY     = 9
-	LightGridZ     = 24
-	LightGridCells = LightGridX * LightGridY * LightGridZ
-)
-
-// MaxLightIndices bounds the flat per-cell light index list a clusterer
-// writes into the LightIndices buffer.
-const MaxLightIndices = 65536
 
 // Light buffer header flag bits (see the uvec4 flags field in
 // shaders/lights.inc).
 const (
 	// LightFlagBruteForce makes the fragment shader loop every uploaded
 	// light and ignore the cluster grid entirely. It is the reference
-	// implementation clustered rendering is compared against, and — until
-	// renderer/lightcluster exists — the only mode that lights anything.
+	// implementation clustered rendering is compared against: both modes
+	// see the same uploaded array in the same order, so a difference
+	// between them is the binning and nothing else. See `task lights`.
 	LightFlagBruteForce uint32 = 1 << 0
 	// LightFlagHeatmap replaces the lit colour with a ramp of each
 	// fragment's cluster cell light count, independent of LightFlagBruteForce.
@@ -65,12 +55,18 @@ const lightHeaderSize = 64
 const lightCellSize = 8
 
 // lightBufferSize, clusterGridBufferSize and lightIndexBufferSize are the
-// fixed sizes of the three storage buffers, sized for the maximums above so
-// they never need to be resized at runtime.
-const (
+// fixed sizes of the three storage buffers. Every one of them comes from
+// lightcluster, which owns the budgets, and they are allocated once: the
+// grid is a cell COUNT rather than a pixel size, so a window resize changes
+// the contents of these buffers and never their size.
+//
+// Variables rather than constants only because lightcluster.DefaultGrid is a
+// var -- it is a tunable the package expects to be changed with a
+// measurement, and the buffers have to follow it rather than pin it.
+var (
 	lightBufferSize       = lightHeaderSize + MaxLights*gpuLightSize
-	clusterGridBufferSize = LightGridCells * lightCellSize
-	lightIndexBufferSize  = MaxLightIndices * 4
+	clusterGridBufferSize = lightcluster.DefaultGrid.Cells() * lightCellSize
+	lightIndexBufferSize  = lightcluster.MaxLightIndices * 4
 )
 
 // GpuLight is one light's 48-byte entry in the LightBuffer SSBO (the GpuLight
@@ -86,34 +82,39 @@ type GpuLight struct {
 }
 
 // LightGridCell is one cell's 8-byte entry in the ClusterGrid SSBO: an offset
-// and count into the LightIndices buffer. renderer/lightcluster produces
-// these; this phase only carries the type and keeps every cell at its zero
-// value (see shadowResources.uploadLights).
-type LightGridCell struct {
-	Offset uint32
-	Count  uint32
-}
+// and count into the LightIndices buffer.
+//
+// An alias, not a copy, because the binner produces these and the renderer
+// only ever copies them to the GPU. A second struct with the same two fields
+// would compile for exactly as long as it took someone to reorder one of
+// them.
+type LightGridCell = lightcluster.Cell
 
 // packLightHeader writes the fixed 64-byte LightBuffer header into dst[:64]:
 // grid dimensions and light count, z-slice parameters, framebuffer size, and
 // flags. Matches the std430 layout in shaders/lights.inc exactly -- four
 // consecutive 16-byte fields, so there is no padding to account for.
 //
-// A plain function on byte slices rather than a method, so the integration
-// phase can call it directly with whatever the clusterer computes, without
-// needing a live Renderer.
-func packLightHeader(dst []byte, gridX, gridY, gridZ, numLights uint32, zScale, zBias, screenW, screenH float32, flags uint32) {
-	binary.LittleEndian.PutUint32(dst[0:4], gridX)
-	binary.LittleEndian.PutUint32(dst[4:8], gridY)
-	binary.LittleEndian.PutUint32(dst[8:12], gridZ)
+// Every number describing the grid comes from the Mapping the binner used for
+// this frame, including screen.zw. Recomputing grid.x/width here would be a
+// second copy of the shader's cell arithmetic, and a copy that rounded the
+// division differently would move light lists a tile sideways -- which looks
+// like a binning bug and is not one.
+//
+// A plain function on byte slices rather than a method, so it can be called
+// with whatever the clusterer produced without needing a live Renderer.
+func packLightHeader(dst []byte, m lightcluster.Mapping, numLights uint32, screenW, screenH float32, flags uint32) {
+	binary.LittleEndian.PutUint32(dst[0:4], uint32(m.Grid.X))
+	binary.LittleEndian.PutUint32(dst[4:8], uint32(m.Grid.Y))
+	binary.LittleEndian.PutUint32(dst[8:12], uint32(m.Grid.Z))
 	binary.LittleEndian.PutUint32(dst[12:16], numLights)
-	binary.LittleEndian.PutUint32(dst[16:20], math.Float32bits(zScale))
-	binary.LittleEndian.PutUint32(dst[20:24], math.Float32bits(zBias))
+	binary.LittleEndian.PutUint32(dst[16:20], math.Float32bits(m.SliceScale))
+	binary.LittleEndian.PutUint32(dst[20:24], math.Float32bits(m.SliceBias))
 	// zParams.z, zParams.w reserved.
 	binary.LittleEndian.PutUint32(dst[32:36], math.Float32bits(screenW))
 	binary.LittleEndian.PutUint32(dst[36:40], math.Float32bits(screenH))
-	binary.LittleEndian.PutUint32(dst[40:44], math.Float32bits(float32(gridX)/screenW))
-	binary.LittleEndian.PutUint32(dst[44:48], math.Float32bits(float32(gridY)/screenH))
+	binary.LittleEndian.PutUint32(dst[40:44], math.Float32bits(m.ScreenScaleX))
+	binary.LittleEndian.PutUint32(dst[44:48], math.Float32bits(m.ScreenScaleY))
 	binary.LittleEndian.PutUint32(dst[48:52], flags)
 	// flags.y, flags.z, flags.w reserved.
 }
@@ -121,9 +122,9 @@ func packLightHeader(dst []byte, gridX, gridY, gridZ, numLights uint32, zScale, 
 // packLights writes lights into dst starting at its beginning -- callers pass
 // the sub-slice after the header, i.e. dst[lightHeaderSize:]. Lights beyond
 // what dst can hold are silently dropped rather than overrunning the buffer;
-// callers that care about the MaxLights ceiling truncate before calling this
-// (see the TODO in Engine.gatherLights), so in practice this bound is never
-// reached. Returns the number of lights written.
+// the binner has already applied the MaxLights budget by the time anything
+// gets here, so in practice this bound is never reached. Returns the number
+// of lights written.
 func packLights(dst []byte, lights []GpuLight) int {
 	n := len(lights)
 	if limit := len(dst) / gpuLightSize; n > limit {
@@ -167,31 +168,4 @@ func packIndices(dst []byte, indices []uint32) int {
 		binary.LittleEndian.PutUint32(dst[i*4:], indices[i])
 	}
 	return n
-}
-
-// lightZSliceParams derives log-depth slicing constants for
-// slice = floor(log(viewDepth)*scale + bias), such that slice(near) == 0 and
-// slice(far) == slices-1. Log rather than linear because most
-// light-occluding detail sits close to the camera, where a linear split
-// would spend most of its slices on the distant, mostly-empty half of the
-// view frustum.
-//
-// This is a placeholder, not something to build on: it slices from the
-// camera's near plane, and a real per-cell light binner may reasonably want
-// its first slice to start further out, since near-plane detail is
-// dominated by geometry a light binner has no reason to distinguish.
-// Whoever adds one should take these numbers from wherever it derives its
-// own slicing rather than assume this function already agrees with it.
-//
-// Falls back to the engine's documented default near/far (0.1/500) for a
-// degenerate input (zero, negative, or far <= near) rather than feeding
-// log() a domain error that would send every fragment's cluster lookup to
-// the same garbage slice.
-func lightZSliceParams(near, far float32, slices uint32) (scale, bias float32) {
-	if near <= 0 || far <= near {
-		near, far = 0.1, 500
-	}
-	scale = float32(slices-1) / float32(math.Log(float64(far/near)))
-	bias = -scale * float32(math.Log(float64(near)))
-	return scale, bias
 }

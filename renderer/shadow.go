@@ -8,6 +8,8 @@ import (
 
 	"github.com/go-gl/mathgl/mgl32"
 	"github.com/vkngwrapper/core/v3/core1_0"
+
+	"github.com/derekmwright/glyphengine/renderer/lightcluster"
 )
 
 const ShadowMapSize = 2048
@@ -52,10 +54,11 @@ type shadowResources struct {
 	lightMemories [maxFramesInFlight]core1_0.DeviceMemory
 	lightMapped   [maxFramesInFlight][]byte
 
-	// clusterGrid and lightIndex are zeroed once at creation and never
-	// written again by this phase -- see uploadLights. Once
-	// renderer/lightcluster exists, the integration phase writes real cell
-	// data into these every frame via packCells/packIndices.
+	// clusterGrid holds one Cell per froxel and lightIndex the concatenated
+	// per-cell light lists; uploadLights rewrites both every frame from what
+	// the binner produced. They are zeroed once at creation so the frames
+	// before the first upload read empty cells rather than whatever the
+	// driver left in host-visible memory.
 	clusterGridBuffers  [maxFramesInFlight]core1_0.Buffer
 	clusterGridMemories [maxFramesInFlight]core1_0.DeviceMemory
 	clusterGridMapped   [maxFramesInFlight][]byte
@@ -377,13 +380,11 @@ func createShadowResources(
 			return nil, fmt.Errorf("frame %d: %w", i, err)
 		}
 
-		// Nothing produces real cluster data yet (no renderer/lightcluster),
-		// and mapped host-visible memory is not guaranteed zeroed by the
-		// driver. Zero once here rather than every frame in uploadLights: an
-		// all-zero Cell{0,0} everywhere is exactly "empty cell", which is
-		// what brute-force mode wants ignored and what heatmap mode should
-		// show as cold until the integration phase starts writing real
-		// counts.
+		// Mapped host-visible memory is not guaranteed zeroed by the driver,
+		// and uploadLights only writes the cells and the index entries the
+		// binner filled. An all-zero Cell{0,0} is exactly "empty cell", so
+		// zeroing once here is what makes the untouched tail of the index
+		// buffer unreachable rather than merely unread.
 		clear(s.clusterGridMapped[i])
 		clear(s.lightIndexMapped[i])
 	}
@@ -820,23 +821,42 @@ func (s *shadowResources) uploadCascadeVPs(frame int, vps [ShadowCascades]mgl32.
 	copy(s.lightVPMapped[frame], src)
 }
 
-// uploadLights writes this frame's light data into the LightBuffer storage
-// buffer the fragment shader reads (see shaders/lights.inc): the 64-byte
-// header, then up to MaxLights GpuLight entries.
+// uploadLights writes this frame's light data into the three storage buffers
+// the fragment shader reads (see shaders/lights.inc): the 64-byte header and
+// the GpuLight array, the per-froxel cells, and the cells' light lists.
 //
-// The cluster grid and light index buffers are not touched here. They were
-// zeroed once at creation (see createShadowResources) and nothing produces
-// real cluster data yet -- brute-force mode ignores them, and until
-// renderer/lightcluster exists there is nothing to re-copy every frame.
-func (s *shadowResources) uploadLights(frame int, lights []GpuLight, flags uint32, near, far float32, extent core1_0.Extent2D) {
+// lights must already be in clusters.Order -- the shader's lights[i] is what
+// the cell lists index. Both come from the same Build, so a frame cannot mix
+// one frame's grid with another's lights.
+//
+// Only clusters.Indices is copied, not the whole index buffer: it is already
+// cut to the entries the cells point at, and the rest was zeroed at creation
+// and is unreachable. At 1024 lights over a dense colony that is 40k entries
+// out of 262144.
+func (s *shadowResources) uploadLights(frame int, lights []GpuLight, clusters *lightcluster.Result, flags uint32, extent core1_0.Extent2D) {
+	buf := s.lightMapped[frame]
+	screenW, screenH := float32(extent.Width), float32(extent.Height)
+
+	if clusters == nil {
+		// No binning means no grid to trust: last frame's cells point into an
+		// index buffer that is about to say something else. Report zero lights
+		// and clear the grid rather than light the scene from a stale list.
+		packLightHeader(buf[:lightHeaderSize], lightcluster.Mapping{Grid: lightcluster.DefaultGrid}, 0, screenW, screenH, flags)
+		clear(s.clusterGridMapped[frame])
+		return
+	}
+
+	// The binner's own budget is MaxLights, so this only bites if a caller
+	// hands over a list it did not bin. Truncating here keeps the header's
+	// count and the array that follows it agreeing, which is what stops the
+	// shader reading past the end.
 	if len(lights) > MaxLights {
 		lights = lights[:MaxLights]
 	}
-	buf := s.lightMapped[frame]
-	zScale, zBias := lightZSliceParams(near, far, LightGridZ)
-	screenW, screenH := float32(extent.Width), float32(extent.Height)
-	packLightHeader(buf[:lightHeaderSize], LightGridX, LightGridY, LightGridZ, uint32(len(lights)), zScale, zBias, screenW, screenH, flags)
+	packLightHeader(buf[:lightHeaderSize], clusters.Mapping, uint32(len(lights)), screenW, screenH, flags)
 	packLights(buf[lightHeaderSize:], lights)
+	packCells(s.clusterGridMapped[frame], clusters.Cells)
+	packIndices(s.lightIndexMapped[frame], clusters.Indices)
 }
 
 // ComputeCascadeVPs computes one orthographic light-space view-projection
