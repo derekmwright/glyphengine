@@ -159,3 +159,119 @@ func cmpStart(s float32) float64 {
 	}
 	return float64(s)
 }
+
+// colonyScene models the consumer game's real camera and light layout, which is
+// what makes the whole-screen fallback matter: an orbit camera over a flat-top
+// hex grid of lamps, where at the zoom a player builds at, the eye sits INSIDE
+// many lamp spheres at once.
+//
+// Hexes of circumradius 1 (neighbours sqrt(3) = 1.732 apart, 2.598 square units
+// each), lamps 0.55 above the ground, an orbit camera looking at the origin, so
+// the eye is distance*sin(pitch) above the ground. At distance 6 and pitch 0.22
+// that is 1.31 up, and a lamp of range 4 reaches it from 3.93 away: 48.5 square
+// units, 19 lamps. That is the case a player spends their time in, not a corner
+// of the parameter space. Field of view 45 degrees, the engine default.
+func colonyScene(lamps int, lampRange, distance, pitch float32) ([]Light, Params) {
+	side := 1
+	for side*side < lamps {
+		side++
+	}
+	const rowStep = 1.7320508 // sqrt(3)
+	lights := make([]Light, 0, lamps)
+	for i := 0; i < lamps; i++ {
+		q := float32(i%side - side/2)
+		r := float32(i/side - side/2)
+		lights = append(lights, Light{
+			Pos:   mgl32.Vec3{1.5 * q, 0.55, rowStep * (r + q/2)},
+			Range: lampRange,
+		})
+	}
+	eye := mgl32.Vec3{
+		0,
+		distance * float32(math.Sin(float64(pitch))),
+		distance * float32(math.Cos(float64(pitch))),
+	}
+	p := Params{
+		View:   mgl32.LookAtV(eye, mgl32.Vec3{0, 0, 0}, mgl32.Vec3{0, 1, 0}),
+		Proj:   reverseZProjection(45, 1920.0/1080.0, 0.1, 500),
+		Width:  1920,
+		Height: 1080,
+		Near:   0.1,
+		Far:    500,
+		Grid:   DefaultGrid,
+	}
+	return lights, p
+}
+
+type colonyCase struct {
+	name            string
+	lampRange       float32
+	distance, pitch float32
+	// wantInside is how many lamps must contain the eye for the scene to still
+	// be the thing it was modelled on. The game measured 19, 6 and 42 for
+	// these three; zoomed out the eye is above every lamp's reach, which is
+	// the case the refinement should NOT be paying for.
+	wantInside int
+}
+
+var colonyCases = []colonyCase{
+	{"r4 d6 p0.22", 4, 6, 0.22, 15},  // minimum zoom and pitch: eye 1.31 up
+	{"r4 d9 p0.45", 4, 9, 0.45, 5},   // default play distance: eye 3.91 up
+	{"r4 d16 p0.45", 4, 16, 0.45, 0}, // zoomed out: eye 6.96 up, nothing reaches it
+	{"r6 d6 p0.22", 6, 6, 0.22, 35},  // the same camera with a longer lamp range
+}
+
+func BenchmarkBuildColony(b *testing.B) {
+	for _, c := range colonyCases {
+		b.Run(c.name, func(b *testing.B) {
+			lights, p := colonyScene(400, c.lampRange, c.distance, c.pitch)
+			builder := New()
+			res := builder.Build(lights, p)
+			avg := 0.0
+			if res.Stats.NonEmptyCells > 0 {
+				avg = float64(res.Stats.TotalCellLights) / float64(res.Stats.NonEmptyCells)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				builder.Build(lights, p)
+			}
+			b.StopTimer()
+			b.ReportMetric(avg, "lights/cell")
+			b.ReportMetric(float64(res.Stats.MaxCellDemand), "max-lights/cell")
+			b.ReportMetric(float64(res.Stats.ScreenWideLights), "screenwide")
+			b.ReportMetric(float64(res.Stats.IndexCount), "indices")
+		})
+	}
+}
+
+// TestColonyOccupancy is the measurement the froxel refinement has to justify
+// itself against, and the check that the scene still reproduces the camera it
+// was modelled on. Run it with -v.
+func TestColonyOccupancy(t *testing.T) {
+	t.Logf("%-14s %6s %5s %10s %8s %6s %6s %8s %8s",
+		"camera", "eye up", "in", "eye-inside", "avg/cell", "max", "wide", "nonempty", "indices")
+	for _, c := range colonyCases {
+		lights, p := colonyScene(400, c.lampRange, c.distance, c.pitch)
+		res := New().Build(lights, p)
+		eye := cameraPosition(p.View)
+		inside := 0
+		for _, l := range lights {
+			if l.Pos.Sub(eye).Len() <= l.Range {
+				inside++
+			}
+		}
+		avg := 0.0
+		if res.Stats.NonEmptyCells > 0 {
+			avg = float64(res.Stats.TotalCellLights) / float64(res.Stats.NonEmptyCells)
+		}
+		t.Logf("%-14s %6.2f %5d %10d %8.2f %6d %6d %8d %8d",
+			c.name, eye[1], res.Stats.Uploaded, inside, avg,
+			res.Stats.MaxCellDemand, res.Stats.ScreenWideLights,
+			res.Stats.NonEmptyCells, res.Stats.IndexCount)
+		if inside < c.wantInside {
+			t.Errorf("%s: only %d lamps contain the eye, want at least %d; this scene "+
+				"has stopped reproducing the camera it was built from", c.name, inside, c.wantInside)
+		}
+	}
+}
