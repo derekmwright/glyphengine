@@ -22,7 +22,7 @@ struct GpuLight {            // 48 bytes, std430
 
 layout(std430, set = LIGHT_SET, binding = 3) readonly buffer LightBuffer {
     uvec4 grid;      // x,y,z cluster counts; w = number of lights in lights[]
-    vec4  zParams;   // x = slice scale, y = slice bias, z,w reserved
+    vec4  zParams;   // x = slice scale, y = slice bias, z = per-cell light cap, w reserved
     vec4  screen;    // x,y framebuffer px; z,w = grid.xy / framebuffer px
     uvec4 flags;     // x bit0 = brute force, bit1 = debug heatmap; y,z,w reserved
     GpuLight lights[];
@@ -53,8 +53,15 @@ uint cellLightCount(vec2 fragCoordXY, float viewDepth) {
 // lightHeatmap is a plain blue -> green -> red ramp of a cell's light count.
 // It exists to answer "which cells are hot", not to look good, so it stays
 // this simple rather than chasing a perceptually uniform ramp.
+//
+// Full scale is zParams.z, the per-cell cap: red means the cell is at the
+// point where it starts dropping lights, and that is the only reading worth
+// colouring by. A fixed full scale of 16 looked right against an empty grid
+// and is useless against a filled one -- a floor of 400 short-range lamps
+// peaks at 67 lights in a cell and a ring of 1024 long-range ones at the cap
+// itself, so everything but the sky came back saturated red.
 vec3 lightHeatmap(uint count) {
-    float t = clamp(float(count) / 16.0, 0.0, 1.0);
+    float t = clamp(float(count) / max(lb.zParams.z, 1.0), 0.0, 1.0);
     vec3 lo = vec3(0.0, 0.0, 1.0);
     vec3 mid = vec3(0.0, 1.0, 0.0);
     vec3 hi = vec3(1.0, 0.0, 0.0);

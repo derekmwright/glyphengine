@@ -54,6 +54,9 @@ func TestPackLightHeaderLayout(t *testing.T) {
 	if got := f32(20); got != -2.5 {
 		t.Errorf("zParams.y (bias) = %g, want -2.5", got)
 	}
+	if got, want := f32(24), float32(lightcluster.MaxLightsPerCell); got != want {
+		t.Errorf("zParams.z (per-cell cap) = %g, want %g", got, want)
+	}
 	if got := f32(32); got != 1280 {
 		t.Errorf("screen.x = %g, want 1280", got)
 	}
