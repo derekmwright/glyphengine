@@ -18,6 +18,15 @@ const DefaultGravity = float32(20.0)
 type System func(s *Scene, dt float32)
 
 // PointLight describes an unshadowed point light for the renderer.
+//
+// Scatter as many as the scene wants. They are binned into a view-space
+// froxel grid every frame (renderer/lightcluster), so a fragment evaluates
+// the lights whose range reaches it rather than every light in the scene, and
+// Range is what decides that -- a light with a range far larger than it
+// visibly needs is a light in every cell it crosses. renderer.MaxLights is
+// the ceiling on how many reach the GPU in one frame; past it the binner
+// drops the ones furthest from lighting anything and says so in
+// Engine.LightStats.
 type PointLight struct {
 	Pos   mgl32.Vec3
 	Range float32
@@ -252,17 +261,22 @@ func (s *Scene) SetPointLight(pos, color mgl32.Vec3, r float32) {
 }
 
 // SetPointLights sets the unshadowed point lights. Combined with the spot
-// lights (see SetSpotLights), the renderer uses at most renderer.MaxLights of
-// them; renderer.MaxPointLights is kept as an alias for renderer.MaxLights,
-// which is why this doc still names it.
+// lights (see SetSpotLights), at most renderer.MaxLights of them reach the
+// GPU in a frame; the rest are dropped nearest-surface-last and counted in
+// Engine.LightStats. renderer.MaxPointLights is an alias for the same number
+// and no longer the 32 it once was.
+//
+// The slice is not copied. Reusing one buffer across frames is the way to
+// drive hundreds of lights without allocating for them.
 func (s *Scene) SetPointLights(lights []PointLight) { s.pointLights = lights }
 
 // PointLights returns the current unshadowed point lights.
 func (s *Scene) PointLights() []PointLight { return s.pointLights }
 
 // SetSpotLights sets the unshadowed spot lights. Combined with the point
-// lights, the renderer uses at most renderer.MaxLights of them, points first
-// then spots -- see Engine.gatherLights.
+// lights, at most renderer.MaxLights of them reach the GPU in a frame, points
+// first then spots -- see Engine.gatherLights. Not copied, like
+// SetPointLights.
 func (s *Scene) SetSpotLights(lights []SpotLight) { s.spotLights = lights }
 
 // SpotLights returns the current unshadowed spot lights.
