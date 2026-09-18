@@ -203,6 +203,11 @@ tasks:
         check 21-streetlights -off
         check 21-streetlights -lamps 300
         check 21-streetlights -lightdebug heatmap
+        # The night grade setter. Strength 0 takes atmNightShift's early-out
+        # and a custom tint takes the other branch, so between them the two
+        # cover both sides of it with a uniform the layer can object to.
+        check 21-streetlights -nightshift 0
+        check 21-streetlights -nighttint 1.30,0.86,0.72
         exit $status
 
   sky:
