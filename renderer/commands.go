@@ -10,17 +10,6 @@ import (
 	"github.com/vkngwrapper/core/v3/core1_0"
 )
 
-// MaxPointLights is the maximum number of unshadowed point lights supported.
-const MaxPointLights = 32
-
-// PointLightData matches the GLSL struct layout: vec4 posRange + vec4 color = 32 bytes.
-type PointLightData struct {
-	Pos   [3]float32
-	Range float32
-	Color [3]float32
-	Pad   float32
-}
-
 // SceneLighting holds global lighting parameters passed via push constants.
 type SceneLighting struct {
 	SunDir      [3]float32  // direction toward the sun (normalized)
@@ -81,8 +70,19 @@ type SceneLighting struct {
 	CascadeVPs    [ShadowCascades]mgl32.Mat4 // per-cascade light view-projections for shadow mapping
 	ShadowEnabled bool                       // true when the sun is above the horizon
 
-	PointLights     [MaxPointLights]PointLightData // unshadowed point lights
-	PointLightCount int                            // number of active unshadowed point lights (0..32)
+	// Lights are the unshadowed point + spot lights for the GPU light buffer
+	// (see shaders/lights.inc), points first then spots, truncated to at
+	// most MaxLights -- see Engine.gatherLights for the TODO naming who owns
+	// overflow once a real clusterer exists.
+	Lights []GpuLight
+	// LightFlags is the header flag word: bit0 = brute force, bit1 = debug
+	// heatmap. See Engine.SetLightDebugMode.
+	LightFlags uint32
+	// Near and Far are the camera's projection planes, needed to derive the
+	// cluster grid's log-depth z-slicing (see lightZSliceParams). Not read
+	// for anything else -- the shader's own depth math is independent of
+	// them (reverse-Z: viewDepth = 1/gl_FragCoord.w).
+	Near, Far float32
 
 	FogDensity float32 // exp² distance fog density (0 disables fog)
 }

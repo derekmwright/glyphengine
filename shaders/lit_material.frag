@@ -41,11 +41,8 @@ layout(set = 1, binding = 0) uniform ShadowData {
 layout(set = 1, binding = 1) uniform sampler2DArrayShadow shadowMap;
 layout(set = 1, binding = 2) uniform samplerCube pointShadowMap;
 
-struct UPointLight { vec4 posRange; vec4 color; };
-layout(set = 1, binding = 3) uniform LightBlock {
-    int numLights;
-    UPointLight lights[32];
-} lb;
+// Clustered light data (points + spots) at set 1, bindings 3-5; see lights.inc.
+#define LIGHT_SET 1
 
 layout(push_constant) uniform PushConstants {
     mat4 mvp;
