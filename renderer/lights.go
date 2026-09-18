@@ -110,7 +110,13 @@ func packLightHeader(dst []byte, m lightcluster.Mapping, numLights uint32, scree
 	binary.LittleEndian.PutUint32(dst[12:16], numLights)
 	binary.LittleEndian.PutUint32(dst[16:20], math.Float32bits(m.SliceScale))
 	binary.LittleEndian.PutUint32(dst[20:24], math.Float32bits(m.SliceBias))
-	// zParams.z, zParams.w reserved.
+	// zParams.z is the per-cell light cap, which only the debug heatmap reads:
+	// it is the count at which a cell starts dropping lights, so it is the only
+	// number that makes the ramp mean something rather than look alarming. Sent
+	// rather than written into the shader because a constant copied into GLSL
+	// is a constant that will disagree with Go the first time it is tuned.
+	binary.LittleEndian.PutUint32(dst[24:28], math.Float32bits(float32(lightcluster.MaxLightsPerCell)))
+	// zParams.w reserved.
 	binary.LittleEndian.PutUint32(dst[32:36], math.Float32bits(screenW))
 	binary.LittleEndian.PutUint32(dst[36:40], math.Float32bits(screenH))
 	binary.LittleEndian.PutUint32(dst[40:44], math.Float32bits(m.ScreenScaleX))
