@@ -57,11 +57,26 @@ void main() {
     // the opaque pipelines -- which do not blend anyway -- keep writing 1.
     float alpha = pc.sunDir.w > 0.0 ? pc.sunDir.w : 1.0;
 
-    // Emissive early-out: tint.w > 0 bypasses lighting (used for moon disc etc.)
+    // Emissive early-out: tint.w > 0 bypasses lighting entirely.
     //
-    // Alpha still applies here. A full-bright translucent object is the
-    // placement ghost this pass exists for, so the two compose rather than one
-    // winning.
+    // NOT the moon disc, whatever this comment used to say: the celestial
+    // pipeline is built from mesh.vert/mesh.frag (see createCelestialPipeline),
+    // as are the overlays. What reaches here is a world-space mesh tagged
+    // Emissive -- a bulb, a fixture marker -- and a full-bright translucent
+    // object, which is the placement ghost the translucent pass exists for, so
+    // alpha still applies and the two compose rather than one winning.
+    //
+    // Bypassing applyFog means bypassing the night shift too, which is the
+    // same answer material_shading.inc reaches by counting emission as local
+    // light: a glowing surface keeps its colour at night. It also means no
+    // fog, which is the one place the two paths still differ -- the material
+    // path fogs its emission on the argument that air scatters emitted light
+    // like any other, and that argument holds here too. Measured before
+    // leaving it alone: routing this through applyFog moves 256 pixels by one
+    // 8-bit step in 21-streetlights, the only example with both fog and
+    // emissive meshes, because the camera sits well above the fog base and
+    // `amount` comes out at 0.18. Worth revisiting for a game with thick fog
+    // at eye level; not worth a behaviour change for one LSB here.
     if (pc.tint.w > 0.0) {
         outColor = vec4(baseColor, alpha);
         return;
