@@ -34,6 +34,7 @@ type Builder struct {
 	cand   []candidate
 	boxes  []cellBox
 	counts []uint32
+	bounds froxelBounds
 	grid   Grid // grid the buffers are sized for
 }
 
@@ -46,8 +47,14 @@ type candidate struct {
 	radius float32
 }
 
-// cellBox is the inclusive froxel range a light was bound to.
+// cellBox is the inclusive froxel range a light was bound to. It is the range
+// the sphere-against-cell test is run over, not the set of cells the light ends
+// up in.
 type cellBox struct{ x0, x1, y0, y1, z0, z1 int32 }
+
+func (b cellBox) cells() int {
+	return int(b.x1-b.x0+1) * int(b.y1-b.y0+1) * int(b.z1-b.z0+1)
+}
 
 // New returns a Builder sized for DefaultGrid. It grows on the first Build
 // with a larger grid or more lights than it has seen, and allocates nothing
@@ -86,6 +93,7 @@ func (b *Builder) Build(lights []Light, p Params) *Result {
 	p = p.normalized()
 	m := NewMapping(p)
 	b.reserve(p.Grid)
+	b.bounds.update(p, m)
 
 	res := &b.res
 	res.Mapping = m
@@ -156,20 +164,18 @@ func (b *Builder) Build(lights []Light, p Params) *Result {
 	bn := newBinner(m, p)
 	b.boxes = b.boxes[:0]
 	for i := range kept {
-		box, wide := bn.box(kept[i].center, float64(kept[i].radius))
-		if wide {
-			res.Stats.ScreenWideLights++
+		box, unbounded := bn.box(kept[i].center, float64(kept[i].radius))
+		if unbounded {
+			res.Stats.UnboundedLights++
 		}
 		b.boxes = append(b.boxes, box)
 		res.Order = append(res.Order, kept[i].index)
-		for z := box.z0; z <= box.z1; z++ {
-			for y := box.y0; y <= box.y1; y++ {
-				base := int(z)*m.Grid.X*m.Grid.Y + int(y)*m.Grid.X
-				for x := box.x0; x <= box.x1; x++ {
-					b.counts[base+int(x)]++
-				}
-			}
+		binned, wide := b.bin(i, box, kept[i].center, kept[i].radius, false)
+		if wide {
+			res.Stats.ScreenWideLights++
 		}
+		res.Stats.CellsTested += box.cells()
+		res.Stats.CellsBinned += binned
 	}
 	res.Stats.Uploaded = len(res.Order)
 
@@ -223,22 +229,99 @@ func (b *Builder) Build(lights []Light, p Params) *Result {
 	// cursor; it has done its job by now.
 	clear(b.counts)
 	for li := range b.boxes {
-		box := &b.boxes[li]
-		for z := box.z0; z <= box.z1; z++ {
-			for y := box.y0; y <= box.y1; y++ {
-				base := int(z)*m.Grid.X*m.Grid.Y + int(y)*m.Grid.X
-				for x := box.x0; x <= box.x1; x++ {
-					i := base + int(x)
-					c := &res.Cells[i]
-					if b.counts[i] < c.Count {
-						res.Indices[c.Offset+b.counts[i]] = uint32(li)
-						b.counts[i]++
-					}
-				}
-			}
-		}
+		b.bin(li, b.boxes[li], kept[li].center, kept[li].radius, true)
 	}
 	return res
+}
+
+// bin walks the cells of one light's candidate box and, for each cell the
+// light's sphere actually reaches, either counts it (fill false) or writes the
+// light into it (fill true). It returns how many cells the light landed in and
+// whether it landed in every tile of some slice.
+//
+// One function for both passes rather than two loops that must agree: they have
+// to visit exactly the same cells in the same order, or a cell would be
+// reserved for one light and filled by another, and nothing about that would
+// look wrong until a light appeared in the wrong place. The fill flag is loop
+// invariant, so the branch costs nothing measurable.
+//
+// The cell test is a sphere against the cell's view-space bounding box, which
+// contains the froxel, so a cell the sphere really touches is never rejected.
+// The axis distances accumulate outside in, which lets a whole slice or a whole
+// row drop out on one comparison: for a light containing the eye that is most
+// of the work, because it reaches everything in the near slices and nothing at
+// the sides of the far ones.
+func (b *Builder) bin(li int, box cellBox, center mgl32.Vec3, radius float32, fill bool) (binned int, wide bool) {
+	g := b.bounds.grid
+	tiles := g.X * g.Y
+	r2 := radius * radius
+	cx, cy, cz := center[0], center[1], center[2]
+
+	for z := int(box.z0); z <= int(box.z1); z++ {
+		dz2 := axisDistanceSquared(cz, b.bounds.z[z])
+		if dz2 > r2 {
+			continue
+		}
+		// One slice of the extents, hoisted: this is the difference between an
+		// index multiply and two bounds checks per cell and none.
+		xs := b.bounds.x[z*g.X : (z+1)*g.X : (z+1)*g.X]
+		ys := b.bounds.y[z*g.Y : (z+1)*g.Y : (z+1)*g.Y]
+
+		inSlice := 0
+		for y := int(box.y0); y <= int(box.y1); y++ {
+			d2 := dz2 + axisDistanceSquared(cy, ys[y])
+			if d2 > r2 {
+				continue
+			}
+			// Columns run left to right and do not overlap except by the pixel
+			// margin, so the distance to them falls and then rises and the ones
+			// the sphere reaches are a contiguous run. Walking in from both
+			// ends finds that run in (rejected + 2) tests instead of testing
+			// every column: in the colony scene two thirds of the candidates
+			// are accepted, so testing each one was paying most of the cost to
+			// answer yes.
+			//
+			// The obvious next step -- narrow the slice's column range once
+			// before walking its rows, so nine rows do not each rediscover the
+			// same rejected columns -- was written and thrown away. Three
+			// interleaved rounds: the colony scene went 541 to 518 us (inside a
+			// spread of 447 to 637) and BenchmarkBuildPathological/1024 went
+			// 9.0 to 11.7 ms, consistently. It buys noise and costs 30% of the
+			// ceiling, most likely to register pressure in this loop, since
+			// nothing stopped being inlined.
+			lo, hi := int(box.x0), int(box.x1)
+			for lo <= hi && d2+axisDistanceSquared(cx, xs[lo]) > r2 {
+				lo++
+			}
+			for hi > lo && d2+axisDistanceSquared(cx, xs[hi]) > r2 {
+				hi--
+			}
+			if lo > hi {
+				continue
+			}
+			base := z*tiles + y*g.X
+			if fill {
+				for x := lo; x <= hi; x++ {
+					i := base + x
+					c := &b.res.Cells[i]
+					if k := b.counts[i]; k < c.Count {
+						b.res.Indices[c.Offset+k] = uint32(li)
+						b.counts[i] = k + 1
+					}
+				}
+			} else {
+				for x := lo; x <= hi; x++ {
+					b.counts[base+x]++
+				}
+			}
+			inSlice += hi - lo + 1
+		}
+		binned += inSlice
+		if inSlice == tiles {
+			wide = true
+		}
+	}
+	return binned, wide
 }
 
 // compareCandidates is the priority order: nearest surface first, ties broken

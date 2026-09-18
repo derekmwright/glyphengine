@@ -330,12 +330,24 @@ type Stats struct {
 	TotalCellLights int
 	// IndexCount is len(Indices).
 	IndexCount int
-	// ScreenWideLights counts lights whose screen bound had to widen to the
-	// whole framebuffer: either they reach past the near plane or the
-	// projection was not a plain perspective. Each one lands in every column
-	// and row of its depth slices, so a large number here means the binner is
-	// doing much less than it looks like it is doing.
+
+	// ScreenWideLights counts lights that ended up in every tile of at least
+	// one slice, which is measured from what was binned rather than from what
+	// was attempted. Those are the lights every fragment in that slice
+	// evaluates, so this is the number that says how much of the every-light
+	// loop is still there.
 	ScreenWideLights int
+	// UnboundedLights counts lights whose screen rectangle could not be
+	// computed — they reach past the near plane, contain the eye, or the
+	// projection is not a plain perspective — so every tile became a candidate
+	// and the cell test had to sort it out. High is expected for a camera down
+	// among its lights; it only costs time if ScreenWideLights is high too.
+	UnboundedLights int
+	// CellsTested and CellsBinned are the candidate cells and the cells the
+	// lights actually reached. The gap between them is what the cell test
+	// removes, and a ratio near 1 means it is not earning its place.
+	CellsTested int
+	CellsBinned int
 }
 
 // Result is the binning of one frame. Every slice points into the Builder's
