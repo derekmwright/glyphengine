@@ -62,7 +62,10 @@ const lightCellSize = 8
 //
 // Variables rather than constants only because lightcluster.DefaultGrid is a
 // var -- it is a tunable the package expects to be changed with a
-// measurement, and the buffers have to follow it rather than pin it.
+// measurement, and the buffers have to follow it rather than pin it. They
+// read it at package init, which is before any game's main can run, so
+// editing the constant sizes these correctly and assigning to it at runtime
+// would not.
 var (
 	lightBufferSize       = lightHeaderSize + MaxLights*gpuLightSize
 	clusterGridBufferSize = lightcluster.DefaultGrid.Cells() * lightCellSize
