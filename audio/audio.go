@@ -12,10 +12,24 @@ package audio
 // CI link it and turned an undefined reference into a failure.
 #cgo linux LDFLAGS: -lm -ldl -lpthread
 
-// CoreAudio and its friends, per miniaudio's own build notes. Not verified on
-// a Mac -- there is none to hand -- but without them the package cannot link
-// there either, for the same reason it could not on Linux.
-#cgo darwin LDFLAGS: -framework CoreFoundation -framework CoreAudio -framework AudioToolbox
+// macOS deliberately gets nothing here. miniaudio runtime-links CoreAudio
+// through dlopen and documents the platform as compiling "without the need to
+// download any dependencies nor link to any libraries or frameworks", and
+// libSystem already provides libm and pthread. An earlier version of this block
+// added -framework CoreFoundation/CoreAudio/AudioToolbox on the assumption that
+// macOS would fail to link the way Linux did. It would not, and the frameworks
+// did nothing: they are only required alongside -DMA_NO_RUNTIME_LINKING, which
+// is not set.
+//
+// That claim was disproved by a report that predates it -- issue #29 is a crash
+// fifteen seconds into ambient playback on an M5 Pro, which means the package
+// linked and played on macOS with none of this.
+//
+// MA_NO_RUNTIME_LINKING plus those three frameworks is the configuration a
+// shipping game wants, because Apple's notarization rejects the dlopen path
+// (miniaudio.h:485). That is a deliberate change with a behavioural difference,
+// not a link fix, and it should be made when someone is notarizing a build and
+// can verify it.
 
 #cgo windows LDFLAGS: -lole32
 #include "miniaudio.h"
