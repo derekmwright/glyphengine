@@ -263,16 +263,11 @@ func createWaterRenderPass(deviceDriver core1_0.DeviceDriver, imageFormat core1_
 	renderPass, _, err := deviceDriver.CreateRenderPass(nil, core1_0.RenderPassCreateInfo{
 		Attachments: attachments,
 		Subpasses:   subpasses,
-		SubpassDependencies: []core1_0.SubpassDependency{{
-			// Wait for the copy that produced the refraction source before any
-			// fragment shader here samples it.
-			SrcSubpass:    core1_0.SubpassExternal,
-			DstSubpass:    0,
-			SrcStageMask:  core1_0.PipelineStageTransfer | core1_0.PipelineStageColorAttachmentOutput | core1_0.PipelineStageLateFragmentTests,
-			DstStageMask:  core1_0.PipelineStageFragmentShader | core1_0.PipelineStageColorAttachmentOutput | core1_0.PipelineStageEarlyFragmentTests,
-			SrcAccessMask: core1_0.AccessTransferWrite | core1_0.AccessColorAttachmentWrite | core1_0.AccessDepthStencilAttachmentWrite,
-			DstAccessMask: core1_0.AccessShaderRead | core1_0.AccessColorAttachmentRead | core1_0.AccessColorAttachmentWrite | core1_0.AccessDepthStencilAttachmentRead,
-		}},
+		// Waits for the copy that produced the refraction source before any
+		// fragment shader here samples it — and is shared with the scene pass
+		// rather than written here, because the blended pipelines are created
+		// against that pass and bound inside this one. See sceneEntryDependency.
+		SubpassDependencies: []core1_0.SubpassDependency{sceneEntryDependency()},
 	})
 	if err != nil {
 		return core1_0.RenderPass{}, err
