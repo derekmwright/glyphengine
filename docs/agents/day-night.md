@@ -28,7 +28,7 @@ requires:
 assets: none
 example: examples/09-water
 run: go run ./09-water -time 0.78
-verified: 2026-09-16
+verified: 2026-09-18
 ---
 
 # Day/night cycle
@@ -113,7 +113,7 @@ Do not compare `TimeOfDay` against 0.25/0.75 to decide which is up. That is what
 the old model did, and it put the swap at a clock boundary where the light was
 still bright. Use `SunAboveHorizon()`, which now tests actual elevation.
 
-## Night is desaturated, not merely dim
+## Night is desaturated, not merely dim — except under a lamp
 
 `atmNightShift` in `atmosphere.inc` blends surface colours toward a blue-shifted
 grey as daylight goes, applied inside `applyFog` because every lit shader calls
@@ -126,6 +126,40 @@ dusk that never finishes rather than night.
 
 Moonlight is correspondingly weak. It started at roughly a sixth of the sun's
 intensity, which is where that inversion came from.
+
+**How much it applies is not a function of the hour alone.** Rods taking over is
+a statement about how much light reaches the eye from a *surface*, and a doorstep
+under a lamp is not dark. So `lighting.inc` records, per fragment, how much
+luminance arrived from local lights — the clustered point and spot lights plus
+the shadowed point light in the push constants — against how much came from the
+sun or moon, ambient and the fog, and `applyFog` passes `atmNightShift` that
+share as a third argument. The blend is scaled by `1 - share`, which is the same
+thing as mixing the shifted colour back toward the unshifted one and keeps a
+single early-out covering both "it is daytime" and "this is lamplight".
+
+Two consequences worth knowing:
+
+- **A scene with no local lights is bit-for-bit unaffected.** The share is
+  exactly `0.0` when nothing local contributed, and `night * (1 - 0)` is `night`.
+  That is the property the weighting was chosen for: every example in the
+  `screenshots` target plus eleven night and dusk scenes render byte-identical
+  across the change, all but `11-lights` and `21-streetlights`.
+- **Fog is inside the ratio.** What fog mixes in is scattered skylight, so a pool
+  far enough away to have faded into the haze stops counting as local and takes
+  the same full shift the sky does. Lamps do not punch warm holes in blue fog.
+
+Before this, the blend keyed on `sunY` alone, and at full night it was provably
+one-sided: expanding it gives `g - b = 0.2*(c.g - c.b) - 0.352*luminance(c)`, and
+the right-hand term wins for every colour with no negative channel. A warm lamp
+could not produce red > green > blue on any surface at any intensity.
+`21-streetlights` had been worked around with a saturated red light over a
+purpose-built dirt patch and still read pink. `task nightlight` is the gate; see
+`cmd/lampcheck` for the ablation that shows it fails when the weighting goes.
+
+`water.frag` is the one lit shader that does not participate: it shades its own
+surface rather than calling either `evalLighting*`, so it takes no local lights
+at all and its share is always zero. Giving water lamp highlights is a separate
+change, and it would start there.
 
 ## Changing the sky's appearance
 
@@ -155,6 +189,11 @@ The clear colour behind it is `Environment.ClearColor`, and is only seen when
   water's reflection. `Twilight()` and `atmTwilight` have drifted apart.
 - **Editing the star fade changes nothing.** It lives in Go, not in GLSL —
   `StarVisibility()`, not `atmosphere.inc`. See [stars](stars.md).
+- **A warm lamp reads cold at night.** The night shift is not being told the
+  fragment is lamplit. Either the shader shades without going through
+  `evalLighting`/`evalLightingAO`/`evalLightingDiffuse` — water does, on
+  purpose — or the light is not in the local set: the directional light is the
+  moon after dusk and counts as sky, however warm it is made.
 
 ## Watching it happen
 
