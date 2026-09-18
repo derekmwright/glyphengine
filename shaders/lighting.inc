@@ -115,6 +115,18 @@ float lightLum(vec3 c) {
 float lightLocalLum = 0.0;
 float lightSkyLum = 0.0;
 
+// Set when this fragment's colour is the debug heatmap rather than a surface,
+// so applyFog hands it back untouched.
+//
+// A froxel occupancy readout is a number drawn in false colour, not something
+// the air is between the eye and, and it was being fogged and blue-shifted
+// like anything else: at midnight the ramp came back a uniform indigo with
+// the red end indistinguishable from the blue end, which is the one time the
+// view is worth opening. Neither producer below sets this in normal shading,
+// so nothing else changes -- water.frag never calls them at all and keeps
+// exactly the shading it had in every mode.
+bool lightDebugReadout = false;
+
 // nightLocalShare is the fraction of the light leaving this fragment toward
 // the eye that came from a lamp. atmNightShift backs its scotopic blend off by
 // exactly this much.
@@ -178,6 +190,10 @@ float nightLocalShare(float fogAmount, vec3 fogCol) {
 //
 // Density rides in pc.cameraPos.w; zero disables fog.
 vec3 applyFog(vec3 color, vec3 worldPos) {
+    if (lightDebugReadout) {
+        return color;
+    }
+
     float density = pc.cameraPos.w;
     if (density <= 0.0) {
         return atmNightShift(color, pc.sunColor.w, nightLocalShare(0.0, vec3(0.0)), shadow.nightGrade);
@@ -250,6 +266,7 @@ vec3 evalLightingAO(vec3 diffuseColor, vec3 F0, float shininess,
     // regardless of the brute-force bit, since the point of the view is to
     // see what binning produced.
     if ((lb.flags.x & 2u) != 0u) {
+        lightDebugReadout = true;
         return lightHeatmap(cellLightCount(gl_FragCoord.xy, viewDepth));
     }
 
@@ -346,6 +363,7 @@ vec3 evalLighting(vec3 diffuseColor, vec3 F0, float shininess,
 vec3 evalLightingDiffuse(vec3 diffuseColor, vec3 N, vec3 worldPos, vec3 shadowPos) {
     float viewDepth = 1.0 / gl_FragCoord.w;
     if ((lb.flags.x & 2u) != 0u) {
+        lightDebugReadout = true;
         return lightHeatmap(cellLightCount(gl_FragCoord.xy, viewDepth));
     }
 
