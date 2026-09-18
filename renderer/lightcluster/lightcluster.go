@@ -55,9 +55,9 @@ import (
 // Stats.DroppedOverBudget, so the loss is visible rather than silent.
 //
 // 1024 lights at 48 bytes is a 48 KB storage buffer, which is nothing, and
-// BenchmarkBuild bins 1024 submitted lights in 81 us on a Ryzen 9 5900X. The
-// ceiling exists so the buffers can be sized once at startup, not because the
-// cost demands it.
+// BenchmarkBuild bins 1024 submitted lights in 86 us on a Ryzen 9 5900X
+// (median of five runs, spread 80 to 91). The ceiling exists so the buffers
+// can be sized once at startup, not because the cost demands it.
 const MaxLights = 1024
 
 // MaxLightsPerCell caps one cell's light list, and so caps the shader's inner
