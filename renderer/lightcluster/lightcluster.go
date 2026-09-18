@@ -48,7 +48,7 @@
 // # Scope
 //
 // Pure Go, no Vulkan and no cgo: this package must build and test on a machine
-// with no GPU, because the oracle test in lightcluster_test.go is the only
+// with no GPU, because the oracle test in oracle_test.go is the only
 // cheap check that binning is conservative.
 package lightcluster
 

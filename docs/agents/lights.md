@@ -1,13 +1,13 @@
 ---
 id: lights
-title: Clustered unshadowed lights
+title: Light a scene with hundreds of point and spot lights
 summary: >
-  Scatter hundreds of point and spot lights around a scene. Each frame they are
-  binned into a view-space froxel grid, so a fragment only evaluates the lights
-  whose range reaches it rather than every light in the scene.
+  Unshadowed point and spot lights are binned every frame into a view-space
+  froxel grid, so a fragment evaluates the lights that reach it rather than
+  every light in the scene. Up to 1024 reach the GPU per frame.
 capability: lighting
 status: stable
-since: v0.6.0
+since: v0.5.0
 api:
   - glyphengine.PointLight
   - glyphengine.SpotLight
@@ -15,21 +15,20 @@ api:
   - glyphengine.Scene.SetSpotLights
   - glyphengine.Scene.PointLights
   - glyphengine.Scene.SpotLights
-  - glyphengine.NightGrade
-  - glyphengine.Scene.SetNightGrade
-  - glyphengine.Scene.NightGrade
   - glyphengine.Engine.LightStats
   - glyphengine.LightDebugMode
   - glyphengine.LightDebugOff
   - glyphengine.LightDebugHeatmap
   - glyphengine.LightDebugBruteForce
   - glyphengine.Engine.SetLightDebugMode
-  - renderer.lightcluster.MaxLights
-  - renderer.lightcluster.MaxLightsPerCell
-  - renderer.lightcluster.MaxLightIndices
-  - renderer.lightcluster.Stats
-example: examples/11-lights
-run: task example:11-lights
+  - renderer.MaxLights
+  - renderer.MaxPointLights
+  - lightcluster.MaxLights
+  - lightcluster.MaxLightsPerCell
+  - lightcluster.MaxLightIndices
+  - lightcluster.Stats
+example: examples/21-streetlights
+run: task example:21-streetlights
 requires:
   - cgo
   - vulkan-runtime
@@ -37,280 +36,205 @@ assets: none
 verified: 2026-09-18
 ---
 
-# Clustered unshadowed lights
+# Light a scene with hundreds of point and spot lights
 
 ```go
-// Point lights: unshadowed fill lights that reach the GPU in any order.
-points := []glyph.PointLight{
-    {Pos: mgl32.Vec3{-5, 1, 0}, Range: 15, Color: mgl32.Vec3{1, 0.2, 0.2}},
-    {Pos: mgl32.Vec3{5, 1, 0}, Range: 15, Color: mgl32.Vec3{0.2, 0.2, 1}},
+lamps := []glyph.PointLight{
+    {Pos: mgl32.Vec3{-5, 3, 0}, Range: 12, Color: mgl32.Vec3{1.0, 0.74, 0.50}},
+    {Pos: mgl32.Vec3{5, 3, 0}, Range: 12, Color: mgl32.Vec3{1.0, 0.74, 0.50}},
 }
-e.Scene.SetPointLights(points)
+e.Scene.SetPointLights(lamps)
 
-// Spot lights: point lights narrowed to a cone. Dir can be any length;
-// zero means omnidirectional. Inner and Outer are half-angles in radians.
-spots := []glyph.SpotLight{
-    {
-        Pos: mgl32.Vec3{0, 3, -10},
-        Dir: mgl32.Vec3{0, -1, 0},    // points downward
-        Range: 20,
-        Color: mgl32.Vec3{1, 1, 0.8},
-        Inner: 0.2,                   // tight center
-        Outer: 0.6,                   // soft edge around it
-    },
+door := glyph.SpotLight{
+    Pos:   mgl32.Vec3{0, 2.6, -10},
+    Dir:   mgl32.Vec3{0, -1, 0.2}, // down and slightly outward; any length
+    Range: 9,
+    Color: mgl32.Vec3{1.0, 0.58, 0.28}.Mul(2.8), // intensity rides in Color
+    Inner: 0.38, // half-angles, in radians
+    Outer: 0.82,
 }
-e.Scene.SetSpotLights(spots)
+e.Scene.SetSpotLights([]glyph.SpotLight{door})
 
-// Check how many lights made it to the GPU.
-stats := e.LightStats()
-if stats.DroppedOverBudget > 0 {
-    e.Debugf("dropped %d lights over budget", stats.DroppedOverBudget)
-}
-if stats.CellsOverflowed > 0 {
-    e.Debugf("dropped from %d cells", stats.CellsOverflowed)
+if st := e.LightStats(); st.DroppedOverBudget > 0 || st.CellsOverflowed > 0 {
+    e.Debugf("lights lost: %d over budget, %d cells overflowed",
+        st.DroppedOverBudget, st.CellsOverflowed)
 }
 ```
 
-The two light types are set per frame with `SetPointLights` and `SetSpotLights`.
-A scene written before spot lights existed lights exactly as it did before, in
-the same order: points first, then spots.
+Both setters replace the whole set and keep the slice you pass rather than
+copying it, so a game that animates its lights mutates one slice and calls the
+setter again. `SetSpotLights(nil)` removes every spot; a zero `Color` removes
+one light's contribution.
 
-`Color` holds intensity; a zero `Color` (or an empty slice) removes the
-contribution entirely. `Range` is the distance past which a light contributes
-nothing. For `SpotLight`, `Inner` and `Outer` are half-angles in radians; full
-intensity inside `Inner`, a smooth falloff between them, and nothing beyond
-`Outer`. A zero-length `Dir` makes a spot light omnidirectional (deliberate: it
-makes a caller's uninitialized `Dir` visibly wrong rather than silently
-missing).
+`Inner` and `Outer` are **half**-angles in radians: full strength inside
+`Inner`, a smooth falloff to nothing at `Outer`. There is no separate intensity
+field on either type — scale `Color`, exactly as `PointLight` always has.
 
-The slices are not copied, so a game that drives hundreds of lights reuses one
-buffer across frames and calls the setter each frame with different data.
-
-## What it is for
-
-A dungeon lit by forty torches, a sprawling colony of habitats each with lit
-windows, a village street lined with lanterns, a city at night — these are the
-cases where one directional light and one shadow-casting point light are not
-enough, and the alternative — one giant light covering the whole scene — reads
-as wrong. Before clustering, adding that many lights meant every fragment
-evaluated every one, which cost what a shadow-casting light does (or more). After
-clustering, a fragment evaluates only the lights whose range reaches it, which is
-why scattering hundreds around a level is reasonable.
-
-The single shadow-casting light (`Scene.SetPointLight`, a cube shadow map) is
-separate and unchanged. It is the one expensive light — the player's lantern or
-a boss's aura — and this feature is for the fill lights around it.
+The one **shadow-casting** point light (`Scene.SetPointLight`, a cube shadow
+map) is a separate mechanism and is unchanged by any of this. There is still
+only one of it.
 
 ## How it works
 
-Every frame, the CPU-side binner (`renderer/lightcluster`, pure Go, no GPU
-dependencies) frustum-culls lights and bins them into a view-space froxel grid:
-16 x 9 tiles across the screen, 24 depth slices logarithmic from 1 m near plane
-onward. A fragment finds its cell at runtime from `gl_FragCoord` and the depth,
-and reads only that cell's light list.
+Every frame, before drawing, the engine hands the lights to
+`renderer/lightcluster` — pure Go, no Vulkan, testable without a GPU — which:
 
-Binning is conservative: if a world point lies inside a light's range (and, for
-a spot, inside its cone) and inside the frustum, the cell containing that point
-lists that light. A false positive costs a few shader instructions. A false
-negative is a tile-shaped hole in the light, which reads as silently wrong; those
-are the ones binning is designed to never produce, and testing against a
-brute-force oracle in lightcluster_test.go guards it.
+1. frustum-culls each light by its bounding sphere (for a spot narrower than a
+   60 degree half-angle, the tight sphere around its cone rather than the full
+   range sphere);
+2. orders the survivors and applies the `MaxLights` budget;
+3. bins each one into a view-space froxel grid of **16 x 9 x 24** cells: 16 x 9
+   tiles across the framebuffer, 24 depth slices that are logarithmic from 1 m
+   to the far plane, with everything nearer than 1 m folded into slice 0.
 
-Data goes to the GPU in three storage buffers on the shadow/light descriptor set
-(bindings 3, 4, 5): the light array, a grid of cell metadata, and an index
-buffer holding each cell's light list. `shaders/lights.inc` declares them and
-exposes `resolveLightRange` and `lightAt` for shader code to iterate.
+The result goes to the GPU in three storage buffers — the engine's first — at
+bindings 3, 4 and 5 of the shadow/light descriptor set: the light array with a
+small header, one `{offset, count}` per cell, and the concatenated index lists.
+`shaders/lights.inc` declares them once for all seven lit fragment shaders. A
+fragment finds its cell from `gl_FragCoord.xy` and its view depth
+(`1.0 / gl_FragCoord.w`, which needs neither near nor far) and loops over that
+cell's list only.
 
-Spot lights use the packed form `DirCone.xyz = unit direction`, `DirCone.w =
-cos(outer half-angle)`, `Color.a = cos(inner half-angle)`. A zero `DirCone.xyz`
-signals a point light. The shader's `lightSpotFactor` applies a smooth cone
-falloff, which is why the two angles pack as cosines rather than radians.
+Binning is **conservative**: if a point is inside a light's range (and cone)
+and inside the frustum, the cell containing it lists that light. A false
+positive costs a few shader instructions; a false negative is missing light.
+`renderer/lightcluster/oracle_test.go` checks that against brute force over
+random scenes, including a colony-builder orbit camera at minimum zoom — the
+eye 1.31 m above a hex grid of lamps, with lit geometry closer than the 1 m
+slice start.
 
-## Budgets and grid occupancy
+**Invariant:** all lit geometry is drawn from one camera. Water refraction
+samples a copy of the scene rather than re-rendering it, and shadow passes are
+depth-only. A second lit camera — a planar reflection, split screen — would need
+its own grid; the one that exists is built for the main view.
 
-Three hard limits govern how many lights reach the GPU:
+## Budgets, and what happens past them
 
-```go
-const MaxLights = 1024                  // lights after culling
-const MaxLightsPerCell = 128            // per-froxel cap
-const MaxLightIndices = 262144          // total index buffer size
-```
+| Constant | Value | Meaning |
+|---|---|---|
+| `lightcluster.MaxLights` (also `renderer.MaxLights`) | 1024 | lights uploaded per frame, after frustum culling |
+| `lightcluster.MaxLightsPerCell` | 128 | cap on one cell's list, and so on the shader's inner loop |
+| `lightcluster.MaxLightIndices` | 262144 | total index entries across all cells |
 
-Lights are kept in priority order: nearest surface first, ties broken by
-submission order. A full froxel keeps the first 128 in that order. If the index
-buffer fills, the last cells in cell order are truncated. All three are counted
-in `Engine.LightStats`, which returns a `renderer/lightcluster.Stats`:
+`renderer.MaxPointLights` still exists as an alias of `MaxLights` so older code
+compiles; it no longer means 32.
 
-```go
-type Stats struct {
-    // Submitted, Culled, Uploaded: the flow of lights through the binner.
-    // If Culled is high, lights are outside the frustum or have non-positive range.
-    Submitted          int
-    Culled             int
-    Uploaded           int
+Nothing past a budget is silent, and all of it is deterministic:
 
-    // DroppedOverBudget: lights that passed frustum test but lost the MaxLights
-    // budget. Check this first — it is the ceiling on GPU work.
-    DroppedOverBudget  int
+- Over `MaxLights`, lights are kept in ascending *(distance from the camera
+  minus range)* order — nearest lit surface first — with ties broken by
+  submission order. The rest are counted in `DroppedOverBudget`.
+- A cell that wants more than 128 keeps the first 128 in that same order and is
+  counted in `CellsOverflowed`.
+- If the whole index buffer fills, the cells that come last in cell order are
+  cut short and counted in `CellsTruncated`. That one shows up as the far end of
+  the grid going dark.
 
-    // CellsOverflowed, CellsTruncated: ways a cell can lose lights.
-    // Overflow keeps the 128 nearest surfaces; truncation loses whole cells.
-    CellsOverflowed    int
-    CellsTruncated     int
+`Engine.LightStats()` returns the last frame's `lightcluster.Stats`. The fields
+a game should put on a debug readout:
 
-    // MaxCellDemand: the highest count before the per-cell cap. If it exceeds
-    // 128, a dense cluster of lights is losing its backmost members.
-    MaxCellDemand      int
+| Field | Watch it because |
+|---|---|
+| `DroppedOverBudget` | lights the GPU never saw |
+| `CellsOverflowed`, `CellsTruncated` | lights missing from part of the screen |
+| `MaxCellDemand` | the largest list any cell wanted before the cap; the number that says whether 128 is enough for your scene |
+| `ScreenWideLights` | lights that landed in every tile of some depth slice, which clustering cannot help with |
+| `Uploaded`, `IndexCount` | how much work the frame actually carries |
 
-    // ScreenWideLights: lights that reached every tile of at least one slice.
-    // These are the ones clustering did not remove from, so they evaluate for
-    // every fragment in that slice. A pathological case (1024 large lights
-    // surrounding the camera) produces high ScreenWideLights and high CPU cost
-    // binning them. Watch this number.
-    ScreenWideLights   int
-
-    // NonEmptyCells, TotalCellLights: average list length per populated cell,
-    // for tuning the grid. Most cells are empty sky.
-    NonEmptyCells      int
-    TotalCellLights    int
-
-    // Remaining fields are for diagnosing the binner, not the scene.
-    // See renderer/lightcluster for their definitions.
-    MaxCellLights      int
-    IndexCount         int
-    UnboundedLights    int
-    CellsTested        int
-    CellsBinned        int
-}
-```
-
-A game should watch `DroppedOverBudget`, `CellsOverflowed`, `CellsTruncated`,
-and `ScreenWideLights`. Each is a way light can go missing without crashing or
-erroring.
-
-## Night grade
-
-Night-time surfaces are desaturated and blue-shifted so a night scene reads as
-night rather than dim day. This is not a global filter: it blends each fragment
-toward a blue-grey based on how much of that fragment's light came from lamps
-versus from the sun or moon. A warm lamp at night therefore keeps its color in
-the pool it throws on the ground, and a surface that receives only sunlight goes
-blue-grey.
-
-`SetNightGrade` controls the shift's strength and tint:
-
-```go
-e.Scene.SetNightGrade(glyph.NightGrade{
-    Strength: 0.8,                             // 0 = off, 1 = full strength
-    Tint: mgl32.Vec3{0.72, 0.86, 1.30},       // blue-biased
-})
-```
-
-The default is what this engine has always used, chosen for artistic direction
-rather than physical accuracy. A game with a different look should change both
-fields. It lives on `Scene` rather than on `EnvironmentState` because custom
-`EnvironmentSource` implementations would otherwise inherit a zero value
-(desaturation off) on a dependency bump. See [`day-night.md`](day-night.md) for
-the full story of scotopic shift, and `scene.go`'s `SetNightGrade` for why it is
-initialized at construction and not on the environment.
-
-## Failure modes
-
-- **Lights vanish when a scene hits the budget.** If `Engine.LightStats()
-  .DroppedOverBudget > 0` or `.CellsOverflowed > 0`, the GPU is not seeing all
-  the lights the scene placed. Reduction in order of visibility cost: reduce
-  range (one light's max distance matters more than its count), scatter smaller
-  lights, or raise the budget (costs GPU memory, not time). `ScreenWideLights`
-  says whether the binning is helping.
-
-- **A scene looks dark, but the lights are there.** The scene may have no
-  `Environment` or an `Environment` with no ambient light. Unshadowed fill
-  lights are fill — they assume the scene has an ambient baseline and add color
-  and warmth on top. If there is no baseline, the unshadowed lights are the only
-  thing lighting it, and they have nothing to add color to.
-
-- **A warm lamp reads as white at night.** Lamp color is weighted by its share
-  of light when computing the night shift. If the weight is zero, the blend
-  produces the scene's ambient night color no matter what the lamp color is.
-  Check `SetNightGrade`, or `LightStats().ScreenWideLights` — if it is high, a
-  light reaching every fragment of a slice has its lamp nature diluted by
-  moonlight and ambient.
-
-- **Water stays dark and unlit by lamps.** Water has its own rendering path
-  (`water.frag`) and does not evaluate the local light list. It is a known gap.
-  Reflections off water can be lit through another body of water or through
-  `Emissive` geometry, but direct lamplight on the water surface itself is out of
-  reach today.
-
-- **Migrating from an old shader, lamps disappeared.** The old `LightBlock` UBO
-  at binding 3 is gone; it is now three storage buffers at bindings 3, 4, 5,
-  declared once in `shaders/lights.inc` behind a `LIGHT_SET` macro. Games that
-  replaced lit shaders via `WithShaders` must re-vendor the shader chain. Also,
-  the per-frame UBO at binding 0 grew to 144 bytes: it now carries `vec4
-  nightGrade` after `mat4 cascadeVP[2]`. If the UBO struct in your shader
-  mismatches the packing expected, geometry moves, flickers or casts bad
-  shadows.
-
-## Debug modes
-
-The shader evaluates lights two ways: the clustered path (normal play) and a
-brute-force reference (per-light loop, ignoring the grid). Both must render
-identically or the binning has a bug.
-
-```go
-e.SetLightDebugMode(glyph.LightDebugOff)           // normal: clustered
-e.SetLightDebugMode(glyph.LightDebugHeatmap)       // per-cell light count
-e.SetLightDebugMode(glyph.LightDebugBruteForce)    // reference: every light
-```
-
-`LightDebugHeatmap` replaces lit color with a blue-to-red ramp of light count
-per cell, saturated at the cap (`MaxLightsPerCell`). `LightDebugBruteForce`
-forces the reference path that ignores the grid entirely and evaluates every
-uploaded light. It is the same lights in the same order — only the iteration
-differs — so the two must render pixel-for-pixel alike. Any difference is a
-missing light from a froxel it belongs in, and will be tile-shaped.
+The remaining fields (`UnboundedLights`, `CellsTested`, `CellsBinned`, ...) are
+for diagnosing the binner; their definitions are on the struct.
 
 ## Measured cost
 
-Benchmark scenes: geometry lit by 32, 256, or 1024 unshadowed point lights
-spread on a grid, each rendered 200 frames on an AMD Radeon RX 7900 XTX, under
-`task bench` conventions (mean of three interleaved passes).
+AMD Radeon RX 7900 XTX, `cmd/bench` scenes `lights32` / `lights256` /
+`lights1024` (`11-lights -lamps N`: a grid of range-4 lamps 1.6 m apart over a
+floor, 200 frames), mean of three interleaved passes.
 
-GPU opaque pass (brute force → clustered):
-| Lights | Brute force | Clustered | Speedup |
-|--------|-------------|-----------|---------|
-| 32     | 0.122 ms    | 0.075 ms  | 1.6x    |
-| 256    | 0.727 ms    | 0.188 ms  | 3.9x    |
-| 1024   | 1.706 ms    | 0.234 ms  | 7.3x    |
+| Lamps | GPU opaque pass, brute force | clustered | CPU `cluster` phase |
+|---|---|---|---|
+| 32 | 0.122 ms | 0.075 ms | 0.06 ms |
+| 256 | 0.727 ms | 0.188 ms | 0.33 ms |
+| 1024 | 1.706 ms | 0.234 ms | 0.50 ms |
 
-CPU `cluster` phase (binning):
-| Lights | Time    |
-|--------|---------|
-| 32     | 0.06 ms |
-| 256    | 0.33 ms |
-| 1024   | 0.50 ms |
+The worst case is not many lights, it is large lights wrapped around the
+camera. 1024 lights on a ring with every one reaching every cell measured
+9.18 -> 1.65 ms on the GPU but 3.9-5.3 ms of CPU binning, because a light that
+genuinely touches all 3456 cells has to be written into all of them.
+`ScreenWideLights` is the early warning.
 
-A pathological case (1024 large lights all surrounding the camera, every light
-in every cell): GPU 9.18 → 1.65 ms, but CPU binning 3.9–5.3 ms. The bottleneck
-shifts to the binner; watch `ScreenWideLights` and `UnboundedLights` in that
-case.
+These are one machine's numbers. `task bench -- -scene lights1024-clustered`
+gives you yours; the CPU cost is the `cluster` phase of the engine's CPU timer
+(`cpu_cluster` in the bench output).
 
-These are one machine's numbers. Run `task bench` on your hardware for yours.
+## Failure modes
 
-## Verification
+- **Lights go missing in a dense scene, with no error.** A budget was exceeded.
+  Read `LightStats()`; see the table above for which counter means what. The
+  budgets are constants in `renderer/lightcluster`, sized from the measurements
+  recorded beside them.
+- **A spot lights everything around it.** Its `Dir` is the zero vector, which
+  makes it omnidirectional. That is deliberate — a flooded scene is a visible
+  bug, a silently dropped light is not.
+- **Cone angles that make no sense are clamped, not rejected.** `Inner > Outer`
+  becomes a hard edge at `Outer`; both angles are clamped to [0, pi]; NaN
+  becomes 0. A hard edge (`Inner == Outer`) is supported.
+- **A lamp beside a lake does not light the water.** `water.frag` shades its
+  own surface and never consults the light list: no pool of light on the water
+  and no highlight from a lamp. Known gap.
+- **A warm lamp reads cold at night.** It should not: the night grade is
+  weighted by how much of a fragment's light came from lamps and emission, so
+  lamplit surfaces keep their colour. If one does not, see the failure mode of
+  the same name in [`day-night.md`](day-night.md). `Scene.SetNightGrade`, also
+  documented there, is how a game tunes or turns off the night shift itself.
+- **A game that replaced the lit shaders through `WithShaders` must re-vendor
+  them.** The `LightBlock` uniform buffer that used to sit at binding 3 is gone:
+  bindings 3, 4 and 5 are storage buffers now, declared in `shaders/lights.inc`
+  behind a `LIGHT_SET` macro (set 1 for static pipelines, set 2 for skinned
+  ones, where set 1 is the joint matrices). The uniform block at binding 0 also
+  grew from 128 to 144 bytes — a `vec4 nightGrade` after `mat4 cascadeVP[2]`.
+  A stale shader declares the wrong descriptor type at binding 3; run it under
+  `task validate`, which will say so.
 
-```sh
-task lights      # Clustered and brute-force renderers byte-identical
-task nightlight  # Warm lamps stay warm on the ground at night
+## Debug views
+
+```go
+e.SetLightDebugMode(glyph.LightDebugHeatmap)    // lights per cell, blue -> green -> red
+e.SetLightDebugMode(glyph.LightDebugBruteForce) // ignore the grid, loop every uploaded light
+e.SetLightDebugMode(glyph.LightDebugOff)        // clustered, the default
 ```
 
-`task lights` renders the same scene in both modes and checks every pixel. Both
-should produce the same image; a difference is a binning bug. The scene is 400
-lamps of range 4 on a tight grid (brute force would not help) plus spot lights,
-from two camera poses: default distance and down among the lamps where the
-froxel grid's near slice is working hardest.
+The heatmap's red end is `MaxLightsPerCell`, so a scene that is mostly red is
+close to overflowing. Brute force is the reference implementation: the same
+shader code over the same lights in the same order, minus the grid.
 
-`task nightlight` is a doorway pool under a warm spotlight, checking that the
-pool stays warm (red minus blue > 0) after the night desaturation. It verifies
-that lamp color survives the scotopic shift, which required weighting the blend
-by how much of each fragment's light came from a lamp.
+`11-lights` and `21-streetlights` both take `-lightdebug heatmap|bruteforce`
+and `-lightstats`.
+
+## Verifying a change
+
+```sh
+task lights      # clustered and brute force render byte-identical frames
+task nightlight  # a doorway pool stays warm at night; the ground beside it does not
+```
+
+`task lights` captures `11-lights -lamps 400 -spots 32` in both modes at two
+poses — an overview, and one with the camera inside about forty lamp spheres
+and half a metre from the floor — at two resolutions, plus two `21-streetlights`
+pairs so the terrain and material shaders are covered, and requires every pair
+to match **byte for byte**. Exact equality is achievable because both modes run
+the same code over lights in the same relative order, and a light that does not
+reach a fragment adds exactly zero.
+
+It has to be exact. Shrinking the binner's sphere test to 0.8 of the radius —
+a genuinely non-conservative binner — changed 25.79 % of the pixels in the near
+pose, every one of them by 1/255, in no visibly tile-shaped pattern: what goes
+missing is the dim tail of a falloff. Any tolerance would have passed it. The
+gate also refuses to run on a scene that drops lights, since the two modes would
+then not be doing the same work, and carries a control (one lamp fewer must
+change the capture).
+
+`task nightlight` samples the pool under a 2800 K door light in
+`21-streetlights` and the moonlit ground beside it: the pool must come out
+R > G > B with red at least 60/255 above blue, the ground must stay blue-grey.
+It fails when the lamp weighting is removed or cut to 15 %; it cannot tell a cut
+to 35 % from an honest retune of the lamp, and says so in its own comment.
