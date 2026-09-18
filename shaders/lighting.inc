@@ -239,6 +239,13 @@ vec3 evalLightingAO(vec3 diffuseColor, vec3 F0, float shininess,
         // light that contributes nothing. The old inline loop only paid them
         // inside its range test; hoisting the loop out of seven shaders lost
         // that, in both modes.
+        //
+        // Worth having, measured rather than assumed: the opaque pass at
+        // 1920x1080, mean of 200 frames, with 11-lights' floor of 400 lamps
+        // and 32 spots, goes 0.557 ms without this to 0.443 with it -- and
+        // four separate runs of the version that has it spread only 0.427 to
+        // 0.450, so the gap is not this machine's drift. The 1024-light ring
+        // goes 1.739 to 1.510.
         if (irradiance == vec3(0.0)) {
             continue;
         }
