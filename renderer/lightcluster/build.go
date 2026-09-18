@@ -251,6 +251,21 @@ func (b *Builder) Build(lights []Light, p Params) *Result {
 // row drop out on one comparison: for a light containing the eye that is most
 // of the work, because it reaches everything in the near slices and nothing at
 // the sides of the far ones.
+//
+// Every light goes through this, not only the ones with no screen bound. A
+// tangent-bounds box is tight on screen but is still a box, and a sphere misses
+// its corners. Measured on the colony scene at minimum zoom, three interleaved
+// rounds, against testing only the lights that have no screen bound:
+//
+//	no cell test at all      319 us   61803 indices   peak cell 57
+//	only unbounded lights    375 us   51687 indices   peak cell 57
+//	every light              496 us   41670 indices   peak cell 50
+//
+// The last 10000 index entries cost 120 us of CPU. Each one is a light every
+// fragment of that cell evaluates, and a cell is 120x120 pixels at 1080p, so
+// the GPU side of that trade is worth far more than the CPU side of it — but
+// this package cannot measure the GPU side, so if the frame timers ever
+// disagree, the switch is to skip the test when the light had a screen bound.
 func (b *Builder) bin(li int, box cellBox, center mgl32.Vec3, radius float32, fill bool) (binned int, wide bool) {
 	g := b.bounds.grid
 	tiles := g.X * g.Y
