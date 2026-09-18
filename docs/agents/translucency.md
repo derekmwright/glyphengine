@@ -66,8 +66,7 @@ path relies on the caller having sorted by `SortKey` for its batching.
 
 ## Where it lands in the frame
 
-Inside the scene render pass, after the sky and before particles. Both ends
-matter:
+After the sky and before particles. Both ends matter:
 
 - **After the sky.** The sky is a fullscreen triangle drawn last on purpose, so
   it only shades pixels nothing else landed on. Translucent geometry writes no
@@ -80,6 +79,35 @@ matter:
 Depth is still *tested*, so a ghost behind a hill stays behind it. It is not
 *written*, so two translucent surfaces do not depth-fight over which one exists,
 and the opaque depth every later pass reads stays the opaque depth.
+
+### Which render pass, when the frame has water
+
+Not writing depth is also what made these draws vanish behind water. The water
+surface is drawn last, in a second pass, because refraction samples the finished
+frame — and at a pixel where a ghost stood in front of the lake the depth buffer
+held the lake *bed*, so the water passed the depth test and painted over the
+ghost (issue #45).
+
+So in a frame that contains water this group splits in two, on the surface:
+
+- a translucent draw **behind** the water — its bound centre on the opposite
+  side of some water surface's still plane from the eye — is recorded in the
+  scene pass exactly as described above, before the refraction copy, so the
+  water refracts and absorbs it;
+- one **in front** is recorded in the water pass, after the surface.
+
+Both halves keep the back-to-front order: the recorder filters the already
+sorted list rather than sorting each half, and a subsequence of a sorted
+sequence is sorted. The order relative to particles is also unchanged — they
+split on the same plane and follow the translucent draws in each half.
+
+Everything in [`water.md`](water.md) about what that rule approximates applies
+here, and one line of it is worth repeating because it is a `Translucent` mesh
+that will meet it first: **the classification reads one point, the draw's bound
+centre.** A pane standing half in the water goes wholly to one side.
+
+`renderer/waterorder.go` decides, once per frame, for every blended draw.
+A frame with no water skips all of it and records exactly what it always did.
 
 ## Shadows
 

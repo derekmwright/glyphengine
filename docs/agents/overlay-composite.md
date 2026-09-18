@@ -28,7 +28,7 @@ The engine has three overlay channels and they do not all go to the same place.
 | --- | --- | --- | --- |
 | UI panels | `SetUIOverlays` | tonemap pass, after the resolve | screen space |
 | MSDF text | `SetMSDFOverlays`, `Debugf` | tonemap pass, after the resolve | screen space |
-| Unlit overlays | `SetOverlays` | scene pass, with the geometry | world space |
+| Unlit overlays | `SetOverlays` | scene pass, with the geometry — or the water pass when the frame has water | world space |
 
 Nothing about the API changes with the split. It matters when you are reasoning
 about what a colour means, or about why something in the scene is or is not
@@ -55,10 +55,18 @@ resolved, which means:
 
 `SetOverlays` takes `RenderObject`s with a caller-supplied MVP, and is for
 things positioned in the world — health bars over a unit, a cooldown ring on the
-ground. It stays in the scene pass, so it keeps the scene's MSAA and sits at the
-right point in the frame relative to the geometry around it. It is still drawn
-with no depth test and no culling, so it is always on top of the geometry; what
-it is *not* is screen space.
+ground. It stays in the scene render pass, so it keeps the scene's MSAA and sits
+at the right point in the frame relative to the geometry around it. It is still
+drawn with no depth test and no culling, so it is always on top of the geometry;
+what it is *not* is screen space.
+
+**In a frame that contains water it moves to the water pass instead**, after the
+surface, and the pass it lands in is the only thing that changes. It had to: it
+is recorded before the refraction copy otherwise, which put it *inside* the
+refraction and then let the surface paint over it — the same shape of bug that
+moved the two screen-space channels out, one pass later in the frame. "Always on
+top" has to include on top of the lake. See
+[`water.md`](water.md#blended-draws-split-on-the-surface).
 
 If you are drawing a HUD, use the other two.
 
@@ -151,8 +159,9 @@ it; decoding again would darken every texture the UI draws. Only the colour that
 came from the game — vertex colour times tint — is converted.
 
 **The world-space `overlays` channel is unchanged and still linear.** It renders
-in the scene pass and goes through the tonemap, so its colour is an HDR value
-like any other piece of geometry, not a display value. The two channels mean
+inside the scene render pass — or the water one, which shares its attachments —
+and goes through the tonemap, so its colour is an HDR value like any other piece
+of geometry, not a display value. The two channels mean
 different things by a colour because they are composited at different points,
 which is the same split this page is about.
 

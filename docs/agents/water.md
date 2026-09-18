@@ -19,7 +19,7 @@ requires:
 assets: none
 example: examples/09-water
 run: go run ./09-water
-verified: 2026-09-16
+verified: 2026-09-18
 ---
 
 # Water
@@ -77,18 +77,78 @@ level, not something to render.
 A fragment shader cannot read the attachment it is writing, and refraction is
 precisely a read of a *different* pixel. So a frame containing water splits:
 
-1. the opaque pass draws everything and presents as usual;
+1. the scene pass draws the opaque world, the sky, and whatever blended
+   geometry is **behind** the water surface;
 2. that result is copied into a sampled image;
-3. a second pass draws only the water, sampling the copy at an offset taken
-   from the wave normal.
+3. a second pass draws the water, sampling the copy at an offset taken from the
+   wave normal, and then the blended geometry that is **in front** of it.
 
 Both passes share the depth buffer, which is why the first now stores depth
 instead of discarding it — water still has to be occluded by terrain in front
 of it. Under MSAA they also share the multisample colour buffer, and the frame
 resolves twice.
 
+The two passes are deliberately **render pass compatible**: same attachments,
+same subpass, and — this is the part that is easy to lose — the same subpass
+dependency, which `sceneEntryDependency` exists to keep identical. That is what
+lets the blended pipelines, built against the scene pass, be bound inside the
+water pass without a second set of them. Give the two passes different
+dependencies and every blended draw in the water pass becomes
+`VUID-vkCmdDrawIndexed-renderPass-02684`; `task validate` catches it on the
+first frame.
+
 **A scene with no water never begins the second pass.** The cost to everyone
 else is two changed store ops.
+
+## Blended draws split on the surface
+
+Nothing blended writes depth. So before this split existed, a flame standing in
+front of the lake left the depth buffer holding the lake *bed* at those pixels,
+the water passed the depth test, and the surface was painted straight over the
+flame: cut off dead flat at the waterline, visible against sky and gone against
+water (issue #45). Everything blended was affected — particles, `Translucent`
+meshes, world-space overlays.
+
+Drawing all of it after the water would break the other half: something under
+the surface has to be in the frame before the copy, or the water refracts a bed
+the object is not part of and the object lands on top of the lake, unrefracted.
+
+So each blended draw is classified:
+
+> A blended draw is **behind** the water, and stays before the copy, when some
+> water surface's still plane separates it from the eye. Otherwise it is **in
+> front**, and is drawn after the water.
+
+"Separates" is the whole rule, and it is why an underwater camera needs no case
+of its own: from above the surface the things behind the water are the ones
+below it, and from below, the ones above it.
+
+`renderer/waterorder.go` is the one place that decides, and the page there is
+the long version. What it does **not** do, in order of how likely you are to
+meet it:
+
+| Approximation | What it costs |
+|---|---|
+| The surface is its **still plane** | A draw within `WaveAmplitude` of the surface can be classified onto the wrong side |
+| A draw is **one point**, its bound centre | A tall pane half in the water goes wholly one way. Particles split per instance, which is as fine as the instance buffer goes |
+| The footprint is the surface mesh's **bounding disc** in XZ | Over a concave shore the disc covers dry land; that only changes the answer for a draw below the waterline over dry ground, which is a draw inside the terrain |
+| Several bodies are tested **independently** | With a tarn above a lake, a draw between the two levels is behind the upper surface and goes before the copy. Deliberate: a wrong tint beats a missing object |
+
+**World-space overlays are always drawn after the water**, whatever their
+position, because "on top" has to mean on top of the lake too — and an overlay
+recorded before the copy is also *inside* the refraction, smeared through the
+waves. Screen-space overlays were moved out of this pass long ago for the same
+reason; see [`overlay-composite.md`](overlay-composite.md).
+
+Particles are one instanced draw per frame, and one system routinely straddles
+the surface, so the **instance buffer** is what splits: a stable partition puts
+the behind-the-water instances first and the frame issues two draws over the
+two ranges. The renderer has no idea how many emitters produced them, which is
+the right level — "per system" would be too coarse even if it were reachable.
+
+The cost shows up as `gpu overwater` in `task bench`, separately from
+`gpu water`, so the reorder is attributable rather than charged to the surface.
+`task waterblend` is the gate.
 
 ### When refraction is unavailable
 
@@ -121,7 +181,15 @@ not ripple. Setting `RefractStrength` to 0 selects the same path deliberately.
   is not underwater; the depth falloff limits this but does not eliminate it.
 - **Water renders over geometry standing in it.** Water is drawn after
   everything opaque and does not write depth. Something submerged must be in
-  the opaque pass to occlude it correctly.
+  the opaque pass to occlude it correctly. Blended geometry is handled — see
+  the split above — but only down to the still plane: a `Translucent` mesh
+  whose bound centre sits inside the wave band can be classified onto either
+  side, and on the wrong one it goes back to being painted over. Anything that
+  has to be right at the waterline wants to be opaque.
+- **A submerged effect looks flat and unrefracted.** It was classified as being
+  in front of the water. Check its bound centre rather than its silhouette: the
+  split reads one point per draw, so a mesh whose origin is above the surface
+  goes after the water even if most of it is under.
 - **~~The HUD vanishes where the lake is.~~** Fixed, and worth knowing because
   it is the shape of bug this pass invites. Screen-space overlays used to be
   recorded in the opaque pass, so step 2 above copied the HUD along with the
