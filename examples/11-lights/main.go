@@ -22,6 +22,7 @@
 //	go run ./11-lights -static      # stop the lights moving
 //	go run ./11-lights -count 200   # raise the fill lights past the old 32-light ceiling
 //	go run ./11-lights -spots 6     # add downward-aimed warm spotlights over the ground
+//	go run ./11-lights -spots 6 -spothardedge  # same, with a crisp cone edge instead of a soft one
 //
 // The camera orbits on its own. Escape quits.
 package main
@@ -68,6 +69,10 @@ type game struct {
 	// spotCount adds this many downward/outward-aimed warm spotlights over
 	// the ground (-spots); 0 adds none.
 	spotCount int
+	// spotHardEdge sets the spotlights' Inner equal to Outer (-spothardedge),
+	// for looking at the crisp-edged cone that produces instead of the
+	// default soft one. Has no effect when spotCount is 0.
+	spotHardEdge bool
 
 	t float32
 }
@@ -264,6 +269,13 @@ func (g *game) Update(e *glyph.Engine, dt float32) {
 	// directly beneath it -- straight down would put the whole pool under
 	// geometry the camera never sees from outside the ring.
 	if g.spotCount > 0 {
+		// -spothardedge sets Inner to Outer's angle for looking at the
+		// crisp cone that produces, instead of the default soft-edged one.
+		outer := mgl32.DegToRad(32)
+		inner := mgl32.DegToRad(18)
+		if g.spotHardEdge {
+			inner = outer
+		}
 		spots := make([]glyph.SpotLight, 0, g.spotCount)
 		for i := 0; i < g.spotCount; i++ {
 			a := float64(i) / float64(g.spotCount) * 2 * math.Pi
@@ -275,8 +287,8 @@ func (g *game) Update(e *glyph.Engine, dt float32) {
 				Dir:   dir,
 				Range: 16,
 				Color: mgl32.Vec3{1.0, 0.75, 0.4}, // warm, like a lamp
-				Inner: mgl32.DegToRad(18),
-				Outer: mgl32.DegToRad(32),
+				Inner: inner,
+				Outer: outer,
 			})
 		}
 		e.Scene.SetSpotLights(spots)
@@ -292,6 +304,7 @@ func main() {
 	shot := flag.String("screenshot", "", "write a PNG of the last frame to this path")
 	count := flag.Int("count", 0, "override the number of unshadowed fill lights (0 = the built-in four; raise past renderer.MaxPointLights to exercise the clustered path)")
 	spots := flag.Int("spots", 0, "add N downward/outward-aimed warm spotlights over the ground")
+	spotHardEdge := flag.Bool("spothardedge", false, "give the -spots cones a hard edge (Inner == Outer) instead of the default soft one")
 	lightDebug := flag.String("lightdebug", "", "light debug mode: heatmap or bruteforce (default: off)")
 	flag.Parse()
 
@@ -312,7 +325,7 @@ func main() {
 		opts = append(opts, glyph.WithScreenshot(*shot))
 	}
 
-	e, err := glyph.New(&game{static: *static, pointCount: *count, spotCount: *spots}, opts...)
+	e, err := glyph.New(&game{static: *static, pointCount: *count, spotCount: *spots, spotHardEdge: *spotHardEdge}, opts...)
 	if err != nil {
 		log.Fatalf("create engine: %v", err)
 	}
