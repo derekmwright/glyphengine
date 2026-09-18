@@ -17,7 +17,11 @@ package renderer
 // surface has to be in the frame before the copy or the water refracts a lake
 // bed that the object is not part of — and the object then lands on top of the
 // lake, unrefracted, at full brightness, which is a louder bug than the one
-// being fixed.
+// being fixed. Measured, with behind() forced to false so every draw counts as
+// in front: over the submerged slab in `09-water -submerged`, mean red minus
+// blue goes from -17.0 to +40.0, against -21.7 for the bare lake. Blue-dominant
+// water with a trace of the object absorbed in it becomes the object's own
+// orange with hard edges, floating on the surface.
 //
 // So the blended draws split on the water surface:
 //

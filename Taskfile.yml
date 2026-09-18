@@ -572,9 +572,20 @@ tasks:
       # the reading self-calibrating -- "as present below the waterline as
       # above it" is a claim no fixed threshold can carry.
       #
-      # Green here reads: box over water +76.9 mean luma, control over sky
-      # +36.7, ratio 2.10. The break experiment that these thresholds are set
-      # from is recorded below once it has been run.
+      # PROVED: with blendSplit.active forced to false -- every blended draw
+      # back before the refraction copy, which is the order that shipped -- the
+      # box over water reads +4.2 mean luma against +76.9 with the fix, a ratio
+      # of 0.115 against 2.096. Both floors bite. Restored immediately after.
+      #
+      # The remaining +4.2 is why there is a ratio floor and not just "greater
+      # than zero": the swallowed plume is still in the refraction copy, so the
+      # water shows an absorbed, smeared ghost of it rather than nothing.
+      #
+      # The control box over sky reads +36.7 either way, to the tenth. That
+      # half of the plume was never the broken half, and a run where it moves
+      # is a run where the camera or the emitter changed, so nothing measured
+      # below the waterline in it would mean anything -- which is what -minref
+      # is for.
       - |
         status=0
         d=.waterblend
