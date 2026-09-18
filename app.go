@@ -511,10 +511,9 @@ func (e *Engine) lightFlags() uint32 {
 }
 
 // gatherLights combines the scene's point and spot lights into one list for
-// the GPU light buffer: points first, then spots, in submission order. Points
-// first keeps a scene written against the old 32-light ceiling lighting
-// exactly as it always did, in the same order -- which is what G1 (the
-// clustered-lighting migration's invisibility gate) checks.
+// the GPU light buffer: points first, then spots, in submission order. A
+// scene written before spot lights existed therefore lights exactly as it
+// did before, in the same order.
 func (e *Engine) gatherLights() []renderer.GpuLight {
 	pls := e.Scene.pointLights
 	spls := e.Scene.spotLights
@@ -531,41 +530,107 @@ func (e *Engine) gatherLights() []renderer.GpuLight {
 	}
 
 	for _, sl := range spls {
-		dir := sl.Dir
-		// A zero-length Dir has no cone to aim, and Inner > Outer is not a
-		// valid cone either -- smoothstep(outer, inner, x) would invert the
-		// falloff. Both degenerate cases fall back to an omnidirectional
-		// point light instead of guessing what the caller meant.
-		if dir.Len() == 0 || sl.Inner > sl.Outer {
-			lights = append(lights, renderer.GpuLight{
-				PosRange: [4]float32{sl.Pos.X(), sl.Pos.Y(), sl.Pos.Z(), sl.Range},
-				Color:    [4]float32{sl.Color.X(), sl.Color.Y(), sl.Color.Z(), 0},
-			})
-			continue
-		}
-		dir = dir.Normalize()
-		lights = append(lights, renderer.GpuLight{
-			PosRange: [4]float32{sl.Pos.X(), sl.Pos.Y(), sl.Pos.Z(), sl.Range},
-			// color.a = cos(inner half-angle); see the GPU contract in the
-			// clustered-lighting spec.
-			Color:   [4]float32{sl.Color.X(), sl.Color.Y(), sl.Color.Z(), float32(math.Cos(float64(sl.Inner)))},
-			DirCone: [4]float32{dir.X(), dir.Y(), dir.Z(), float32(math.Cos(float64(sl.Outer)))},
-		})
+		lights = append(lights, spotLightGpuLight(sl))
 	}
 
-	// TODO(clustered-lighting integration phase): this truncates in
-	// submission order once the combined list exceeds MaxLights.
-	// renderer/lightcluster owns the real overflow policy -- priority by
-	// ascending (distance to camera - range), ties by submission index (see
-	// decision 6 and the CPU contract in the clustered-lighting spec). Do not
-	// extend this truncation into something that looks like a policy; it is
-	// only "do what the old 32-light cap did" until that phase lands.
+	// Truncates in submission order once the combined list exceeds
+	// MaxLights, the same "keep the first N, drop the rest" behaviour the
+	// old fixed 32-slot array had when a scene exceeded it. That is
+	// deliberately not a considered budget policy -- a real one would
+	// prioritize by distance or screen coverage -- it is a placeholder for
+	// whatever eventually replaces this function with the output of a real
+	// light binner.
 	if len(lights) > renderer.MaxLights {
 		lights = lights[:renderer.MaxLights]
 	}
 
 	e.lightBuf = lights
 	return lights
+}
+
+// spotLightGpuLight converts one SpotLight into the GpuLight the shader
+// reads (shaders/lights.inc's packed form): DirCone.xyz is the unit
+// direction the light points, DirCone.w is cos(outer half-angle), and
+// Color.a is cos(inner half-angle). A zero-length Dir has no cone to aim, so
+// it reaches the GPU as a plain point light (DirCone left at zero) -- see
+// the SpotLight doc comment in scene.go for why that is the chosen
+// behaviour rather than an error.
+//
+// Two invariants have to hold in the angles this packs, or the shader's
+// smoothstep(cosOuter, cosInner, x) misbehaves:
+//
+//   - Inner must not exceed Outer. A caller asking for a narrower inner cone
+//     than the outer one is not asking for "no cone at all" -- clamping
+//     Inner down to Outer gives a hard edge instead, which is also what
+//     Inner == Outer already has to mean, so the two cases collapse into
+//     one rather than needing separate handling.
+//   - cosInner must be strictly greater than cosOuter, by more than a
+//     float32 rounding error can erase. GLSL leaves smoothstep undefined
+//     when its two edges are equal, and a hard-edged cone (Inner == Outer,
+//     or Outer small enough that Inner clamps to the same float32 value) is
+//     the most natural thing a caller will write, not a rare mistake to
+//     shrug off. cosineMargin (1e-4) is roughly 800x the spacing between
+//     representable float32 values near +-1, which is where cosines of
+//     small angles and angles near pi actually land, so nudging by it
+//     always produces a different float rather than rounding straight back
+//     to the value it started from.
+func spotLightGpuLight(sl SpotLight) renderer.GpuLight {
+	g := renderer.GpuLight{
+		PosRange: [4]float32{sl.Pos.X(), sl.Pos.Y(), sl.Pos.Z(), sl.Range},
+		Color:    [4]float32{sl.Color.X(), sl.Color.Y(), sl.Color.Z(), 0},
+	}
+
+	dir := sl.Dir
+	if dir.Len() == 0 {
+		return g
+	}
+	dir = dir.Normalize()
+
+	outer := sanitizeSpotAngle(sl.Outer)
+	inner := sanitizeSpotAngle(sl.Inner)
+	if inner > outer {
+		inner = outer
+	}
+
+	cosOuter := float32(math.Cos(float64(outer)))
+	cosInner := float32(math.Cos(float64(inner)))
+
+	const cosineMargin = 1e-4
+	if cosInner-cosOuter < cosineMargin {
+		cosInner = cosOuter + cosineMargin
+		if cosInner > 1 {
+			// Outer itself is near zero, so cosOuter is already near the
+			// ceiling and there is no room left to push cosInner above it --
+			// push cosOuter down instead. The cone this produces is a
+			// hair-thin sliver rather than truly zero width, which is a
+			// numerical safety floor, not a design choice: a caller wanting
+			// an actual zero-radius cone has asked for something with no
+			// correct answer here.
+			cosInner = 1
+			cosOuter = 1 - cosineMargin
+		}
+	}
+
+	g.Color[3] = cosInner
+	g.DirCone = [4]float32{dir.X(), dir.Y(), dir.Z(), cosOuter}
+	return g
+}
+
+// sanitizeSpotAngle clamps a half-angle to [0, pi] and maps NaN to 0. Both
+// are angles no caller can have sanely meant, and 0 -- the narrowest
+// possible cone -- is a safer fallback than letting either reach cos() and
+// carry a NaN into the packed light.
+func sanitizeSpotAngle(a float32) float32 {
+	switch {
+	case math.IsNaN(float64(a)):
+		return 0
+	case a < 0:
+		return 0
+	case a > math.Pi:
+		return math.Pi
+	default:
+		return a
+	}
 }
 
 // resolveMaxCatchUp applies the default and makes sure the budget can fit at

@@ -26,13 +26,20 @@ type PointLight struct {
 
 // SpotLight describes an unshadowed spot light for the renderer: a point
 // light narrowed to a cone. Dir is the direction the light points (need not
-// be unit length -- the engine normalizes it); a zero Dir is treated as
-// omnidirectional, i.e. an ordinary point light, rather than as an error.
+// be unit length -- the engine normalizes it).
+//
+// A zero Dir has no cone to aim and is treated as omnidirectional, i.e. an
+// ordinary point light, rather than as an error. That is deliberate: it
+// turns a caller's uninitialized or mistakenly-zeroed Dir into a visibly
+// wrong light -- unexpectedly lighting everything around it -- rather than
+// a silently missing one, which is easier to notice and debug.
 //
 // Inner and Outer are half-angles in radians measured from Dir: full
 // intensity inside Inner, a smooth falloff to zero between Inner and Outer,
-// and nothing beyond Outer. Inner must not exceed Outer -- see
-// Scene.SetSpotLights.
+// and nothing beyond Outer. Inner greater than Outer is clamped down to
+// Outer rather than rejected, producing a hard-edged cone instead of
+// flooding the scene with an unbounded point light -- the opposite of what
+// asking for a narrower inner cone means.
 type SpotLight struct {
 	Pos   mgl32.Vec3
 	Dir   mgl32.Vec3
