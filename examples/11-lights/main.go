@@ -7,8 +7,10 @@
 //     scene six more times into a cube map, so there is exactly one, and it is
 //     the one you spend on the lantern the player is carrying.
 //   - Scene.SetPointLights are unshadowed fill lights, up to
-//     renderer.MaxPointLights of them. They cost a loop in the fragment
-//     shader and nothing else, so they are what you scatter around a level.
+//     renderer.MaxLights of them -- 1024, not the 32 this example was
+//     written against. They are binned into a froxel grid each frame, so a
+//     fragment only pays for the ones whose range reaches it, which is what
+//     makes scattering hundreds around a level reasonable. -lamps does that.
 //
 // Telling them apart is the point of this example: watch the orbiting white
 // light throw pillar shadows across the floor while the coloured lights pool
@@ -20,7 +22,7 @@
 //	go run ./11-lights              # windowed
 //	go run ./11-lights -frames 200  # render 200 frames, then exit
 //	go run ./11-lights -static      # stop the lights moving
-//	go run ./11-lights -count 200   # raise the fill lights past the old 32-light ceiling
+//	go run ./11-lights -count 200   # 200 fill lights on the ring instead of four
 //	go run ./11-lights -spots 6     # add downward-aimed warm spotlights over the ground
 //	go run ./11-lights -spots 6 -spothardedge  # same, with a crisp cone edge instead of a soft one
 //	go run ./11-lights -lamps 400   # a floor of small static lamps instead of the orbiting ring
@@ -166,8 +168,7 @@ func (g *game) Init(e *glyph.Engine) error {
 	}
 
 	// One marker per fill light: the built-in four by default, or -count of
-	// them once that flag raises the fill-light total past the old 32-light
-	// ceiling (see renderer.MaxLights). fillCount is also what Update uses to
+	// them (see renderer.MaxLights). fillCount is also what Update uses to
 	// build the light list itself, so the two never disagree about how many
 	// there are.
 	for i := 0; i < g.fillCount(); i++ {
@@ -395,7 +396,7 @@ func main() {
 	frames := flag.Int("frames", 0, "render N frames then exit (0 = run until closed)")
 	static := flag.Bool("static", false, "stop the lights moving")
 	shot := flag.String("screenshot", "", "write a PNG of the last frame to this path")
-	count := flag.Int("count", 0, "override the number of unshadowed fill lights (0 = the built-in four; raise past renderer.MaxPointLights to exercise the clustered path)")
+	count := flag.Int("count", 0, "override the number of unshadowed fill lights on the ring (0 = the built-in four)")
 	spots := flag.Int("spots", 0, "add N downward/outward-aimed warm spotlights over the ground")
 	spotHardEdge := flag.Bool("spothardedge", false, "give the -spots cones a hard edge (Inner == Outer) instead of the default soft one")
 	lightDebug := flag.String("lightdebug", "", "light debug mode: heatmap or bruteforce (default: off)")
