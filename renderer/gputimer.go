@@ -25,7 +25,8 @@ const (
 	PassSky                     // sky dome, volumetric clouds, stars
 	PassTranslucent             // blended world geometry, back to front
 	PassParticles               // billboard particles
-	PassWater                   // scene copy, refraction, god rays
+	PassWater                   // scene copy and the refraction surfaces
+	PassOverWater               // blended draws that belong in front of the water
 	PassOverlay                 // world-space unlit overlays, plus the scene pass end
 	PassBloom                   // bright-pass, downsample and upsample chain
 	PassTonemap                 // HDR resolve to the swapchain
@@ -39,7 +40,17 @@ const (
 // vkCmdEndRenderPass, so it charges the scene pass's MSAA resolve to "overlay".
 // On 15-kitchen-sink, which sets no world-space overlays at all, it still reads
 // 0.046 ms. Read it as "the end of the scene pass" rather than as the cost of
-// SetOverlays.
+// SetOverlays. In a frame that contains water it is exactly that and nothing
+// else: the overlays themselves move to PassOverWater, because they have to be
+// drawn on top of the surface rather than under it.
+//
+// PassOverWater is the blended geometry that had to move after the water:
+// translucent meshes, the particle instances in front of the surface, and the
+// world overlays. It exists as a pass of its own rather than being folded into
+// PassWater so that the cost of the reorder is visible and separable — folding
+// it in would make water look more expensive than it is, and folding it back
+// into PassTranslucent and PassParticles would need intervals that straddle the
+// water pass and overlap it. It reads zero in every frame without water.
 
 // String is what shows up in the report; kept short so a per-frame line fits.
 func (p Pass) String() string {
@@ -62,6 +73,8 @@ func (p Pass) String() string {
 		return "particles"
 	case PassWater:
 		return "water"
+	case PassOverWater:
+		return "overwater"
 	case PassOverlay:
 		return "overlay"
 	case PassBloom:
