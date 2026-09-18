@@ -128,8 +128,9 @@ float lightSkyLum = 0.0;
 // It also moved 41.5% of 08-grass at midnight by up to 47/255, 18.3% of
 // 16-materials at midnight and 18.2% at dusk by up to 18/255, and 4.7% of
 // 15-kitchen-sink at dusk -- scenes with no lamp in them at all. A ratio is
-// exactly zero when nothing local contributed, so those scenes cannot move:
-// that is the property worth having, and gate 1 below checks it by hash.
+// exactly zero when nothing local contributed, so those scenes cannot move,
+// and "cannot" is checkable: every example in the `screenshots` target except
+// 11-lights and 21-streetlights renders byte-identical across this change.
 //
 // The fog belongs inside the ratio, not outside it. What fog mixes in is
 // scattered skylight, which is nobody's lamp, so a pool far enough away to
