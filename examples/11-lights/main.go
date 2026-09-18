@@ -20,6 +20,8 @@
 //	go run ./11-lights              # windowed
 //	go run ./11-lights -frames 200  # render 200 frames, then exit
 //	go run ./11-lights -static      # stop the lights moving
+//	go run ./11-lights -count 200   # raise the fill lights past the old 32-light ceiling
+//	go run ./11-lights -spots 6     # add downward-aimed warm spotlights over the ground
 //
 // The camera orbits on its own. Escape quits.
 package main
@@ -59,7 +61,15 @@ type game struct {
 	lantern glyph.Entity
 	fills   []glyph.Entity
 	static  bool
-	t       float32
+
+	// pointCount overrides the number of unshadowed fill lights (-count); 0
+	// keeps the built-in four so the default output is unchanged.
+	pointCount int
+	// spotCount adds this many downward/outward-aimed warm spotlights over
+	// the ground (-spots); 0 adds none.
+	spotCount int
+
+	t float32
 }
 
 func (g *game) Init(e *glyph.Engine) error {
@@ -116,7 +126,13 @@ func (g *game) Init(e *glyph.Engine) error {
 	e.C.Color.Set(g.lantern, &glyph.Color{R: 1, G: 0.96, B: 0.88})
 	e.C.Emissive.Set(g.lantern, &glyph.Emissive{})
 
-	for _, c := range fillColors {
+	// One marker per fill light: the built-in four by default, or -count of
+	// them once that flag raises the fill-light total past the old 32-light
+	// ceiling (see renderer.MaxLights). fillCount is also what Update uses to
+	// build the light list itself, so the two never disagree about how many
+	// there are.
+	for i := 0; i < g.fillCount(); i++ {
+		c := fillColor(i, g.fillCount())
 		f := e.Spawn()
 		e.C.Transform.Set(f, &glyph.Transform{Scale: mgl32.Vec3{1, 1, 1}})
 		e.C.MeshRef.Set(f, &glyph.MeshRef{Mesh: bulb})
@@ -145,6 +161,53 @@ var fillColors = [][3]float32{
 	{0.95, 0.75, 0.20},
 }
 
+// fillCount is how many fill lights this run has: the built-in four unless
+// -count raised it. Both Init (markers) and Update (the light list itself)
+// call this so they never disagree about how many there are.
+func (g *game) fillCount() int {
+	if g.pointCount > 0 {
+		return g.pointCount
+	}
+	return len(fillColors)
+}
+
+// fillColor returns the i-th of n fill-light colours: fillColors verbatim
+// when n matches its length (the default, unmodified by -count), or a colour
+// cycled around the hue wheel when -count has raised the total past it --
+// fillColors has only four entries, and repeating them would make lights
+// past the fourth impossible to tell apart in a -count 200 capture.
+func fillColor(i, n int) [3]float32 {
+	if n == len(fillColors) {
+		return fillColors[i]
+	}
+	return hueColor(float64(i) / float64(n))
+}
+
+// hueColor converts a hue in [0,1) to a fully saturated, full value RGB
+// colour. Standard HSV-to-RGB with S=V=1, used only to spread -count lights
+// evenly around the colour wheel so a large count stays visually distinct.
+func hueColor(hue float64) [3]float32 {
+	hue -= math.Floor(hue)
+	h6 := hue * 6
+	x := 1 - math.Abs(math.Mod(h6, 2)-1)
+	var r, g, b float64
+	switch int(h6) {
+	case 0:
+		r, g, b = 1, x, 0
+	case 1:
+		r, g, b = x, 1, 0
+	case 2:
+		r, g, b = 0, 1, x
+	case 3:
+		r, g, b = 0, x, 1
+	case 4:
+		r, g, b = x, 0, 1
+	default:
+		r, g, b = 1, 0, x
+	}
+	return [3]float32{float32(r), float32(g), float32(b)}
+}
+
 func (g *game) Update(e *glyph.Engine, dt float32) {
 	if !g.static {
 		g.t += dt
@@ -171,9 +234,11 @@ func (g *game) Update(e *glyph.Engine, dt float32) {
 	// These pass through the whole scene without occlusion, so they light the
 	// far side of a pillar as happily as the near side. That is the trade:
 	// many of them, none of them casting.
-	lights := make([]glyph.PointLight, 0, len(fillColors))
-	for i, c := range fillColors {
-		a := float64(i)/float64(len(fillColors))*2*math.Pi - float64(g.t)*0.3
+	n := g.fillCount()
+	lights := make([]glyph.PointLight, 0, n)
+	for i := 0; i < n; i++ {
+		c := fillColor(i, n)
+		a := float64(i)/float64(n)*2*math.Pi - float64(g.t)*0.3
 		pos := mgl32.Vec3{
 			float32(math.Cos(a)) * 9.5,
 			1.6 + float32(math.Sin(float64(g.t)*1.3+float64(i)))*0.5,
@@ -192,6 +257,30 @@ func (g *game) Update(e *glyph.Engine, dt float32) {
 		}
 	}
 	e.Scene.SetPointLights(lights)
+
+	// ── the unshadowed spot lights (-spots) ──
+	// Posts around the same ring the pillars stand on, aimed down and
+	// outward so the cone lands on the ground ahead of its post instead of
+	// directly beneath it -- straight down would put the whole pool under
+	// geometry the camera never sees from outside the ring.
+	if g.spotCount > 0 {
+		spots := make([]glyph.SpotLight, 0, g.spotCount)
+		for i := 0; i < g.spotCount; i++ {
+			a := float64(i) / float64(g.spotCount) * 2 * math.Pi
+			outward := mgl32.Vec3{float32(math.Cos(a)), 0, float32(math.Sin(a))}
+			pos := outward.Mul(14).Add(mgl32.Vec3{0, 6.5, 0})
+			dir := mgl32.Vec3{0, -1, 0}.Add(outward.Mul(0.5))
+			spots = append(spots, glyph.SpotLight{
+				Pos:   pos,
+				Dir:   dir,
+				Range: 16,
+				Color: mgl32.Vec3{1.0, 0.75, 0.4}, // warm, like a lamp
+				Inner: mgl32.DegToRad(18),
+				Outer: mgl32.DegToRad(32),
+			})
+		}
+		e.Scene.SetSpotLights(spots)
+	}
 }
 
 func main() {
@@ -201,6 +290,9 @@ func main() {
 	frames := flag.Int("frames", 0, "render N frames then exit (0 = run until closed)")
 	static := flag.Bool("static", false, "stop the lights moving")
 	shot := flag.String("screenshot", "", "write a PNG of the last frame to this path")
+	count := flag.Int("count", 0, "override the number of unshadowed fill lights (0 = the built-in four; raise past renderer.MaxPointLights to exercise the clustered path)")
+	spots := flag.Int("spots", 0, "add N downward/outward-aimed warm spotlights over the ground")
+	lightDebug := flag.String("lightdebug", "", "light debug mode: heatmap or bruteforce (default: off)")
 	flag.Parse()
 
 	opts := []glyph.Option{
@@ -220,11 +312,22 @@ func main() {
 		opts = append(opts, glyph.WithScreenshot(*shot))
 	}
 
-	e, err := glyph.New(&game{static: *static}, opts...)
+	e, err := glyph.New(&game{static: *static, pointCount: *count, spotCount: *spots}, opts...)
 	if err != nil {
 		log.Fatalf("create engine: %v", err)
 	}
 	defer e.Destroy()
+
+	switch *lightDebug {
+	case "heatmap":
+		e.SetLightDebugMode(glyph.LightDebugHeatmap)
+	case "bruteforce":
+		e.SetLightDebugMode(glyph.LightDebugBruteForce)
+	case "":
+		// default: off
+	default:
+		log.Fatalf("unknown -lightdebug %q, want heatmap or bruteforce", *lightDebug)
+	}
 
 	e.Run()
 	log.Printf("rendered %d frames", e.FrameCount())
