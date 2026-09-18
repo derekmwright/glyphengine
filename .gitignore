@@ -25,3 +25,4 @@ Thumbs.db
 # behind on failure so the frame that failed can be looked at.
 examples/.determinism/
 examples/.hud/
+examples/.sky/
