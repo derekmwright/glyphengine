@@ -1,7 +1,6 @@
 package renderer
 
 import (
-	"encoding/binary"
 	"fmt"
 	"log"
 	"math"
@@ -26,10 +25,6 @@ var cascadeRadii = [ShadowCascades]float32{15, 90}
 // cascadeUBOSize holds one mat4 light VP per cascade.
 const cascadeUBOSize = ShadowCascades * 64
 
-// pointLightsUBOSize is the UBO size for up to 32 unshadowed point lights.
-// Layout: int numLights (4B) + 12B padding + 32 * PointLightData (32B each) = 1040 bytes.
-const pointLightsUBOSize = 16 + 32*32
-
 // shadowResources holds all Vulkan resources for the shadow mapping pass.
 // Per-frame images/views/framebuffers prevent read-write conflicts between frames in flight.
 // The sun shadow map is a 2D array image with one layer per cascade.
@@ -48,10 +43,26 @@ type shadowResources struct {
 	lightVPMemories [maxFramesInFlight]core1_0.DeviceMemory
 	lightVPMapped   [maxFramesInFlight][]byte
 
-	// Per-frame UBOs for unshadowed point lights, up to 32 (persistently mapped)
-	pointLightsBuffers  [maxFramesInFlight]core1_0.Buffer
-	pointLightsMemories [maxFramesInFlight]core1_0.DeviceMemory
-	pointLightsMapped   [maxFramesInFlight][]byte
+	// Per-frame storage buffers for the clustered light data (points + spots,
+	// up to MaxLights), persistently mapped. Three buffers because the GPU
+	// contract in shaders/lights.inc is three separate readonly buffers, not
+	// one with sub-regions -- LightBuffer (bindings 3), ClusterGrid (4) and
+	// LightIndices (5).
+	lightBuffers  [maxFramesInFlight]core1_0.Buffer
+	lightMemories [maxFramesInFlight]core1_0.DeviceMemory
+	lightMapped   [maxFramesInFlight][]byte
+
+	// clusterGrid and lightIndex are zeroed once at creation and never
+	// written again by this phase -- see uploadLights. Once
+	// renderer/lightcluster exists, the integration phase writes real cell
+	// data into these every frame via packCells/packIndices.
+	clusterGridBuffers  [maxFramesInFlight]core1_0.Buffer
+	clusterGridMemories [maxFramesInFlight]core1_0.DeviceMemory
+	clusterGridMapped   [maxFramesInFlight][]byte
+
+	lightIndexBuffers  [maxFramesInFlight]core1_0.Buffer
+	lightIndexMemories [maxFramesInFlight]core1_0.DeviceMemory
+	lightIndexMapped   [maxFramesInFlight][]byte
 
 	// Descriptor set layout: binding 0 = UBO (vertex), binding 1 = shadow sampler (fragment)
 	descriptorSetLayout core1_0.DescriptorSetLayout
@@ -305,50 +316,85 @@ func createShadowResources(
 		s.lightVPMapped[i] = unsafe.Slice((*byte)(ptr), cascadeUBOSize)
 	}
 
-	// Per-frame UBOs for unshadowed point lights (1040 bytes each)
-	for i := 0; i < maxFramesInFlight; i++ {
-		s.pointLightsBuffers[i], _, err = deviceDriver.CreateBuffer(nil, core1_0.BufferCreateInfo{
-			Size:        pointLightsUBOSize,
-			Usage:       core1_0.BufferUsageUniformBuffer,
+	// Per-frame storage buffers for the clustered light data: LightBuffer,
+	// ClusterGrid, LightIndices. Host-visible and persistently mapped, same
+	// as the UBOs above -- only the usage and descriptor type differ, because
+	// the light array no longer fits the UBO's 16KB minimum guaranteed range
+	// once it can hold MaxLights (1024) entries instead of 32.
+	newStorageBuffer := func(size int, label string) (core1_0.Buffer, core1_0.DeviceMemory, []byte, error) {
+		buf, _, err := deviceDriver.CreateBuffer(nil, core1_0.BufferCreateInfo{
+			Size:        size,
+			Usage:       core1_0.BufferUsageStorageBuffer,
 			SharingMode: core1_0.SharingModeExclusive,
 		})
 		if err != nil {
-			s.destroy(deviceDriver)
-			return nil, fmt.Errorf("point lights UBO buffer %d: %w", i, err)
+			return core1_0.Buffer{}, core1_0.DeviceMemory{}, nil, fmt.Errorf("%s buffer: %w", label, err)
 		}
 
-		bufMemReqs := deviceDriver.GetBufferMemoryRequirements(s.pointLightsBuffers[i])
-		bufMemType, err := findMemoryType(instanceDriver, physicalDevice, bufMemReqs.MemoryTypeBits,
+		memReqs := deviceDriver.GetBufferMemoryRequirements(buf)
+		memType, err := findMemoryType(instanceDriver, physicalDevice, memReqs.MemoryTypeBits,
 			core1_0.MemoryPropertyHostVisible|core1_0.MemoryPropertyHostCoherent)
 		if err != nil {
-			s.destroy(deviceDriver)
-			return nil, err
+			return core1_0.Buffer{}, core1_0.DeviceMemory{}, nil, err
 		}
 
-		s.pointLightsMemories[i], _, err = deviceDriver.AllocateMemory(nil, core1_0.MemoryAllocateInfo{
-			AllocationSize:  bufMemReqs.Size,
-			MemoryTypeIndex: bufMemType,
+		mem, _, err := deviceDriver.AllocateMemory(nil, core1_0.MemoryAllocateInfo{
+			AllocationSize:  memReqs.Size,
+			MemoryTypeIndex: memType,
 		})
 		if err != nil {
-			s.destroy(deviceDriver)
-			return nil, fmt.Errorf("point lights UBO memory %d: %w", i, err)
+			return core1_0.Buffer{}, core1_0.DeviceMemory{}, nil, fmt.Errorf("%s memory: %w", label, err)
 		}
 
-		_, err = deviceDriver.BindBufferMemory(s.pointLightsBuffers[i], s.pointLightsMemories[i], 0)
-		if err != nil {
-			s.destroy(deviceDriver)
-			return nil, fmt.Errorf("bind point lights UBO %d: %w", i, err)
+		if _, err := deviceDriver.BindBufferMemory(buf, mem, 0); err != nil {
+			return core1_0.Buffer{}, core1_0.DeviceMemory{}, nil, fmt.Errorf("bind %s: %w", label, err)
 		}
 
-		ptr, _, err := deviceDriver.MapMemory(s.pointLightsMemories[i], 0, pointLightsUBOSize, 0)
+		ptr, _, err := deviceDriver.MapMemory(mem, 0, size, 0)
 		if err != nil {
-			s.destroy(deviceDriver)
-			return nil, fmt.Errorf("map point lights UBO %d: %w", i, err)
+			return core1_0.Buffer{}, core1_0.DeviceMemory{}, nil, fmt.Errorf("map %s: %w", label, err)
 		}
-		s.pointLightsMapped[i] = unsafe.Slice((*byte)(ptr), pointLightsUBOSize)
+		return buf, mem, unsafe.Slice((*byte)(ptr), size), nil
 	}
 
-	// Descriptor set layout: binding 0 = UBO, binding 1 = sun shadow sampler, binding 2 = point cube sampler, binding 3 = point lights UBO
+	for i := 0; i < maxFramesInFlight; i++ {
+		var err error
+		s.lightBuffers[i], s.lightMemories[i], s.lightMapped[i], err = newStorageBuffer(lightBufferSize, "light buffer")
+		if err != nil {
+			s.destroy(deviceDriver)
+			return nil, fmt.Errorf("frame %d: %w", i, err)
+		}
+
+		s.clusterGridBuffers[i], s.clusterGridMemories[i], s.clusterGridMapped[i], err = newStorageBuffer(clusterGridBufferSize, "cluster grid buffer")
+		if err != nil {
+			s.destroy(deviceDriver)
+			return nil, fmt.Errorf("frame %d: %w", i, err)
+		}
+
+		s.lightIndexBuffers[i], s.lightIndexMemories[i], s.lightIndexMapped[i], err = newStorageBuffer(lightIndexBufferSize, "light index buffer")
+		if err != nil {
+			s.destroy(deviceDriver)
+			return nil, fmt.Errorf("frame %d: %w", i, err)
+		}
+
+		// Nothing produces real cluster data yet (no renderer/lightcluster),
+		// and mapped host-visible memory is not guaranteed zeroed by the
+		// driver. Zero once here rather than every frame in uploadLights: an
+		// all-zero Cell{0,0} everywhere is exactly "empty cell", which is
+		// what brute-force mode wants ignored and what heatmap mode should
+		// show as cold until the integration phase starts writing real
+		// counts.
+		clear(s.clusterGridMapped[i])
+		clear(s.lightIndexMapped[i])
+	}
+
+	// Descriptor set layout: binding 0 = UBO, binding 1 = sun shadow sampler,
+	// binding 2 = point cube sampler, bindings 3-5 = the clustered light
+	// storage buffers (LightBuffer, ClusterGrid, LightIndices -- see
+	// shaders/lights.inc). Binding 3 used to be a point-lights UBO; it is a
+	// storage buffer now because the light array no longer fits the UBO's
+	// 16KB minimum guaranteed range once it can hold MaxLights (1024) 48-byte
+	// entries instead of 32.
 	s.descriptorSetLayout, _, err = deviceDriver.CreateDescriptorSetLayout(nil, core1_0.DescriptorSetLayoutCreateInfo{
 		Bindings: []core1_0.DescriptorSetLayoutBinding{
 			{
@@ -371,7 +417,19 @@ func createShadowResources(
 			},
 			{
 				Binding:         3,
-				DescriptorType:  core1_0.DescriptorTypeUniformBuffer,
+				DescriptorType:  core1_0.DescriptorTypeStorageBuffer,
+				DescriptorCount: 1,
+				StageFlags:      core1_0.StageFragment,
+			},
+			{
+				Binding:         4,
+				DescriptorType:  core1_0.DescriptorTypeStorageBuffer,
+				DescriptorCount: 1,
+				StageFlags:      core1_0.StageFragment,
+			},
+			{
+				Binding:         5,
+				DescriptorType:  core1_0.DescriptorTypeStorageBuffer,
 				DescriptorCount: 1,
 				StageFlags:      core1_0.StageFragment,
 			},
@@ -567,7 +625,7 @@ func createShadowResources(
 		return nil, fmt.Errorf("cube shadow sampler: %w", err)
 	}
 
-	// Update descriptor sets now that all resources (UBO, sun shadow, cube shadow) are ready.
+	// Update descriptor sets now that all resources (UBO, sun shadow, cube shadow, light buffers) are ready.
 	for i := 0; i < maxFramesInFlight; i++ {
 		err = deviceDriver.UpdateDescriptorSets([]core1_0.WriteDescriptorSet{
 			{
@@ -609,12 +667,36 @@ func createShadowResources(
 			{
 				DstSet:         s.descriptorSets[i],
 				DstBinding:     3,
-				DescriptorType: core1_0.DescriptorTypeUniformBuffer,
+				DescriptorType: core1_0.DescriptorTypeStorageBuffer,
 				BufferInfo: []core1_0.DescriptorBufferInfo{
 					{
-						Buffer: s.pointLightsBuffers[i],
+						Buffer: s.lightBuffers[i],
 						Offset: 0,
-						Range:  pointLightsUBOSize,
+						Range:  lightBufferSize,
+					},
+				},
+			},
+			{
+				DstSet:         s.descriptorSets[i],
+				DstBinding:     4,
+				DescriptorType: core1_0.DescriptorTypeStorageBuffer,
+				BufferInfo: []core1_0.DescriptorBufferInfo{
+					{
+						Buffer: s.clusterGridBuffers[i],
+						Offset: 0,
+						Range:  clusterGridBufferSize,
+					},
+				},
+			},
+			{
+				DstSet:         s.descriptorSets[i],
+				DstBinding:     5,
+				DescriptorType: core1_0.DescriptorTypeStorageBuffer,
+				BufferInfo: []core1_0.DescriptorBufferInfo{
+					{
+						Buffer: s.lightIndexBuffers[i],
+						Offset: 0,
+						Range:  lightIndexBufferSize,
 					},
 				},
 			},
@@ -738,25 +820,23 @@ func (s *shadowResources) uploadCascadeVPs(frame int, vps [ShadowCascades]mgl32.
 	copy(s.lightVPMapped[frame], src)
 }
 
-// uploadPointLights serializes the unshadowed point lights directly into the
-// per-frame UBO (persistently mapped), matching the GLSL LightBlock layout:
-// int numLights (4B) + 12B pad + 32 * {vec4 posRange, vec4 color}.
-func (s *shadowResources) uploadPointLights(frame int, lights *[MaxPointLights]PointLightData, count int) {
-	buf := s.pointLightsMapped[frame]
-	if count > MaxPointLights {
-		count = MaxPointLights
+// uploadLights writes this frame's light data into the LightBuffer storage
+// buffer the fragment shader reads (see shaders/lights.inc): the 64-byte
+// header, then up to MaxLights GpuLight entries.
+//
+// The cluster grid and light index buffers are not touched here. They were
+// zeroed once at creation (see createShadowResources) and nothing produces
+// real cluster data yet -- brute-force mode ignores them, and until
+// renderer/lightcluster exists there is nothing to re-copy every frame.
+func (s *shadowResources) uploadLights(frame int, lights []GpuLight, flags uint32, near, far float32, extent core1_0.Extent2D) {
+	if len(lights) > MaxLights {
+		lights = lights[:MaxLights]
 	}
-	binary.LittleEndian.PutUint32(buf[0:4], uint32(count))
-	for i := 0; i < count; i++ {
-		off := 16 + i*32
-		binary.LittleEndian.PutUint32(buf[off+0:], math.Float32bits(lights[i].Pos[0]))
-		binary.LittleEndian.PutUint32(buf[off+4:], math.Float32bits(lights[i].Pos[1]))
-		binary.LittleEndian.PutUint32(buf[off+8:], math.Float32bits(lights[i].Pos[2]))
-		binary.LittleEndian.PutUint32(buf[off+12:], math.Float32bits(lights[i].Range))
-		binary.LittleEndian.PutUint32(buf[off+16:], math.Float32bits(lights[i].Color[0]))
-		binary.LittleEndian.PutUint32(buf[off+20:], math.Float32bits(lights[i].Color[1]))
-		binary.LittleEndian.PutUint32(buf[off+24:], math.Float32bits(lights[i].Color[2]))
-	}
+	buf := s.lightMapped[frame]
+	zScale, zBias := lightZSliceParams(near, far, LightGridZ)
+	screenW, screenH := float32(extent.Width), float32(extent.Height)
+	packLightHeader(buf[:lightHeaderSize], LightGridX, LightGridY, LightGridZ, uint32(len(lights)), zScale, zBias, screenW, screenH, flags)
+	packLights(buf[lightHeaderSize:], lights)
 }
 
 // ComputeCascadeVPs computes one orthographic light-space view-projection
@@ -969,15 +1049,37 @@ func (s *shadowResources) destroy(deviceDriver core1_0.DeviceDriver) {
 		deviceDriver.DestroyDescriptorSetLayout(s.descriptorSetLayout, nil)
 	}
 	for i := 0; i < maxFramesInFlight; i++ {
-		if s.pointLightsMapped[i] != nil {
-			deviceDriver.UnmapMemory(s.pointLightsMemories[i])
-			s.pointLightsMapped[i] = nil
+		if s.lightIndexMapped[i] != nil {
+			deviceDriver.UnmapMemory(s.lightIndexMemories[i])
+			s.lightIndexMapped[i] = nil
 		}
-		if s.pointLightsMemories[i].Handle() != 0 {
-			deviceDriver.FreeMemory(s.pointLightsMemories[i], nil)
+		if s.lightIndexMemories[i].Handle() != 0 {
+			deviceDriver.FreeMemory(s.lightIndexMemories[i], nil)
 		}
-		if s.pointLightsBuffers[i].Handle() != 0 {
-			deviceDriver.DestroyBuffer(s.pointLightsBuffers[i], nil)
+		if s.lightIndexBuffers[i].Handle() != 0 {
+			deviceDriver.DestroyBuffer(s.lightIndexBuffers[i], nil)
+		}
+
+		if s.clusterGridMapped[i] != nil {
+			deviceDriver.UnmapMemory(s.clusterGridMemories[i])
+			s.clusterGridMapped[i] = nil
+		}
+		if s.clusterGridMemories[i].Handle() != 0 {
+			deviceDriver.FreeMemory(s.clusterGridMemories[i], nil)
+		}
+		if s.clusterGridBuffers[i].Handle() != 0 {
+			deviceDriver.DestroyBuffer(s.clusterGridBuffers[i], nil)
+		}
+
+		if s.lightMapped[i] != nil {
+			deviceDriver.UnmapMemory(s.lightMemories[i])
+			s.lightMapped[i] = nil
+		}
+		if s.lightMemories[i].Handle() != 0 {
+			deviceDriver.FreeMemory(s.lightMemories[i], nil)
+		}
+		if s.lightBuffers[i].Handle() != 0 {
+			deviceDriver.DestroyBuffer(s.lightBuffers[i], nil)
 		}
 	}
 	for i := 0; i < maxFramesInFlight; i++ {

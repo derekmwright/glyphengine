@@ -142,8 +142,20 @@ func createDescriptorPool(deviceDriver core1_0.DeviceDriver, maxSets int) (core1
 			},
 			{
 				Type: core1_0.DescriptorTypeUniformBuffer,
-				// +4 shadow UBO + point lights UBO per frame, then one per material
-				DescriptorCount: 36 + maxFramesInFlight + maxMaterials,
+				// +4 shadow UBO, then one per material. Point lights used to
+				// add one UBO per frame here; they are storage buffers now
+				// (see the StorageBuffer pool size below), which is why this
+				// no longer carries a maxFramesInFlight term.
+				DescriptorCount: 36 + maxMaterials,
+			},
+			{
+				Type: core1_0.DescriptorTypeStorageBuffer,
+				// The clustered light data: LightBuffer, ClusterGrid, and
+				// LightIndices (bindings 3-5 on the shadow descriptor set),
+				// one of each per frame in flight. Fixed rather than
+				// swapchain-scaled -- that descriptor set is allocated once
+				// in createShadowResources and never reallocated on resize.
+				DescriptorCount: lightStorageBuffersPerSet * maxFramesInFlight,
 			},
 		},
 	})

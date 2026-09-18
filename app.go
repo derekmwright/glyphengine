@@ -3,6 +3,7 @@ package glyphengine
 import (
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"slices"
 	"strings"
@@ -454,8 +455,117 @@ type Engine struct {
 	// copy rather than the engine.
 	accumulator time.Duration
 
+	// lightDebugMode selects what the fragment shader's light loop does; see
+	// SetLightDebugMode.
+	lightDebugMode LightDebugMode
+
+	// lightBuf is reused each frame to avoid allocs, like drawBuf.
+	lightBuf []renderer.GpuLight
+
 	// cpu accumulates per-phase CPU cost; see cputimer.go.
 	cpu cpuTimer
+}
+
+// LightDebugMode selects what the fragment shader does with the clustered
+// light data; see Engine.SetLightDebugMode.
+type LightDebugMode int
+
+const (
+	// LightDebugOff renders normally.
+	//
+	// Phase 2 of clustered lighting has no clusterer yet (renderer/lightcluster
+	// does not exist), so lightFlags below still forces brute force under
+	// this mode -- see the comment there for the one line to flip once it does.
+	LightDebugOff LightDebugMode = iota
+	// LightDebugHeatmap replaces the lit colour with a ramp of each fragment's
+	// cluster cell light count, for inspecting how lights distribute across
+	// the grid.
+	LightDebugHeatmap
+	// LightDebugBruteForce forces the reference loop-every-light path
+	// regardless of the cluster grid, for A/B comparison against clustered
+	// rendering.
+	LightDebugBruteForce
+)
+
+// SetLightDebugMode selects how the fragment shader evaluates the light
+// list: normal, the per-cell light-count heatmap, or the brute-force
+// reference path. See LightDebugMode.
+func (e *Engine) SetLightDebugMode(mode LightDebugMode) { e.lightDebugMode = mode }
+
+// lightFlags packs the current debug mode into the header bits
+// shaders/lights.inc reads: bit0 = brute force, bit1 = debug heatmap.
+func (e *Engine) lightFlags() uint32 {
+	switch e.lightDebugMode {
+	case LightDebugHeatmap:
+		return renderer.LightFlagHeatmap
+	case LightDebugBruteForce:
+		return renderer.LightFlagBruteForce
+	default:
+		// No clusterer exists yet (renderer/lightcluster). "Off" has nothing
+		// to fall back to except brute force, or every unshadowed light
+		// would silently go dark the moment this phase lands. Flip this to
+		// `return 0` once the integration phase wires a real clusterer into
+		// DrawFrame and "off" can mean "use the grid".
+		return renderer.LightFlagBruteForce
+	}
+}
+
+// gatherLights combines the scene's point and spot lights into one list for
+// the GPU light buffer: points first, then spots, in submission order. Points
+// first keeps a scene written against the old 32-light ceiling lighting
+// exactly as it always did, in the same order -- which is what G1 (the
+// clustered-lighting migration's invisibility gate) checks.
+func (e *Engine) gatherLights() []renderer.GpuLight {
+	pls := e.Scene.pointLights
+	spls := e.Scene.spotLights
+	lights := e.lightBuf[:0]
+
+	for _, pl := range pls {
+		lights = append(lights, renderer.GpuLight{
+			PosRange: [4]float32{pl.Pos.X(), pl.Pos.Y(), pl.Pos.Z(), pl.Range},
+			Color:    [4]float32{pl.Color.X(), pl.Color.Y(), pl.Color.Z(), 0},
+			// DirCone stays zero: lightSpotFactor in shaders/lights.inc reads
+			// that as "omnidirectional", which is the value a plain point
+			// light has to reach the GPU with.
+		})
+	}
+
+	for _, sl := range spls {
+		dir := sl.Dir
+		// A zero-length Dir has no cone to aim, and Inner > Outer is not a
+		// valid cone either -- smoothstep(outer, inner, x) would invert the
+		// falloff. Both degenerate cases fall back to an omnidirectional
+		// point light instead of guessing what the caller meant.
+		if dir.Len() == 0 || sl.Inner > sl.Outer {
+			lights = append(lights, renderer.GpuLight{
+				PosRange: [4]float32{sl.Pos.X(), sl.Pos.Y(), sl.Pos.Z(), sl.Range},
+				Color:    [4]float32{sl.Color.X(), sl.Color.Y(), sl.Color.Z(), 0},
+			})
+			continue
+		}
+		dir = dir.Normalize()
+		lights = append(lights, renderer.GpuLight{
+			PosRange: [4]float32{sl.Pos.X(), sl.Pos.Y(), sl.Pos.Z(), sl.Range},
+			// color.a = cos(inner half-angle); see the GPU contract in the
+			// clustered-lighting spec.
+			Color:   [4]float32{sl.Color.X(), sl.Color.Y(), sl.Color.Z(), float32(math.Cos(float64(sl.Inner)))},
+			DirCone: [4]float32{dir.X(), dir.Y(), dir.Z(), float32(math.Cos(float64(sl.Outer)))},
+		})
+	}
+
+	// TODO(clustered-lighting integration phase): this truncates in
+	// submission order once the combined list exceeds MaxLights.
+	// renderer/lightcluster owns the real overflow policy -- priority by
+	// ascending (distance to camera - range), ties by submission index (see
+	// decision 6 and the CPU contract in the clustered-lighting spec). Do not
+	// extend this truncation into something that looks like a policy; it is
+	// only "do what the old 32-light cap did" until that phase lands.
+	if len(lights) > renderer.MaxLights {
+		lights = lights[:renderer.MaxLights]
+	}
+
+	e.lightBuf = lights
+	return lights
 }
 
 // resolveMaxCatchUp applies the default and makes sure the budget can fit at
@@ -1165,18 +1275,10 @@ func (e *Engine) renderFrame() {
 		SunScreenPos:  sunScreen,
 	}
 
-	pls := e.Scene.pointLights
-	if len(pls) > renderer.MaxPointLights {
-		pls = pls[:renderer.MaxPointLights]
-	}
-	lighting.PointLightCount = len(pls)
-	for i, pl := range pls {
-		lighting.PointLights[i] = renderer.PointLightData{
-			Pos:   [3]float32{pl.Pos.X(), pl.Pos.Y(), pl.Pos.Z()},
-			Range: pl.Range,
-			Color: [3]float32{pl.Color.X(), pl.Color.Y(), pl.Color.Z()},
-		}
-	}
+	lighting.Lights = e.gatherLights()
+	lighting.LightFlags = e.lightFlags()
+	lighting.Near = e.near
+	lighting.Far = e.far
 
 	e.cpu.begin(CPUSubmit)
 	// Debug text rides in its own channel, appended rather than merged, so a

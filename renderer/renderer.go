@@ -435,6 +435,18 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 				lim, pushConstantSize)
 		}
 		log.Printf("Push constants: %d bytes used of %d available", pushConstantSize, props.Limits.MaxPushConstantsSize)
+
+		// The clustered light data (LightBuffer, ClusterGrid, LightIndices)
+		// lives in three storage buffer bindings on one fragment-stage
+		// descriptor set. Vulkan 1.0 core guarantees at least 4 per stage, so
+		// this should never fire, but it is the same "check the limit rather
+		// than discover it as a pipeline that will not create" reasoning as
+		// the push constant check above -- a silent 0 here would be a device
+		// that simply cannot run this renderer.
+		if lim := props.Limits.MaxPerStageDescriptorStorageBuffers; lim < lightStorageBuffersPerSet {
+			return nil, fmt.Errorf("renderer: device allows %d storage buffers per stage, engine needs %d for clustered lighting",
+				lim, lightStorageBuffersPerSet)
+		}
 		supported := props.Limits.FramebufferColorSampleCounts & props.Limits.FramebufferDepthSampleCounts
 		requested := r.msaaSamples
 		for r.msaaSamples > core1_0.Samples1 && supported&r.msaaSamples == 0 {
@@ -1339,7 +1351,7 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 	// all fragments to project to the shadow map origin where depth=1.0
 	// (cleared) → fully lit.
 	r.shadow.uploadCascadeVPs(f, lighting.CascadeVPs)
-	r.shadow.uploadPointLights(f, &lighting.PointLights, lighting.PointLightCount)
+	r.shadow.uploadLights(f, lighting.Lights, lighting.LightFlags, lighting.Near, lighting.Far, r.sc.extent)
 
 	// The water pass is optional: a device without TRANSFER_SRC on its
 	// swapchain images cannot supply the refraction source, and scenes with no

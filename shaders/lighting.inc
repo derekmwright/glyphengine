@@ -1,7 +1,8 @@
 // Shared lighting functions for lit fragment shaders.
-// Expects shadowMap (sampler2DArrayShadow), pointShadowMap, lb, pc, and
+// Expects shadowMap (sampler2DArrayShadow), pointShadowMap, pc, and
 // shadow (ShadowData UBO with mat4 cascadeVP[2]) to be declared by the
-// including file.
+// including file, and LIGHT_SET #defined before this include -- see
+// lights.inc for lb/cg/li (the clustered light buffers).
 //
 // Light contributions use the "irradiance" pattern (same as three.js):
 // irradiance = saturate(NdotL) * lightColor, then both diffuse and specular
@@ -9,6 +10,7 @@
 // leaking through surfaces where NdotL <= 0.
 
 #include "atmosphere.inc"
+#include "lights.inc"
 
 const int NumCascades = 2;
 
@@ -178,6 +180,18 @@ vec3 brdfSpecular(vec3 L, vec3 V, vec3 N, vec3 F0, float shininess) {
 vec3 evalLightingAO(vec3 diffuseColor, vec3 F0, float shininess,
                     vec3 N, vec3 V,
                     vec3 worldPos, vec3 shadowPos, float ao) {
+    // Reverse-Z: view-space depth is 1/w regardless of near/far (see the
+    // "Facts" section of the clustered-lighting spec) -- both the cluster
+    // lookup and the debug heatmap key off this.
+    float viewDepth = 1.0 / gl_FragCoord.w;
+
+    // Debug heatmap replaces the lit colour outright ("keep it simple"); it
+    // reports the grid regardless of the brute-force bit, since the point of
+    // the view is to see what binning produced.
+    if ((lb.flags.x & 2u) != 0u) {
+        return lightHeatmap(cellLightCount(gl_FragCoord.xy, viewDepth));
+    }
+
     // --- Directional (sun) light ---
     vec3 L = normalize(pc.sunDir.xyz);
     float NdotL = clamp(dot(N, L), 0.0, 1.0);
@@ -206,26 +220,16 @@ vec3 evalLightingAO(vec3 diffuseColor, vec3 F0, float shininess,
         pointSpecular = ptIrradiance * brdfSpecular(PL, V, N, F0, shininess);
     }
 
-    // --- Unshadowed point lights ---
+    // --- Unshadowed lights (point + spot) ---
     vec3 uDiffuse = vec3(0.0);
     vec3 uSpecular = vec3(0.0);
-    for (int i = 0; i < lb.numLights; i++) {
-        vec3 uPos = lb.lights[i].posRange.xyz;
-        float uRange = lb.lights[i].posRange.w;
-        vec3 uColor = lb.lights[i].color.rgb;
-        vec3 uToLight = uPos - worldPos;
-        float uDist = length(uToLight);
-        if (uRange > 0.0 && uDist < uRange) {
-            float uRatio = uDist / uRange;
-            float uAtten = (1.0 - uRatio * uRatio);
-            uAtten = uAtten * uAtten;
-            vec3 UL = normalize(uToLight);
-            float uNdotL = clamp(dot(N, UL), 0.0, 1.0);
-            vec3 uIrradiance = uNdotL * uAtten * uColor;
-
-            uDiffuse  += uIrradiance * diffuseColor;
-            uSpecular += uIrradiance * brdfSpecular(UL, V, N, F0, shininess);
-        }
+    LightRange lr = resolveLightRange(gl_FragCoord.xy, viewDepth);
+    for (uint i = 0u; i < lr.count; i++) {
+        GpuLight light = lightAt(lr, i);
+        vec3 uL;
+        vec3 irradiance = lightIrradiance(light, worldPos, N, uL);
+        uDiffuse  += irradiance * diffuseColor;
+        uSpecular += irradiance * brdfSpecular(uL, V, N, F0, shininess);
     }
 
     vec3 ambientTerm = diffuseColor * pc.ambient.rgb * ao;
@@ -248,6 +252,11 @@ vec3 evalLighting(vec3 diffuseColor, vec3 F0, float shininess,
 // no Fresnel. Used by grass: on sub-pixel blades the Fresnel term explodes at
 // grazing sun angles (dawn/dusk) and turns normal noise into bright speckle.
 vec3 evalLightingDiffuse(vec3 diffuseColor, vec3 N, vec3 worldPos, vec3 shadowPos) {
+    float viewDepth = 1.0 / gl_FragCoord.w;
+    if ((lb.flags.x & 2u) != 0u) {
+        return lightHeatmap(cellLightCount(gl_FragCoord.xy, viewDepth));
+    }
+
     // --- Directional (sun) light ---
     vec3 L = normalize(pc.sunDir.xyz);
     float NdotL = clamp(dot(N, L), 0.0, 1.0);
@@ -267,19 +276,12 @@ vec3 evalLightingDiffuse(vec3 diffuseColor, vec3 N, vec3 worldPos, vec3 shadowPo
         color += NdotPL * atten * pc.pointColor.rgb * ptShadow * diffuseColor;
     }
 
-    // --- Unshadowed point lights ---
-    for (int i = 0; i < lb.numLights; i++) {
-        vec3 uPos = lb.lights[i].posRange.xyz;
-        float uRange = lb.lights[i].posRange.w;
-        vec3 uToLight = uPos - worldPos;
-        float uDist = length(uToLight);
-        if (uRange > 0.0 && uDist < uRange) {
-            float uRatio = uDist / uRange;
-            float uAtten = (1.0 - uRatio * uRatio);
-            uAtten = uAtten * uAtten;
-            float uNdotL = clamp(dot(N, normalize(uToLight)), 0.0, 1.0);
-            color += uNdotL * uAtten * lb.lights[i].color.rgb * diffuseColor;
-        }
+    // --- Unshadowed lights (point + spot) ---
+    LightRange lr = resolveLightRange(gl_FragCoord.xy, viewDepth);
+    for (uint i = 0u; i < lr.count; i++) {
+        GpuLight light = lightAt(lr, i);
+        vec3 uL;
+        color += lightIrradiance(light, worldPos, N, uL) * diffuseColor;
     }
 
     return diffuseColor * pc.ambient.rgb + color;
