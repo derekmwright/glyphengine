@@ -57,10 +57,17 @@ package renderer
 //
 //   - **Several bodies are tested independently.** A draw is behind the water if
 //     ANY surface whose disc contains it separates it from the eye. With lakes
-//     at different heights — a tarn above a lake — a draw between the two levels
-//     is behind the upper surface and in front of the lower, and it goes before
-//     the copy. That is the conservative choice: being refracted by a lake you
-//     are not in is a wrong tint, being swallowed by one is a missing object.
+//     at different heights — a tarn above a lake — an eye above the tarn and a
+//     draw between the two levels is behind the tarn and in front of the lake,
+//     and it goes before the copy: refracted by water it is not in, rather than
+//     risked behind water it is. That is the side to be wrong on, because a
+//     wrong tint is visible and a swallowed object is not.
+//
+//     The eye's side is half of that and easy to drop. A surface ABOVE both the
+//     eye and the draw separates nothing, however far above the draw it is —
+//     stand between two lakes and the upper one is simply not between you and
+//     anything. waterorder_test.go pins it; the first version of this paragraph
+//     said the opposite and the test is what caught it.
 //
 //   - **Nothing consults the far side of the surface.** A draw above the water
 //     and beyond the far shore is "in front", and is drawn after the water. It

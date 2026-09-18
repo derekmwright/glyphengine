@@ -121,7 +121,10 @@ So each blended draw is classified:
 
 "Separates" is the whole rule, and it is why an underwater camera needs no case
 of its own: from above the surface the things behind the water are the ones
-below it, and from below, the ones above it.
+below it, and from below, the ones above it. It is also the half that is easy to
+drop — a surface above both the eye and the draw separates nothing — so the rule
+is unit-tested in `renderer/waterorder_test.go` rather than left to a capture
+nobody can take without walking into the lake.
 
 `renderer/waterorder.go` is the one place that decides, and the page there is
 the long version. What it does **not** do, in order of how likely you are to
@@ -132,7 +135,7 @@ meet it:
 | The surface is its **still plane** | A draw within `WaveAmplitude` of the surface can be classified onto the wrong side |
 | A draw is **one point**, its bound centre | A tall pane half in the water goes wholly one way. Particles split per instance, which is as fine as the instance buffer goes |
 | The footprint is the surface mesh's **bounding disc** in XZ | Over a concave shore the disc covers dry land; that only changes the answer for a draw below the waterline over dry ground, which is a draw inside the terrain |
-| Several bodies are tested **independently** | With a tarn above a lake, a draw between the two levels is behind the upper surface and goes before the copy. Deliberate: a wrong tint beats a missing object |
+| Several bodies are tested **independently** | With a tarn above a lake and the eye above the tarn, a draw between the two levels is behind the tarn and goes before the copy — refracted by water it is not in. Deliberate: a wrong tint beats a missing object |
 
 **World-space overlays are always drawn after the water**, whatever their
 position, because "on top" has to mean on top of the lake too — and an overlay
