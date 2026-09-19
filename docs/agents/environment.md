@@ -268,10 +268,14 @@ and a zero keeps the frame out of the water pass entirely. `08-grass`,
 `07-terrain` and `15-kitchen-sink` never point at the sun and report
 `gpu_shafts 0.000` and `gpu_water 0.000` throughout.
 
-`task shafts` is the gate: it renders that dusk scene with the shafts on and
-off, requires the ground lit through a gap to gain more than the ground in the
-pillar's streak, and requires the two captures to be byte identical when the sun
-is off screen.
+`task shafts` is the gate, on the default shape. It renders that dusk scene with
+the shafts on and off and requires three things of the light added: the ground
+lit through a gap gains at least twice what the ground in the pillar's streak
+does; the foreground hillside, metres from the eye, gains almost nothing (+0.2
+shipped, ceiling 4); and with the sun off screen the two captures are byte
+identical. The middle one is what catches the effect turning into a dirty lens:
+with the lobe removed the first check still passes at a ratio of 4.0, and the
+foreground reads +6.7.
 
 ## Fog settles, if you ask it to
 
