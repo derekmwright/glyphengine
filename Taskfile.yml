@@ -140,6 +140,12 @@ tasks:
       - go run ./06-skinned -frames 60
       - go run ./08-grass -frames 60
       - go run ./07-terrain -frames 60
+      # A real Blender terrain converted by cmd/heightmapconv (issue #70),
+      # not the procedural fBm terrain the run above uses -- the -heightmap
+      # path is untested by every other run here. 65x65 grid, ~17 KB, small
+      # enough to commit alongside the .glb it was converted from; see
+      # examples/07-terrain/assets/README.md.
+      - go run ./07-terrain -frames 60 -heightmap 07-terrain/assets/blender_terrain.heightmap
       - go run ./09-water -frames 60
       - go run ./11-lights -frames 60
       - go run ./12-particles -frames 60
@@ -216,6 +222,11 @@ tasks:
         # instance -- that a hand-authored fixture never exercises. See
         # renderer/testdata/blender/README.md and docs/agents/blender-pipeline.md.
         check 22-level -level ../renderer/testdata/blender/level.glb
+        # A heightmap converted from a real Blender terrain (issue #70),
+        # not the procedurally-generated one the stock 07-terrain run above
+        # uses -- CreateTerrainMesh/CreateIndexedMesh32 run against real
+        # (if small) converted grid data here, not synthetic fBm.
+        check 07-terrain -heightmap 07-terrain/assets/blender_terrain.heightmap
         # 21-streetlights' non-default paths: the moving sweep, the cleared
         # spotlight set, a lamp count well past the default, and the debug
         # heatmap. None of these run under stock settings above.
