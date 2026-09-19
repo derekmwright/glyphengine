@@ -262,7 +262,7 @@ tasks:
         exit $status
 
   determinism:
-    desc: "Check that a fixed frame clock makes renders byte-identical"
+    desc: "Check that a fixed frame clock makes renders, and the draw sequence behind them, identical"
     dir: examples
     cmds:
       # Needs a GPU, so it sits with smoke and validate rather than in `task ci`.

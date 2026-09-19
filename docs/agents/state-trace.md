@@ -10,6 +10,7 @@ status: stable
 since: v0.4.0
 api:
   - renderer.StateTrace
+  - cmd/tracefield
   - renderer.OpenStateTrace
   - renderer.Renderer.SetStateTrace
   - renderer.Hasher
@@ -17,7 +18,7 @@ api:
   - renderer.HashPOD
 assets: none
 run: task determinism
-verified: 2026-09-18
+verified: 2026-09-19
 ---
 
 # Finding a render that differs run to run
@@ -39,6 +40,21 @@ GLYPHENGINE_STATE_TRACE=a.trace go run ./08-grass -frames 150 -screenshot a.png
 GLYPHENGINE_STATE_TRACE=b.trace go run ./08-grass -frames 150 -screenshot b.png
 diff a.trace b.trace | head
 ```
+
+Diffing the whole file is right when you are hunting; it is wrong in a gate,
+because `slot=` and `image=` name the frame-in-flight and the swapchain image
+the acquire returned and both legitimately differ between two runs that drew
+the same frame. To assert on one field, pull it out first:
+
+```
+go run ../cmd/tracefield -key draws -in a.trace -out a.draws
+go run ../cmd/tracefield -key draws -in b.trace -out b.draws
+diff a.draws b.draws
+```
+
+`tracefield` exits non-zero if the field is on no line, so a gate built on it
+cannot pass by comparing two empty files. `task determinism` uses it on
+`draws=` over thirteen scenes.
 
 It is an environment variable rather than an `Option` for the same reason
 `GLYPHENGINE_FIXED_FRAME_TIME` and `GLYPHENGINE_VALIDATION` are: the run that
@@ -107,9 +123,14 @@ frame: the swapchain is rebuilt and the frame is drawn into it, ending at
 The pairing of fields is the point.
 
 - `draws` differs, `drawsset` matches — the same geometry arrived in a
-  different sequence. The draw list is built by an ECS query that walks a Go
-  map, so this happens on **every** frame of **every** run; what matters is
-  whether it survives the sort into something the image depends on.
+  different sequence. **This should no longer happen for an unchanged scene**,
+  and `task determinism` gates on it: the draw list is assembled by an ECS
+  query that walks a Go map, so it *arrives* in a different order on every
+  frame of every run, but the sort it goes through has a total order, so what
+  comes out is a function of the scene. If this field differs between two runs
+  under a fixed clock, the sort has lost its tiebreak or something is feeding
+  it a value that varies per process. That was issue #53, where the low bits of
+  the sort key were a descriptor set address.
 - `clock` differs — the frame loop ran a different number of times, or ticked a
   different number of times. Check `loop` against `rendered` and `ticks`.
 - `cam` differs with `clock` identical — the camera moved under an identical
@@ -117,6 +138,11 @@ The pairing of fields is the point.
 - `sim` fields all match and `grass`, `particles` or `dynmesh` differ — the
   simulation was identical and the renderer derived different GPU state from
   it. That is a much narrower bug than the other way round.
+- `dynmeshorder` differs — the `r.dynamicMeshes` map was walked in a different
+  order. Still expected, and still harmless: each entry's flush is independent,
+  so the field records the walk rather than asserting anything about it. It is
+  the one map order in the trace that was *not* fixed, because there is nothing
+  to fix.
 - `outcome` differs — one run skipped or rebuilt where the other did not. This
   is the one that needs no further hashing to be a finding.
 
@@ -175,9 +201,18 @@ What they found, measured on this repo before the fixes that followed
 | `DRAW_ORDER=reverse` | `18-translucent`, `15-kitchen-sink -demo`, `09-water -plume -ghost -marker -submerged` | none | — |
 
 Read that table as three findings. A wall-clock stall changes nothing, which is
-what a fixed clock is for. Reversing the draw list changes `draws=` and not the
-image, so the ECS map walk's randomness is latent rather than live — worth
-knowing, not worth a fix. And a frame the renderer did not draw, or a swapchain
+what a fixed clock is for. And a frame the renderer did not draw, or a swapchain
 rebuilt underneath one it did, changes the picture by an amount that depends
 entirely on how late it happened: a rebuild on the last frame of `08-grass`
 moved 28 % of the pixels.
+
+Reversing the draw list was the third, and it has since been fixed rather than
+merely recorded. It changed `draws=` and not the image, which said the map
+walk's randomness was latent — and the same measurement said that two ordinary
+runs of the same build differed the same way, in eight of the thirteen scenes
+the determinism gate covers. Latent is not harmless: two blended draws at the
+same depth would have picked an order per frame. The sort now has a total order
+(`Engine.sortDraws`), so reversing the list produces the identical sequence and
+not merely the identical picture. `TestReversedInputSortsToTheSameSequence`
+asserts that without a GPU; the provocation stays in the gate as the end-to-end
+half.
