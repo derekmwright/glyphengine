@@ -36,10 +36,15 @@ type OverlapResult struct {
 // WorldAABB computes the world-space AABB for an entity given its transform
 // and collider. Rotation is ignored (axis-aligned assumption).
 func WorldAABB(t *Transform, c *Collider) AABB {
+	// The magnitude of the scale, not the scale: a negative one is a mirror,
+	// and the box around a mirrored box is the same box. Left signed it put Min
+	// above Max on that axis, and an inverted AABB overlaps nothing -- the
+	// collider was there and nothing could touch it. Negative scales arrive from
+	// TransformFromMatrix, for anything an editor mirrored.
 	scaled := mgl32.Vec3{
-		c.HalfExtents.X() * t.Scale.X(),
-		c.HalfExtents.Y() * t.Scale.Y(),
-		c.HalfExtents.Z() * t.Scale.Z(),
+		c.HalfExtents.X() * abs32(t.Scale.X()),
+		c.HalfExtents.Y() * abs32(t.Scale.Y()),
+		c.HalfExtents.Z() * abs32(t.Scale.Z()),
 	}
 	return AABB{
 		Min: t.Position.Sub(scaled),
