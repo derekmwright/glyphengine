@@ -129,6 +129,16 @@ type Scene struct {
 	// StaticGrid indexes entities tagged Static. Built once by RebuildStatics.
 	StaticGrid *SpatialGrid
 
+	// Queries replaces the built-in spatial-grid collision queries — Raycast
+	// and OverlapAABB — with a game's own broadphase. Nil keeps the built-in
+	// implementation; NewScene leaves it nil, the same way it leaves Terrain,
+	// PathFinder, and SpatialGrid nil for "use the built-in or fallback
+	// behavior" rather than setting a default the way it does for Env and
+	// Integrator. See QueryBackend for what a replacement must honour: the
+	// #57 order contracts, the collision snapshot, and the concurrency
+	// requirement.
+	Queries QueryBackend
+
 	// NavGrid and PathFinder are optional A* pathfinding over the terrain.
 	NavGrid    *NavGrid
 	PathFinder *PathFinder

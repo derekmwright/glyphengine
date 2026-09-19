@@ -148,6 +148,64 @@ func (s *Scene) colliderAABB(entity ecs.Entity) (wb AABB, ok bool) {
 	return WorldAABB(t, c), true
 }
 
+// QueryBackend answers the two collision queries every internal engine system
+// runs against the world: a nearest-hit raycast and a box-overlap query.
+// Scene.Queries is nil by default, which keeps this file's spatial-grid
+// implementation; setting it replaces BOTH Scene.Raycast and Scene.OverlapAABB
+// in one step, because every engine call site goes through those two methods
+// and nothing else — IntegrateBodies, MoveCharacter, Unstick,
+// Camera.ResolveCollision (via the Raycaster embedded below), and
+// Engine.PickEntity. A game backing collision queries with its own broadphase
+// — a BVH, say — implements this once instead of leaving OverlapAABB stuck on
+// the built-in grid while only Raycast is swapped.
+//
+// A replacement must honour the order contracts #57 gave the built-in
+// implementation, because engine code is written against them:
+//
+//   - OverlapAABB's results are ordered by ascending entity id.
+//   - Raycast breaks an exact-distance tie on the lower entity id; a terrain
+//     hit (Entity == 0, since no real entity ever has id 0) always wins a tie
+//     against any real entity.
+//
+// Both are about reproducibility, not the specific ordering: the same query
+// against the same frozen state must return the same answer on every call,
+// not whichever candidate a map walk or a goroutine happened to reach first.
+// Measured, not assumed: scrambling OverlapAABB's result order does not
+// currently break Unstick or MoveCharacter — Unstick scans the whole result
+// list itself and picks the smallest-push entry with its own tie-break
+// (below), and MoveCharacter's "does anything block this move" check is an OR
+// over the list, so neither reads a positional index. See
+// TestUnstickToleratesScrambledOverlapOrder and
+// TestMoveCharacterToleratesScrambledOverlapOrder in query_backend_test.go.
+// The contract is required of a replacement anyway, because OverlapAABB
+// documents it to ITS OWN callers (physics-queries.md) and a game may depend
+// on it exactly the way Unstick used to.
+//
+// The collision snapshot is the other half of the contract, and deliberately
+// is not a method here — there is no lifecycle hook to freeze or unfreeze a
+// replacement, because Raycast and OverlapAABB are the whole of what this
+// seam is for. During Scene.MoveCharactersParallel, both are called from
+// multiple goroutines while other goroutines concurrently write Transform and
+// Velocity through MoveCharacter. The built-in implementation is exposed to
+// that race only because it reads those same live components, and it
+// survives by freezing a copy of every collider's AABB before the phase
+// starts (colliderAABB, buildCollisionSnapshot) and answering from the copy
+// for the phase's duration. A replacement backed by its own index — rebuilt
+// once per tick, which is the normal shape of a broadphase — satisfies the
+// same requirement for free, because nothing in its index changes mid-phase
+// in the first place. A replacement that instead queries Scene's live
+// Transform/Velocity itself needs the same freeze the built-in one has.
+//
+// Concurrency: Raycast and OverlapAABB are called from multiple goroutines
+// during the parallel phase, so neither may keep scratch state shared across
+// calls — compare SpatialGrid.QueryRadius, which reuses a buffer and is NOT
+// safe for this, against QueryRadiusAlloc, which the built-in implementation
+// uses instead. Each call must be independent or internally synchronized.
+type QueryBackend interface {
+	Raycaster
+	OverlapAABB(box AABB, exclude ecs.Entity) []OverlapResult
+}
+
 // OverlapAABB queries the world for all collider entities whose AABB overlaps
 // the given box. The exclude entity (if non-zero) is skipped.
 //
@@ -156,7 +214,21 @@ func (s *Scene) colliderAABB(entity ecs.Entity) (wb AABB, ok bool) {
 // cell lists are filled by a Go map walk (SpatialGrid.Update), so without an
 // explicit sort a caller reading results[0] would get a different entity on
 // every call. Unstick used to do exactly that (#57).
+//
+// When Scene.Queries is set, this and Raycast delegate to it instead of the
+// spatial-grid implementation below — see QueryBackend for the contract a
+// replacement has to honour.
 func (s *Scene) OverlapAABB(box AABB, exclude ecs.Entity) []OverlapResult {
+	if s.Queries != nil {
+		return s.Queries.OverlapAABB(box, exclude)
+	}
+	return s.overlapAABBBuiltin(box, exclude)
+}
+
+// overlapAABBBuiltin is the default OverlapAABB implementation: spatial-grid
+// broad phase over colliderAABB, which is what makes it safe under the
+// collision snapshot (see colliderAABB and QueryBackend).
+func (s *Scene) overlapAABBBuiltin(box AABB, exclude ecs.Entity) []OverlapResult {
 	var results []OverlapResult
 
 	testEntity := func(entity ecs.Entity) {
@@ -279,7 +351,22 @@ func (s *Scene) Unstick(entity ecs.Entity) {
 // The exclude entity (if non-zero) is skipped.
 // Also tests the terrain heightmap for downward rays (checked first).
 // Uses the SpatialGrid when available to reduce candidate entities from O(all) to O(nearby).
+//
+// When Scene.Queries is set, this delegates to it instead of the built-in
+// implementation below — see QueryBackend for the contract a replacement has
+// to honour.
 func (s *Scene) Raycast(origin, dir mgl32.Vec3, maxDist float32, exclude ecs.Entity) (RayHit, bool) {
+	if s.Queries != nil {
+		return s.Queries.Raycast(origin, dir, maxDist, exclude)
+	}
+	return s.raycastBuiltin(origin, dir, maxDist, exclude)
+}
+
+// raycastBuiltin is the default Raycast implementation: terrain fast path,
+// then spatial-grid broad phase over colliderAABB, then convex-hull narrow
+// phase — see colliderAABB and QueryBackend for the collision-snapshot
+// contract this depends on.
+func (s *Scene) raycastBuiltin(origin, dir mgl32.Vec3, maxDist float32, exclude ecs.Entity) (RayHit, bool) {
 	var best RayHit
 	found := false
 
