@@ -360,6 +360,14 @@ its layer-less `direct` mode with every demo element asking for the emission it
 asks for in `on` renders a byte-identical frame to the same mode with none of
 them asking.
 
+**An element that emits hard loses its hue in the middle**, and that is the
+display rather than a bug. `13-ui`'s button is teal at `Glow: 2.0`, so its green
+channel reaches 2.06 in linear and its red 0.16; the composite clamps both and
+the core comes out near white with a cyan halo around it, exactly the way the
+sun disc clips in the scene. Whether that reads as "lit" or as "blown out" is a
+look, and it is the game's to tune: a lower `Glow`, a less saturated colour, or
+a lower `SetUIGlow` threshold so a gentler emission still reaches the chain.
+
 `Renderer.UIGlowLayer` reports whether the layer exists, because every other
 knob is silent without it. `Renderer.UIGlow` and `Renderer.UIExposure` read the
 settings back, for a harness that wants to switch the look off and put the same
