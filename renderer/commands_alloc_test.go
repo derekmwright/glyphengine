@@ -39,6 +39,13 @@ func (fx *frame) record(d core1_0.DeviceDriver, frameIndex int) error {
 // because the fixture only had a few draws" -- a fixed per-frame cost would
 // still show up as equal here, but anything that scales with the draw count
 // would not.
+//
+// Verified to fail: putting back the opaque loop's per-draw vertex-buffer
+// slice literal (deviceDriver.CmdBindVertexBuffers(cmdBuf, 0,
+// []core1_0.Buffer{d.Mesh.vertexBuffer}, []int{0}) in place of
+// scratch.bindVertexBuffers) reports 84 allocs/op at 61 draws and 324 at 228
+// -- scaling with draw count, which is exactly the shape this test exists to
+// catch.
 func TestRecordCommandBufferAllocsAreConstant(t *testing.T) {
 	small := buildFrame(40)
 	big := buildFrame(160)
@@ -115,7 +122,17 @@ func benchName(n int) string {
 // both "before" and "after" in the same test run: the whole point is to catch
 // a change in what gets sent to the driver, and a test that only compares the
 // current code to itself would not.
-const goldenStreamHash = Hasher(0xfe4146bf2977758c)
+//
+// Recomputed once, after the scratch refactor landed: buildFrame's camera was
+// an identity VP, which ExtractFrustum reads as the unit cube, so every grass
+// tile -- placed tens of units out along +X -- was being culled and the
+// impostor and mesh draw paths were never reached. Fixing the camera (a real
+// reverse-Z perspective looking down +X) changed how many calls the SAME
+// verified-unchanged recording code makes, which is why this moved from
+// 0xfe4146bf2977758c to the value below; it did not move because of anything
+// in commands.go, which TestRecordCommandBufferAllocsAreConstant and a manual
+// before/after diff of this constant both still agreed on at the time.
+const goldenStreamHash = Hasher(0xfc9618c8db98fa0f)
 
 // TestRecordCommandBufferStreamIsUnchanged is the GPU-free half of "nothing
 // changed": every driver call the recorder makes, folded in order with its
@@ -124,6 +141,14 @@ const goldenStreamHash = Hasher(0xfe4146bf2977758c)
 // call clobbers before the outer caller reads it changes what value reaches
 // the driver without changing the number of calls, which is exactly what this
 // catches and TestRecordCommandBufferAllocsAreConstant cannot.
+//
+// Verified to fail: inserting a spurious scratch.resetPC() in the grass
+// impostor loop, right before it sets pcImpostorCell -- simulating some other
+// call reusing scratch.pc before the outer grass block's VP/lighting/tint
+// fill (set once, before the tile loop, and relied on for every impostor
+// draw) was read -- changes the hash from 0xfc9618c8db98fa0f to
+// 0x82448aa6078d119f. AllocsPerRun does not move: resetPC allocates nothing,
+// so this is a case the allocation test genuinely cannot see.
 func TestRecordCommandBufferStreamIsUnchanged(t *testing.T) {
 	fx := buildFrame(97)
 	d := &fakeDriver{hashing: true}

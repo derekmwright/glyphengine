@@ -1,8 +1,26 @@
 package renderer
 
 import (
+	"github.com/go-gl/mathgl/mgl32"
 	"github.com/vkngwrapper/core/v3/core1_0"
 )
+
+// fixtureReverseZProjection mirrors app.go's reverseZProjection (package
+// glyphengine, unreachable from here and not worth an import cycle for one
+// formula): near maps to depth 1, far to 0, and Y is flipped for Vulkan's clip
+// space. ExtractFrustum assumes exactly this convention (0 <= z <= w), and
+// grass's tile cull -- the one part of the recording path that actually reads
+// the frustum rather than just forwarding it to the driver -- silently drops
+// every tile without it: a plain mgl32.Perspective leaves z in [-w, w], so the
+// "z >= 0" plane ExtractFrustum builds rejects everything behind the eye by
+// half the frustum's own volume.
+func fixtureReverseZProjection(fovDegrees, aspect, near, far float32) mgl32.Mat4 {
+	proj := mgl32.Perspective(mgl32.DegToRad(fovDegrees), aspect, near, far)
+	proj[10] = near / (far - near)
+	proj[14] = (far * near) / (far - near)
+	proj[5] *= -1
+	return proj
+}
 
 // frame is a GPU-free scene: every field recordCommandBuffer takes, built from
 // fakeHandles rather than a real device. It exists so the allocation and
@@ -266,6 +284,16 @@ func buildFrame(n int) *frame {
 		image: h.image(), texture: fakeTexture(h), extent: core1_0.Extent2D{Width: 640, Height: 360},
 	}
 
+	// A real reverse-Z view-projection, not a placeholder: grass's tile cull
+	// reads lighting.VP through ExtractFrustum, and everything the fixture
+	// places -- draws, grass tiles -- sits in front of this camera so the
+	// mesh, impostor and culled distance bands in buildFrame's grass tiles
+	// are all actually reachable rather than rejected before recordCommandBuffer
+	// ever sees them.
+	camView := mgl32.LookAtV(mgl32.Vec3{-5, 2, 0}, mgl32.Vec3{1, 0, 0}, mgl32.Vec3{0, 1, 0})
+	camProj := fixtureReverseZProjection(75, 640.0/360.0, 0.1, 500)
+	camVP := camProj.Mul4(camView)
+
 	fx := &frame{
 		cmdBuf:                         h.commandBuffer(),
 		renderPass:                     h.renderPass(),
@@ -320,8 +348,8 @@ func buildFrame(n int) *frame {
 			PointPos: [3]float32{2, 3, -4}, PointRange: 12, PointColor: [3]float32{1, 0.6, 0.3},
 			Ambient: [3]float32{0.1, 0.1, 0.15}, SkyColor: [4]float32{0.4, 0.6, 0.9, 1},
 			DrawSky: true, DrawStars: true, ShadowEnabled: true, CloudSteps: 0,
-			VP: identityMat(42), CameraRight: [3]float32{1, 0, 0}, CameraUp: [3]float32{0, 1, 0},
-			CameraPos: [3]float32{0, 2, 10},
+			VP: camVP, CameraRight: [3]float32{0, 0, -1}, CameraUp: [3]float32{0, 1, 0},
+			CameraPos: [3]float32{-5, 2, 0},
 		},
 		split:           blendSplit{}, // inactive: everything records in the main pass
 		fallbackTexture: fakeTexture(h),
