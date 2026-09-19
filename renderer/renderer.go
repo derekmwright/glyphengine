@@ -169,6 +169,26 @@ type Renderer struct {
 	bloomKnee      float32
 	bloomRadius    float32
 
+	// The screen-space UI's own HDR layer: a second colour target, a second
+	// bloom chain over it, and a fixed-exposure composite onto the swapchain.
+	// nil unless WithUIGlowLayer was passed, and everything about the feature
+	// is skipped when it is. See uilayer.go.
+	uiLayer             *uiLayerTarget
+	uiLayerRenderPass   core1_0.RenderPass
+	uiLayerUIPipeline   core1_0.Pipeline
+	uiLayerMSDFPipeline core1_0.Pipeline
+	uiResolvePipeline   core1_0.Pipeline
+	uiGlowRequested     bool
+
+	// The UI layer's look. Defaulted at construction rather than left zero,
+	// because a zero threshold would make every white label glow the moment a
+	// game turned the strength up; see SetUIGlow.
+	uiGlowStrength  float32
+	uiGlowThreshold float32
+	uiGlowKnee      float32
+	uiGlowRadius    float32
+	uiExposure      float32
+
 	// stats counts what the frame submitted; see stats.go.
 	stats RenderStats
 
@@ -352,6 +372,28 @@ func WithMSAASamples(n int) Option {
 	}
 }
 
+// WithUIGlowLayer gives the screen-space UI its own HDR layer, so a UI element
+// can be brighter than 1 and bloom across the elements around it.
+//
+// It is an option rather than a setter because the layer is a pair of
+// swapchain-sized targets: they are allocated when the renderer is built and
+// rebuilt on every resize, which is not a decision that can be made per frame.
+// How the glow LOOKS is a per-frame decision and lives in SetUIGlow and
+// SetUIExposure.
+//
+// Off by default, and free when off: no images, no framebuffers, no descriptor
+// sets, no pipelines, and nothing extra recorded. A UI element's Glow is
+// likewise inert without it -- the swapchain is 8 bits per channel, so with no
+// layer there is nowhere for a value above 1 to be.
+//
+// What it costs when on, at 1280x720 with three swapchain images: 21.1 MiB for
+// the layer itself (R16G16B16A16_SFLOAT at full resolution, one per swapchain
+// image) and 7.0 MiB for its five-level bloom chain. Measured GPU cost is in
+// docs/agents/overlay-composite.md.
+func WithUIGlowLayer() Option {
+	return func(r *Renderer) { r.uiGlowRequested = true }
+}
+
 // New initializes the full Vulkan rendering stack: instance, surface, device,
 // swapchain, render pass, pipelines, framebuffers, command buffers, and sync
 // objects. Call Destroy on the result.
@@ -373,6 +415,14 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 		shaders:       DefaultShaders(),
 		dynamicMeshes: make(map[*Mesh]*dynamicMesh),
 		grassLOD:      DefaultGrassLOD(),
+		// The UI glow layer's defaults, which are the scene bloom's own
+		// starting point over an image whose ordinary content tops out at
+		// exactly 1. Inert until WithUIGlowLayer allocates the layer.
+		uiGlowStrength:  0.7,
+		uiGlowThreshold: 1.2,
+		uiGlowKnee:      0.2,
+		uiGlowRadius:    1.0,
+		uiExposure:      1.0,
 	}
 	for _, o := range opts {
 		o(r)
@@ -811,7 +861,7 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 		return nil, fmt.Errorf("renderer: device cannot use R16G16B16A16_SFLOAT as a sampleable colour attachment")
 	}
 	r.hdr, err = createHDRTargets(r.instanceDriver, r.deviceDriver, r.physicalDevice,
-		r.descriptorPool, r.descriptorSetLayout, r.sc.extent, len(r.sc.imageViews), r.maxAnisotropy)
+		r.descriptorPool, r.descriptorSetLayout, r.sc.extent, len(r.sc.imageViews), r.maxAnisotropy, "HDR target")
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create HDR targets: %w", err)
 	}
@@ -907,7 +957,8 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	}
 	r.onInit(func() { r.deviceDriver.DestroyRenderPass(r.tonemapRenderPass, nil) })
 
-	r.tonemapPipeline, err = createTonemapPipeline(r.deviceDriver, r.shaders, r.tonemapRenderPass, r.tonemapPipelineLayout, r.sc.extent)
+	r.tonemapPipeline, err = createResolvePipeline(r.deviceDriver, r.shaders, r.shaders.TonemapFrag, "Tonemap",
+		r.tonemapRenderPass, r.tonemapPipelineLayout, r.sc.extent, false)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create tonemap pipeline: %w", err)
 	}
@@ -955,6 +1006,51 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 		return nil, fmt.Errorf("renderer: create UI pipeline: %w", err)
 	}
 	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.uiPipeline, nil) })
+
+	// The UI glow layer, when a game asked for one. Everything here is skipped
+	// otherwise: no render pass, no pipelines, no images, no descriptor sets,
+	// and nothing recorded per frame.
+	//
+	// The two overlay pipelines are built a SECOND time, against the layer's
+	// render pass rather than the tonemap's. They have to be: a pipeline is tied
+	// to the render pass it was created against, and these two passes differ in
+	// the only thing that matters for compatibility -- the layer is
+	// R16G16B16A16_SFLOAT and the swapchain is B8G8R8A8_SRGB. Binding the
+	// tonemap pass's UI pipeline inside the layer pass is a validation error at
+	// DRAW time, not at creation, and the frame still presents; see
+	// docs/agents/overlay-composite.md.
+	if r.uiGlowRequested {
+		r.uiLayerRenderPass, err = createUILayerRenderPass(r.deviceDriver)
+		if err != nil {
+			return nil, fmt.Errorf("renderer: %w", err)
+		}
+		r.onInit(func() { r.deviceDriver.DestroyRenderPass(r.uiLayerRenderPass, nil) })
+
+		r.uiLayerUIPipeline, err = createUIPipeline(r.deviceDriver, r.shaders, r.uiLayerRenderPass, r.pipelineLayout, r.sc.extent, core1_0.Samples1)
+		if err != nil {
+			return nil, fmt.Errorf("renderer: create UI layer panel pipeline: %w", err)
+		}
+		r.onInit(func() { r.deviceDriver.DestroyPipeline(r.uiLayerUIPipeline, nil) })
+
+		r.uiLayerMSDFPipeline, err = createMSDFPipeline(r.deviceDriver, r.shaders, r.uiLayerRenderPass, r.pipelineLayout, r.sc.extent, core1_0.Samples1)
+		if err != nil {
+			return nil, fmt.Errorf("renderer: create UI layer text pipeline: %w", err)
+		}
+		r.onInit(func() { r.deviceDriver.DestroyPipeline(r.uiLayerMSDFPipeline, nil) })
+
+		// Against the TONEMAP render pass, because this is the draw that lands
+		// on the swapchain, one command after the scene's own resolve.
+		r.uiResolvePipeline, err = createResolvePipeline(r.deviceDriver, r.shaders, r.shaders.UIResolveFrag, "UI resolve",
+			r.tonemapRenderPass, r.tonemapPipelineLayout, r.sc.extent, true)
+		if err != nil {
+			return nil, fmt.Errorf("renderer: create UI resolve pipeline: %w", err)
+		}
+		r.onInit(func() { r.deviceDriver.DestroyPipeline(r.uiResolvePipeline, nil) })
+	}
+
+	// The layer's own targets are created further down, after the command pool:
+	// they have to be primed into a legal layout before the first frame binds
+	// them, and priming submits a clear.
 
 	// The scene draws into the HDR views; only the tonemap pass touches the
 	// swapchain.
@@ -1038,6 +1134,21 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 
 	if err = r.primeBloomLayouts(r.bloom); err != nil {
 		return nil, fmt.Errorf("renderer: prime bloom layouts: %w", err)
+	}
+
+	// The UI glow layer's images and bloom chain, here rather than beside its
+	// render pass and pipelines above for exactly the reason the two priming
+	// calls above are here: createUILayerTargets primes what it allocates, and
+	// priming submits a clear, which needs the command pool.
+	if r.uiGlowRequested {
+		r.uiLayer, err = r.createUILayerTargets()
+		if err != nil {
+			return nil, fmt.Errorf("renderer: create UI glow layer: %w", err)
+		}
+		// Read through r rather than captured: recreateSwapchain swaps this out
+		// on every resize, and a closure holding the old pointer would free an
+		// already-freed target and leak the live one. Rule 10.
+		r.onInit(func() { r.uiLayer.destroy(r.deviceDriver) })
 	}
 
 	cmdBufs, err := createCommandBuffers(r.deviceDriver, r.commandPool, maxFramesInFlight)
@@ -1281,7 +1392,7 @@ func (r *Renderer) recreateSwapchain() error {
 	r.bloom.destroy(r.deviceDriver)
 	r.hdr.destroy(r.deviceDriver)
 	r.hdr, err = createHDRTargets(r.instanceDriver, r.deviceDriver, r.physicalDevice,
-		r.descriptorPool, r.descriptorSetLayout, r.sc.extent, len(r.sc.imageViews), r.maxAnisotropy)
+		r.descriptorPool, r.descriptorSetLayout, r.sc.extent, len(r.sc.imageViews), r.maxAnisotropy, "HDR target")
 	if err != nil {
 		return err
 	}
@@ -1327,6 +1438,19 @@ func (r *Renderer) recreateSwapchain() error {
 
 	if err := r.primeBloomLayouts(r.bloom); err != nil {
 		return err
+	}
+
+	// The UI glow layer is swapchain-sized too, so it goes with it -- images,
+	// bloom chain, framebuffers and the resolve's descriptor sets, which name
+	// specific views and would otherwise sample freed ones. Its render pass and
+	// its three pipelines survive: the extent reaches them through dynamic
+	// viewport and scissor state, exactly as it does for the tonemap pass's.
+	if r.uiLayer != nil {
+		r.uiLayer.destroy(r.deviceDriver)
+		r.uiLayer, err = r.createUILayerTargets()
+		if err != nil {
+			return err
+		}
 	}
 
 	// The resolve's sets name specific views, so they have to be rewritten

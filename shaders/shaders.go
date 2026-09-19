@@ -68,6 +68,9 @@ var UIVertSpv []byte
 //go:embed ui.frag.spv
 var UIFragSpv []byte
 
+//go:embed uiresolve.frag.spv
+var UIResolveFragSpv []byte
+
 //go:embed skinned_lit.vert.spv
 var SkinnedLitVertSpv []byte
 

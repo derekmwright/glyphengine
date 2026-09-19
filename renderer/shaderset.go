@@ -49,6 +49,7 @@ type ShaderSet struct {
 	ParticleVert, ParticleFrag   []byte // billboard particles
 	MsdfVert, MsdfFrag           []byte // MSDF text
 	UIVert, UIFrag               []byte // 9-slice UI panels
+	UIResolveFrag                []byte // UI glow layer composite (uses SkyVert)
 }
 
 // DefaultShaders returns the shader set the engine embeds. Copy it, override
@@ -97,6 +98,7 @@ func DefaultShaders() ShaderSet {
 		MsdfFrag:           shaders.MsdfFragSpv,
 		UIVert:             shaders.UIVertSpv,
 		UIFrag:             shaders.UIFragSpv,
+		UIResolveFrag:      shaders.UIResolveFragSpv,
 	}
 }
 
@@ -134,6 +136,7 @@ func (s ShaderSet) withDefaults() ShaderSet {
 		{&s.ParticleVert, d.ParticleVert}, {&s.ParticleFrag, d.ParticleFrag},
 		{&s.MsdfVert, d.MsdfVert}, {&s.MsdfFrag, d.MsdfFrag},
 		{&s.UIVert, d.UIVert}, {&s.UIFrag, d.UIFrag},
+		{&s.UIResolveFrag, d.UIResolveFrag},
 	}
 	for _, p := range pairs {
 		if *p.dst == nil {

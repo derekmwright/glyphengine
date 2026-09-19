@@ -119,12 +119,20 @@ func appendMSDFGeometry(vertices []Vertex, indices []uint16, font *Font, lines [
 				spr := fontSize / font.PxPerEM * font.PxRange
 				norm := [3]float32{alpha, spr, font.BoldBias}
 
+				// Z carries the line's emission multiplier rather than a
+				// position: this is a screen-space ortho pipeline that neither
+				// tests nor writes depth, so Z was always zero here, and every
+				// other per-vertex channel is taken (Normal is alpha,
+				// screenPxRange and the bold bias). msdf.vert drops it from
+				// gl_Position, which it has to -- a glow of 2 at Ortho(-1, 1)
+				// would put the quad outside the clip volume and the glyph
+				// would vanish exactly when a game asked it to glow.
 				base := uint16(len(vertices))
 				vertices = append(vertices,
-					Vertex{Pos: [3]float32{x0, y0, 0}, Color: line.Color, Normal: norm, UV: [2]float32{uLeft, vTop}},
-					Vertex{Pos: [3]float32{x1, y0, 0}, Color: line.Color, Normal: norm, UV: [2]float32{uRight, vTop}},
-					Vertex{Pos: [3]float32{x1, y1, 0}, Color: line.Color, Normal: norm, UV: [2]float32{uRight, vBottom}},
-					Vertex{Pos: [3]float32{x0, y1, 0}, Color: line.Color, Normal: norm, UV: [2]float32{uLeft, vBottom}},
+					Vertex{Pos: [3]float32{x0, y0, line.Glow}, Color: line.Color, Normal: norm, UV: [2]float32{uLeft, vTop}},
+					Vertex{Pos: [3]float32{x1, y0, line.Glow}, Color: line.Color, Normal: norm, UV: [2]float32{uRight, vTop}},
+					Vertex{Pos: [3]float32{x1, y1, line.Glow}, Color: line.Color, Normal: norm, UV: [2]float32{uRight, vBottom}},
+					Vertex{Pos: [3]float32{x0, y1, line.Glow}, Color: line.Color, Normal: norm, UV: [2]float32{uLeft, vBottom}},
 				)
 				indices = append(indices, base, base+1, base+2, base+2, base+3, base)
 			}

@@ -156,17 +156,26 @@ const maxHDRSets = 8
 // corruption of reusing sets that still name freed views.
 const maxBloomSets = maxHDRSets * bloomLevels
 
+// The UI glow layer is a second colour target and a second bloom chain with the
+// same per-swapchain-image counts, so the pool carries both budgets twice.
+//
+// It is counted whether or not the layer is created. A descriptor pool reserves
+// counts rather than memory anyone will miss, and a pool that only fits while an
+// option is off turns that option into a startup failure nobody would connect to
+// it -- on a machine with more swapchain images than the one it was tried on.
+const uiLayerSetFactor = 2
+
 // createDescriptorPool creates a pool that can allocate combined image sampler and
 // uniform buffer descriptor sets. Extra capacity for shadow mapping descriptors.
 func createDescriptorPool(deviceDriver core1_0.DeviceDriver, maxSets int) (core1_0.DescriptorPool, error) {
 	pool, _, err := deviceDriver.CreateDescriptorPool(nil, core1_0.DescriptorPoolCreateInfo{
-		MaxSets: maxSets + 36 + maxMaterials + maxHDRSets + maxBloomSets,
+		MaxSets: maxSets + 36 + maxMaterials + uiLayerSetFactor*(maxHDRSets+maxBloomSets),
 		PoolSizes: []core1_0.DescriptorPoolSize{
 			{
 				Type: core1_0.DescriptorTypeCombinedImageSampler,
 				// +4 sun shadow + 2 cube shadow samplers, then four maps per material
 				// The tonemap's sets take two samplers each, hence the doubling.
-				DescriptorCount: maxSets + 6 + maxMaterials*materialTextureBindings + maxHDRSets*2 + maxBloomSets,
+				DescriptorCount: maxSets + 6 + maxMaterials*materialTextureBindings + uiLayerSetFactor*(maxHDRSets*2+maxBloomSets),
 			},
 			{
 				Type: core1_0.DescriptorTypeUniformBuffer,
@@ -184,7 +193,7 @@ func createDescriptorPool(deviceDriver core1_0.DeviceDriver, maxSets int) (core1
 				// It is counted anyway because allocation fails outright
 				// otherwise, which would be a startup error on the first scene
 				// with enough textures rather than anything visible here.
-				DescriptorCount: maxSets + maxHDRSets + maxBloomSets + 36 + maxMaterials,
+				DescriptorCount: maxSets + uiLayerSetFactor*(maxHDRSets+maxBloomSets) + 36 + maxMaterials,
 			},
 			{
 				Type: core1_0.DescriptorTypeStorageBuffer,
