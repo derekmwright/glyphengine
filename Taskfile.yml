@@ -170,6 +170,13 @@ tasks:
       # because they surface at vkDestroyDevice rather than during rendering.
       - |
         status=0
+        # The count below comes from grep, and a shell without one returns an
+        # empty string: [ "" -ne 0 ] is an error, the else branch runs, and
+        # every example reads "clean" with the layer screaming. That is how
+        # task determinism compared nothing for weeks on a shell with no
+        # sha256sum. So the counter is shown one message and must count it.
+        probe=$(echo "VULKAN ERROR: self-check" | grep -cE "VULKAN (ERROR|WARNING)" || true)
+        if [ "$probe" != "1" ]; then echo "SELF-CHECK: cannot count validation messages here (grep missing?) -- this gate proves nothing"; exit 1; fi
         check() {
           ex=$1; shift
           label=$ex
@@ -356,6 +363,12 @@ tasks:
         }
         prov "rebuild on the last frame"   GLYPHENGINE_PROVOKE_RECREATE_FRAMES 149        08-grass     150 -timeofday 0.28
         prov "rebuild mid-run"             GLYPHENGINE_PROVOKE_RECREATE_FRAMES 89         09-water      90
+        # A moving camera, because every case above holds the camera still and
+        # a still camera cannot tell a fresh reprojection matrix from a stale
+        # one: prevVP equals the current VP on every frame. Leaving prevVP
+        # unadvanced on the frame that triggers a rebuild passed all six other
+        # cases and changes this capture at rebuild frames 60 and 89 alike.
+        prov "rebuild under a moving camera" GLYPHENGINE_PROVOKE_RECREATE_FRAMES 60      15-kitchen-sink 90 -demo
         prov "a frame never drawn"         GLYPHENGINE_PROVOKE_SKIP_FRAMES     149        08-grass     150 -timeofday 0.0
         prov "frames never drawn"          GLYPHENGINE_PROVOKE_SKIP_FRAMES     3,40,88    12-particles  90
         prov "a stalled cold start"        GLYPHENGINE_PROVOKE_STALL           20:40ms    08-grass     150 -timeofday 0.0
