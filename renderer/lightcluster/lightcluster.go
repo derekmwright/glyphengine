@@ -62,7 +62,7 @@ import (
 // it are dropped in priority order (nearest surface first) and counted in
 // Stats.DroppedOverBudget, so the loss is visible rather than silent.
 //
-// 1024 lights at 48 bytes is a 48 KB storage buffer, which is nothing, and
+// 1024 lights at 64 bytes is a 64 KB storage buffer, which is nothing, and
 // BenchmarkBuild bins 1024 submitted lights in 89 us on a Ryzen 9 5900X
 // (median of interleaved runs, spread 77 to 109). The ceiling exists so the
 // buffers can be sized once at startup, not because the cost demands it.

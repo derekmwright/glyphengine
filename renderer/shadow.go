@@ -509,7 +509,7 @@ func createShadowResources(
 	// storage buffers (LightBuffer, ClusterGrid, LightIndices -- see
 	// shaders/lights.inc). Binding 3 used to be a point-lights UBO; it is a
 	// storage buffer now because the light array no longer fits the UBO's
-	// 16KB minimum guaranteed range once it can hold MaxLights (1024) 48-byte
+	// 16KB minimum guaranteed range once it can hold MaxLights (1024) 64-byte
 	// entries instead of 32.
 	s.descriptorSetLayout, _, err = deviceDriver.CreateDescriptorSetLayout(nil, core1_0.DescriptorSetLayoutCreateInfo{
 		Bindings: []core1_0.DescriptorSetLayoutBinding{
