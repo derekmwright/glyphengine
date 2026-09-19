@@ -39,7 +39,29 @@ const surfaceMergeEpsilon = 1e-4
 // share it about as often as it pushes it inside both, and "outside both"
 // is exactly the false hole the diagonal-sample test in raster_test.go
 // exists to catch.
-const baryEdgeEps = 1e-7
+//
+// baryEdgeEpsRel is a fraction of the COORDINATE MAGNITUDE involved, not a
+// fixed number, because the actual source of the rounding this tolerance
+// absorbs is float32: every vertex position comes off a glTF POSITION
+// accessor as float32, and node.World is an mgl32.Mat4 (also float32, the
+// same precision the rest of this engine uses throughout) -- so the
+// absolute error in a transformed coordinate scales with the coordinate's
+// own magnitude, not with the triangle's size. A tolerance sized for a
+// triangle near the origin is too tight for the identical triangle a few
+// hundred units away.
+//
+// Measured, not assumed (cmd/heightmapconv/testdata/blender_terrain.glb,
+// whose TerrainParent sits at world X~190-200 specifically to expose this):
+// a FIXED baryEdgeEps of 1e-7 -- which passed every earlier synthetic test
+// in this package, all built near the origin -- left 17 of that fixture's
+// 121 grid samples reading as holes, each one a sample sitting exactly on a
+// shared vertex/edge of the real mesh that the tolerance was too tight to
+// admit at that magnitude. Scaling by 1e-6 * max(1, largest |coordinate|
+// involved) -- about 2e-4 at this fixture's ~200-unit magnitude -- brought
+// holes to 0 without loosening anything for a mesh built near the origin,
+// where the scale factor floors at 1 and the tolerance is unchanged from
+// the fixed 1e-7 this replaced turned out to be too tight even for.
+const baryEdgeEpsRel = 1e-6
 
 func barycentricHeight(t triangle, x, z float64) (y float64, ok bool) {
 	x0, z0 := t.v0[0], t.v0[2]
@@ -53,10 +75,26 @@ func barycentricHeight(t triangle, x, z float64) (y float64, ok bool) {
 	a := ((z1-z2)*(x-x2) + (x2-x1)*(z-z2)) / d
 	b := ((z2-z0)*(x-x2) + (x0-x2)*(z-z2)) / d
 	c := 1 - a - b
-	if a < -baryEdgeEps || b < -baryEdgeEps || c < -baryEdgeEps {
+
+	eps := baryEdgeEpsRel * edgeToleranceScale(x0, z0, x1, z1, x2, z2, x, z)
+	if a < -eps || b < -eps || c < -eps {
 		return 0, false
 	}
 	return a*t.v0[1] + b*t.v1[1] + c*t.v2[1], true
+}
+
+// edgeToleranceScale is the largest coordinate magnitude among the
+// triangle's three XZ vertices and the sample point, floored at 1 so a mesh
+// built near the origin keeps the same tight tolerance a fixed constant
+// would have given it.
+func edgeToleranceScale(coords ...float64) float64 {
+	scale := 1.0
+	for _, c := range coords {
+		if a := math.Abs(c); a > scale {
+			scale = a
+		}
+	}
+	return scale
 }
 
 // dedupeHeights sorts and merges hits within surfaceMergeEpsilon of their
