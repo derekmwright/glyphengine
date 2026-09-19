@@ -282,6 +282,13 @@ tasks:
           [ -s "$d/$1.png" ] && [ -s "$d/$2.png" ] || { echo "MISSING CAPTURE -- this gate proves nothing"; status=1; return 1; }
           diff -q "$d/$1.png" "$d/$2.png" >/dev/null 2>&1
         }
+        # The same comparison over two named files rather than two captures,
+        # for the draw-sequence gate below. Same rule: an empty file is a
+        # missing measurement, not a match.
+        samefile() {
+          [ -s "$1" ] && [ -s "$2" ] || { echo "MISSING EXTRACT -- this gate proves nothing"; status=1; return 1; }
+          diff -q "$1" "$2" >/dev/null 2>&1
+        }
         # Prove the comparator before trusting a word it says.
         #
         # This used to hash with sha256sum, which is not on the PATH of the
@@ -298,7 +305,21 @@ tasks:
           echo "SELF-CHECK: two different files compared equal -- this gate proves nothing"
           exit 1
         fi
-        rm -f $d/x.png $d/y.png
+        printf "loop=1 draws=1/aa" > $d/x.seq; printf "loop=1 draws=1/aa" > $d/y.seq
+        samefile $d/x.seq $d/y.seq || { echo "SELF-CHECK: two identical extracts compared unequal -- this gate proves nothing"; exit 1; }
+        printf "loop=1 draws=1/bb" > $d/y.seq
+        if samefile $d/x.seq $d/y.seq; then
+          echo "SELF-CHECK: two different extracts compared equal -- this gate proves nothing"
+          exit 1
+        fi
+        # And the extractor: a trace with no draws= on any line must be an
+        # error, not an empty file that compares equal to another empty file.
+        # That is the exact shape the sha256sum failure had.
+        if go run ../cmd/tracefield -key notafield -in $d/x.seq -out $d/z.seq >/dev/null 2>&1; then
+          echo "SELF-CHECK: tracefield accepted a field that is not there -- this gate proves nothing"
+          exit 1
+        fi
+        rm -f $d/x.png $d/y.png $d/x.seq $d/y.seq $d/z.seq
         # The water/blended split is in here because it reorders a buffer every
         # frame from the camera's position: a partition that was not stable, or
         # that read a stale upload, would show up as two runs disagreeing long
@@ -373,6 +394,66 @@ tasks:
         prov "frames never drawn"          GLYPHENGINE_PROVOKE_SKIP_FRAMES     3,40,88    12-particles  90
         prov "a stalled cold start"        GLYPHENGINE_PROVOKE_STALL           20:40ms    08-grass     150 -timeofday 0.0
         prov "draw list reversed"          GLYPHENGINE_PROVOKE_DRAW_ORDER      reverse    09-water      90 -plume -ghost -marker -submerged
+
+        # The SEQUENCE the recorder was handed, not just the picture it made.
+        #
+        # Everything above compares captures, and a capture cannot see an
+        # ordering bug that has not reached the image yet. This one did not:
+        # the draw list arrives from a Go map walk, it was sorted with an
+        # unstable sort, and the sort key's low bits were a descriptor set
+        # ADDRESS -- so the recorded order was different in every process, and
+        # `draws=` in the state trace differed between two runs of eight of the
+        # thirteen scenes below while `drawsset=` and the PNG matched. Issue
+        # #53. Nothing rendered wrong; the next scene with two equal-depth
+        # blended draws would have flickered, and no capture gate would have
+        # said why.
+        #
+        # So the assertion is on the trace field directly. cmd/tracefield pulls
+        # `draws=` out and diff compares the two -- diff and not a hash, for the
+        # reason written at the top of this gate. The whole trace cannot be
+        # diffed: `slot=` and `image=` name the frame-in-flight and the
+        # swapchain image the acquire returned, and both legitimately differ
+        # between two runs that drew the same frame.
+        #
+        # Measured before the fix, two runs each, 90 frames (lines of 90 whose
+        # draws= differed): 09-water 19, 12-particles 61, 06-skinned 90,
+        # 09-water -plume... 33, 18-translucent 90, 13-ui 24, 10-text 13,
+        # 21-streetlights 90. The three 08-grass poses, 15-kitchen-sink and
+        # 19-instanced happened to match on that run, which is what "randomised"
+        # means -- it is not a property of the scene.
+        drawseq() {
+          set -- $1
+          name=$1; shift
+          GLYPHENGINE_FIXED_FRAME_TIME=16.667ms GLYPHENGINE_STATE_TRACE=$d/s1.trace go run ./$name -frames 90 $* >/dev/null 2>&1
+          GLYPHENGINE_FIXED_FRAME_TIME=16.667ms GLYPHENGINE_STATE_TRACE=$d/s2.trace go run ./$name -frames 90 $* >/dev/null 2>&1
+          go run ../cmd/tracefield -key draws -in $d/s1.trace -out $d/s1.draws || { status=1; return; }
+          go run ../cmd/tracefield -key draws -in $d/s2.trace -out $d/s2.draws || { status=1; return; }
+          if samefile $d/s1.draws $d/s2.draws; then
+            echo "$name $*: draw sequence identical"
+          else
+            echo "$name $*: THE DRAW SEQUENCE DIFFERS between two runs"
+            diff $d/s1.draws $d/s2.draws | head -6
+            status=1
+          fi
+        }
+        for ex in "08-grass" "08-grass -timeofday 0.0" "08-grass -timeofday 0.03" "09-water"                   "12-particles" "06-skinned -demo" "15-kitchen-sink -demo"                   "09-water -plume -ghost -marker -submerged"                   "18-translucent" "13-ui" "10-text" "19-instanced" "21-streetlights"; do
+          drawseq "$ex"
+        done
+        # Prove this comparison can say no on real traces and not only on the
+        # constructed files above. Without the fixed clock the model matrices
+        # the hash covers are sampled at different times, so two runs of an
+        # animated scene must disagree; if they do not, the traces are not
+        # being read.
+        GLYPHENGINE_STATE_TRACE=$d/c1.trace go run ./12-particles -frames 90 >/dev/null 2>&1
+        GLYPHENGINE_STATE_TRACE=$d/c2.trace go run ./12-particles -frames 90 >/dev/null 2>&1
+        go run ../cmd/tracefield -key draws -in $d/c1.trace -out $d/c1.draws || status=1
+        go run ../cmd/tracefield -key draws -in $d/c2.trace -out $d/c2.draws || status=1
+        if samefile $d/c1.draws $d/c2.draws; then
+          echo "control: draw sequences matched WITHOUT a fixed clock -- this gate proves nothing"
+          status=1
+        else
+          echo "control: the draw sequence differs without the fixed clock, as it must"
+        fi
         # A paused world must be frozen, not merely slowed. 09-water is the
         # scene for it because the things that move there run off different
         # clocks: the waves and shoreline foam off the elapsed clock the shaders
