@@ -413,8 +413,10 @@ func TestMaterialUVTransformNoExtension(t *testing.T) {
 	if m != identityUV {
 		t.Errorf("m = %+v, want identityUV", m)
 	}
-	if chosenName != "" || skipped != nil || differing != nil {
-		t.Errorf("chosenName=%q skipped=%v differing=%v, want all empty", chosenName, skipped, differing)
+	// The base colour map still DECIDES -- at the identity -- so it is named;
+	// see TestMaterialUVTransformAnUntiledMapIsStillAMap for why that matters.
+	if chosenName != "baseColorTexture" || skipped != nil || differing != nil {
+		t.Errorf("chosenName=%q skipped=%v differing=%v, want baseColorTexture and nothing else", chosenName, skipped, differing)
 	}
 }
 
@@ -502,22 +504,32 @@ func TestResolveUVTransformDiscriminatesMaterials(t *testing.T) {
 	}
 }
 
-// TestSameUVTransformIgnoresTexCoordPointerIdentity guards the reason
-// sameUVTransform exists rather than a plain struct ==: TexCoord is a
-// *int, comparable in Go by ADDRESS, so two separately-allocated
-// "texCoord: 0" values must not compare unequal for a reason that has
-// nothing to do with the baked matrix.
+// TestMaterialUVTransformIgnoresTexCoordPointerIdentity: TexCoord is a *int,
+// which Go compares by ADDRESS, so two maps that both say "texCoord: 0" hold
+// two different pointers. The comparison is between composed matrices, which
+// never see the pointer -- this is here so that a future comparison of the
+// decoded structs themselves is caught, since that is the obvious way to write
+// it and it reports every such material as disagreeing with itself.
 //
-// It has teeth: replacing sameUVTransform's body with
-// `return a == b` (a plain struct compare) fails this test, since a.TexCoord
-// and b.TexCoord below are two different *int allocations both pointing at
-// 0. Introduced and reverted to confirm.
-func TestSameUVTransformIgnoresTexCoordPointerIdentity(t *testing.T) {
+// Verified to fail that way: with the loop comparing the decoded
+// TextureTranform values with ==, differing came back [normalTexture].
+func TestMaterialUVTransformIgnoresTexCoordPointerIdentity(t *testing.T) {
 	zeroA, zeroB := 0, 0
-	a := texturetransform.TextureTranform{Scale: [2]float64{2, 2}, TexCoord: &zeroA}
-	b := texturetransform.TextureTranform{Scale: [2]float64{2, 2}, TexCoord: &zeroB}
-	if !sameUVTransform(a, b) {
-		t.Error("sameUVTransform(a, b) = false, want true (only TexCoord's address differs)")
+	mat := &gltf.Material{
+		Name: "two pointers to zero",
+		PBRMetallicRoughness: &gltf.PBRMetallicRoughness{
+			BaseColorTexture: &gltf.TextureInfo{Index: 0, Extensions: gltf.Extensions{
+				texturetransform.ExtensionName: &texturetransform.TextureTranform{Scale: [2]float64{2, 2}, TexCoord: &zeroA},
+			}},
+		},
+		NormalTexture: &gltf.NormalTexture{Index: gltf.Index(1), Extensions: gltf.Extensions{
+			texturetransform.ExtensionName: &texturetransform.TextureTranform{Scale: [2]float64{2, 2}, TexCoord: &zeroB},
+		}},
+	}
+	doc := &gltf.Document{Materials: []*gltf.Material{mat}}
+	m, found, _, skipped, differing := materialUVTransform(doc, 0)
+	if !found || m.a != 2 || len(skipped) != 0 || len(differing) != 0 {
+		t.Errorf("m=%+v found=%v skipped=%v differing=%v; want the 2x transform, agreed on by both maps", m, found, skipped, differing)
 	}
 }
 
@@ -609,5 +621,80 @@ func TestExtractSkinnedPrimitiveBakesUV(t *testing.T) {
 	}
 	if verts[1].UV != [2]float32{6, 0} {
 		t.Errorf("vertex 1 UV = %v, want [6 0] (5*1+1, 5*0+0)", verts[1].UV)
+	}
+}
+
+// TestMaterialUVTransformAnUntiledMapIsStillAMap: a map with no
+// KHR_texture_transform has a transform, and it is the identity. Leaving such
+// maps out of the comparison was wrong in both directions, each of them silent:
+//
+//   - An untiled base colour over a tiled normal map: the normal's 4x was the
+//     only transform found, so it won, and the base colour -- the map everyone
+//     looks at -- was tiled 4x by a transform that was never its own.
+//   - A tiled base colour over an untiled normal map: the normal was tiled 8x
+//     with it and nothing said so.
+//
+// Base colour, when there is one, decides; whatever disagrees with it is named.
+//
+// Verified to fail against the first version of materialUVTransform: the first
+// case reported "chosen normalTexture, matrix 4x" and the second an empty
+// differing list.
+func TestMaterialUVTransformAnUntiledMapIsStillAMap(t *testing.T) {
+	untiledBase := &gltf.Material{
+		Name: "untiled base, tiled normal",
+		PBRMetallicRoughness: &gltf.PBRMetallicRoughness{
+			BaseColorTexture: &gltf.TextureInfo{Index: 0},
+		},
+		NormalTexture: &gltf.NormalTexture{Index: gltf.Index(1), Extensions: uvTT(0, 0, 4, 4)},
+	}
+	tiledBase := &gltf.Material{
+		Name: "tiled base, untiled normal",
+		PBRMetallicRoughness: &gltf.PBRMetallicRoughness{
+			BaseColorTexture: &gltf.TextureInfo{Index: 0, Extensions: uvTT(0, -7, 8, 8)},
+		},
+		NormalTexture: &gltf.NormalTexture{Index: gltf.Index(1)},
+	}
+	doc := &gltf.Document{Materials: []*gltf.Material{untiledBase, tiledBase}}
+
+	m, _, chosen, _, differing := materialUVTransform(doc, 0)
+	if m != identityUV || chosen != "baseColorTexture" {
+		t.Errorf("untiled base: chosen %s, matrix %+v; want baseColorTexture and the identity", chosen, m)
+	}
+	if len(differing) != 1 || differing[0] != "normalTexture" {
+		t.Errorf("untiled base: differing = %v, want [normalTexture]", differing)
+	}
+
+	m, _, chosen, _, differing = materialUVTransform(doc, 1)
+	if m.a != 8 || m.e != 8 || m.f != -7 || chosen != "baseColorTexture" {
+		t.Errorf("tiled base: chosen %s, matrix %+v; want baseColorTexture's 8x and -7", chosen, m)
+	}
+	if len(differing) != 1 || differing[0] != "normalTexture" {
+		t.Errorf("tiled base: differing = %v, want [normalTexture]", differing)
+	}
+}
+
+// TestMaterialUVTransformComparesMatricesNotSpellings: glTF lets `scale` be
+// omitted, meaning (1,1), and an exporter is free to write it on one map and
+// leave it off another. Those are one transform spelled two ways, and
+// reporting them as a disagreement sends someone looking for a tiling bug that
+// is not there.
+//
+// Verified to fail when the raw fields are compared: differing came back
+// [normalTexture].
+func TestMaterialUVTransformComparesMatricesNotSpellings(t *testing.T) {
+	mat := &gltf.Material{
+		Name: "same transform, two spellings",
+		PBRMetallicRoughness: &gltf.PBRMetallicRoughness{
+			BaseColorTexture: &gltf.TextureInfo{Index: 0, Extensions: gltf.Extensions{
+				texturetransform.ExtensionName: &texturetransform.TextureTranform{Offset: [2]float64{0.25, 0}},
+			}},
+		},
+		NormalTexture: &gltf.NormalTexture{Index: gltf.Index(1), Extensions: gltf.Extensions{
+			texturetransform.ExtensionName: &texturetransform.TextureTranform{Offset: [2]float64{0.25, 0}, Scale: [2]float64{1, 1}},
+		}},
+	}
+	doc := &gltf.Document{Materials: []*gltf.Material{mat}}
+	if _, _, _, _, differing := materialUVTransform(doc, 0); len(differing) != 0 {
+		t.Errorf("differing = %v, want none: both maps are an offset of 0.25 at scale 1", differing)
 	}
 }
