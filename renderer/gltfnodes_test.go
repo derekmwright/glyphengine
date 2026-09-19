@@ -1,6 +1,8 @@
 package renderer
 
 import (
+	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/go-gl/mathgl/mgl32"
@@ -392,5 +394,124 @@ func TestModelNodeLookup(t *testing.T) {
 
 	if _, ok := m.Node("Socket_Missing"); ok {
 		t.Error("Node reported a match for a name that is not in the model")
+	}
+}
+
+// TestExtractNodesExtras covers ModelNode.Extras -- glTF's own place for
+// application data, surfaced as raw JSON rather than interpreted
+// (AGENTS.md rule 14).
+//
+// This goes through a real encode/decode round trip (roundTrip, defined in
+// gltflights_test.go) rather than a doc built and read back by hand, because
+// the whole point of marshalExtras is that qmuntal/gltf hands Node.Extras
+// back as `any` -- concretely map[string]any for a JSON object, per the
+// package's own generic decode -- not as the json.RawMessage this field
+// promises callers, so this is the same "verify, don't assume" case
+// TestExtractLightsRoundTrip is, for the decode side rather than an
+// extension.
+//
+// It has teeth: replacing marshalExtras's body with `return nil` (the
+// mistake of adding the field but forgetting to wire it up) makes
+// Building.Extras nil, failing the first assertion. Introduced and reverted
+// to confirm.
+func TestExtractNodesExtras(t *testing.T) {
+	doc := &gltf.Document{
+		Asset: gltf.Asset{Version: "2.0"},
+		Nodes: []*gltf.Node{
+			{Name: "Building", Extras: map[string]any{"static": true, "collider": "box"}},
+			{Name: "Plain"},
+		},
+	}
+	got := roundTrip(t, doc)
+	nodes := extractNodes(got)
+
+	if nodes[0].Extras == nil {
+		t.Fatal("Building.Extras = nil, want the authored extras")
+	}
+	var tags struct {
+		Static   bool   `json:"static"`
+		Collider string `json:"collider"`
+	}
+	if err := json.Unmarshal(nodes[0].Extras, &tags); err != nil {
+		t.Fatalf("unmarshal Extras: %v", err)
+	}
+	if !tags.Static || tags.Collider != "box" {
+		t.Errorf("Extras decoded to %+v, want {Static:true Collider:box}", tags)
+	}
+
+	if nodes[1].Extras != nil {
+		t.Errorf("Plain.Extras = %s, want nil (node authored none)", nodes[1].Extras)
+	}
+}
+
+// TestNodeMeshesInstancing covers Model.NodeMeshes: several nodes instancing
+// the SAME doc mesh -- the case ModelMesh.Node ("first owner only") gets
+// wrong for placement, which is issue #66's whole reason for existing: a
+// level with forty identical lamp posts sharing one doc mesh needs every
+// node's own meshes, not just the first node's -- and a node that carries no
+// mesh at all.
+//
+// It has teeth: dropping the DocMesh filter (returning every index in
+// meshes regardless of which doc mesh it split from) returns all three
+// ModelMesh entries for LampA instead of the two that actually came from
+// doc mesh 0, pulling in the unrelated ground primitive. Introduced and
+// reverted to confirm.
+func TestNodeMeshesInstancing(t *testing.T) {
+	nodes := []ModelNode{
+		{Name: "LampA", Mesh: 0}, // instances doc mesh 0
+		{Name: "LampB", Mesh: 0}, // same doc mesh, second instance
+		{Name: "Ground", Mesh: 1},
+		{Name: "Empty", Mesh: -1}, // no mesh at all
+	}
+	meshes := []ModelMesh{
+		{Name: "lamp_body", DocMesh: 0},
+		{Name: "lamp_glass", DocMesh: 0}, // doc mesh 0 split into two primitives
+		{Name: "ground", DocMesh: 1},
+	}
+
+	if got := nodeMeshes(nodes, meshes, 0); len(got) != 2 || got[0] != 0 || got[1] != 1 {
+		t.Errorf("LampA meshes = %v, want [0 1]", got)
+	}
+	// LampB instances the same doc mesh as LampA, so NodeMeshes has to
+	// return the same primitives for it too -- this is exactly the question
+	// ModelMesh.Node cannot answer, since it only ever names LampA.
+	if got := nodeMeshes(nodes, meshes, 1); len(got) != 2 || got[0] != 0 || got[1] != 1 {
+		t.Errorf("LampB meshes = %v, want [0 1] (same doc mesh as LampA)", got)
+	}
+	if got := nodeMeshes(nodes, meshes, 2); len(got) != 1 || got[0] != 2 {
+		t.Errorf("Ground meshes = %v, want [2]", got)
+	}
+	if got := nodeMeshes(nodes, meshes, 3); got != nil {
+		t.Errorf("Empty meshes = %v, want nil", got)
+	}
+	if got := nodeMeshes(nodes, meshes, 99); got != nil {
+		t.Errorf("out-of-range node meshes = %v, want nil", got)
+	}
+}
+
+// TestCappedNodeList covers the formatting behind the untransformed-node log
+// line: every name when there are few, first-N-plus-a-count when there are
+// not (issue #66's "cap the list of names ... first few + 'and N more'"),
+// checked as its own function because the log line itself cannot be
+// asserted on without rendering something.
+//
+// It has teeth: deleting the truncation (always returning
+// fmt.Sprintf("%v", names), the pre-cap behaviour) prints all 40 names
+// instead of "[N0 N1 N2 N3 N4] and 35 more" for the many-names case, failing
+// it. Introduced and reverted to confirm.
+func TestCappedNodeList(t *testing.T) {
+	few := []string{"A", "B", "C"}
+	if got := cappedNodeList(few, 5); got != "[A B C]" {
+		t.Errorf("few names = %q, want [A B C]", got)
+	}
+
+	many := make([]string, 40)
+	for i := range many {
+		many[i] = fmt.Sprintf("N%d", i)
+	}
+	got := cappedNodeList(many, 5)
+	want := "[N0 N1 N2 N3 N4] and 35 more"
+	if got != want {
+		t.Errorf("many names = %q, want %q", got, want)
 	}
 }

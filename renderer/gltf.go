@@ -77,6 +77,16 @@ type ModelMesh struct {
 	// the node a socket's mesh-space helper needs -- only needs one of them.
 	// All primitives split from the same doc mesh share this value.
 	Node int
+
+	// DocMesh is the index into the source document's Meshes this primitive
+	// was split from -- doc.Meshes[DocMesh], not Model.Meshes[DocMesh].
+	//
+	// Kept so Model.NodeMeshes can go the other direction from Node above: a
+	// doc mesh instanced by several nodes (issue #66's forty identical lamp
+	// posts) needs, for a GIVEN node, every ModelMesh that doc mesh split
+	// into -- Node alone only ever names the first instancing node, never the
+	// mesh's primitives themselves.
+	DocMesh int
 }
 
 // materialName returns the name of the material a primitive references, or ""
@@ -111,6 +121,13 @@ type Model struct {
 	// docs/agents/models.md). Use Model.NodeInMeshSpace rather than a node's
 	// World directly when placing something relative to a mesh.
 	Nodes []ModelNode
+
+	// Lights is every KHR_lights_punctual light the document carries,
+	// attached to Nodes by ModelLight.Node. Nil when the document has none --
+	// most models, since this is a level-authoring extension rather than
+	// something a single prop needs. See docs/agents/lights.md for the units
+	// caveat and the per-node placement pattern.
+	Lights []ModelLight
 }
 
 // ModelNode is one node in the glTF scene graph a model was loaded from.
@@ -145,6 +162,19 @@ type ModelNode struct {
 	// Mesh is the index into doc.Meshes this node instances, or -1 if the
 	// node carries no mesh (an empty node, a light, a joint).
 	Mesh int
+
+	// Extras is the node's glTF `extras` as raw JSON, nil when the node has
+	// none. This is glTF's own slot for application data -- a designer
+	// tagging a node `{"collider": "box", "static": true}` in an editor --
+	// and the engine deliberately does not look inside it (AGENTS.md rule
+	// 14: unblock a path, do not ship an opinion). A game reads its own
+	// vocabulary out with json.Unmarshal(node.Extras, &myTags).
+	//
+	// qmuntal/gltf decodes `extras` into `any` (there is no registered type
+	// for it the way KHR_lights_punctual has one) -- extractNodes re-marshals
+	// whatever came out, so this is always either nil or valid JSON, never
+	// the decoded Go value glTF handed back.
+	Extras json.RawMessage
 }
 
 // openGLTF opens a glTF or GLB document from fsys and returns it along with an
@@ -194,6 +224,7 @@ func (r *Renderer) LoadGLTF(fsys fs.FS, name string) (*Model, error) {
 	materialCache := make(map[int]*Material)
 
 	model.Nodes = extractNodes(doc)
+	model.Lights = extractLights(doc, model.Nodes)
 	meshOwners := meshOwnerNodes(doc)
 
 	for meshIdx, mesh := range doc.Meshes {
@@ -256,6 +287,7 @@ func (r *Renderer) LoadGLTF(fsys fs.FS, name string) (*Model, error) {
 				Verts:       vertices,
 				Idx:         indices,
 				Node:        meshOwners[meshIdx],
+				DocMesh:     meshIdx,
 			})
 		}
 	}
@@ -265,8 +297,16 @@ func (r *Renderer) LoadGLTF(fsys fs.FS, name string) (*Model, error) {
 	// when the node instancing a mesh has an identity transform. Making the
 	// exception visible costs one log line; finding it by hand cost someone a
 	// hand-measured constant that broke on re-export (issue #46).
+	//
+	// A level file (docs/agents/models.md's "Loading a level" section) is the
+	// case where this fires for EVERY mesh node on purpose: the per-node
+	// pattern places each mesh from Model.Nodes itself, which is the correct
+	// handling and makes this specific warning a false alarm there. cappedNodeList
+	// keeps the line readable regardless of how many nodes that is, and the
+	// message points at the pattern that makes the warning moot rather than
+	// just repeating that something is untransformed.
 	if names := untransformedMeshNodes(model.Nodes, model.Meshes); len(names) > 0 {
-		log.Printf("gltf %q: static geometry drawn without its node transform -- node(s) %v carry a transform LoadGLTF does not apply to their mesh's vertices (see docs/agents/models.md)", name, names)
+		log.Printf("gltf %q: static geometry drawn without its node transform -- node(s) %s carry a transform LoadGLTF does not apply to their mesh's vertices; if this is a level file, place these with Model.Nodes per-node (see docs/agents/models.md#loading-a-level) rather than treating this as an error", name, cappedNodeList(names, untransformedNodeListCap))
 	}
 
 	return &model, nil
@@ -634,6 +674,11 @@ func (r *Renderer) LoadGLTFSkinned(fsys fs.FS, name string) (*SkinnedModel, erro
 	// World below is the authored bind-pose transform, not the joint's
 	// current pose during playback -- see the Skeleton/Joint types for that.
 	model.Nodes = extractNodes(doc)
+	// Lights are filled the same pure function as LoadGLTF, cheap because it
+	// only reads doc and the nodes just extracted above -- there is no
+	// skinning-specific reason a level's lamp posts would carry a skin, so
+	// there is nothing here for this to interact with.
+	model.Lights = extractLights(doc, model.Nodes)
 	meshOwners := meshOwnerNodes(doc)
 
 	// Pass 1: Load skinned meshes from nodes with a Skin reference.
@@ -695,6 +740,7 @@ func (r *Renderer) LoadGLTFSkinned(fsys fs.FS, name string) (*SkinnedModel, erro
 				Metallic:  metallic,
 				Roughness: roughness,
 				Node:      meshOwners[meshIdx],
+				DocMesh:   meshIdx,
 			})
 		}
 	}
@@ -759,6 +805,7 @@ func (r *Renderer) LoadGLTFSkinned(fsys fs.FS, name string) (*SkinnedModel, erro
 				Verts:     vertices,
 				Idx:       indices,
 				Node:      meshOwners[meshIdx],
+				DocMesh:   meshIdx,
 			})
 		}
 	}
@@ -766,9 +813,11 @@ func (r *Renderer) LoadGLTFSkinned(fsys fs.FS, name string) (*SkinnedModel, erro
 	// Pass 2's static primitives go through the same extractPrimitive as
 	// LoadGLTF and are just as silently missing their node's transform (see
 	// the identical check there). Skinned primitives are excluded: their
-	// placement goes through the skeleton/RootTransform, not this trap.
+	// placement goes through the skeleton/RootTransform, not this trap. See
+	// the LoadGLTF version of this log line for why it is capped and what it
+	// points at.
 	if names := untransformedMeshNodes(model.Nodes, model.Meshes[staticStart:]); len(names) > 0 {
-		log.Printf("gltf %q: static geometry drawn without its node transform -- node(s) %v carry a transform this loader does not apply to their mesh's vertices (see docs/agents/models.md)", name, names)
+		log.Printf("gltf %q: static geometry drawn without its node transform -- node(s) %s carry a transform this loader does not apply to their mesh's vertices; if this is a level file, place these with Model.Nodes per-node (see docs/agents/models.md#loading-a-level) rather than treating this as an error", name, cappedNodeList(names, untransformedNodeListCap))
 	}
 
 	// Compute root transform from the parent chain of the first skinned mesh
@@ -1180,6 +1229,33 @@ func nodeLocalTransform(node *gltf.Node) mgl32.Mat4 {
 	return mgl32.Ident4()
 }
 
+// marshalExtras re-encodes a node's decoded `extras` value as raw JSON, or
+// returns nil when the node had none.
+//
+// gltf.Node.Extras is typed `any` and qmuntal/gltf has no registered decoder
+// for it (unlike KHR_lights_punctual's node reference, which decodes to a
+// concrete Go type -- see extractLights), so by the time it reaches here it
+// is already whatever encoding/json's generic decode produced: typically
+// map[string]any for a JSON object, but a game's extras are not required to
+// be one. Re-marshaling rather than type-asserting to map[string]any keeps
+// ModelNode.Extras a faithful copy of whatever the document actually said,
+// which is the whole point of not interpreting it (AGENTS.md rule 14).
+//
+// The error path only fires for a value encoding/json's own decoder could
+// not have produced in the first place (a channel, a func) and is treated
+// the same as "no extras" rather than failing the whole load over one node's
+// application data the engine was never going to read anyway.
+func marshalExtras(extras any) json.RawMessage {
+	if extras == nil {
+		return nil
+	}
+	data, err := json.Marshal(extras)
+	if err != nil {
+		return nil
+	}
+	return json.RawMessage(data)
+}
+
 // extractNodes builds a Model.Nodes from a glTF document's node graph: name,
 // authored TRS, the local and world transforms, parent index and the mesh a
 // node instances, if any.
@@ -1242,6 +1318,7 @@ func extractNodes(doc *gltf.Document) []ModelNode {
 				nodes[i].Mesh = mi
 			}
 		}
+		nodes[i].Extras = marshalExtras(gn.Extras)
 	}
 
 	resolveWorld(nodes)
@@ -1356,6 +1433,28 @@ func untransformedMeshNodes(nodes []ModelNode, meshes []ModelMesh) []string {
 		}
 	}
 	return names
+}
+
+// untransformedNodeListCap is how many names LoadGLTF/LoadGLTFSkinned's
+// log line prints before falling back to "and N more". Sized so the line
+// stays one screen-width-ish line for the #46 case (usually one or two
+// nodes) while not turning into forty names for a level file, where every
+// mesh node is expected to trip this check.
+const untransformedNodeListCap = 5
+
+// cappedNodeList formats names for the untransformed-node log line: the
+// names themselves when there are few, or the first cap of them plus a count
+// of the rest when there are not.
+//
+// Split out from the log line itself so the exact wording can be pinned by a
+// test without rendering anything -- this is the piece the "cap the list of
+// names" requirement in issue #66 is actually about, and the log line around
+// it is not something a test can observe.
+func cappedNodeList(names []string, limit int) string {
+	if len(names) <= limit {
+		return fmt.Sprintf("%v", names)
+	}
+	return fmt.Sprintf("%v and %d more", names[:limit], len(names)-limit)
 }
 
 // convertMat4 converts a [4][4]float32 from qmuntal/gltf to mgl32.Mat4.
