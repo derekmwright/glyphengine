@@ -77,6 +77,15 @@ var scenes = []scene{
 
 	{"streetlights", "21-streetlights", []string{"-frames", "200"}, "a settlement: PBR walls, door spots, lamp posts"},
 
+	// Lit water, which is a different shape of light cost from the scenes
+	// above: the surface is one near-horizontal draw covering most of the
+	// lower frame, so a light over the lake lands on a great many fragments
+	// at once. -lampposts=false keeps the three rows drawing identical
+	// geometry, so the difference between them is the light loop and nothing
+	// else. `water` above stays the unlit control.
+	{"waterlights32", "09-water", []string{"-time", "0.02", "-lamps", "32", "-spots", "0", "-lampposts=false", "-frames", "200"}, "32 lamps over a lake"},
+	{"waterlights400", "09-water", []string{"-time", "0.02", "-lamps", "400", "-spots", "0", "-lampposts=false", "-frames", "200"}, "400 lamps over the same lake"},
+
 	{"kitchensink", "15-kitchen-sink", []string{"-demo", "-frames", "240"}, "everything at once"},
 }
 
