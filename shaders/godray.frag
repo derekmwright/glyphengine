@@ -54,6 +54,19 @@ layout(location = 0) out vec4 outColor;
 // SAMPLES sets how finely the ray between the fragment and the sun is walked.
 // It is the whole cost of the effect: every one of these is a texture fetch,
 // and nothing else in here is expensive.
+//
+// Measured on a Radeon RX 7900 XTX at 1280x720, MSAA 4x, as PassShafts alone
+// over five interleaved 200-frame runs of `09-water -time 0.72 -yaw 1.771
+// -pitch -0.185 -pillars`, which puts the sun in the middle of the frame and so
+// is close to the worst case for this pass:
+//
+//	48 taps   0.163 ms   (0.144 – 0.169)
+//	24 taps   0.102 ms   (0.097 – 0.104)
+//
+// Halving them saves 0.06 ms and costs most of what the jitter below buys: the
+// banding metric on the lit hillside goes from 0.28 mean / 1.03 max at 48 to
+// 0.43 / 1.94 at 24, against 0.70 / 3.31 with no jitter at all. Not a trade
+// worth making for a pass that is already under 5 % of this frame.
 const int SAMPLES = 48;
 
 // bright keeps only what is plausibly the sky or the sun.
@@ -108,7 +121,7 @@ vec3 bright(vec3 c) {
 // Measured on the hillside the shafts fall on in `09-water -time 0.72 -yaw
 // 1.771 -pitch -0.185 -pillars`, box 670,480,170x160, as the Laplacian of the
 // added light after an 8x8 box blur — the blur is what tells a step apart from
-// dither: with the jitter 0.25 mean / 1.08 max, without it 0.48 / 2.77. The
+// dither: with the jitter 0.28 mean / 1.03 max, without it 0.70 / 3.31. The
 // picture is plainer than the number. Amplified 4x, the unjittered difference
 // is a set of concentric arcs and the jittered one is a smooth gradient with a
 // fine grain. A per-column profile sees neither, because the bands are arcs
