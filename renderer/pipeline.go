@@ -771,11 +771,15 @@ func createSkyPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPa
 // layer to need it.
 //
 // Getting this pair out of step is not a subtle miscolouring, it is the failure
-// this whole feature is one line away from: with the shader premultiplying and
-// the blend left at SrcAlpha, 13-ui through the layer differed from the direct
-// path on 33745 pixels at a maximum of 55/255, every one of them a glyph edge or
-// a panel border -- a dark fringe on exactly the antialiased edges #15 added.
-// Measured by doing it, before overlayBlend existed. `task uiglow` is the gate.
+// this whole feature is one line away from: a dark fringe on exactly the
+// antialiased edges #15 added, which reads as "the antialiasing is broken"
+// rather than as a blend mode. Measured by doing it, twice -- once on the way in,
+// before this function existed, where 13-ui through the layer differed from the
+// direct path on 33745 pixels at a maximum of 55/255, and once afterwards
+// through `task uiglow` with the premultiplied case returning SrcAlpha, which
+// reports 60747 px differing, 15204 of them above 1/255, max delta 60 against a
+// tolerance of 2. Every one of them is a glyph edge or a panel border, and the
+// gate's GLOW arm stays green throughout.
 func overlayBlend(premultiplied bool) core1_0.PipelineColorBlendAttachmentState {
 	src := core1_0.BlendFactorSrcAlpha
 	if premultiplied {
