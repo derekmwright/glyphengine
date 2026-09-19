@@ -1290,7 +1290,15 @@ func recordCommandBuffer(
 			viewport, scissor, overlays, fallbackTexture, scratch)
 	}
 
+	timer.end(deviceDriver, cmdBuf, frame, PassOverlay)
+
+	// The end of the pass is where the MSAA colour resolves, and that is real GPU
+	// time that belongs to no draw. It gets a bracket of its own so that it is
+	// neither charged to whichever pass happens to close last nor left as an
+	// unexplained gap between the passes' sum and the frame total.
+	timer.begin(deviceDriver, cmdBuf, frame, PassSceneResolve)
 	deviceDriver.CmdEndRenderPass(cmdBuf)
+	timer.end(deviceDriver, cmdBuf, frame, PassSceneResolve)
 
 	// Water needs the finished scene as a texture, so it runs in a second pass.
 	//
@@ -1301,7 +1309,6 @@ func recordCommandBuffer(
 	// empty render pass and draws nothing. Kept as it is rather than tidied in
 	// passing, because removing it changes which frames resolve twice and that
 	// wants its own before-and-after; see the note on createGodRayPipeline.
-	timer.end(deviceDriver, cmdBuf, frame, PassOverlay)
 
 	timer.begin(deviceDriver, cmdBuf, frame, PassWater)
 	if sceneColor != nil && (hasWater(draws) || lighting.LightShafts > 0) {
@@ -1329,6 +1336,8 @@ func recordCommandBuffer(
 		timer.end(deviceDriver, cmdBuf, frame, PassWater)
 		timer.begin(deviceDriver, cmdBuf, frame, PassOverWater)
 		timer.end(deviceDriver, cmdBuf, frame, PassOverWater)
+		timer.begin(deviceDriver, cmdBuf, frame, PassWaterResolve)
+		timer.end(deviceDriver, cmdBuf, frame, PassWaterResolve)
 	}
 
 	timer.begin(deviceDriver, cmdBuf, frame, PassBloom)
@@ -1689,19 +1698,17 @@ func recordWaterPass(
 			viewport, scissor, ow.overlays, ow.fallback, scratch)
 	}
 
-	deviceDriver.CmdEndRenderPass(cmdBuf)
-
-	// After the end of the pass, not before it, exactly as PassOverlay closes
-	// after the scene pass ends. The water pass resolves its MSAA colour on the
-	// way out, and that resolve used to fall inside PassWater; closing here
-	// keeps it charged to the frame instead of to the gap between two passes.
-	//
-	// Measured on 09-water, which has water and nothing blended in front of it,
-	// three runs each: PassWater alone read 0.069/0.071/0.072 ms before the
-	// split. After it, with this timestamp inside the pass, PassWater read
-	// 0.049/0.050/0.051 and PassOverWater 0.000 -- 0.021 ms of resolve
-	// belonging to neither. With it here the two sum back to what the one used
-	// to be.
 	timer.end(deviceDriver, cmdBuf, ow.frame, PassOverWater)
+
+	// The water pass resolves its MSAA colour on the way out, the same as the
+	// scene pass, and it gets the same treatment: a bracket of its own. It was
+	// briefly charged to PassOverWater instead, on the argument that otherwise
+	// 0.021 ms belonged to nobody -- true, and the wrong cure, because it made
+	// "overwater" read 0.021 ms on a lake with nothing in front of it, which is
+	// the very thing PassOverlay was criticised for. PassWater + PassOverWater +
+	// PassWaterResolve is what PassWater alone used to be.
+	timer.begin(deviceDriver, cmdBuf, ow.frame, PassWaterResolve)
+	deviceDriver.CmdEndRenderPass(cmdBuf)
+	timer.end(deviceDriver, cmdBuf, ow.frame, PassWaterResolve)
 	return nil
 }

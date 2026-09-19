@@ -238,19 +238,20 @@ the right level — "per system" would be too coarse even if it were reachable.
 ### What it costs
 
 `gpu overwater` in `task bench`, separately from `gpu water`, so the reorder is
-attributable rather than charged to the surface. Measured on this machine at
-1280x720, 200 frames, three interleaved runs each:
+attributable rather than charged to the surface, and `gpu waterresolve` for the
+water pass's own MSAA resolve, which belongs to neither. Measured on this
+machine at 1280x720, 200 frames, three runs each:
 
-| scene | `gpu water` | `gpu overwater` |
-|---|---|---|
-| `09-water` — water, nothing blended in front of it | 0.049 / 0.050 / 0.050 ms | 0.026 / 0.023 / 0.023 ms |
-| `09-water -plume -ghost -marker -submerged` | 0.051 / 0.051 / 0.051 ms | 0.034 / 0.038 / 0.038 ms |
+| scene | `gpu water` | `gpu overwater` | `gpu waterresolve` |
+|---|---|---|---|
+| `09-water` — water, nothing blended in front of it | 0.062 / 0.061 / 0.055 ms | 0.000 / 0.000 / 0.000 ms | 0.030 / 0.021 / 0.021 ms |
+| `09-water -plume -ghost -marker -submerged` | 0.056 / 0.056 / 0.056 ms | 0.012 / 0.012 / 0.012 ms | 0.021 / 0.021 / 0.022 ms |
 
-`gpu overwater` is not zero in the first row: it carries the water pass's own
-MSAA resolve, which `gpu water` used to. The two together, 0.073 ms, are what
-`gpu water` alone read before the split (0.069 / 0.071 / 0.072). The reorder
-itself is the 0.013 ms of difference between the rows, over a flame of ~340
-instances, a double-sided pane and an overlay disc.
+`gpu overwater` reads zero on a lake with nothing in front of it, which is what
+the name promises. For a while it did not: it closed after the pass ended and so
+carried the resolve, 0.021-0.026 ms of a number called "overwater" on a scene
+with nothing over the water. The reorder itself is the 0.012 ms in the second
+row, over a flame of ~340 instances, a double-sided pane and an overlay disc.
 
 Against the same scene recorded in the old order, the blended passes sum to
 0.088–0.128 ms before and 0.095–0.120 ms after, three runs each: the same work,
