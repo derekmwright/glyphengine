@@ -108,9 +108,9 @@ type game struct {
 	// that its brightness must not move with the time of day or with the
 	// scene's exposure curve, and a claim like that is worth nothing unless
 	// someone outside the engine can render both and difference them.
-	timeOfDay       float32
-	sceneBloom      float32
-	exposure, curve float32
+	timeOfDay              float32
+	sceneBloom, sceneThres float32
+	exposure, curve        float32
 
 	t float32
 }
@@ -218,10 +218,13 @@ func (g *game) Init(e *glyph.Engine) error {
 	e.SetTimeOfDay(g.timeOfDay)
 	e.SetDayCycleSpeed(0)
 	if g.sceneBloom > 0 {
-		// The SCENE's bloom, which the UI must never feed and must never be
-		// fed by. Threshold, knee and radius are the engine's documented
-		// starting point.
-		r.SetBloom(g.sceneBloom, 1.2, 0.2, 1.0)
+		// The SCENE's bloom, which the UI must never feed and must never be fed
+		// by. The threshold is a flag because the default 1.2 selects nothing in
+		// this scene -- measured: -bloom 0.7 at 1.2 renders a byte-identical
+		// frame -- and a bloom that does nothing proves nothing about what it
+		// does not pick up. Drop it to 0.5 and the sky clears it, which is the
+		// configuration `task hud` uses for the same reason.
+		r.SetBloom(g.sceneBloom, g.sceneThres, 0.2, 1.0)
 	}
 	if g.exposure > 0 || g.curve > 0 {
 		r.SetTonemap(g.exposure, g.curve, 6)
@@ -408,6 +411,7 @@ func main() {
 	glow := flag.String("glow", "off", "glow demo: off, direct, layer or on (see the package comment)")
 	timeOfDay := flag.Float64("time", 0.33, "time of day, 0 = midnight, 0.5 = noon")
 	sceneBloom := flag.Float64("bloom", 0, "scene bloom intensity (0 = off)")
+	sceneThres := flag.Float64("bloomthreshold", 1.2, "scene bloom threshold")
 	exposure := flag.Float64("exposure", 0, "scene tonemap exposure (0 = unchanged)")
 	curve := flag.Float64("curve", 0, "scene tonemap curve: 0 identity, 1 Reinhard, 2 ACES")
 	flag.Parse()
@@ -440,6 +444,7 @@ func main() {
 		mode:       mode,
 		timeOfDay:  float32(*timeOfDay),
 		sceneBloom: float32(*sceneBloom),
+		sceneThres: float32(*sceneThres),
 		exposure:   float32(*exposure),
 		curve:      float32(*curve),
 	}, opts...)
