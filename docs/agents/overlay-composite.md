@@ -25,6 +25,8 @@ api:
   - renderer.UIRenderObject.Glow
   - renderer.TextLine.Glow
   - renderer.PanelLayer.Glow
+  - ui.Label.Glow
+  - ui.Button.Glow
   - renderer.ShaderSet.UIResolveFrag
   - renderer.PassUILayer
   - renderer.PassUIGlow
@@ -342,6 +344,14 @@ renderer.UIRenderObject{..., Glow: 2.0}                  // panels and textures
 renderer.TextLine{Text: "REACTOR CRITICAL", Glow: 2.2}   // MSDF text
 renderer.PanelLayer{..., Glow: 1.0}                      // a Panel's layer
 ```
+
+The `ui` widgets carry it through, since they are what a game usually sets
+rather than the structs above: `ui.Label.Glow` reaches its `TextLine` on both
+build paths, and `ui.Button.Glow` lights the button's panel layers and its label
+together. A **disabled** button does not glow whatever the field says -- glowing
+is the loudest way a control has of asking to be pressed. `ui.ProgressBar`
+returns raw vertices rather than a `UIRenderObject`, so the glow for a bar is
+set on the `UIRenderObject` the game wraps it in, as `13-ui` does.
 
 `Glow` is a **linear** multiple of the element's own colour: 0 is none, 1
 doubles it, 3 quadruples it. It is deliberately not "write 1.4 into `Color`" —
