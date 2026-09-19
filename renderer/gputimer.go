@@ -32,6 +32,8 @@ const (
 	PassOverlay                  // world-space unlit overlays
 	PassSceneResolve             // the end of the scene pass: its MSAA resolve
 	PassBloom                    // bright-pass, downsample and upsample chain
+	PassUILayer                  // screen-space UI into its own HDR layer
+	PassUIGlow                   // the UI layer's own bright-pass and mip chain
 	PassTonemap                  // HDR resolve to the swapchain
 	PassComposite                // UI panels and MSDF text, onto the resolved image
 
@@ -52,6 +54,17 @@ const (
 // someone comparing MSAA settings would not know to look for a gap. Named, it
 // is a line they can read. In a frame with water the overlays themselves move
 // to PassOverWater, because they have to be drawn on top of the surface.
+//
+// PassUILayer and PassUIGlow are empty unless a game asked for the UI glow
+// layer (see WithUIGlowLayer), and PassComposite then holds one fullscreen
+// triangle instead of the UI quads -- the composite REPLACES the direct draw
+// rather than stacking on it, so the three numbers together are what the
+// feature costs, against PassComposite alone on the default path.
+//
+// Both write their timestamps whether or not the layer exists, for the reason
+// recordCommandBuffer gives at the water arm: a query that is reset and never
+// written makes the whole frame's readback come back NotReady, and every pass
+// loses its number rather than the skipped one reading zero.
 //
 // PassOverWater is the blended geometry that had to move after the water:
 // translucent meshes, the particle instances in front of the surface, and the
@@ -98,6 +111,10 @@ func (p Pass) String() string {
 		return "overlay"
 	case PassBloom:
 		return "bloom"
+	case PassUILayer:
+		return "uilayer"
+	case PassUIGlow:
+		return "uiglow"
 	case PassTonemap:
 		return "tonemap"
 	case PassComposite:

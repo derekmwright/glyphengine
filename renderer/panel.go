@@ -15,7 +15,13 @@ type PanelLayer struct {
 	Color       [3]float32
 	Opacity     float32
 	TextureMode bool // true = straight texture blending (pre-colored textures with alpha)
-	mesh        *Mesh
+
+	// Glow is this layer's emission, carried through to UIRenderObject.Glow.
+	// A plain field rather than an AddLayer parameter because every existing
+	// call site means zero by it and should not have to say so.
+	Glow float32
+
+	mesh *Mesh
 }
 
 // Panel is a multi-layer 9-slice UI element.
@@ -62,6 +68,23 @@ type UIRenderObject struct {
 	Opacity     float32
 	TextureMode bool // true = straight texture*color blending (icons); false = 9-slice panel mode
 
+	// Glow is how much LINEAR light this element emits on top of its own
+	// colour: 0 is no glow, 1 doubles it, 3 quadruples it. It is a multiple of
+	// Color rather than a colour of its own, so a red warning glows red.
+	//
+	// It is separate from Color because Color is an sRGB display value and sRGB
+	// has no meaning above 1 -- srgbToLinear's curve is only defined on [0,1],
+	// so "write 1.4 and it will be bright" is not an answer, it is undefined
+	// behaviour that happens to produce a number. Emission is linear by nature,
+	// and this is the multiplier applied after the decode.
+	//
+	// It does nothing without the UI glow layer (renderer.WithUIGlowLayer): the
+	// swapchain is 8-bit, so on the direct path there is nothing above 1 to
+	// hold. That is why zero is the default and why an existing game is
+	// untouched -- and why a game that sets this and sees no glow should check
+	// UIGlowLayer first.
+	Glow float32
+
 	// Fill overrides the panel interior; nil derives it from the tint. Panels
 	// built through NineSlice carry theirs from there, and a game assembling
 	// UIRenderObjects itself sets this directly.
@@ -88,6 +111,7 @@ func (p *Panel) UIRenderObjects(screenW, screenH float32) []UIRenderObject {
 			},
 			Opacity:     layer.Opacity,
 			TextureMode: layer.TextureMode,
+			Glow:        layer.Glow,
 			Fill:        layer.NineSlice.Fill,
 		})
 	}

@@ -17,6 +17,14 @@
 //
 //	go run ./13-ui              # windowed
 //	go run ./13-ui -frames 120  # render 120 frames, then exit
+//	go run ./13-ui -glow        # the same HUD with the UI glow layer on
+//
+// -glow adds three elements that ask for emission -- a steady button, a warning
+// that pulses, and a line of text -- beside the ordinary panels and labels,
+// which is the comparison worth looking at: the glow crosses onto the elements
+// next to it, and nothing that did not ask for it moves. Without the flag the
+// layer is not allocated at all and the frame is the one this example has always
+// drawn.
 //
 // The bars animate on their own. Escape quits.
 package main
@@ -70,7 +78,15 @@ type game struct {
 
 	health, stamina, mana ui.ProgressBar
 
-	t float32
+	// glow turns on the UI glow layer and the three elements that use it. The
+	// meshes are nil without it: an element that emits needs its own
+	// UIRenderObject, because Glow is per object, and building meshes for
+	// objects nothing will draw is the sort of thing that makes a default run
+	// stop being the frame it was.
+	glow     bool
+	btnMesh  *renderer.Mesh
+	warnMesh *renderer.Mesh
+	t        float32
 }
 
 func (g *game) Init(e *glyph.Engine) error {
@@ -128,6 +144,22 @@ func (g *game) Init(e *glyph.Engine) error {
 	g.mana = ui.ProgressBar{
 		Width: 240, Height: 12, Max: 100, Value: 88,
 		FgColor: [3]float32{0.32, 0.52, 0.90}, BgColor: [3]float32{0.08, 0.11, 0.18},
+	}
+
+	if g.glow {
+		if g.btnMesh, err = r.CreateDynamicIndexedMesh(4, 6); err != nil {
+			return err
+		}
+		if g.warnMesh, err = r.CreateDynamicIndexedMesh(4, 6); err != nil {
+			return err
+		}
+		// The defaults, said out loud. They are the scene bloom's own starting
+		// point (0.7, 1.2, 0.2, 1.0) over an image whose ordinary content tops
+		// out at exactly 1, and they are here so that the first thing anyone
+		// reaching for this feature sees is that the numbers belong to the game.
+		r.SetUIGlow(0.7, 1.2, 0.2, 1.0)
+		r.SetUIExposure(1.0)
+		log.Printf("UI glow layer: %v", r.UIGlowLayer())
 	}
 
 	e.SetTimeOfDay(0.33)
@@ -193,10 +225,48 @@ func (g *game) buildHUD(e *glyph.Engine, sw, sh float32) {
 	// The UI pipeline is ortho and depth-test free, so this matrix is the only
 	// thing placing the HUD on screen.
 	proj := mgl32.Ortho(0, sw, 0, sh, -1, 1)
-	e.SetUIOverlays([]renderer.UIRenderObject{{
+	overlays := []renderer.UIRenderObject{{
 		RenderObject: renderer.RenderObject{Mesh: g.uiMesh, MVP: proj},
 		Opacity:      0.92,
-	}})
+	}}
+
+	if g.glow {
+		// A button that is simply lit, and a warning that pulses. Both are
+		// ordinary panels with an ordinary sRGB colour; the only new thing is
+		// Glow, which is a LINEAR multiple of that colour -- 1.4 means the
+		// button emits 2.4x its own teal, so it clears the 1.2 threshold and
+		// the chain over the layer spreads it onto the panel beside it.
+		var bv []renderer.Vertex
+		var bi []uint16
+		bv, bi = ui.AppendQuad(bv, bi, 420, 54, 150, 34, [3]float32{0.16, 0.62, 0.60})
+		e.Renderer().UpdateMeshData(g.btnMesh, bv, bi)
+
+		var wv []renderer.Vertex
+		var wi []uint16
+		wv, wi = ui.AppendQuad(wv, wi, 420, 100, 150, 20, [3]float32{0.85, 0.28, 0.16})
+		e.Renderer().UpdateMeshData(g.warnMesh, wv, wi)
+
+		// 0 at the trough rather than a floor above it, so the pulse passes
+		// through "no glow at all" every cycle. A warning that never stops
+		// glowing is a lamp; one that crosses the threshold is a warning.
+		pulse := 0.5 + 0.5*float32(math.Sin(float64(g.t)*3.0))
+
+		overlays = append(overlays,
+			renderer.UIRenderObject{
+				RenderObject: renderer.RenderObject{Mesh: g.btnMesh, MVP: proj},
+				Opacity:      1.0,
+				TextureMode:  false,
+				Glow:         1.4,
+			},
+			renderer.UIRenderObject{
+				RenderObject: renderer.RenderObject{Mesh: g.warnMesh, MVP: proj},
+				Opacity:      1.0,
+				TextureMode:  false,
+				Glow:         3.0 * pulse,
+			},
+		)
+	}
+	e.SetUIOverlays(overlays)
 
 	// Labels last, so nothing covers them.
 	lines := []renderer.TextLine{
@@ -212,6 +282,16 @@ func (g *game) buildHUD(e *glyph.Engine, sw, sh float32) {
 		{Text: "immediate-mode HUD: rebuilt every frame into one mesh",
 			X: 32, Y: sh - 44, Scale: 16, Color: [3]float32{0.85, 0.85, 0.85}},
 	}
+	if g.glow {
+		// One line of the same block, in the same draw as the rest. Glow is per
+		// TextLine precisely so this works: MSDFText builds one mesh from every
+		// line it is given, so a per-overlay value could not light this one and
+		// leave the line above it alone.
+		lines = append(lines, renderer.TextLine{
+			Text: "REACTOR CRITICAL", X: 420, Y: 130, Scale: 20,
+			Color: [3]float32{1.0, 0.72, 0.30}, Glow: 2.2,
+		})
+	}
 	g.text.SetText(e.Renderer(), lines, sw, sh)
 	e.SetMSDFOverlays([]renderer.RenderObject{g.text.RenderObject(sw, sh, 48)})
 }
@@ -223,6 +303,12 @@ func (g *game) Shutdown(e *glyph.Engine) {
 	if g.uiMesh != nil {
 		e.Renderer().DestroyMesh(g.uiMesh)
 	}
+	if g.btnMesh != nil {
+		e.Renderer().DestroyMesh(g.btnMesh)
+	}
+	if g.warnMesh != nil {
+		e.Renderer().DestroyMesh(g.warnMesh)
+	}
 }
 
 func main() {
@@ -231,6 +317,7 @@ func main() {
 	fullscreen := flag.Bool("fullscreen", false, "run fullscreen on the primary monitor")
 	frames := flag.Int("frames", 0, "render N frames then exit (0 = run until closed)")
 	shot := flag.String("screenshot", "", "write a PNG of the last frame to this path")
+	glow := flag.Bool("glow", false, "give the UI its own HDR layer and add three glowing elements")
 	flag.Parse()
 
 	opts := []glyph.Option{
@@ -238,6 +325,9 @@ func main() {
 		glyph.WithWindowSize(*width, *height),
 		glyph.WithMSAA(4),
 		glyph.WithQuitKey(input.KeyEscape),
+	}
+	if *glow {
+		opts = append(opts, glyph.WithUIGlow())
 	}
 	if *fullscreen {
 		opts = append(opts, glyph.WithFullscreen())
@@ -249,7 +339,7 @@ func main() {
 		opts = append(opts, glyph.WithScreenshot(*shot))
 	}
 
-	e, err := glyph.New(&game{}, opts...)
+	e, err := glyph.New(&game{glow: *glow}, opts...)
 	if err != nil {
 		log.Fatalf("create engine: %v", err)
 	}

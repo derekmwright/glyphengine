@@ -124,6 +124,7 @@ type config struct {
 	debugKeys      bool
 	shaders        renderer.ShaderSet
 	hasShaders     bool
+	uiGlow         bool
 }
 
 // rendererOptions translates the engine's config into the renderer's options.
@@ -148,6 +149,9 @@ func (c *config) rendererOptions() []renderer.Option {
 	if c.hasShaders {
 		opts = append(opts, renderer.WithShaders(c.shaders))
 	}
+	if c.uiGlow {
+		opts = append(opts, renderer.WithUIGlowLayer())
+	}
 	return opts
 }
 
@@ -161,6 +165,23 @@ func WithScene(s *Scene) Option {
 // it to what the GPU supports. Zero keeps the renderer default.
 func WithMSAA(n int) Option {
 	return func(c *config) { c.msaa = n }
+}
+
+// WithUIGlow gives the screen-space UI its own HDR layer, so a UI element can be
+// brighter than 1 and bloom across the elements around it.
+//
+// Off by default and free when off. An element asks for glow through
+// renderer.UIRenderObject.Glow or renderer.TextLine.Glow, both of which are inert
+// without this; how the glow looks is tuned at run time through
+// Renderer().SetUIGlow and Renderer().SetUIExposure, which are the game's to set
+// rather than the engine's to decide.
+//
+// A straight passthrough to renderer.WithUIGlowLayer, and it exists for the same
+// reason WithShaders does: the layer allocates targets at construction and on
+// resize, so it cannot be reached by a game that only has an Engine otherwise.
+// See docs/agents/overlay-composite.md.
+func WithUIGlow() Option {
+	return func(c *config) { c.uiGlow = true }
 }
 
 // WithShaders replaces the SPIR-V the renderer builds its pipelines from.

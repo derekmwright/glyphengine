@@ -41,6 +41,10 @@ type hdrTarget struct {
 	// tonemapSets bind the scene at binding 0 and the bloom chain's finest
 	// level at binding 1. They are written after the bloom chain exists, which
 	// is why they are not filled in by createHDRTargets.
+	//
+	// The UI glow layer is an hdrTarget too and uses these for its own resolve,
+	// which pairs the same two things: a colour target and the bloom chain over
+	// it. Same shape, same writeTonemapSets, different images.
 	tonemapSets []core1_0.DescriptorSet
 
 	extent core1_0.Extent2D
@@ -63,6 +67,11 @@ func hdrSupported(instanceDriver core1_0.CoreInstanceDriver, physicalDevice core
 }
 
 // createHDRTargets allocates one HDR colour buffer per swapchain image.
+//
+// label names the target in the startup log, because there is more than one of
+// these now: the scene's, and -- when the UI glow layer is on -- the screen-space
+// UI's own. Two lines reading "HDR target" with different sizes is the kind of
+// log that makes someone doubt the one that is correct.
 func createHDRTargets(
 	instanceDriver core1_0.CoreInstanceDriver,
 	deviceDriver core1_0.CoreDeviceDriver,
@@ -72,6 +81,7 @@ func createHDRTargets(
 	extent core1_0.Extent2D,
 	count int,
 	maxAnisotropy float32,
+	label string,
 ) (*hdrTarget, error) {
 	t := &hdrTarget{extent: extent}
 
@@ -182,7 +192,7 @@ func createHDRTargets(
 		return nil, fmt.Errorf("update hdr descriptor sets: %w", err)
 	}
 
-	log.Printf("HDR target: %dx%d R16G16B16A16_SFLOAT x%d", extent.Width, extent.Height, count)
+	log.Printf("%s: %dx%d R16G16B16A16_SFLOAT x%d", label, extent.Width, extent.Height, count)
 	return t, nil
 }
 
@@ -328,10 +338,22 @@ func createTonemapRenderPass(deviceDriver core1_0.DeviceDriver, swapchainFormat 
 	return renderPass, nil
 }
 
-// createTonemapPipeline builds the fullscreen resolve. It reuses sky.vert, which
-// is already the fullscreen triangle, and the non-lit pipeline layout, whose
-// set 0 is a single combined image sampler -- exactly what this needs.
-func createTonemapPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D) (core1_0.Pipeline, error) {
+// createResolvePipeline builds a fullscreen resolve into the swapchain image.
+// It reuses sky.vert, which is already the fullscreen triangle, and a pipeline
+// layout whose set 0 pairs a colour target with its bloom chain -- exactly what
+// both resolves need.
+//
+// Two of them exist: the scene's tonemap, which writes every pixel of an opaque
+// image and therefore does not blend, and the UI glow layer's composite, which
+// lays a transparent layer over what the tonemap just wrote and therefore does.
+// One function with a blend flag rather than two near-identical copies, for the
+// reason createLitVariantPipeline gives: a second copy is how one of them
+// quietly ends up with the wrong state, and the state that would differ here is
+// precisely the one whose failure reads as "the antialiasing is broken".
+//
+// blend is premultiplied "over": the source is already scaled by its own alpha
+// (see ui.frag), so the source factor is One rather than SrcAlpha.
+func createResolvePipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, frag []byte, label string, renderPass core1_0.RenderPass, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, blend bool) (core1_0.Pipeline, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
 		Code: bytesToUint32Slice(sh.SkyVert),
 	})
@@ -341,12 +363,26 @@ func createTonemapPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, rend
 	defer deviceDriver.DestroyShaderModule(vertModule, nil)
 
 	fragModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
-		Code: bytesToUint32Slice(sh.TonemapFrag),
+		Code: bytesToUint32Slice(frag),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, err
 	}
 	defer deviceDriver.DestroyShaderModule(fragModule, nil)
+
+	attachment := core1_0.PipelineColorBlendAttachmentState{
+		ColorWriteMask: core1_0.ColorComponentRed | core1_0.ColorComponentGreen | core1_0.ColorComponentBlue | core1_0.ColorComponentAlpha,
+		BlendEnabled:   false,
+	}
+	if blend {
+		attachment.BlendEnabled = true
+		attachment.SrcColorBlendFactor = core1_0.BlendFactorOne
+		attachment.DstColorBlendFactor = core1_0.BlendFactorOneMinusSrcAlpha
+		attachment.ColorBlendOp = core1_0.BlendOpAdd
+		attachment.SrcAlphaBlendFactor = core1_0.BlendFactorOne
+		attachment.DstAlphaBlendFactor = core1_0.BlendFactorOneMinusSrcAlpha
+		attachment.AlphaBlendOp = core1_0.BlendOpAdd
+	}
 
 	pipelines, _, err := deviceDriver.CreateGraphicsPipelines(nil, nil, core1_0.GraphicsPipelineCreateInfo{
 		Stages: []core1_0.PipelineShaderStageCreateInfo{
@@ -368,10 +404,7 @@ func createTonemapPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, rend
 		MultisampleState:  &core1_0.PipelineMultisampleStateCreateInfo{RasterizationSamples: core1_0.Samples1},
 		DepthStencilState: &core1_0.PipelineDepthStencilStateCreateInfo{DepthTestEnable: false, DepthWriteEnable: false},
 		ColorBlendState: &core1_0.PipelineColorBlendStateCreateInfo{
-			Attachments: []core1_0.PipelineColorBlendAttachmentState{{
-				ColorWriteMask: core1_0.ColorComponentRed | core1_0.ColorComponentGreen | core1_0.ColorComponentBlue | core1_0.ColorComponentAlpha,
-				BlendEnabled:   false,
-			}},
+			Attachments: []core1_0.PipelineColorBlendAttachmentState{attachment},
 		},
 		DynamicState: &core1_0.PipelineDynamicStateCreateInfo{
 			DynamicStates: []core1_0.DynamicState{core1_0.DynamicStateViewport, core1_0.DynamicStateScissor},
@@ -381,9 +414,9 @@ func createTonemapPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, rend
 		Subpass:    0,
 	})
 	if err != nil {
-		return core1_0.Pipeline{}, fmt.Errorf("create tonemap pipeline: %w", err)
+		return core1_0.Pipeline{}, fmt.Errorf("create %s pipeline: %w", label, err)
 	}
-	log.Println("Tonemap pipeline created")
+	log.Printf("%s pipeline created", label)
 	return pipelines[0], nil
 }
 
@@ -419,6 +452,7 @@ func (r *Renderer) tonemapFor(imageIndex int) tonemapPass {
 		curve:       r.tonemapCurve,
 		white:       r.tonemapWhite,
 		bloom:       r.bloomIntensity,
+		ui:          r.uiLayerFor(imageIndex),
 	}
 }
 

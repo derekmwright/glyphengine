@@ -123,6 +123,17 @@ type TextLine struct {
 	Color [3]float32
 	Alpha float32 // 0 means fully opaque (default), otherwise 0..1.
 	Font  *Font   // nil = default font
+
+	// Glow is how much LINEAR light this line emits on top of Color: 0 is no
+	// glow, 1 doubles it, 3 quadruples it. Same meaning and same reasons as
+	// UIRenderObject.Glow, including that it needs the UI glow layer
+	// (renderer.WithUIGlowLayer) to have anywhere to be bright.
+	//
+	// It is per line rather than per overlay because MSDFText builds one mesh
+	// and one draw from every line it is given, so a per-draw value could not
+	// make one line glow and leave the next alone. It reaches the shader in the
+	// vertex position's unused Z; see msdf.vert.
+	Glow float32
 }
 
 // TextOverlay renders bitmap text as colored quads.

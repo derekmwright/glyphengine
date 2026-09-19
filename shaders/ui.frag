@@ -9,6 +9,14 @@ layout(push_constant) uniform PushConstants {
     vec4 tint;
     vec4 params; // x = textureMode (0=panel, 1=straight texture)
     vec4 fill;   // rgb = panel interior colour, w = its opacity; w < 0 = derive
+    // x = linear emission multiplier, y = premultiply alpha before writing.
+    //
+    // Offset 176, which is where the lit block's pointPos sits -- the UI
+    // pipelines read none of the lit members past tint, so everything from
+    // params on is this pass's own use of the same 256 bytes. Nothing else
+    // writes pc[44..47] on this path, so a draw that asks for neither leaves
+    // both at the zero resetPC already put there.
+    vec4 glow;
 } pc;
 
 layout(set = 0, binding = 0) uniform sampler2D uiTexture;
@@ -83,5 +91,42 @@ void main() {
             mix(fillColor, borderColor, texel.a),
             mix(fillAlpha, fragColor.a, texel.a) * coverage
         );
+    }
+
+    // Emission. A UI colour is an sRGB value and sRGB has no meaning above 1,
+    // so "brighter than white" cannot be asked for by writing 1.4 into Color --
+    // srgbToLinear would be evaluating its curve outside the domain it is
+    // defined on. It is asked for with a separate LINEAR multiple of whatever
+    // colour the element already has, applied after the decode: glow 0 leaves
+    // the colour alone, 1 doubles it in linear light, 3 quadruples it. The
+    // element keeps its hue, which is what a game means by "make the warning
+    // glow" -- it wants a brighter red, not a red with white added.
+    //
+    // Multiplying by exactly 1.0 is exact in IEEE754, so a draw that asks for
+    // no glow writes the same bits it wrote before this line existed. That is
+    // what keeps the direct-to-swapchain path byte-identical.
+    outColor.rgb *= 1.0 + pc.glow.x;
+
+    // Premultiply, for the UI layer only.
+    //
+    // Drawing into a transparent layer and compositing it later is not the
+    // same arithmetic as drawing onto an opaque scene. The layer clears to
+    // (0,0,0,0) and accumulates with One / OneMinusSrcAlpha, which is "over"
+    // in premultiplied form: the colour it holds is already scaled by its own
+    // coverage, so two overlapping panels compose once rather than counting
+    // alpha twice, and the composite onto the swapchain can then be One /
+    // OneMinusSrcAlpha as well.
+    //
+    // Doing it here rather than by leaving the blend at SrcAlpha /
+    // OneMinusSrcAlpha -- which reaches the same result for the colour -- is
+    // what lets the composite stay a straight "over". It also makes the
+    // failure legible: with the layer's blend put back to SrcAlpha the colour
+    // is scaled by coverage twice, and every antialiased edge over a bright
+    // background gains a dark fringe. `task uiglow` measures exactly that.
+    //
+    // The branch is uniform across the draw -- it is a push constant the
+    // recorder sets once per pass, not per fragment -- so it costs nothing.
+    if (pc.glow.y > 0.5) {
+        outColor.rgb *= outColor.a;
     }
 }

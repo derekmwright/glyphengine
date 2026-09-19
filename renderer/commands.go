@@ -444,6 +444,17 @@ type tonemapPass struct {
 	curve    float32
 	white    float32
 	bloom    float32
+
+	// ui is the screen-space UI's own HDR layer, or nil when a game did not ask
+	// for one -- which is the default, and the path every existing render takes.
+	//
+	// It rides here rather than as another parameter to recordCommandBuffer for
+	// a reason worth stating: that function's parameter list is already pinned
+	// by TestRecordCommandBufferStreamIsUnchanged, whose fixture builds this
+	// struct. A nil field in a struct the fixture already fills is a layer-off
+	// frame with no edit to the test at all, which is what "off is free" has to
+	// mean for the check that measures it. See uilayer.go.
+	ui *uiLayerPass
 }
 
 // materialPipelines groups the material variant's pipelines with their layouts.
@@ -1361,12 +1372,52 @@ func recordCommandBuffer(
 	}
 	timer.end(deviceDriver, cmdBuf, frame, PassBloom)
 
+	// The screen-space UI's own HDR layer and the glow chain over it, both of
+	// which only exist when a game asked for them. They are recorded here
+	// because they have to be outside the tonemap render pass -- a render pass
+	// cannot begin inside another -- and because the composite that reads them
+	// is the last thing in the frame.
+	//
+	// A frame with no UI at all skips both AND skips the composite, so it
+	// presents exactly what a layer-off frame presents: a layer that was never
+	// written must not be composited over the scene.
+	//
+	// Both brackets are written unconditionally; see the water arm above for
+	// what a query that is reset and never written costs.
+	useUILayer := tonemap.ui != nil && (len(uiOverlays) > 0 || len(msdfOverlays) > 0)
+	timer.begin(deviceDriver, cmdBuf, frame, PassUILayer)
+	if useUILayer {
+		if err := recordUILayer(deviceDriver, stats, cmdBuf, tonemap.ui, extent,
+			uiOverlays, msdfOverlays, fallbackTexture, scratch); err != nil {
+			return err
+		}
+	}
+	timer.end(deviceDriver, cmdBuf, frame, PassUILayer)
+
+	timer.begin(deviceDriver, cmdBuf, frame, PassUIGlow)
+	if useUILayer {
+		if err := recordBloom(deviceDriver, cmdBuf, tonemap.ui.bloom, scratch); err != nil {
+			return err
+		}
+	}
+	timer.end(deviceDriver, cmdBuf, frame, PassUIGlow)
+
 	// Screen-space UI is composited inside this pass, after the resolve. The
 	// tonemap owns its own timing now that two intervals live in it.
+	//
+	// With the layer on the composite REPLACES those draws with one fullscreen
+	// triangle of the finished layer rather than stacking on them. Drawing both
+	// would put the UI on screen twice, once blended into a float layer and
+	// once straight onto the swapchain, which reads as the HUD having gained
+	// contrast rather than as a double draw.
 	if err := recordTonemap(deviceDriver, cmdBuf, tonemap, tonemap.layout, extent, timer, frame,
 		func(cmdBuf core1_0.CommandBuffer) {
+			if useUILayer {
+				recordUIResolve(deviceDriver, cmdBuf, tonemap.ui, extent, scratch)
+				return
+			}
 			recordUIComposite(deviceDriver, stats, cmdBuf, uiPipeline, msdfPipeline,
-				pipelineLayout, extent, uiOverlays, msdfOverlays, fallbackTexture, scratch)
+				pipelineLayout, extent, uiOverlays, msdfOverlays, fallbackTexture, false, scratch)
 		}, scratch); err != nil {
 		return err
 	}

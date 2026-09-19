@@ -24,8 +24,15 @@ func packUIFill(pc *[64]float32, fill *PanelFill) {
 	pc[43] = fill.Opacity
 }
 
-// recordUIComposite draws the screen-space overlay channels onto the swapchain,
-// inside the tonemap pass and after its resolve triangle.
+// recordUIComposite draws the screen-space overlay channels: onto the swapchain
+// inside the tonemap pass and after its resolve triangle, which is the default,
+// or into the UI glow layer when a game asked for one (recordUILayer calls this
+// with premultiply set, and the composite of the finished layer then replaces
+// these draws in the tonemap pass).
+//
+// One function for both because everything about WHAT is drawn is the same --
+// the panels, the nine-slice fill, the texture mode, the text. What differs is
+// the render pass the pipelines were built against and one push-constant float.
 //
 // They used to be recorded in the scene pass with everything else, and that put
 // them in the HDR target before three passes that are meant to operate on the
@@ -39,6 +46,13 @@ func packUIFill(pc *[64]float32, fill *PanelFill) {
 // same ordering, and they go away with it: a UI colour is a literal sRGB value
 // now rather than an HDR one that moves with scene exposure, and bright text no
 // longer glows into the scene behind it.
+//
+// Both of those still hold with the UI glow layer on, which is why the layer is
+// a second target rather than a route back into the scene's. The UI still never
+// reaches the scene's bloom chain or the scene's exposure; what the layer adds
+// is a glow that comes from the UI's own chain, over the UI's own image, at an
+// exposure that does not move with the time of day. A colour at or below 1 is
+// still the literal sRGB value it is here. See uilayer.go.
 //
 // Compositing here rather than in a render pass of its own is deliberate. The
 // tonemap pass already owns the swapchain image at the right extent, already
@@ -62,10 +76,23 @@ func recordUIComposite(
 	uiOverlays []UIRenderObject,
 	msdfOverlays []RenderObject,
 	fallbackTexture *Texture,
+	premultiply bool,
 	scratch *commandScratch,
 ) {
 	if len(uiOverlays) == 0 && len(msdfOverlays) == 0 {
 		return
+	}
+
+	// glowPremultiply is pc[45], read by both fragment shaders as glow.y. It is
+	// 1 only when these draws are going into the UI glow layer, where the
+	// destination is transparent and the colour has to be scaled by its own
+	// coverage before it is written; see ui.frag. On the direct path it stays
+	// at the zero resetPC already put there, so the shaders take the branch
+	// they always took and every pushed byte is what it was before the layer
+	// existed.
+	var glowPremultiply float32
+	if premultiply {
+		glowPremultiply = 1
 	}
 
 	// Set explicitly rather than inherited from the resolve triangle. Dynamic
@@ -112,6 +139,10 @@ func recordUIComposite(
 			if d.TextureMode {
 				scratch.pc[36] = 1.0
 			}
+			// glow.x: the element's linear emission multiple, zero for every
+			// panel that has never heard of it.
+			scratch.pc[44] = d.Glow
+			scratch.pc[45] = glowPremultiply
 			packUIFill(&scratch.pc, d.Fill)
 			scratch.pushConstants(deviceDriver, cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment)
 
@@ -156,6 +187,9 @@ func recordUIComposite(
 			scratch.pc[33] = 1.0
 			scratch.pc[34] = 1.0
 			scratch.pc[35] = d.Color[0] // screenPxRange
+			// No glow.x here: text carries its emission per vertex, because one
+			// draw covers every line an overlay holds. See TextLine.Glow.
+			scratch.pc[45] = glowPremultiply
 			scratch.pushConstants(deviceDriver, cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment)
 
 			stats.addDraw(1, d.Mesh.IndexCount, d.Mesh.VertexCount)
