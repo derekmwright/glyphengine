@@ -25,7 +25,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: user-supplied
-verified: 2026-07-28
+verified: 2026-09-18
 ---
 
 # Play skeletal animation clips
@@ -138,6 +138,18 @@ need to infer them from vertical velocity.
 Animation advances by the real frame delta in `TickAnimations`, not by the
 fixed tick delta, so poses stay smooth above and below the tick rate. The delta
 is clamped to 0.25s so a long pause does not lurch a pose forward.
+
+## Attachment points are bind pose, not the animated pose
+
+`LoadGLTFSkinned` also fills the embedded `Model.Nodes` from the glTF node
+graph, the same way the static `LoadGLTF` does -- see `docs/agents/models.md`
+(`model.Nodes` via promotion, since `SkinnedModel` embeds `Model`). That is
+for a non-animated attachment point on a skinned model, e.g. a static prop
+bolted to the chassis. It is **not** a way to attach something to an animated
+joint: `ModelNode.World` there is the authored bind-pose transform, computed
+once at load, not a joint's transform during playback. For a joint's live
+transform, sample it the way `TickAnimations` does, through `Skeleton` and
+`AnimationState` -- there is no shortcut through `Model.Nodes`.
 
 ## Failure modes
 
