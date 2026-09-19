@@ -83,6 +83,7 @@ func runBlenderFixtureChecks(t *testing.T, path string) {
 	t.Run("TextureTransform", func(t *testing.T) { checkTextureTransform(t, doc) })
 	t.Run("AlphaAndDoubleSided", func(t *testing.T) { checkAlphaAndDoubleSided(t, doc) })
 	t.Run("Mirrored", func(t *testing.T) { checkMirrored(t, doc) })
+	t.Run("ParentChain", func(t *testing.T) { checkParentChain(t, doc) })
 	t.Run("Instancing", func(t *testing.T) { checkInstancing(t, doc) })
 }
 
@@ -460,6 +461,75 @@ func checkMirrored(t *testing.T, doc *gltf.Document) {
 	s := doc.Nodes[idx].ScaleOrDefault()
 	if s[0] >= 0 && s[1] >= 0 && s[2] >= 0 {
 		t.Errorf("Mirrored node's authored scale = %v, want at least one negative component", s)
+	}
+}
+
+// checkParentChain is the one check here that a PARENTED node's World is
+// its parent's matrix times its own, in that order, on what Blender wrote.
+//
+// It was missing, and breaking the order showed it: with resolveWorld
+// composing child * parent instead, every other check in this file passed,
+// because nothing else here asserts on a node that has a parent -- the lights
+// and the buildings are all top level. (The in-memory tests did catch it, so
+// the engine was covered; the claim this FILE makes, that the loader agrees
+// with real Blender output, was not.) ShearChild is the node that can tell:
+// a stretched parent and a rotated child do not commute, which is the whole
+// reason it is sheared. The two collection-instance children cannot, since a
+// parent that only translates gives the same answer either way round.
+//
+// By hand from build_fixture.py: the parent is at Blender (-8, -6, 1) with
+// scale (1, 1, 3), which is glTF (-8, 1, 6) and (1, 3, 1); the child sits 0.6
+// up the parent's Z, glTF (0, 0.6, 0), rotated 45 degrees about X. So
+//
+//	World = T(-8,1,6) * S(1,3,1) * T(0,0.6,0) * Rx(45)
+//
+// puts the child at (-8, 1 + 3*0.6, 6) and makes its local Y axis
+// S * (0, cos45, sin45) = (0, 2.1213, 0.7071). The wrong order gives
+// Rx * S * (0,1,0) = (0, 2.1213, 2.1213) for that axis instead.
+//
+// Verified to fail that way: "ShearChild world Y axis = [0 2.1213202
+// 2.1213205], want [0 2.1213 0.7071]".
+func checkParentChain(t *testing.T, doc *gltf.Document) {
+	nodes := extractNodes(doc)
+	idx := nodeIndexByName(doc, "ShearChild")
+	if idx < 0 {
+		t.Fatal("ShearChild node not found")
+	}
+	if p := nodes[idx].Parent; p < 0 || nodes[p].Name != "ShearParent" {
+		t.Fatalf("ShearChild's parent is node %d, want ShearParent", p)
+	}
+	w := nodes[idx].World
+	if pos := (mgl32.Vec3{w[12], w[13], w[14]}); !closeF(pos[0], -8, 1e-4) || !closeF(pos[1], 2.8, 1e-4) || !closeF(pos[2], 6, 1e-4) {
+		t.Errorf("ShearChild world position = %v, want [-8 2.8 6]", pos)
+	}
+	if y := (mgl32.Vec3{w[4], w[5], w[6]}); !closeF(y[0], 0, 1e-4) || !closeF(y[1], 2.1213, 1e-3) || !closeF(y[2], 0.7071, 1e-3) {
+		t.Errorf("ShearChild world Y axis = %v, want [0 2.1213 0.7071]", y)
+	}
+
+	// The collection instances: each child lands where its instancing empty
+	// is, which is the part of the chain they CAN vouch for.
+	for name, want := range map[string]mgl32.Vec3{
+		"PropCollectionInstance":  {8, 0, 6},
+		"PropCollectionInstance2": {10, 2, 6},
+	} {
+		pi := nodeIndexByName(doc, name)
+		if pi < 0 {
+			t.Fatalf("%s node not found", name)
+		}
+		found := false
+		for i := range nodes {
+			if nodes[i].Parent != pi {
+				continue
+			}
+			found = true
+			cw := nodes[i].World
+			if pos := (mgl32.Vec3{cw[12], cw[13], cw[14]}); pos.Sub(want).Len() > 1e-4 {
+				t.Errorf("%s's child is at %v, want %v", name, pos, want)
+			}
+		}
+		if !found {
+			t.Errorf("%s has no child node; Blender wrote its instance as one", name)
+		}
 	}
 }
 
