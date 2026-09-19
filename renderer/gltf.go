@@ -66,6 +66,17 @@ type ModelMesh struct {
 	// rather than answering from an empty set.
 	Verts []Vertex
 	Idx   []uint32
+
+	// Node is the index into Model.Nodes of the first node (in glTF node-index
+	// order) that instances the doc mesh this primitive came from, or -1 if no
+	// node does.
+	//
+	// A doc mesh can be referenced by several nodes (instancing) or by none.
+	// This is "first" rather than "all" because a primitive is drawn once
+	// regardless of instance count, and the one use for this field -- finding
+	// the node a socket's mesh-space helper needs -- only needs one of them.
+	// All primitives split from the same doc mesh share this value.
+	Node int
 }
 
 // materialName returns the name of the material a primitive references, or ""
@@ -83,6 +94,57 @@ func materialName(doc *gltf.Document, material *int) string {
 // Model holds all meshes loaded from a single glTF/GLB file.
 type Model struct {
 	Meshes []ModelMesh
+
+	// Nodes is the glTF scene graph LoadGLTF walks to find the meshes, kept
+	// rather than discarded so a game can find a point on the model that
+	// carries no geometry at all -- an empty node an artist placed as a
+	// socket, a muzzle, a doorway (issue #46).
+	//
+	// Nodes[i] is built from doc.Nodes[i]: the indices are kept equal on
+	// purpose, so a game debugging a socket against Blender or another glTF
+	// tool is looking at the same number the tooling shows.
+	//
+	// Space: World is in the glTF scene's space, which is the same space a
+	// mesh's vertices are in only when that mesh's own instancing node chain
+	// is identity -- LoadGLTF never applies a node's transform to the
+	// vertices it decodes (see the "Node space" section of
+	// docs/agents/models.md). Use Model.NodeInMeshSpace rather than a node's
+	// World directly when placing something relative to a mesh.
+	Nodes []ModelNode
+}
+
+// ModelNode is one node in the glTF scene graph a model was loaded from.
+//
+// Translation, Rotation and Scale are the node's authored TRS fields exactly
+// as glTF stored them (defaulted the way glTF defines, via
+// TranslationOrDefault/RotationOrDefault/ScaleOrDefault), regardless of
+// whether the node actually used TRS or a Matrix to author its transform.
+// Local is the transform that matters: nodeLocalTransform's TRS-vs-Matrix
+// rule decides it, the same rule LoadGLTFSkinned's joints and armature root
+// already use, so a node authored with Matrix has a Local that reflects it
+// while Translation/Rotation/Scale sit at their TRS defaults.
+type ModelNode struct {
+	Name string
+
+	// Parent is the index into Model.Nodes of this node's parent, or -1 for
+	// a root.
+	Parent int
+
+	Translation mgl32.Vec3
+	Rotation    mgl32.Quat
+	Scale       mgl32.Vec3
+
+	// Local is this node's transform in its parent's space.
+	Local mgl32.Mat4
+
+	// World is Local composed down the parent chain, in the glTF scene's
+	// space. See the space caveat on Model.Nodes before using this to place
+	// anything relative to a mesh's vertices.
+	World mgl32.Mat4
+
+	// Mesh is the index into doc.Meshes this node instances, or -1 if the
+	// node carries no mesh (an empty node, a light, a joint).
+	Mesh int
 }
 
 // openGLTF opens a glTF or GLB document from fsys and returns it along with an
@@ -131,7 +193,10 @@ func (r *Renderer) LoadGLTF(fsys fs.FS, name string) (*Model, error) {
 	var model Model
 	materialCache := make(map[int]*Material)
 
-	for _, mesh := range doc.Meshes {
+	model.Nodes = extractNodes(doc)
+	meshOwners := meshOwnerNodes(doc)
+
+	for meshIdx, mesh := range doc.Meshes {
 		for _, prim := range mesh.Primitives {
 			if prim.Mode != gltf.PrimitiveTriangles {
 				continue
@@ -190,8 +255,18 @@ func (r *Renderer) LoadGLTF(fsys fs.FS, name string) (*Model, error) {
 				Roughness:   roughness,
 				Verts:       vertices,
 				Idx:         indices,
+				Node:        meshOwners[meshIdx],
 			})
 		}
+	}
+
+	// LoadGLTF draws every primitive in mesh-local space -- it never applies a
+	// node's transform to the vertices above. That is silently correct only
+	// when the node instancing a mesh has an identity transform. Making the
+	// exception visible costs one log line; finding it by hand cost someone a
+	// hand-measured constant that broke on re-export (issue #46).
+	if names := untransformedMeshNodes(model.Nodes, model.Meshes); len(names) > 0 {
+		log.Printf("gltf %q: static geometry drawn without its node transform -- node(s) %v carry a transform LoadGLTF does not apply to their mesh's vertices (see docs/agents/models.md)", name, names)
 	}
 
 	return &model, nil
@@ -553,6 +628,14 @@ func (r *Renderer) LoadGLTFSkinned(fsys fs.FS, name string) (*SkinnedModel, erro
 	var model Model
 	loadedMeshes := make(map[int]bool) // track which doc.Meshes indices we've loaded
 
+	// Nodes are filled the same way LoadGLTF fills them (same pure function),
+	// so a socket works identically on a skinned model's non-animated
+	// attachment points. This is NOT a way to attach to an animated joint:
+	// World below is the authored bind-pose transform, not the joint's
+	// current pose during playback -- see the Skeleton/Joint types for that.
+	model.Nodes = extractNodes(doc)
+	meshOwners := meshOwnerNodes(doc)
+
 	// Pass 1: Load skinned meshes from nodes with a Skin reference.
 	for _, node := range doc.Nodes {
 		if node.Skin == nil || node.Mesh == nil {
@@ -611,11 +694,13 @@ func (r *Renderer) LoadGLTFSkinned(fsys fs.FS, name string) (*SkinnedModel, erro
 				BaseColor: baseColor,
 				Metallic:  metallic,
 				Roughness: roughness,
+				Node:      meshOwners[meshIdx],
 			})
 		}
 	}
 
 	// Pass 2: Load non-skinned meshes from nodes without a Skin reference.
+	staticStart := len(model.Meshes)
 	for _, node := range doc.Nodes {
 		if node.Mesh == nil || node.Skin != nil {
 			continue
@@ -673,8 +758,17 @@ func (r *Renderer) LoadGLTFSkinned(fsys fs.FS, name string) (*SkinnedModel, erro
 				Roughness: roughness,
 				Verts:     vertices,
 				Idx:       indices,
+				Node:      meshOwners[meshIdx],
 			})
 		}
+	}
+
+	// Pass 2's static primitives go through the same extractPrimitive as
+	// LoadGLTF and are just as silently missing their node's transform (see
+	// the identical check there). Skinned primitives are excluded: their
+	// placement goes through the skeleton/RootTransform, not this trap.
+	if names := untransformedMeshNodes(model.Nodes, model.Meshes[staticStart:]); len(names) > 0 {
+		log.Printf("gltf %q: static geometry drawn without its node transform -- node(s) %v carry a transform this loader does not apply to their mesh's vertices (see docs/agents/models.md)", name, names)
 	}
 
 	// Compute root transform from the parent chain of the first skinned mesh
@@ -1084,6 +1178,184 @@ func nodeLocalTransform(node *gltf.Node) mgl32.Mat4 {
 	}
 
 	return mgl32.Ident4()
+}
+
+// extractNodes builds a Model.Nodes from a glTF document's node graph: name,
+// authored TRS, the local and world transforms, parent index and the mesh a
+// node instances, if any.
+//
+// A pure function of *gltf.Document so it can be tested without a Renderer or
+// a GPU -- LoadGLTF needs one, node extraction does not.
+//
+// glTF from the wild is not always valid, so this tolerates what a
+// hand-authored or buggy-exporter document can throw at it without hanging or
+// panicking: a nil node in doc.Nodes, an out-of-range child index, an
+// out-of-range mesh index, and a parent/child cycle (see resolveWorld below).
+func extractNodes(doc *gltf.Document) []ModelNode {
+	n := len(doc.Nodes)
+	if n == 0 {
+		return nil
+	}
+	nodes := make([]ModelNode, n)
+	for i := range nodes {
+		nodes[i].Parent = -1
+		nodes[i].Mesh = -1
+	}
+
+	// Parent indices come from walking every node's Children rather than
+	// from anything glTF stores on the child, so an out-of-range entry is
+	// just skipped -- there's nothing on the child side to fail.
+	for pi, gn := range doc.Nodes {
+		if gn == nil {
+			continue
+		}
+		for _, ci := range gn.Children {
+			if ci < 0 || ci >= n {
+				continue
+			}
+			if nodes[ci].Parent == -1 {
+				nodes[ci].Parent = pi
+			}
+		}
+	}
+
+	for i, gn := range doc.Nodes {
+		if gn == nil {
+			// A nil entry in doc.Nodes is invalid glTF, but the index still
+			// has to exist so every other node's Parent/Mesh reference stays
+			// valid. Ident4 local/world and no mesh is the inert answer.
+			nodes[i].Local = mgl32.Ident4()
+			continue
+		}
+		nodes[i].Name = gn.Name
+		t := gn.TranslationOrDefault()
+		r := gn.RotationOrDefault()
+		s := gn.ScaleOrDefault()
+		nodes[i].Translation = mgl32.Vec3{float32(t[0]), float32(t[1]), float32(t[2])}
+		// glTF quat: (x,y,z,w) -> mathgl: Quat{W, Vec3{x,y,z}}, same
+		// convention loadAnimations and nodeLocalTransform already use.
+		nodes[i].Rotation = mgl32.Quat{W: float32(r[3]), V: mgl32.Vec3{float32(r[0]), float32(r[1]), float32(r[2])}}
+		nodes[i].Scale = mgl32.Vec3{float32(s[0]), float32(s[1]), float32(s[2])}
+		nodes[i].Local = nodeLocalTransform(gn)
+		if gn.Mesh != nil {
+			if mi := *gn.Mesh; mi >= 0 && mi < len(doc.Meshes) {
+				nodes[i].Mesh = mi
+			}
+		}
+	}
+
+	resolveWorld(nodes)
+	return nodes
+}
+
+// resolveWorld fills World on every node by composing Local down the parent
+// chain, memoized so a document with many siblings under one root does the
+// composition once per node rather than once per leaf's depth.
+//
+// state distinguishes "already computed" from "on the path currently being
+// resolved", and the latter is how a parent/child cycle is caught: glTF from
+// the wild is not always valid, and a node that is its own ancestor has to
+// resolve to *something* rather than recurse forever. Landing on the node's
+// own Local is arbitrary but terminates, which is the only property invalid
+// input needs to have here.
+func resolveWorld(nodes []ModelNode) {
+	const (
+		unresolved = iota
+		resolving
+		resolved
+	)
+	state := make([]uint8, len(nodes))
+
+	var resolve func(i int) mgl32.Mat4
+	resolve = func(i int) mgl32.Mat4 {
+		switch state[i] {
+		case resolved:
+			return nodes[i].World
+		case resolving:
+			return nodes[i].Local
+		}
+		state[i] = resolving
+		w := nodes[i].Local
+		if p := nodes[i].Parent; p >= 0 && p < len(nodes) {
+			w = resolve(p).Mul4(nodes[i].Local)
+		}
+		nodes[i].World = w
+		state[i] = resolved
+		return w
+	}
+	for i := range nodes {
+		resolve(i)
+	}
+}
+
+// meshOwnerNodes returns, for each doc.Meshes index, the first node (in
+// doc.Nodes order) that instances it via node.Mesh, or -1 if no node does.
+//
+// "First" rather than "all": a doc mesh can be instanced by several nodes,
+// but a ModelMesh is drawn once regardless, and the one thing this index is
+// for -- finding the node a mesh-space helper needs -- only needs one of
+// them. Node-index order rather than scene-graph order because it is
+// deterministic without requiring the document to declare a default scene,
+// which LoadGLTF does not require either.
+func meshOwnerNodes(doc *gltf.Document) []int {
+	owner := make([]int, len(doc.Meshes))
+	for i := range owner {
+		owner[i] = -1
+	}
+	for ni, gn := range doc.Nodes {
+		if gn == nil || gn.Mesh == nil {
+			continue
+		}
+		mi := *gn.Mesh
+		if mi < 0 || mi >= len(owner) {
+			continue
+		}
+		if owner[mi] == -1 {
+			owner[mi] = ni
+		}
+	}
+	return owner
+}
+
+// isIdentityTransform reports whether m is the identity matrix, within a
+// small epsilon for the float64 (glTF) -> float32 (mgl32) round trip.
+func isIdentityTransform(m mgl32.Mat4) bool {
+	const eps = 1e-6
+	ident := mgl32.Ident4()
+	for i := range m {
+		d := m[i] - ident[i]
+		if d > eps || d < -eps {
+			return false
+		}
+	}
+	return true
+}
+
+// untransformedMeshNodes returns the names of nodes that instance a mesh in
+// meshes while carrying a non-identity World transform.
+//
+// LoadGLTF draws every primitive in mesh-local space (fact recorded in
+// docs/agents/models.md): it never applies a node's transform to the
+// vertices it decodes. That is invisible exactly when it does not matter --
+// an identity instancing node -- and silently wrong otherwise, so this is
+// the pure check behind the log line LoadGLTF and LoadGLTFSkinned each emit
+// once per load. A mesh with Node == -1 (no instancing node at all) cannot
+// be wrong this way and is skipped, and each offending node is named once
+// even if several primitives share it.
+func untransformedMeshNodes(nodes []ModelNode, meshes []ModelMesh) []string {
+	var names []string
+	seen := make(map[int]bool)
+	for i := range meshes {
+		ni := meshes[i].Node
+		if ni < 0 || ni >= len(nodes) || seen[ni] {
+			continue
+		}
+		seen[ni] = true
+		if !isIdentityTransform(nodes[ni].World) {
+			names = append(names, nodes[ni].Name)
+		}
+	}
+	return names
 }
 
 // convertMat4 converts a [4][4]float32 from qmuntal/gltf to mgl32.Mat4.

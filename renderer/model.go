@@ -3,6 +3,8 @@ package renderer
 import (
 	"fmt"
 	"math"
+
+	"github.com/go-gl/mathgl/mgl32"
 )
 
 // ReleaseGeometry drops the decoded vertices and indices from every mesh in the
@@ -17,6 +19,10 @@ import (
 // Calling it makes Bounds and CombineModel fail rather than return something
 // wrong, which is the point: silently returning an empty mesh from a released
 // model is the kind of green result that gets shipped.
+//
+// Nodes is untouched. A node is a handful of floats, not the megabytes-scale
+// geometry this exists to give back, and a socket found before release stays
+// valid to look up and use after it.
 func (m *Model) ReleaseGeometry() {
 	if m == nil {
 		return
@@ -38,6 +44,11 @@ func (m *Model) ReleaseGeometry() {
 // A box rather than the sphere Mesh.BoundCenter and Mesh.BoundRadius already
 // carry: a sphere is what a frustum test wants and the wrong shape for asking
 // how tall something is, which is the question that comes up when placing one.
+//
+// This is over Verts as decoded, the same mesh-local space LoadGLTF has
+// always drawn in — it does not walk Model.Nodes, so an instancing node's
+// transform (see the space caveat on Model.Nodes) is not folded in here
+// either.
 func (m *Model) Bounds() (min, max [3]float32, ok bool) {
 	if m == nil {
 		return min, max, false
@@ -122,6 +133,17 @@ func mergeGeometry(meshes []ModelMesh) ([]Vertex, []uint32) {
 //
 // Fails on a model whose geometry has been released, rather than returning an
 // empty mesh.
+//
+// Nodes and ModelMesh.Node are ignored. A combined mesh routinely comes from
+// several primitives that in turn came from several different nodes — that
+// is the whole reason a game reaches for this, to draw N primitives as one —
+// and mergeGeometry concatenates their raw Verts exactly as LoadGLTF decoded
+// them, in each primitive's own mesh-local space, with no node transform
+// applied to any of them. That is consistent with LoadGLTF's existing
+// contract (see the space caveat on Model.Nodes) rather than a new gap: this
+// helper was already a plain concatenation before Nodes existed, and picking
+// one primitive's node transform to apply to the merged whole would privilege
+// that primitive over its siblings for no defensible reason.
 func (r *Renderer) CombineModel(m *Model) (*Mesh, error) {
 	if m == nil || len(m.Meshes) == 0 {
 		return nil, fmt.Errorf("combine model: no meshes")
@@ -143,4 +165,48 @@ func (r *Renderer) CombineModel(m *Model) (*Mesh, error) {
 		return r.CreateIndexedMesh(verts, idx16)
 	}
 	return r.CreateIndexedMesh32(verts, idx)
+}
+
+// Node returns the first node named name, and whether one was found.
+//
+// Exact match only. No fuzzy matching and no baked-in convention like a
+// "Socket_" prefix — what a node's name means is the game's business, not
+// the loader's; this only has to get the name there intact and hand it back.
+// "First" matters when an exporter (or an artist) produces duplicate names:
+// the earlier one in doc.Nodes order wins, silently, rather than being an
+// error at lookup time.
+func (m *Model) Node(name string) (ModelNode, bool) {
+	if m == nil {
+		return ModelNode{}, false
+	}
+	for _, n := range m.Nodes {
+		if n.Name == name {
+			return n, true
+		}
+	}
+	return ModelNode{}, false
+}
+
+// NodeInMeshSpace returns node's World transform expressed in mm's vertex
+// space — the trap in the Model.Nodes space caveat, removed.
+//
+// A node's World is in the glTF scene's space. mm.Verts are in that same
+// space only when the node instancing mm has an identity transform, which is
+// true of every model this has been checked against today but is not
+// guaranteed by the format. This is the general answer: it inverts mm's
+// owning node's World and composes it with node's World, so the result places
+// node correctly relative to mm's vertices whether or not that node happened
+// to be identity. When mm.Node is -1 (no node instances it), there is no
+// mesh-node transform to remove, so node.World is returned unchanged.
+func (m *Model) NodeInMeshSpace(node ModelNode, mm ModelMesh) mgl32.Mat4 {
+	return nodeInMeshSpace(m.Nodes, mm, node)
+}
+
+// nodeInMeshSpace is NodeInMeshSpace's pure arithmetic, split out so it can be
+// tested without a Renderer.
+func nodeInMeshSpace(nodes []ModelNode, mm ModelMesh, node ModelNode) mgl32.Mat4 {
+	if mm.Node < 0 || mm.Node >= len(nodes) {
+		return node.World
+	}
+	return nodes[mm.Node].World.Inv().Mul4(node.World)
 }
