@@ -439,9 +439,13 @@ loses its `extras` and its lights — not an error, just an empty
 `Model.Lights` and every `ModelNode.Extras` nil, which reads as "the level
 has no lamps" rather than "the export dropped them". Tick **Include >
 Custom Properties** and **Include > Punctual Lights** before exporting a
-level. (The full Blender-side recipe — units, axis conventions, what
-"Apply Transforms" does to a linked duplicate — is issue #67; this is only
-the warning and the pointer.)
+level, or run `tools/blender/export_level.py`, which sets those two plus
+four more a level needs and cannot be forgotten one at a time. The full
+Blender-side recipe — units, axis conventions, Alt-D vs Shift-D, what an
+unapplied non-uniform scale does to a rotated child, mirrored objects, light
+units, and what does not survive the export at all — is
+[`blender-pipeline.md`](blender-pipeline.md); this section is only the
+warning and the pointer.
 
 One more Blender default worth knowing rather than working around: its
 exporter writes `doubleSided: true` on a material unless the artist enables
