@@ -16,7 +16,7 @@ api:
 assets: none
 example: examples/09-water
 run: go run ./09-water -clouds 32
-verified: 2026-08-04
+verified: 2026-09-19
 ---
 
 # Volumetric clouds
@@ -147,10 +147,12 @@ measures 0.161 median.
 
 If night needs rebalancing, move the sky palette, the moon boost and this
 together — darkening the sky alone leaves the moon as a hole punched in it. And
-be careful with the palette specifically: `atmSkyPalette`'s night endpoints are
-read by the dome, by the fog distant geometry fades into, and by the water's
-reflection, so lifting them to make the sky legible washes out the whole
-landscape. **Brighten the moon, not the air.**
+be careful with the palette specifically: its night endpoints —
+`SkyPalette.ZenithNight` and `HorizonNight`, which a game sets with
+`Scene.SetSkyPalette` and the engine defaults in `DefaultSkyPalette` — are read
+by the dome, by the fog distant geometry fades into, by this march's ambient
+fill and by the water's reflection, so lifting them to make the sky legible
+washes out the whole landscape. **Brighten the moon, not the air.**
 
 ## Not done
 

@@ -318,19 +318,30 @@ mean supplying all of them:
 
 ```go
 custom := renderer.DefaultShaders()
-custom.SkyFrag = alienSkySpv // //go:embed your own .spv
+custom.LitFrag = toonLitSpv // //go:embed your own .spv
 
 e, err := glyph.New(&game{},
-    glyph.WithTitle("Not Earth"),
+    glyph.WithTitle("Banded"),
     glyph.WithShaders(custom),
 )
 ```
 
 This is a passthrough to `renderer.WithShaders`, and it is the only way to reach
 that seam without giving up `Engine` entirely. Before it existed, a game that
-wanted a sky that is not Earth's had to call `renderer.New` directly and then
-reimplement the frame loop, the fixed timestep, interpolation, the draw-list
-build and the environment resolve that `Run` already provides.
+wanted its own shading had to call `renderer.New` directly and then reimplement
+the frame loop, the fixed timestep, interpolation, the draw-list build and the
+environment resolve that `Run` already provides.
+
+**Do not reach for it to recolour the sky.** The example above is the one thing
+`SkyFrag` is the wrong tool for: the sky's palette is shared with the fog
+distant geometry fades into and with the water's reflection of the dome, so
+replacing `sky.frag` alone gives a violet sky over an Earth-blue landscape, and
+getting the rest means vendoring `atmosphere.inc` and `lighting.inc` and every
+`.frag` that includes them — 430 lines of engine internals with no version
+handshake. Those colours are data: `Scene.SetSkyPalette`, see
+[environment](environment.md#a-sky-that-is-not-earths). `WithShaders` is for
+the sky's *behaviour* — a different scattering model, two suns — not its
+colours.
 
 `renderer.ShaderSet` documents what a replacement has to match: the vertex input
 layout, descriptor set layout and push-constant ranges the engine's pipelines

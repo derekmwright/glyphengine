@@ -23,11 +23,15 @@ api:
   - glyphengine.Scene.SetDayCycleSpeed
   - glyphengine.Engine.SetFogDensity
   - glyphengine.Scene.SetNightGrade
+  - glyphengine.SkyPalette
+  - glyphengine.DefaultSkyPalette
+  - glyphengine.Scene.SetSkyPalette
+  - glyphengine.Scene.SkyPalette
 requires: []
 assets: none
 example: examples/09-water
-run: go run ./09-water
-verified: 2026-09-18
+run: go run ./09-water -alien
+verified: 2026-09-19
 ---
 
 # Environment
@@ -187,6 +191,57 @@ numbers. To change how the sky is *drawn*, replace `sky.frag` through
 directly. Neither forces the other. See
 [`game-loop.md`](game-loop.md#replacing-an-engine-shader).
 
+If what you want is a sky that is a different **colour**, do not replace the
+shader — see below.
+
+## A sky that is not Earth's
+
+`Scene.SetSkyPalette` sets the six colours the atmosphere blends between:
+zenith and horizon for day, for twilight and for night.
+
+```go
+e.Scene.SetSkyPalette(glyph.SkyPalette{
+    ZenithDay:       mgl32.Vec3{0.30, 0.10, 0.62}, // violet overhead
+    HorizonDay:      mgl32.Vec3{0.95, 0.55, 0.22}, // amber at the rim
+    ZenithTwilight:  mgl32.Vec3{0.18, 0.04, 0.30},
+    HorizonTwilight: mgl32.Vec3{0.95, 0.22, 0.30},
+    ZenithNight:     mgl32.Vec3{0.0040, 0.0012, 0.0060},
+    HorizonNight:    mgl32.Vec3{0.0110, 0.0035, 0.0055},
+})
+```
+
+`glyph.DefaultSkyPalette()` is Earth's and is what a new `Scene` starts with,
+so a game that says nothing is unaffected. `examples/09-water -alien` is that
+palette exactly; run it at `-time 0.5`, `-time 0.77` and `-time 0.0` to see day,
+dusk and night.
+
+**It is the whole atmosphere's palette, not the dome's.** `applyFog` blends
+distant geometry toward the same horizon colour and water reflects the dome, so
+these three are one value on purpose: change it and the sky, the haze and the
+lake move together. That is also why replacing `sky.frag` alone does *not* give
+an alien sky — it gives a violet dome over a landscape still fading into
+Earth-blue haze, with a lake reflecting the wrong one of the two.
+
+They reach the shaders in the per-frame `ShadowData` uniform block, after the
+cascade matrices and the night grade. `sky.frag` and `clouds.frag` read the
+same buffer through binding 1 of the cloud descriptor set — the same buffer,
+not a copy, because a second copy is a second thing to get wrong. `task
+skypalette` is the gate on that, and it fails if the palette reaches the dome
+but not the fog.
+
+The palette works with `Sky` nil as well, because fog does not need a dome to
+fade into a horizon colour. That, and the upgrade argument under [convenience
+methods](#convenience-methods), is why it is `Scene` state rather than a field
+on `Sky`.
+
+**What it does not cover.** Rayleigh-versus-Mie behaviour, a different
+scattering model, a sky with two suns, and the cloud, star and sun-disc colours
+are all still shader work, and `WithShaders` is the right escape hatch for
+them. The sun's own glow keeps a fixed warm ember (`atmSunGlow` in
+`shaders/atmosphere.inc`) after the directional light fades, which is a seventh
+colour this does not reach. This is the case that is pure palette, which is
+most of what "another planet" means in practice.
+
 ## SunDir is not the sun
 
 `EnvironmentState` has both `SunDir` and `SunElevation`, and they are not the
@@ -207,15 +262,27 @@ through to the built-in `Environment`. They are **no-ops** under a custom
 `EnvironmentSource`, which owns its own state — `Scene.DayNight()` returns nil
 there, and that is the signal to configure your own type directly.
 
-`Scene.SetNightGrade` is deliberately **not** one of those. The night colour
-grade — see [day-night](day-night.md#night-is-desaturated-not-merely-dim--except-under-a-lamp)
-— is Scene state initialised by `NewScene`, so it works the same under a custom
-source as under the built-in one. It would read more naturally as a field on
-`EnvironmentState` beside fog and ambient, and it is not one for a specific
-reason: a source written before the field existed would return it as the zero
-value, zero strength means no night shift at all, and that game's nights would
-change on a dependency bump with nobody choosing it. Vary it per frame from
-`Update` if it should move with the moon phase.
+`Scene.SetNightGrade` and `Scene.SetSkyPalette` are deliberately **not** ones of
+those. Both are Scene state initialised by `NewScene`, so they work the same
+under a custom source as under the built-in one. Both would read more naturally
+as fields on `EnvironmentState` beside fog and ambient, and neither is one for
+the same reason: a source written before the field existed returns it as the
+zero value. For the night grade — see
+[day-night](day-night.md#night-is-desaturated-not-merely-dim--except-under-a-lamp)
+— zero strength means no night shift at all, and that game's nights change on a
+dependency bump with nobody choosing it. For the palette the zero value is six
+black colours, so the sky, the fog and the water reflections all go black.
+
+A sentinel would be more defensible for the palette than it was for the grade:
+all-zero is a palette nobody wants, so reading it as "engine default" costs
+nothing expressible. It is still not what was done, because it only covers the
+all-zero case — a source that sets `ZenithDay` and leaves the other five alone
+gets five black endpoints and no warning, which is the same trap one step
+along. A field `NewScene` owns cannot be zeroed by a source that has never
+heard of it.
+
+Vary either per frame from `Update` if it should move with the moon phase or
+the weather.
 
 ## Failure modes
 
@@ -232,3 +299,9 @@ change on a dependency bump with nobody choosing it. Vary it per frame from
 - **A custom source's nights went flat after an upgrade.** Not this field —
   `NightGrade` is on `Scene` precisely so that cannot happen. Look for a new
   `EnvironmentState` field the source is returning as its zero value.
+- **A custom sky shader gives a violet dome over Earth-blue haze.** The palette
+  is shared with `applyFog` and the water's reflection, which the replaced
+  shader does not touch. Use `SetSkyPalette` instead of replacing `sky.frag`.
+- **The sky changed colour but the distant hills did not.** Something is
+  reading `atmSkyPalette`'s old constants rather than `shadow.skyPalette`.
+  `task skypalette` is the check for exactly that.
