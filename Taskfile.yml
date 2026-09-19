@@ -366,7 +366,17 @@ tasks:
         # the issue as the reason it went unseen: at night the sky is dim
         # enough that the grass silhouette is most of what the image is, so a
         # difference lands somewhere the daytime frame hides it.
-        for ex in "08-grass" "08-grass -timeofday 0.0" "08-grass -timeofday 0.03" "09-water" "12-particles" "06-skinned -demo" "15-kitchen-sink -demo" "09-water -plume -ghost -marker -submerged"; do
+        #
+        # The last entry is the only one that draws light shafts -- no example
+        # points at the sun with stock flags, so without it this gate covers
+        # the effect not at all. It is not vacuous: the shafts move 68 % of that
+        # frame's pixels and lift it by 6.8 mean sRGB luma, so the two captures
+        # being equal is a statement about the effect rather than about its
+        # absence. What it can catch is a per-pixel dither seeded from anything
+        # that is not the pixel -- the shaft march is dithered, and noise of
+        # that amplitude survives every other gate here, all of which read a
+        # mean or a box.
+        for ex in "08-grass" "08-grass -timeofday 0.0" "08-grass -timeofday 0.03" "09-water" "12-particles" "06-skinned -demo" "15-kitchen-sink -demo" "09-water -plume -ghost -marker -submerged" "09-water -time 0.72 -yaw 1.771 -pitch -0.185 -pillars"; do
           set -- $ex
           name=$1; shift
           shot 16.667ms $name a "$*"
