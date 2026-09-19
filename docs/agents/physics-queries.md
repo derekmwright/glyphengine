@@ -32,7 +32,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-07-28
+verified: 2026-09-19
 ---
 
 # Colliders, raycasts, overlap queries, and body integration
@@ -96,6 +96,15 @@ if ok {
 - Terrain is tested first for near-vertical downward rays, since that is the
   common case and the heightmap answers it in O(1).
 - A ray starting **inside** a box does not count as a hit.
+- **Exact-distance ties keep the lower entity id.** Two colliders hit at
+  precisely the same distance — coincident faces, a tiled floor of identical
+  boxes — used to report whichever one the spatial grid's cell list visited
+  first, which is a Go map walk (`SpatialGrid.Update`) and changed from call
+  to call. That flipped `hit.Entity` and `hit.Normal` nondeterministically,
+  which matters because the character controller's walkable-slope test reads
+  `hit.Normal` (see `character-controller`). A terrain hit always wins its own
+  tie against any collider — terrain is checked first, and its `RayHit` has
+  the zero-value `Entity`, which is lower than any real entity id.
 
 ## Overlap queries
 
@@ -108,6 +117,16 @@ for _, ov := range scene.OverlapAABB(box, self) {
 
 `OverlapAABB` allocates its result slice, which makes it safe to call from the
 parallel movement goroutines.
+
+**Results are ordered by ascending entity id.** That is part of the contract,
+not an implementation detail: candidates come off the spatial grid, whose
+cell lists are filled by a Go map walk, so without an explicit sort a caller
+reading `results[0]` would get a different entity on every call — which is
+exactly what made `Unstick` nondeterministic before this was fixed (#57). The
+sort is an insertion as results are appended, so it costs nothing measurable
+at the overlap counts a single query actually sees (a handful of nearby
+colliders) and adds no allocations beyond the result slice's own growth;
+`BenchmarkOverlapAABB` in `physics_order_test.go` has the measured numbers.
 
 ## Screen picking
 
@@ -160,6 +179,25 @@ Body-to-body response is the character controller's job or a game-side system's.
 `Unstick(entity)` nudges an entity out of overlapping colliders on the XZ
 plane, up to eight iterations. Call it after spawning or teleporting.
 
+Each iteration resolves against whichever overlap needs the **smallest push**
+to clear — the least disruptive correction, and the best available proxy for
+"the thing actually in the way" when several colliders overlap at once. Ties,
+including the ordinary case of a single overlap, break on the **lowest entity
+id**. That tie-break is why the single-overlap case behaves exactly as
+before: with nothing to choose between, the smallest-push search picks the
+same collider a first-match search would have.
+
+This scan is what makes `Unstick` deterministic. Before this was fixed
+(#57), it read `overlaps[0]` — whichever collider `OverlapAABB` happened to
+list first, which came from the spatial grid's map-walk-filled cell lists and
+changed from call to call. An entity spawned overlapping two or three
+colliders could be pushed out of a different one, and land in a different
+final spot, on every call, every tick, every run. Colliders that lose a given
+round are still overlapping on the next attempt and get their turn within the
+8-iteration budget, so a character boxed in on multiple sides still gets
+fully freed — just via a fixed sequence instead of whatever order the map
+walk produced.
+
 ## Failure modes
 
 - **Raycast never hits.** `dir` is not normalized, or `maxDist` is too short,
@@ -171,3 +209,7 @@ plane, up to eight iterations. Call it after spawning or teleporting.
   walkable-slope test (`normal.Y > 0.5`). A plain AABB has axis-aligned faces
   and is treated as walkable when hit from above.
 - **Everything is slow.** Missing `UpdateSpatialGrid()` in the tick.
+- **`Unstick` moved an entity somewhere unexpected with several overlapping
+  colliders.** Check which collider actually needed the smallest push — it
+  resolves the shallowest overlap first, not necessarily the one that looks
+  most "in the way" visually.

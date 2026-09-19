@@ -24,7 +24,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-07-28
+verified: 2026-09-19
 ---
 
 # Move a character with MoveIntent
@@ -134,6 +134,13 @@ an arch.
 
 Ground detection prefers the terrain heightmap (O(1)) and only falls back to a
 raycast when off the heightmap or near static geometry.
+
+The walkable-slope test (`hit.Normal.Y() > 0.5`) reads whichever collider
+`Raycast` reports as the hit, so it depends on `Raycast`'s tie-break for an
+exact-distance hit — two boxes with coincident top faces, say. `Raycast`
+always keeps the lower entity id on a tie (see `physics-queries`), so the
+same geometry reports the same normal on every tick rather than flipping
+floor to wall depending on the spatial grid's iteration order.
 
 ## Moving many characters in parallel
 
