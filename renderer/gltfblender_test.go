@@ -554,7 +554,7 @@ func checkParentChain(t *testing.T, doc *gltf.Document) {
 // Verified to fail: with applyUVTransform ignoring the offset (c and f), V
 // spans 0..8 and this reports "Ground V spans 0..8, want -7..1"; with
 // resolveAlpha returning before it reads the material, GlassPane reports
-// "opaque alpha 1, want blend 0.3".
+// "GlassPane loads as OPAQUE alpha 1, want blend 0.3".
 func checkLoadedTilingAndAlpha(t *testing.T, doc *gltf.Document) {
 	meshOf := func(node string) (*gltf.Mesh, int) {
 		idx := nodeIndexByName(doc, node)
