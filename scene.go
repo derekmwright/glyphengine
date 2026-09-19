@@ -31,6 +31,24 @@ type PointLight struct {
 	Pos   mgl32.Vec3
 	Range float32
 	Color mgl32.Vec3
+
+	// Volumetric is how much of this light the air itself sends back toward
+	// the eye -- Unreal's "volumetric scattering intensity". 0, the default,
+	// means none: the light still lights surfaces exactly as it always did
+	// and the in-scattering march skips it entirely, so a scene that does not
+	// ask pays nothing and renders byte-identically.
+	//
+	// Above 0 the lamp gets a glow in the air around it, integrated along the
+	// view ray through the froxel grid. What it scatters off is the scene's
+	// FOG, so a scene with Fog nil or Density 0 sees nothing however high
+	// this goes -- there is no medium. Scene.SetVolumetrics tunes the medium;
+	// this is per light, so one lamp in a scene can have a visible halo and
+	// the rest not.
+	//
+	// It is not shadowed: no local light in this engine casts a shadow, and
+	// the glow is consistent with the light it belongs to. See
+	// docs/agents/lights.md.
+	Volumetric float32
 }
 
 // SpotLight describes an unshadowed spot light for the renderer: a point
@@ -56,6 +74,18 @@ type SpotLight struct {
 	Color mgl32.Vec3
 	Inner float32
 	Outer float32
+
+	// Volumetric turns the cone into a visible beam: the air inside it
+	// scatters the light back toward the eye instead of only the surface the
+	// cone lands on. 0, the default, means none, and costs nothing. See
+	// PointLight.Volumetric for what the number means and what it scatters
+	// off -- the scene's fog, so a scene with no fog shows no beam.
+	//
+	// The beam is the same cone the surface lighting uses, evaluated in the
+	// air rather than on a surface, so the shaft and the pool it lands in
+	// agree by construction. It is not shadowed: a beam crossing a wall keeps
+	// glowing on the far side, exactly as the light does.
+	Volumetric float32
 }
 
 // Scene owns simulation state: the ECS world, component stores, physics
@@ -159,6 +189,10 @@ type Scene struct {
 	// and with the same initialisation; see SetSkyPalette.
 	skyPalette SkyPalette
 
+	// volumetrics is the in-scattering medium, here for the same reason and
+	// with the same initialisation again; see SetVolumetrics.
+	volumetrics Volumetrics
+
 	// staticColliderXZ caches XZ positions of static colliders for the
 	// linear-scan fallback used when StaticGrid is nil.
 	staticColliderXZ [][2]float32
@@ -178,13 +212,14 @@ type Scene struct {
 func NewScene() *Scene {
 	w := ecs.NewWorld()
 	return &Scene{
-		world:      w,
-		C:          NewComponents(w),
-		Env:        DefaultEnvironment(),
-		Gravity:    DefaultGravity,
-		Integrator: IntegrateBodies,
-		nightGrade: DefaultNightGrade(),
-		skyPalette: DefaultSkyPalette(),
+		world:       w,
+		C:           NewComponents(w),
+		Env:         DefaultEnvironment(),
+		Gravity:     DefaultGravity,
+		Integrator:  IntegrateBodies,
+		nightGrade:  DefaultNightGrade(),
+		skyPalette:  DefaultSkyPalette(),
+		volumetrics: DefaultVolumetrics(),
 	}
 }
 
@@ -457,6 +492,58 @@ func (s *Scene) SetSkyPalette(p SkyPalette) { s.skyPalette = p }
 
 // SkyPalette returns the scene's atmosphere palette.
 func (s *Scene) SkyPalette() SkyPalette { return s.skyPalette }
+
+// Volumetrics is the scattering medium a light's beam is made of: how
+// forward-scattering the air is, and how many steps the per-pixel march
+// spends crossing it.
+//
+// It is deliberately NOT the medium's density. That is the scene's fog
+// (Fog.Density and the height profile beside it) and it stays there, because
+// the air that hazes the hills is the air a lamp lights -- one medium, one
+// place to tune it. A scene with no fog therefore sees no beams, which is the
+// right answer rather than a missing feature: there is nothing in the air to
+// light.
+type Volumetrics struct {
+	// Anisotropy is the Henyey-Greenstein g. 0 scatters equally in every
+	// direction; positive scatters forward, so a beam coming toward the eye
+	// is brighter than the same beam crossing it. Clamped to (-1, 1).
+	Anisotropy float32
+
+	// Steps is how many samples each pixel's march takes: the cost knob and
+	// the banding knob at once. 0 turns the march off for the whole scene,
+	// whatever the lights ask for. Capped at renderer.MaxVolumetricSteps.
+	Steps int
+}
+
+// DefaultVolumetrics is the medium a scene gets by saying nothing.
+//
+// The numbers are repeated from renderer.DefaultVolumetrics rather than read
+// from it, because Scene has no renderer dependency -- that is what lets a
+// headless tool or test drive one -- and the same is already true of
+// DefaultNightGrade and DefaultSkyPalette above. The measurements behind them
+// are on the renderer side, next to the shader they configure;
+// TestDefaultsMatchTheRenderers is what keeps the two copies from drifting,
+// which nothing did for the grade or the palette until now.
+func DefaultVolumetrics() Volumetrics {
+	return Volumetrics{Anisotropy: 0.4, Steps: 16}
+}
+
+// SetVolumetrics sets the scattering medium for this scene.
+//
+// On Scene, initialised by NewScene, for exactly the reasons SetSkyPalette
+// records: EnvironmentState is produced wholesale by EnvironmentSource.State,
+// so a game that has replaced the environment model returns a struct written
+// before this field existed and it would arrive zero -- and a zero Steps
+// marches nothing, so every beam in that game would disappear on a dependency
+// bump with nobody choosing it.
+//
+// Density is the exception and stays on Fog, because it is not a volumetrics
+// setting: it is the fog, and a game that animates fog rolling in wants the
+// beams to thicken with it without touching this at all.
+func (s *Scene) SetVolumetrics(v Volumetrics) { s.volumetrics = v }
+
+// Volumetrics returns the scene's scattering medium.
+func (s *Scene) Volumetrics() Volumetrics { return s.volumetrics }
 
 // ─────────────────────────── spatial ───────────────────────────
 

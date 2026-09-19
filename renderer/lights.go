@@ -33,6 +33,22 @@ const (
 	// LightFlagHeatmap replaces the lit colour with a ramp of each
 	// fragment's cluster cell light count, independent of LightFlagBruteForce.
 	LightFlagHeatmap uint32 = 1 << 1
+	// LightFlagVolumetric says at least one uploaded light has a non-zero
+	// GpuLight.Params.x, so the in-scattering march is worth entering at all.
+	//
+	// This is the whole of the early-out for a scene that does not use
+	// volumetrics, and it is a header bit rather than a per-cell test because
+	// of where the cost would otherwise land. Without it, every lit fragment
+	// and every sky pixel would walk its froxel's light list once more per
+	// step just to discover that nothing in it scatters -- Steps times the
+	// cell's light count, on scenes that asked for none of it. With it the
+	// march is behind one branch on a value that is uniform across the whole
+	// draw, which every GPU this targets resolves for the wave rather than
+	// per lane.
+	//
+	// Set by the caller that packs the lights, not derived in the shader:
+	// deriving it would mean the loop this exists to avoid.
+	LightFlagVolumetric uint32 = 1 << 2
 )
 
 // lightStorageBuffersPerSet is how many storage buffer bindings the shadow

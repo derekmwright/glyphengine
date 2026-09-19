@@ -12,6 +12,7 @@
 
 #include "atmosphere.inc"
 #include "lights.inc"
+#include "volumetric.inc"
 
 const int NumCascades = 2;
 
@@ -203,6 +204,10 @@ vec3 applyFog(vec3 color, vec3 worldPos) {
 
     float density = pc.cameraPos.w;
     if (density <= 0.0) {
+        // No medium, so no beams either -- volInscatter would return zero
+        // from its own density test and this saves it the call. See
+        // volumetric.inc: a lamp in clean air lights what it hits and nothing
+        // else, which is the answer rather than a gap.
         return atmNightShift(color, pc.sunColor.w, nightLocalShare(0.0, vec3(0.0)), shadow.nightGrade);
     }
 
@@ -218,14 +223,24 @@ vec3 applyFog(vec3 color, vec3 worldPos) {
     float amount = 1.0;
     if (heightFalloff > 0.0) {
         float invH = 1.0 / heightFalloff;
-        float camRel = (pc.cameraPos.y - pc.fog.y) * invH;
-        float fragRel = (worldPos.y - pc.fog.y) * invH;
-        float dy = fragRel - camRel;
+        // volFogHeightExponent is what this raises e to, and it is the same
+        // function volInscatter samples the medium with a point at a time --
+        // so the air a lamp lights is provably the air that hazes the hills,
+        // rather than two expressions a comment claims are equal. It returns
+        // the NEGATED height ratio, which is the form both uses want:
+        // -camRel and -fragRel below, and dy is their difference either way
+        // round. Rewriting it this way is exact, not merely equivalent --
+        // (-a)*b is -(a*b) and (-a)-(-b) is b-a to the bit -- and the twelve
+        // G1 captures, which include two height-fog scenes, are byte
+        // identical across the change.
+        float hc = volFogHeightExponent(pc.cameraPos.y, invH);
+        float hf = volFogHeightExponent(worldPos.y, invH);
+        float dy = hc - hf;
 
         if (abs(dy) < 1e-4) {
-            amount = exp(-camRel);
+            amount = exp(hc);
         } else {
-            amount = (exp(-camRel) - exp(-fragRel)) / dy;
+            amount = (exp(hc) - exp(hf)) / dy;
         }
         amount = max(amount, 0.0);
     }
@@ -239,7 +254,39 @@ vec3 applyFog(vec3 color, vec3 worldPos) {
     float f = clamp(1.0 - exp(-d * d), 0.0, 1.0);
 
     vec3 fogCol = fogColor(viewDir);
-    return atmNightShift(mix(color, fogCol, f), pc.sunColor.w, nightLocalShare(f, fogCol), shadow.nightGrade);
+
+    // In-scattering from the local lights, along this same ray, up to this
+    // same fragment. It goes here because applyFog is the one call every lit
+    // shader makes exactly once as its last step -- the same property that
+    // made this the right home for the night shift -- so no surface can be
+    // missed, and every surface integrates to its own depth for free.
+    //
+    // ADDED to the fogged colour rather than mixed into it. What `mix` above
+    // does is replace the surface with the haze in front of it; what a beam
+    // does is put light INTO that haze, which is an emission along the ray
+    // and not a different surface colour. Mixing it would also make a beam
+    // dimmer the clearer the air got, which is backwards.
+    //
+    // 1.0/gl_FragCoord.w is the positive view depth (see evalLightingAO), so
+    // dividing it by the distance gives the cosine between this ray and the
+    // camera axis -- what the march needs to turn metres along the ray into
+    // the depth the froxel grid slices on.
+    vec3 scatter = volInscatter(gl_FragCoord.xy, viewDir, dist, (1.0 / gl_FragCoord.w) / max(dist, 0.001));
+
+    // It is lamp light, so it counts as lamp light for the night grade: a
+    // warm beam must no more be shifted to scotopic blue than the warm pool
+    // it lands in, and nightLocalShare is how applyFog is told that. Adding
+    // it here rather than inside the two evalLighting* functions is what
+    // covers water.frag too, which shades its own surface and sets these by
+    // hand.
+    //
+    // Exactly +0.0 when nothing scatters, and `x + 0.0` is `x` for every
+    // value either of these can hold -- which is the whole of why a scene
+    // with no volumetric light renders byte-identically rather than
+    // approximately so.
+    lightLocalLum += lightLum(scatter);
+
+    return atmNightShift(mix(color, fogCol, f) + scatter, pc.sunColor.w, nightLocalShare(f, fogCol), shadow.nightGrade);
 }
 
 // Blinn-Phong specular BRDF (returns unscaled specular color).
