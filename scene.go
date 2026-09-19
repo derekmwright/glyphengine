@@ -121,6 +121,10 @@ type Scene struct {
 	// would mean "no night shift" for anyone who never called the setter.
 	nightGrade NightGrade
 
+	// skyPalette is the atmosphere's six colours, here for the same reason
+	// and with the same initialisation; see SetSkyPalette.
+	skyPalette SkyPalette
+
 	// staticColliderXZ caches XZ positions of static colliders for the
 	// linear-scan fallback used when StaticGrid is nil.
 	staticColliderXZ [][2]float32
@@ -145,6 +149,7 @@ func NewScene() *Scene {
 		Env:        DefaultEnvironment(),
 		Gravity:    DefaultGravity,
 		nightGrade: DefaultNightGrade(),
+		skyPalette: DefaultSkyPalette(),
 	}
 }
 
@@ -333,6 +338,83 @@ func (s *Scene) SetNightGrade(g NightGrade) { s.nightGrade = g }
 
 // NightGrade returns the scene's scotopic grade.
 func (s *Scene) NightGrade() NightGrade { return s.nightGrade }
+
+// SkyPalette is the six colours the atmosphere blends between: zenith and
+// horizon for day, for twilight and for night. `shaders/atmosphere.inc` mixes
+// night toward day on the daylight curve and then toward twilight on the
+// twilight curve, so these are endpoints rather than a gradient to sample.
+//
+// It is the whole atmosphere's palette, not the dome's. Distant geometry fades
+// toward the same horizon colour and water reflects the dome, so changing only
+// the sky would give a violet sky over a landscape still hazing into
+// Earth-blue — which is exactly what replacing `sky.frag` through `WithShaders`
+// used to do, and the reason these are data now.
+//
+// What it does not cover: Rayleigh-versus-Mie behaviour, a different scattering
+// model, two suns, the cloud and star colours, and the sun's own glow ember are
+// all still shader work, and `WithShaders` is the right escape hatch for them.
+// This is the case that is pure palette, which is most of what "another planet"
+// means in practice.
+type SkyPalette struct {
+	ZenithDay, HorizonDay           mgl32.Vec3
+	ZenithTwilight, HorizonTwilight mgl32.Vec3
+	ZenithNight, HorizonNight       mgl32.Vec3
+}
+
+// DefaultSkyPalette is Earth's sky, and is exactly the constants that used to
+// be compiled into atmSkyPalette.
+//
+// The horizon is pale because that is what looking through more atmosphere
+// does, but not white: distant geometry fades into this colour, so a
+// washed-out horizon washes out the whole landscape with it. The night
+// endpoints are deliberately very dark for the same reason — they are what the
+// dome, the fog and the water all reach at midnight, so lifting them to make
+// the sky legible washes out the entire landscape. Brighten the moon instead.
+func DefaultSkyPalette() SkyPalette {
+	return SkyPalette{
+		ZenithDay:  mgl32.Vec3{0.13, 0.30, 0.78},
+		HorizonDay: mgl32.Vec3{0.52, 0.70, 0.93},
+
+		ZenithTwilight:  mgl32.Vec3{0.055, 0.085, 0.26},
+		HorizonTwilight: mgl32.Vec3{0.88, 0.42, 0.22},
+
+		ZenithNight:  mgl32.Vec3{0.0014, 0.0017, 0.0060},
+		HorizonNight: mgl32.Vec3{0.0034, 0.0050, 0.0130},
+	}
+}
+
+// SetSkyPalette sets the atmosphere's colours for this scene.
+//
+// It lives on Scene, initialised by NewScene, rather than on Sky or
+// EnvironmentState — which is where the issue that asked for it proposed
+// putting it, and where it reads more naturally beside FixedSunElevation and
+// fog. Two reasons, and the first is the one SetNightGrade already records:
+// EnvironmentState is produced wholesale by EnvironmentSource.State, so a game
+// that has replaced the environment model returns a struct written before this
+// field existed and the field arrives as its zero value. For the night grade
+// that meant a flat night; here it means six black colours, so that game's sky
+// goes black on a dependency bump with nobody choosing it.
+//
+// A sentinel would be defensible here where it was not for the grade — all-zero
+// is a palette nobody wants, so reading it as "engine default" costs nothing
+// expressible. It is still not the shape chosen, because it only covers the
+// all-zero case: a source that sets ZenithDay and leaves the other five at
+// their zero value gets five black endpoints and no warning, which is the same
+// silent trap one step along. A Scene field initialised at construction cannot
+// be zeroed by a source that does not know about it at all.
+//
+// The second reason is that the palette is not only the sky's. `applyFog`
+// blends distant geometry toward the horizon colour whether or not a dome is
+// drawn, so a scene with Sky nil still uses this — which makes Sky the wrong
+// home for it independently of upgrades.
+//
+// A source that legitimately wants the palette to move — a storm, an eclipse,
+// a second moon — still can: call this from Update, where SetPointLights is
+// called from.
+func (s *Scene) SetSkyPalette(p SkyPalette) { s.skyPalette = p }
+
+// SkyPalette returns the scene's atmosphere palette.
+func (s *Scene) SkyPalette() SkyPalette { return s.skyPalette }
 
 // ─────────────────────────── spatial ───────────────────────────
 
