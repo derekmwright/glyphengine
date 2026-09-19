@@ -247,9 +247,15 @@ func spawnLevel(e *glyph.Engine, model *renderer.Model) mgl32.Vec3 {
 // already-Transform'd entity: the GPU mesh plus its material factors. No
 // texture or Material maps exist in the BUILT-IN level (see gen/main.go), so
 // Color plus MeshRef's own Metallic/Roughness carries it there -- the same
-// untextured path 21-streetlights' door, roof and fixture use. A glTF loaded
-// with -level can carry a base colour texture, which this now draws too (see
-// spawnTexture below).
+// untextured path 21-streetlights' door, roof and fixture use.
+//
+// A glTF loaded with -level can carry a base colour texture (and, per
+// docs/agents/material-maps.md, normal/metallic-roughness/occlusion maps),
+// which this now draws too -- MaterialRef.PBR when LoadGLTF built a
+// Material (issue #69's baked KHR_texture_transform lands in mm.Mesh's own
+// vertex UVs either way, so nothing texture-specific is needed here beyond
+// binding it), MaterialRef.Texture when it only found a plain base colour.
+// The built-in level uses neither, so this branch never fires for it.
 //
 // AlphaMode/BaseAlpha (issue #68) are surfaced by the engine as pure data --
 // LoadGLTF does not decide what a BLEND primitive becomes, docs/agents/models.md
@@ -269,6 +275,9 @@ func spawnPrimitive(e *glyph.Engine, ent glyph.Entity, mm renderer.ModelMesh) {
 	}
 	if mm.AlphaMode == renderer.AlphaModeBlend {
 		e.C.Translucent.Set(ent, &glyph.Translucent{Alpha: mm.BaseAlpha})
+	}
+	if mm.Material != nil || mm.Texture != nil {
+		e.C.MaterialRef.Set(ent, &glyph.MaterialRef{PBR: mm.Material, Texture: mm.Texture})
 	}
 }
 

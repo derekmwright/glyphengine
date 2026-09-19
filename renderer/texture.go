@@ -271,8 +271,15 @@ type textureOptions struct {
 	// with every value bent through a gamma curve.
 	srgb bool
 
-	filter  core1_0.Filter
-	address core1_0.SamplerAddressMode
+	filter core1_0.Filter
+
+	// addressU and addressV are tracked separately, even though every
+	// caller below still passes the same mode for both, because glTF's own
+	// sampler carries wrapS and wrapT independently (issue #69) -- a
+	// single "address" field could not express a texture that repeats
+	// along U and clamps along V, which is legal glTF even if none of the
+	// engine's own non-glTF callers has ever needed it.
+	addressU, addressV core1_0.SamplerAddressMode
 
 	// mipmap generates the full chain by successive linear blits. Minified
 	// sampling without it picks near-random texels on sub-pixel geometry
@@ -289,10 +296,11 @@ type textureOptions struct {
 // colour: albedo, terrain detail, foliage cutouts.
 func (r *Renderer) CreateTexture(pixels []byte, width, height int) (*Texture, error) {
 	return r.createTexture(pixels, width, height, textureOptions{
-		srgb:    true,
-		filter:  core1_0.FilterLinear,
-		address: core1_0.SamplerAddressModeRepeat,
-		mipmap:  true,
+		srgb:     true,
+		filter:   core1_0.FilterLinear,
+		addressU: core1_0.SamplerAddressModeRepeat,
+		addressV: core1_0.SamplerAddressModeRepeat,
+		mipmap:   true,
 	})
 }
 
@@ -424,10 +432,11 @@ func bilinearWrapU(pix []byte, w, h int, fx, fy float64) (byte, byte, byte) {
 // carries no mip chain because MSDF atlases need exact texel values.
 func (r *Renderer) CreateDataTexture(pixels []byte, width, height int) (*Texture, error) {
 	return r.createTexture(pixels, width, height, textureOptions{
-		srgb:    false,
-		filter:  core1_0.FilterLinear,
-		address: core1_0.SamplerAddressModeRepeat,
-		mipmap:  true,
+		srgb:     false,
+		filter:   core1_0.FilterLinear,
+		addressU: core1_0.SamplerAddressModeRepeat,
+		addressV: core1_0.SamplerAddressModeRepeat,
+		mipmap:   true,
 	})
 }
 
@@ -435,10 +444,11 @@ func (r *Renderer) CreateDataTexture(pixels []byte, width, height int) (*Texture
 // clamp-to-edge sampling. Used for MSDF atlases where distance values must be read as-is.
 func (r *Renderer) CreateTextureLinear(pixels []byte, width, height int) (*Texture, error) {
 	return r.createTexture(pixels, width, height, textureOptions{
-		srgb:    false,
-		filter:  core1_0.FilterLinear,
-		address: core1_0.SamplerAddressModeClampToEdge,
-		mipmap:  false,
+		srgb:     false,
+		filter:   core1_0.FilterLinear,
+		addressU: core1_0.SamplerAddressModeClampToEdge,
+		addressV: core1_0.SamplerAddressModeClampToEdge,
+		mipmap:   false,
 	})
 }
 
@@ -446,10 +456,11 @@ func (r *Renderer) CreateTextureLinear(pixels []byte, width, height int) (*Textu
 // nearest-neighbor filtering and clamp-to-edge sampling. Used for pixel art.
 func (r *Renderer) CreateTextureNearest(pixels []byte, width, height int) (*Texture, error) {
 	return r.createTexture(pixels, width, height, textureOptions{
-		srgb:    true,
-		filter:  core1_0.FilterNearest,
-		address: core1_0.SamplerAddressModeClampToEdge,
-		mipmap:  false,
+		srgb:     true,
+		filter:   core1_0.FilterNearest,
+		addressU: core1_0.SamplerAddressModeClampToEdge,
+		addressV: core1_0.SamplerAddressModeClampToEdge,
+		mipmap:   false,
 	})
 }
 
@@ -750,11 +761,13 @@ func (r *Renderer) createTexture(pixels []byte, width, height int, opts textureO
 	}
 
 	sampler, _, err := r.deviceDriver.CreateSampler(nil, core1_0.SamplerCreateInfo{
-		MagFilter:        opts.filter,
-		MinFilter:        opts.filter,
-		AddressModeU:     opts.address,
-		AddressModeV:     opts.address,
-		AddressModeW:     opts.address,
+		MagFilter:    opts.filter,
+		MinFilter:    opts.filter,
+		AddressModeU: opts.addressU,
+		AddressModeV: opts.addressV,
+		// W has no meaning for a 2D texture; it rides along with U rather
+		// than getting a third independent field nothing here ever samples.
+		AddressModeW:     opts.addressU,
 		MipmapMode:       mipMode,
 		MaxLod:           maxLod,
 		AnisotropyEnable: maxAniso > 0,

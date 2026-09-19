@@ -21,7 +21,7 @@ api:
 assets: procedural
 example: examples/16-materials
 run: go run ./16-materials
-verified: 2026-08-03
+verified: 2026-09-19
 ---
 
 # Material maps
@@ -208,6 +208,77 @@ for _, m := range model.Meshes {
 The loader decides sRGB versus linear per image by walking the document's
 materials first, because glTF only says which encoding an image wants indirectly
 — through the slot a material binds it to.
+
+## KHR_texture_transform: tiling, rotation, offset
+
+A Blender ground plane tiled with a Mapping node (the ordinary way to tile a
+texture) exports UVs left at 0..1 and the tiling itself as
+`KHR_texture_transform` on the texture reference — `LoadGLTF` and
+`LoadGLTFSkinned` now read it and **bake it into the primitive's vertex UVs
+at load**, so nothing changes at draw time and no shader gained a UV matrix.
+There is no API for this — it is automatic, unlike `AlphaMode`
+(`docs/agents/models.md`), because there is nowhere for a game to opt out
+usefully: an unbaked tiled ground is simply wrong.
+
+Baking was the only option with teeth: the push-constant block is already at
+its 256-byte guaranteed minimum (see `createDescriptorSetLayout`'s comment in
+`texture.go`), so a per-material UV matrix had nowhere to live. Each glTF
+primitive decodes to its own vertex copy even when several primitives split
+from one doc mesh share an accessor — `modeler.ReadTextureCoord`'s `nil`
+destination buffer allocates fresh every call — so baking per primitive
+cannot leak between them.
+
+Measured against a real Blender 5.0.1 export: a Mapping node scaled 8x8
+exports as `{"offset":[0,-7],"scale":[8,8]}` (rendered and rigorously
+checked — 8 columns counted by scanning marker-colour runs across a render,
+not eyeballed); a 30-degree rotation exports as `"rotation":0.5235987...`
+(exactly 30° in radians, sign preserved) with a non-obvious nonzero offset
+even though the Mapping node's own Location was left at zero — Blender's
+own V-flip on export, not a bug in the formula, and the formula does not
+need to know why, only to apply translation·rotation·scale in that order.
+
+**One transform per primitive.** When maps on the SAME material carry
+different transforms, baking cannot satisfy all of them: the base colour
+texture's transform wins (or the first present, in order: base colour,
+normal, metallic-roughness, occlusion, emissive), and the loader logs ONE
+line naming the material and which maps disagree. Measured to be the
+uncommon case: a material with base colour and normal fed from ONE Mapping
+node (Blender's ordinary setup) exports the byte-identical
+`KHR_texture_transform` object on both texture references.
+
+**`texCoord` override.** The extension can name a UV set other than the
+texture's own `texCoord` — this engine reads `TEXCOORD_0` only (no second UV
+set), so a map whose extension targets anything else is skipped as a bake
+candidate (logged once) rather than silently baked into data it does not
+use.
+
+## Sampler wrap modes
+
+glTF's sampler carries `wrapS`/`wrapT` per axis; `LoadGLTF`'s image upload
+now honours them (clamp-to-edge, mirrored-repeat, or glTF's repeat default)
+instead of hardcoding repeat. `renderer.Texture`'s address mode was already
+per-call data (`textureOptions.addressU`/`addressV` in `texture.go`); this
+is the glTF loader choosing it from the document instead of always passing
+repeat.
+
+**One wrap mode per IMAGE, not per (image, sampler) pair.** `loadGLTFImages`
+uploads one engine `Texture` per glTF `Image`, a design this predates and
+does not widen — glTF itself binds a sampler per `Texture` (an image+sampler
+pair), so an image referenced by two glTF Textures with different samplers
+can only be uploaded with one. The first (`doc.Textures` order) wins; the
+loader logs once per image when this actually happens. Measured to be a real
+case, not hypothetical: Blender's exporter deduplicates identical image
+*content* into one glTF Image even across separate texture nodes, so two
+materials that both reference the same source PNG with different wrap
+settings (e.g. one tiled, one clamped) collide here by default.
+
+## Loading a level: alpha and tiling arrive together
+
+`examples/22-level`'s `spawnPrimitive` shows both this page's tiling and
+`docs/agents/models.md`'s `AlphaMode` together: `MaterialRef.PBR` when
+`LoadGLTF` built a `Material`, `.Texture` for a plain base colour, and
+`Translucent` for a `BLEND` material — three independent, composable reads
+of the same `ModelMesh`, none of which required the others.
 
 ## Limits
 

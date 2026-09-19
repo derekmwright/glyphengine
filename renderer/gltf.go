@@ -15,6 +15,7 @@ import (
 	"github.com/go-gl/mathgl/mgl32"
 	"github.com/qmuntal/gltf"
 	"github.com/qmuntal/gltf/modeler"
+	"github.com/vkngwrapper/core/v3/core1_0"
 )
 
 // ModelMesh pairs a GPU mesh with an optional texture loaded from a glTF file.
@@ -237,6 +238,7 @@ func (r *Renderer) LoadGLTF(fsys fs.FS, name string) (*Model, error) {
 
 	var model Model
 	materialCache := make(map[int]*Material)
+	uvCache := make(map[int]uvAffine)
 
 	model.Nodes = extractNodes(doc)
 	model.Lights = extractLights(doc, model.Nodes)
@@ -248,7 +250,13 @@ func (r *Renderer) LoadGLTF(fsys fs.FS, name string) (*Model, error) {
 				continue
 			}
 
-			vertices, indices, err := r.extractPrimitive(doc, prim)
+			matIdx := -1
+			if prim.Material != nil {
+				matIdx = int(*prim.Material)
+			}
+			uv := resolveUVTransform(name, doc, uvCache, matIdx)
+
+			vertices, indices, err := r.extractPrimitive(doc, prim, uv)
 			if err != nil {
 				return nil, fmt.Errorf("extract primitive from mesh %q: %w", mesh.Name, err)
 			}
@@ -280,9 +288,7 @@ func (r *Renderer) LoadGLTF(fsys fs.FS, name string) (*Model, error) {
 			var metallic, roughness float32
 			var doubleSided bool
 			roughness = 0.5
-			matIdx := -1
 			if prim.Material != nil {
-				matIdx = int(*prim.Material)
 				tex = r.resolveBaseColorTexture(doc, textures, *prim.Material)
 				baseColor, metallic, roughness = resolveMaterial(doc, int(*prim.Material))
 				doubleSided = doc.Materials[*prim.Material].DoubleSided
@@ -333,8 +339,21 @@ func (r *Renderer) LoadGLTF(fsys fs.FS, name string) (*Model, error) {
 	return &model, nil
 }
 
-// extractPrimitive reads vertex attributes and indices from a glTF primitive.
-func (r *Renderer) extractPrimitive(doc *gltf.Document, prim *gltf.Primitive) ([]Vertex, []uint32, error) {
+// extractPrimitive reads vertex attributes and indices from a glTF
+// primitive. uv is the affine transform to bake into TEXCOORD_0 before it
+// reaches the vertex array -- identityUV for a primitive whose material
+// carries no KHR_texture_transform, which applyUVTransform turns into a
+// no-op rather than wasted arithmetic (issue #69).
+//
+// Baking here rather than after the caller gets vertices back is safe even
+// when several primitives split from the same doc mesh share one accessor:
+// modeler.ReadTextureCoord is called with a nil destination buffer, and
+// makeBufferOf's own rule ("len(buffer) < count" with buffer==nil) allocates
+// a FRESH slice on every call rather than reusing one keyed by accessor --
+// confirmed by reading modeler/read.go rather than assumed, per the issue's
+// instruction to verify this claim before relying on it. Each primitive's uvs
+// here is therefore its own copy, never aliased with a sibling primitive's.
+func (r *Renderer) extractPrimitive(doc *gltf.Document, prim *gltf.Primitive, uv uvAffine) ([]Vertex, []uint32, error) {
 	// Positions (required)
 	posIdx, ok := prim.Attributes[gltf.POSITION]
 	if !ok {
@@ -363,6 +382,7 @@ func (r *Renderer) extractPrimitive(doc *gltf.Document, prim *gltf.Primitive) ([
 		if err != nil {
 			return nil, nil, fmt.Errorf("read texcoords: %w", err)
 		}
+		applyUVTransform(uvs, uv)
 	}
 
 	// Vertex colors (optional, default white)
@@ -454,6 +474,7 @@ func dataImageIndices(doc *gltf.Document) map[int]bool {
 func (r *Renderer) loadGLTFImages(doc *gltf.Document, base fs.FS) (map[int]*Texture, error) {
 	textures := make(map[int]*Texture)
 	dataImages := dataImageIndices(doc)
+	wrapModes, wrapConflicts := imageWrapModes(doc)
 
 	for i, img := range doc.Images {
 		var imgBytes []byte
@@ -486,12 +507,27 @@ func (r *Renderer) loadGLTFImages(doc *gltf.Document, base fs.FS) (map[int]*Text
 			return nil, fmt.Errorf("decode image %d (%s): %w", i, img.Name, err)
 		}
 
-		var tex *Texture
-		if dataImages[i] {
-			tex, err = r.CreateDataTexture(decoded.pixels, decoded.width, decoded.height)
-		} else {
-			tex, err = r.CreateTexture(decoded.pixels, decoded.width, decoded.height)
+		wrap, ok := wrapModes[i]
+		if !ok {
+			wrap = repeatWrap
 		}
+		if wrapConflicts[i] {
+			log.Printf("gltf: image %d (%s) is referenced by glTF textures with different sampler wrap modes; uploading it once with the first and drawing every use of it that way", i, img.Name)
+		}
+
+		// Same srgb-vs-data choice CreateTexture/CreateDataTexture make, but
+		// calling r.createTexture directly rather than going through either
+		// public constructor: both hardcode repeat addressing, and a glTF
+		// image's wrap mode is per-Texture (image+sampler pair) data this
+		// loader now has to honour instead (issue #69).
+		var tex *Texture
+		tex, err = r.createTexture(decoded.pixels, decoded.width, decoded.height, textureOptions{
+			srgb:     !dataImages[i],
+			filter:   core1_0.FilterLinear,
+			addressU: wrap.u,
+			addressV: wrap.v,
+			mipmap:   true,
+		})
 		if err != nil {
 			return nil, fmt.Errorf("upload texture %d (%s): %w", i, img.Name, err)
 		}
@@ -688,6 +724,7 @@ func (r *Renderer) LoadGLTFSkinned(fsys fs.FS, name string) (*SkinnedModel, erro
 
 	var model Model
 	loadedMeshes := make(map[int]bool) // track which doc.Meshes indices we've loaded
+	uvCache := make(map[int]uvAffine)  // shared across both passes below, keyed by materialIdx
 
 	// Nodes are filled the same way LoadGLTF fills them (same pure function),
 	// so a socket works identically on a skinned model's non-animated
@@ -715,7 +752,13 @@ func (r *Renderer) LoadGLTFSkinned(fsys fs.FS, name string) (*SkinnedModel, erro
 				continue
 			}
 
-			vertices, indices, err := extractSkinnedPrimitive(doc, prim)
+			matIdx := -1
+			if prim.Material != nil {
+				matIdx = int(*prim.Material)
+			}
+			uv := resolveUVTransform(name, doc, uvCache, matIdx)
+
+			vertices, indices, err := extractSkinnedPrimitive(doc, prim, uv)
 			if err != nil {
 				return nil, fmt.Errorf("extract skinned primitive from mesh %q: %w", mesh.Name, err)
 			}
@@ -741,10 +784,8 @@ func (r *Renderer) LoadGLTFSkinned(fsys fs.FS, name string) (*SkinnedModel, erro
 			var tex *Texture
 			baseColor := [3]float32{1, 1, 1}
 			var metallic, roughness float32
-			matIdx := -1
 			roughness = 0.5
 			if prim.Material != nil {
-				matIdx = int(*prim.Material)
 				tex = r.resolveBaseColorTexture(doc, textures, *prim.Material)
 				baseColor, metallic, roughness = resolveMaterial(doc, int(*prim.Material))
 			}
@@ -789,7 +830,13 @@ func (r *Renderer) LoadGLTFSkinned(fsys fs.FS, name string) (*SkinnedModel, erro
 				continue
 			}
 
-			vertices, indices, err := r.extractPrimitive(doc, prim)
+			matIdx := -1
+			if prim.Material != nil {
+				matIdx = int(*prim.Material)
+			}
+			uv := resolveUVTransform(name, doc, uvCache, matIdx)
+
+			vertices, indices, err := r.extractPrimitive(doc, prim, uv)
 			if err != nil {
 				return nil, fmt.Errorf("extract static primitive from mesh %q: %w", mesh.Name, err)
 			}
@@ -815,10 +862,8 @@ func (r *Renderer) LoadGLTFSkinned(fsys fs.FS, name string) (*SkinnedModel, erro
 			var tex *Texture
 			baseColor := [3]float32{1, 1, 1}
 			var metallic, roughness float32
-			matIdx := -1
 			roughness = 0.5
 			if prim.Material != nil {
-				matIdx = int(*prim.Material)
 				tex = r.resolveBaseColorTexture(doc, textures, *prim.Material)
 				baseColor, metallic, roughness = resolveMaterial(doc, int(*prim.Material))
 			}
@@ -869,7 +914,12 @@ func (r *Renderer) LoadGLTFSkinned(fsys fs.FS, name string) (*SkinnedModel, erro
 	}, nil
 }
 
-func extractSkinnedPrimitive(doc *gltf.Document, prim *gltf.Primitive) ([]SkinnedVertex, []uint32, error) {
+// extractSkinnedPrimitive is extractPrimitive's skinned counterpart: a
+// separate function rather than a shared code path (SkinnedVertex is a
+// different layout), so it needs its own uv bake -- see extractPrimitive's
+// doc comment for why baking per call is safe even when primitives share an
+// accessor.
+func extractSkinnedPrimitive(doc *gltf.Document, prim *gltf.Primitive, uv uvAffine) ([]SkinnedVertex, []uint32, error) {
 	posIdx, ok := prim.Attributes[gltf.POSITION]
 	if !ok {
 		return nil, nil, fmt.Errorf("primitive missing POSITION attribute")
@@ -895,6 +945,7 @@ func extractSkinnedPrimitive(doc *gltf.Document, prim *gltf.Primitive) ([]Skinne
 		if err != nil {
 			return nil, nil, fmt.Errorf("read texcoords: %w", err)
 		}
+		applyUVTransform(uvs, uv)
 	}
 
 	var colors [][4]uint8
