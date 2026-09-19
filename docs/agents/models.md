@@ -95,8 +95,10 @@ if !ok {
     return fmt.Errorf("flare_stack.glb: no Socket_Lamp node")
 }
 
-// glTF's forward axis is -Z; transforming it by World gives the socket's aim,
-// which a hand-measured Vec3 could never carry.
+// Which local axis means "aim" is between the game and its artist. -Z is the
+// one glTF itself uses for cameras and punctual lights (an ASSET faces +Z, so
+// do not read this as "glTF forward"). Transforming it by World gives the
+// aim, which a hand-measured Vec3 could never carry.
 pos := socket.World.Mul4x1(mgl32.Vec4{0, 0, 0, 1}).Vec3()
 dir := socket.World.Mul4x1(mgl32.Vec4{0, 0, -1, 0}).Vec3()
 
