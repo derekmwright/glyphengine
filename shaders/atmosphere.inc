@@ -4,7 +4,12 @@
 // nothing is a function of the clock. That is the point: the sky dome, the fog
 // that distant geometry fades into, and the water's reflection all need the
 // same answer, and deriving it from a value they already have is the only way
-// to guarantee they agree. There is no uniform to forget to update.
+// to guarantee they agree. The curves have no uniform to forget to update.
+//
+// The COLOURS those curves blend between are the one exception: they are data
+// (see atmSkyPalette), and the three agree because there is one buffer and
+// every caller is handed it, not because there is nothing to hand. `task
+// skypalette` is what notices a caller that stops taking it.
 //
 // The old model had a single "night factor" that ramped linearly over five
 // percent of the cycle and drove the entire palette, with the sunset glow
