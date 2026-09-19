@@ -95,17 +95,56 @@ type Volumetrics struct {
 //
 // Anisotropy 0.4 rather than something more dramatic. The forward lobe is
 // what makes a beam brighten as the camera swings into it, and at g = 0.7 it
-// does that too well: the phase function is 67x stronger straight down the
-// beam than across it, so a lamp viewed from the side -- which is most views
-// of most street lamps -- almost disappears. At 0.4 the ratio is 5.8x, which
-// still reads as a beam that has a direction while leaving the side-on view
-// clearly visible. Both numbers are the phase function evaluated at
-// cos(theta) = 1 and 0; PLACEHOLDER-MEASURE records what it does to the
-// capture.
+// does that too well: volPhase is 67x stronger straight down the beam than
+// across it, so a lamp viewed from the side -- which is most views of most
+// street lamps -- almost disappears. At 0.4 the ratio is 5.8x, which still
+// reads as a beam that has a direction while leaving the side-on view clearly
+// visible. Both ratios are volPhase evaluated at cos(theta) = 1 against
+// cos(theta) = 0.
 //
-// Steps 16: PLACEHOLDER-MEASURE.
+// What that does to a capture, measured rather than left as arithmetic: the
+// side-on doorway pose below at 1280x720, box 600,270,60,60 across a door
+// spot's cone, mean luma added at -volg 0 / 0.2 / 0.4 / 0.7 is +7.33 / +7.04
+// / +6.04 / +3.36. The default keeps 82% of the isotropic brightness when
+// looking ACROSS a beam; 0.7 keeps 46%, and a spotlight at night is usually
+// there to be seen from the side.
+//
+//	21-streetlights -volumetric 1 -volg G -camtargetx 21 -camtargety 1.5 \
+//	  -camtargetz 0 -camyaw 0 -campitch 0.1 -camdist 9 -camlook 0.6
+//
+// Steps 32, and this one IS a measurement. `21-streetlights -skylamp
+// -volumetric 1 -volsteps N` at 1280x720 under a fixed clock, differenced
+// against the same frame with no volumetrics and read by cmd/volumetriccheck
+// over the box 610,40,50,120 -- the upward beam where it crosses open sky.
+// Mean luma added, and the mean absolute Laplacian of what was added (the
+// number that says "grainy", since a fixed-step march through a cone thinner
+// than one step lights some pixels and not their neighbours):
+//
+//	steps   added    grain
+//	    8   +6.24    49.82
+//	   16   +6.29    37.13
+//	   24   +7.25    22.60
+//	   32   +7.44    10.10
+//	   64   +7.51     5.59
+//
+// The added light converges: 32 is within 1% of 64 and 16 is 16% short of it,
+// because noise plus a concave tonemap loses light rather than just moving it
+// about. The grain is what the eye sees, and it is still falling at 64.
+//
+// 32 rather than 16 because 16 is visibly crosshatched where a cone crosses
+// the frame and 32 is not, in the sky at least -- looked at, not inferred from
+// the table. It costs 0.46 ms more per frame at 1920x1080 on a scene with
+// every light scattering (1.25 ms against 0.79), which is a real price for an
+// effect a game opted into deliberately and can opt back out of one field at a
+// time. The whole table is in docs/agents/lights.md, so a game that needs the
+// time back knows exactly what dropping to 16 buys and costs.
+//
+// Neither number stops the march being grainy at the apex of a narrow cone,
+// where the cone is thinner than a step at any count worth paying for. That is
+// the limit of the per-pixel form, and the answer to it is the 3D-texture
+// inject/integrate with temporal reprojection, not a bigger number here.
 func DefaultVolumetrics() Volumetrics {
-	return Volumetrics{Anisotropy: 0.4, Steps: 16}
+	return Volumetrics{Anisotropy: 0.4, Steps: 32}
 }
 
 // MaxVolumetricSteps caps Volumetrics.Steps.

@@ -525,7 +525,7 @@ type Volumetrics struct {
 // TestDefaultsMatchTheRenderers is what keeps the two copies from drifting,
 // which nothing did for the grade or the palette until now.
 func DefaultVolumetrics() Volumetrics {
-	return Volumetrics{Anisotropy: 0.4, Steps: 16}
+	return Volumetrics{Anisotropy: 0.4, Steps: 32}
 }
 
 // SetVolumetrics sets the scattering medium for this scene.

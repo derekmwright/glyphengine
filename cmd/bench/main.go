@@ -77,6 +77,20 @@ var scenes = []scene{
 
 	{"streetlights", "21-streetlights", []string{"-frames", "200"}, "a settlement: PBR walls, door spots, lamp posts"},
 
+	// The same settlement with every light asking for volumetric
+	// in-scattering, against the row above as its control. Paired for the
+	// reason the clustered/brute-force rows are: the only honest way to say
+	// what the march costs is the same scene with and without it, and the
+	// cost lands INSIDE the passes that were already there -- opaque, terrain
+	// and sky -- because the march lives in applyFog and in sky.frag rather
+	// than in a pass of its own. There is no gpu_volumetric column to read
+	// and there cannot be one.
+	//
+	// -skylamp is in here on purpose: it is the only light in the set whose
+	// cone crosses sky pixels, and sky.frag's march is a different shader
+	// from the lit one.
+	{"streetlights-volumetric", "21-streetlights", []string{"-volumetric", "1", "-lampvolumetric", "1", "-skylamp", "-frames", "200"}, "the same settlement, every light scattering"},
+
 	// Lit water, which is a different shape of light cost from the scenes
 	// above: the surface is one near-horizontal draw covering most of the
 	// lower frame, so a light over the lake lands on a great many fragments
@@ -85,6 +99,21 @@ var scenes = []scene{
 	// else. `water` above stays the unlit control.
 	{"waterlights32", "09-water", []string{"-time", "0.02", "-lamps", "32", "-spots", "0", "-lampposts=false", "-frames", "200"}, "32 lamps over a lake"},
 	{"waterlights400", "09-water", []string{"-time", "0.02", "-lamps", "400", "-spots", "0", "-lampposts=false", "-frames", "200"}, "400 lamps over the same lake"},
+
+	// The same 32 lamps with every one of them scattering, against
+	// waterlights32 as its control -- the SAME arguments plus -volumetric 1,
+	// so the two rows differ by the march and by nothing else. The first
+	// version of this row added two spot lights as well, which would have
+	// made a third of the difference something other than what it claimed to
+	// measure.
+	//
+	// Water is its own shape of cost here: the surface is one near-horizontal
+	// draw covering most of the lower frame, so every one of those fragments
+	// runs a march, and it runs it in the water pass on top of the opaque
+	// pass having already run one for the bed underneath. That double count
+	// is measured in docs/agents/lights.md and is not a bug -- see the note
+	// there about the shoreline.
+	{"waterlights-volumetric", "09-water", []string{"-time", "0.02", "-lamps", "32", "-spots", "0", "-volumetric", "1", "-lampposts=false", "-frames", "200"}, "the same 32 lamps, all scattering"},
 
 	// The screen-space UI, three ways over one scene. Paired for the same
 	// reason the instanced and clustered rows are: the only honest way to say
@@ -116,12 +145,28 @@ func main() {
 	only := flag.String("scene", "", "run only the named scene")
 	jsonOut := flag.String("json", "", "also write results as JSON to this path")
 	repeat := flag.Int("repeat", 1, "run each scene N times and keep the fastest")
+	// extra exists so a sweep -- a resolution, a step count, a light count --
+	// can be measured with this tool's parsing and this tool's table instead
+	// of a one-off script that reports something subtly different. It is
+	// deliberately only useful with -scene: appending "-volsteps 32" to
+	// 02-cube would fail, and failing loudly on one named scene is clearer
+	// than silently skipping it in a run of twenty.
+	extra := flag.String("extra", "", "extra arguments appended to the scene's own, e.g. -extra \"-width 1920 -height 1080\"; requires -scene")
 	flag.Parse()
+
+	if *extra != "" && *only == "" {
+		fmt.Fprintln(os.Stderr, "bench: -extra needs -scene: the arguments are not valid for every scene")
+		os.Exit(2)
+	}
 
 	var results []result
 	for _, sc := range scenes {
 		if *only != "" && sc.name != *only {
 			continue
+		}
+
+		if *extra != "" {
+			sc.args = append(append([]string{}, sc.args...), strings.Fields(*extra)...)
 		}
 
 		var best *result
