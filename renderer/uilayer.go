@@ -178,8 +178,10 @@ func (r *Renderer) createUILayerTargets() (*uiLayerTarget, error) {
 	// composite is recorded only on a frame that recorded the layer pass, and
 	// that pass leaves them in SHADER_READ_ONLY. It is also not possible --
 	// an hdrTarget carries TRANSFER_SRC and not TRANSFER_DST, so the clear
-	// primeSampledImages does is rejected outright. Checked by doing it:
-	// VUID-vkCmdClearColorImage-image-00002, three times per frame.
+	// primeSampledImages does is rejected outright. Checked by doing it: nine
+	// validation errors at startup, one per image for each of the two barriers
+	// and the clear between them, VUID-VkImageMemoryBarrier-oldLayout-01213 and
+	// VUID-vkCmdClearColorImage-image-00002.
 	if err := r.primeBloomLayouts(t.bloom); err != nil {
 		t.destroy(r.deviceDriver)
 		return nil, err
