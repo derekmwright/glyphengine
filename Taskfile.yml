@@ -595,6 +595,7 @@ tasks:
       - go run ./19-instanced -frames 60 -screenshot ../docs/images/19-instanced.png
       - go run ./20-screens -frames 60 -screenshot ../docs/images/20-screens.png
       - go run ./21-streetlights -frames 90 -screenshot ../docs/images/21-streetlights.png
+      - go run ./22-level -frames 90 -screenshot ../docs/images/22-level.png
       - go run ./15-kitchen-sink -demo -frames 260 -screenshot ../docs/images/15-kitchen-sink.png
 
   hud:
