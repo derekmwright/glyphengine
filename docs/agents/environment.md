@@ -122,6 +122,106 @@ worth about 12% on its own and is what makes a raymarched sky affordable at
 all; before it, a fullscreen sky shaded every pixel and the world painted over
 most of them.
 
+## Light shafts are on, and only near the sun
+
+`Sky.LightShafts` is the strength of screen-space light shafts — the smear of
+brightness radiating from the sun past whatever occludes it. `DefaultSky()` sets
+**0.25**, so a game that says nothing gets them in every frame with the sun
+above the horizon and in view.
+
+They are a **screen-space radial blur**, not volumetrics. The pass samples the
+copy of the scene the water pass already makes, keeps only what is bright enough
+to be sky or sun, and smears it outward from the sun's projected position.
+Geometry standing between the eye and the sun is darker than the sky behind it,
+so it contributes nothing and leaves a gap — and a gap in a radial smear reads
+as a shaft. That is the whole mechanism, and its limits follow from it:
+
+- **Only while the sun is on screen.** The effect is built from pixels, so there
+  is nothing to build from once the sun leaves the frame. The strength fades out
+  as the sun approaches the edge rather than cutting, and reaches zero once the
+  sun is 0.175 of a frame past it. As a fraction of what the game asked for,
+  measured off the strength the renderer is handed: 0.98 with the sun at u =
+  0.90, 0.80 at 0.96, 0.46 at 1.03, 0.08 at 1.12 and nothing at 1.27.
+- **Only while the sun disc is drawn.** Below the horizon the strength fades
+  with the disc, over elevation −0.02 to −0.15, and at night it is exactly zero.
+  The moon gets none: the pass is anchored to the sun, and issue #47 is the ask
+  for shafts from other lights.
+- **No depth.** The pass cannot tell air in front of a distant hill from the
+  ground two metres away, so what keeps it off the foreground is distance from
+  the sun *on screen* — a lobe about 0.9 screen heights wide. Point the camera
+  so that the sun is directly over near ground and that ground will haze, because
+  from the pass's point of view it is exactly where the air should be.
+- **A `Sky` without a `Cycle` gets none.** The shafts radiate from the sun
+  billboard, and only a `Cycle` places one.
+
+### Choosing a strength
+
+Measured on `09-water -time 0.72 -yaw 1.771 -pitch -0.185 -pillars` — dusk, the
+sun coming up over a ridge behind a row of pillars — as mean sRGB luma added
+against the same frame with the shafts off:
+
+| `LightShafts` | Ground lit through a gap | The occluder itself | Whole frame |
+|---|---|---|---|
+| 0.20 | +26.0 | +29.1 | +5.7 |
+| 0.25 (default) | +31.2 | +34.7 | +6.8 |
+| 0.35 | +40.7 | +44.7 | +8.9 |
+| 0.50 | +53.1 | +57.7 | +11.6 |
+
+**Read the second column, not the first.** The sky in the gaps beside a setting
+sun is already at the top of the display range, so the only pixels with headroom
+left to brighten are the dark ones — which means the number that decides whether
+this reads as light or as a dirty lens is the one on the silhouette. Pillar 4 in
+that scene sits at 67 with the shafts off, against 245 for the sky beside it; at
+0.25 it goes to 102 and still reads as a silhouette, at 0.35 to 112, and at 1.0
+to 158, by which point it is a pale shape in front of a white sky rather than a
+dark one.
+
+0.25 is the default for that reason: a deliberate step down from the 0.35 this
+field carried for seven weeks without ever drawing a pixel, because 0.35 is the
+setting that, the first time it was drawn, was described as heavy enough to
+flatten the pillars' silhouettes. It is still well past where the shafts are
+obvious — the gap gains 31 levels and the streak the pillar casts down the
+hillside is plain at 1:1 — and a game that wants the drama back has one field to
+change.
+
+At midday the same setting is a soft halo around the disc and little else, which
+is what a midday sun does: the plain sky measures 0.566 in linear right beside
+the disc and the pass's threshold starts at 0.62, so only the disc and the
+clouds contribute.
+
+### Cost
+
+One fullscreen pass of 48 texture taps per pixel, inside the water render pass.
+Measured on a Radeon RX 7900 XTX at 1280x720, MSAA 4x, as `PassShafts` over five
+interleaved 200-frame runs:
+
+| Sun | Cost |
+|---|---|
+| Middle of the frame | 0.163 ms (0.144–0.169) |
+| At the frame edge | 0.095 ms (0.089–0.097) |
+| Off screen | 0.000 ms — the pass does not run |
+
+A scene with **no water** pays more than that, because the shafts are what make
+the frame enter the water pass at all: a full copy of the scene colour and a
+second render pass to resolve. Measured with that pass forced on in scenes that
+have no water, `PassWater` (the copy) is 0.019–0.022 ms and `PassWaterResolve`
+0.020 ms in `07-terrain` and 0.041–0.177 ms in `08-grass`. So a sky scene with
+no water and the sun in frame spends roughly 0.2 to 0.35 ms on shafts, against
+frames of 1.4 and 4.8 ms. A scene that already has water pays only the 0.163 ms,
+because the copy and the resolve were happening anyway.
+
+Nothing is spent when the effect cannot contribute. The strength that reaches
+the renderer already has the edge fade and the elevation fade in it, so a sun
+below the horizon, behind the camera or past the frame edge takes it to zero,
+and a zero keeps the frame out of the water pass entirely. `08-grass`,
+`07-terrain` and `15-kitchen-sink` never point at the sun and report
+`gpu_shafts 0.000` and `gpu_water 0.000` throughout.
+
+`task shafts` is the gate: it renders that dusk scene with the shafts on and
+off, requires the ground lit through a gap to gain more than the ground in the
+pillar's streak, and requires the two captures to be byte identical when the sun
+is off screen.
+
 ## Fog settles, if you ask it to
 
 `Fog.Density` alone gives uniform fog: the only thing that thickens it is

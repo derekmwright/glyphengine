@@ -1699,7 +1699,19 @@ func recordWaterPass(
 	// shafts were computed without them; laying a warm wash over a flame, a
 	// particle or a world overlay would add light the effect never accounted
 	// for, and it would wash out the overlays that exist to stay legible.
-	// Checked against `09-water -plume -ghost -marker -submerged`.
+	//
+	// Not observable today, and the honest version of that is worth writing
+	// down. Moving this block below the PassOverWater bracket renders
+	// byte-identical frames for `09-water -plume -ghost -marker -submerged` at
+	// every pose where the shafts are strong (yaw 1.771, 1.2 and 0.9 at time
+	// 0.72), because no example can put blended geometry inside the lobe: the
+	// sun's azimuth is always on the +Z side by construction in
+	// DayNight.SunDir, 09-water's blended effects sit toward the lake about 90
+	// degrees away, and the horizontal field of view is 72. So this is a
+	// decision taken on what the smear is made of rather than on a picture, and
+	// TestShaftBracketHoldsTheShaftDrawAndOnlyIt pins it so that the first
+	// scene able to see the difference does not get the other order by
+	// accident.
 	timer.begin(deviceDriver, cmdBuf, ow.frame, PassShafts)
 	if lighting.LightShafts > 0 {
 		recordLightShafts(deviceDriver, cmdBuf, godRayPipeline, pipelineLayout,
@@ -1751,7 +1763,10 @@ func recordWaterPass(
 // -pillars` under GLYPHENGINE_FIXED_FRAME_TIME: dusk, the sun peeking over a
 // ridge from behind a row of pillars, which is the scene the effect exists for.
 // Every reading below is mean sRGB luma ADDED against the same frame rendered
-// with -shafts 0, over four boxes:
+// with -shafts 0, at -shafts 0.35 rather than at the 0.25 default -- these are
+// ablations of one constant at a time and a brighter setting separates them
+// more clearly. For what the default itself does, see Sky.LightShafts, which
+// carries the strength sweep. The four boxes:
 //
 //	gap      739,440,80x80   terrain lit through the gap beside pillar 4
 //	shadow   459,440,80x80   terrain in pillar 4's streak, same radius from

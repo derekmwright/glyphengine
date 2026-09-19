@@ -260,13 +260,20 @@ tasks:
       # the lower two thirds should be brighter than the dark terrain there, and
       # the disc is pale yellow against nearly black, so the margin is enormous.
       #
-      # -shafts 0 changes nothing today and is here for the day it does. An
-      # earlier version of this comment said the shaft pass "samples the scene
-      # and would react to the disc", and the fix's commit message blamed a
-      # 32 % frame difference on it. Both were wrong: the god-ray pipeline is
-      # built and never drawn (#50), and -shafts 0, 1 and 3 render byte-identical
-      # frames. The flag stays so that wiring shafts up cannot quietly turn this
-      # from a test of the disc into a test of the disc plus a radial blur.
+      # -shafts 0 keeps this a test of the disc rather than of the disc plus a
+      # radial blur. The shafts are drawn now (#50), so the flag has a job at
+      # last -- though at this pose it would still change nothing: the sun is
+      # behind the headland, the brightest pixel left in the frame is 0.46 in
+      # linear, and godray.frag's window starts at 0.62, so the pass runs and
+      # adds exactly zero. Verified: -shafts 3 renders a byte-identical frame.
+      # Keep the flag anyway. Anything that raises this scene's brightest pixel
+      # past the window -- a longer twilight, a brighter disc, an emissive
+      # anything -- would turn a test of occlusion into a test of two effects.
+      #
+      # An earlier version of this comment said the shaft pass "samples the
+      # scene and would react to the disc", and the sun-disc fix's commit
+      # message blamed a 32 % frame difference on it. Both were wrong for the
+      # same reason: nothing bound the pipeline.
       - |
         status=0
         d=.sky
@@ -934,8 +941,8 @@ tasks:
       # fails the absolute floor. With it replaced by the same frame plus a flat
       # +30 everywhere -- "a uniform wash", which is what this shader does with
       # no bright() threshold -- both boxes gain +30.0, the ratio is 1.000 and
-      # the run fails the ratio floor. The real pair reads +40.7 and +10.0,
-      # ratio 4.06.
+      # the run fails the ratio floor. The real pair reads +31.2 and +7.4,
+      # ratio 4.23, at the 0.25 default.
       #
       # And broken twice on a real build, after the fix was committed. Reverting
       # the draw commit -- main exactly as it stood for seven weeks -- reads

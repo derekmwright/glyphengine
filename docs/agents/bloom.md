@@ -13,7 +13,7 @@ api:
 assets: none
 example: examples/16-materials
 run: go run ./16-materials
-verified: 2026-08-02
+verified: 2026-09-19
 ---
 
 # Bloom
@@ -38,10 +38,17 @@ either side of it. `radius` widens the upsample tent in source texels.
 This is the one setting that will bite you, and it does not look like a bug when
 it goes wrong.
 
-A daytime sky sits around **0.68** in linear, and clouds reach close to 1. If the
+A daytime sky sits around **0.5** in linear, and clouds reach close to 1. If the
 ramp starts below that, the sky joins the bloom and the whole frame lifts. It
 reads as haze — a slightly milky image you might accept as atmosphere — rather
 than as a mistake.
+
+(That figure said 0.68 until #50 measured it for the light-shaft threshold.
+Decoding the captures back to linear — the tonemap is identity and the swapchain
+is sRGB, so a capture byte is the scene value under 1 — `16-materials` sky reads
+0.39 to 0.50 and peaks at 0.66, and `09-water` at noon reads 0.345 far from the
+sun and 0.566 sixty pixels from it. Nothing above that is plain sky. The advice
+below did not depend on the number, which is presumably how it survived.)
 
 Measured in `16-materials`: at `SetBloom(0.7, 1.0, 0.5, 1.0)` the ramp began at
 0.5 and the sky, far from anything emissive, moved by **RMS 0.025 (max 0.047)**
@@ -54,8 +61,10 @@ longer does.
 **Check any threshold against the sky, not against the thing you want to glow.**
 The thing you want to glow will look fine either way.
 
-`godray.frag` documents the same failure for the same reason. A screen-space
-effect without a threshold is a blur of the whole image.
+`godray.frag` documents the same failure for the same reason, and since #50 it
+documents it against measurements rather than against a guess: a screen-space
+effect without a threshold is a blur of the whole image, and its window has to
+sit above the sky rather than above the thing it wants to select.
 
 ## It needs something above 1
 

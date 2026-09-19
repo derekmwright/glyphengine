@@ -167,7 +167,24 @@ precisely a read of a *different* pixel. So a frame containing water splits:
    geometry is **behind** the water surface;
 2. that result is copied into a sampled image;
 3. a second pass draws the water, sampling the copy at an offset taken from the
-   wave normal, and then the blended geometry that is **in front** of it.
+   wave normal, then the light shafts, then the blended geometry that is **in
+   front** of it.
+
+The shafts sit between the surface and the blended draws on purpose. They are
+built out of the copy, which holds the opaque world and the sky and nothing
+else, so the water — part of the same world — is fair to haze over, while a
+flame, a particle or a world overlay recorded after the copy contributed nothing
+to the smear and would only be washed by it.
+
+No example can show the difference, and that is worth saying rather than
+implying otherwise: moving the shafts below the blended draws renders
+byte-identical frames for `09-water -plume -ghost -marker -submerged` at every
+pose where the shafts are strong, because the sun's azimuth is always on the +Z
+side by construction and 09-water's blended effects sit toward the lake about 90
+degrees away, against a 72-degree field of view. The order is a decision about
+what the smear is made of, and a recorder test pins it so the first scene able
+to see it does not get the other one by accident. See `recordLightShafts` and
+[`environment.md`](environment.md).
 
 Both passes share the depth buffer, which is why the first now stores depth
 instead of discarding it — water still has to be occluded by terrain in front
@@ -183,8 +200,14 @@ dependencies and every blended draw in the water pass becomes
 `VUID-vkCmdDrawIndexed-renderPass-02684`; `task validate` catches it on the
 first frame.
 
-**A scene with no water never begins the second pass.** The cost to everyone
-else is two changed store ops.
+**A scene with no water begins the second pass only for light shafts.** Since
+#50 they are drawn in it, so a frame with `Sky.LightShafts` in effect pays for
+the copy and the resolve even with no lake in it: measured with no water in
+frame, `gpu water` 0.019–0.022 ms for the copy and `gpu waterresolve` 0.020 ms
+in `07-terrain`, 0.041–0.177 ms in `08-grass`. A frame where the shafts cannot
+contribute — sun down, behind the camera, or past the screen-edge fade — skips
+the pass exactly as before, and the cost to everyone else is still two changed
+store ops.
 
 ## Blended draws split on the surface
 

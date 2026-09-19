@@ -102,7 +102,9 @@ type EnvironmentState struct {
 	// CloudSteps is the volumetric cloud sample count; zero draws none.
 	CloudSteps int
 
-	// LightShafts is the god-ray strength; zero disables them.
+	// LightShafts is the god-ray strength; zero disables them. It carries the
+	// fade with the sun disc's elevation already applied, so a sun on its way
+	// down arrives here weaker rather than being cut off at the horizon.
 	LightShafts float32
 
 	// CastShadows enables the shadow pass. Turning it off when the only light
@@ -227,16 +229,35 @@ type Sky struct {
 
 	// LightShafts is the strength of screen-space light shafts, or god rays:
 	// the smear of brightness radiating from the sun past whatever occludes
-	// it. Zero disables them. Around 0.5 is visible without being a haze;
-	// above roughly 1.5 it stops reading as light and starts reading as a
-	// dirty lens.
+	// it. Zero disables them; DefaultSky sets 0.25.
+	//
+	// Measured at dusk with the sun coming up over a ridge behind pillars
+	// (`09-water -time 0.72 -yaw 1.771 -pitch -0.185 -pillars`), as mean sRGB
+	// luma added over ground lit through a gap and over the occluder itself:
+	// 0.20 gives +26.0 and +29.1, 0.25 gives +31.2 and +34.7, 0.35 gives +40.7
+	// and +44.7, 0.50 gives +53.1 and +57.7.
+	//
+	// Watch the second number, not the first, and that is why the default is
+	// 0.25 rather than the 0.35 this field shipped with. The gaps beside a
+	// setting sun are already at the top of the display range, so the only
+	// pixels with headroom left to brighten are the dark ones -- which means
+	// the strength that decides whether this reads as light or as a dirty lens
+	// is really the strength at which a silhouette stops being one. That pillar
+	// reads 67 with the shafts off and 245 for the sky beside it; 102 at 0.25,
+	// 112 at 0.35, and 158 at 1.0, which is a pale shape rather than a dark
+	// one.
 	//
 	// They are screen-space, so they only exist while the sun is on screen,
 	// and they fade as it approaches the edge rather than popping out. That is
 	// a property of the technique, not a tuning failure — there is nothing to
-	// smear from once the sun leaves the frame.
+	// smear from once the sun leaves the frame. They also need a Cycle: the
+	// shafts radiate from the sun billboard, and only a cycle places one.
 	//
-	// Costs one fullscreen pass with 48 taps, and only when the sun is up.
+	// Costs one fullscreen pass of 48 taps -- 0.163 ms at 1280x720 MSAA 4x on
+	// a Radeon RX 7900 XTX with the sun centred, 0.095 with it at the edge --
+	// and only while the sun is up and in frame. In a scene with no water that
+	// pass also drags in a copy of the scene colour and a second render pass;
+	// see docs/agents/environment.md.
 	LightShafts float32
 }
 
@@ -253,7 +274,7 @@ const (
 
 // DefaultSky is a full sky: dome, volumetric clouds, stars, and both discs.
 func DefaultSky() *Sky {
-	return &Sky{Stars: true, StarDensity: 1, MilkyWay: 1, SunDisc: true, MoonDisc: true, CloudSteps: CloudsHigh, LightShafts: 0.35}
+	return &Sky{Stars: true, StarDensity: 1, MilkyWay: 1, SunDisc: true, MoonDisc: true, CloudSteps: CloudsHigh, LightShafts: 0.25}
 }
 
 // DirectionalLight is a fixed sun: one direction, one colour, no clock.
