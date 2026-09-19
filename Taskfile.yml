@@ -1057,24 +1057,35 @@ tasks:
       # both captures and subtracts out, the way `task shafts` and
       # `task waterblend` do it.
       #
-      # PROVED by breaking the real code three ways, each one committed first,
-      # run through this task, and reverted afterwards:
+      # PROVED by breaking the real code three ways, each one run through this
+      # task on a committed tree and reverted afterwards. What each printed:
       #
       #   1. the composite unbound -- recordUIResolve's CmdDraw deleted, so the
-      #      layer is rendered every frame and never put on screen. The HUD
-      #      vanishes: the neutrality arm reports PLACEHOLDER1, and lit reports
-      #      "sits at PLACEHOLDER2 before anything glows, under 80" -- the
-      #      element it measures is not in the capture at all. Both arms fail.
+      #      layer is rendered every frame and never reaches the swapchain. The
+      #      whole HUD vanishes. "the glowing and non-glowing captures are byte
+      #      identical", then the neutrality arm at 98498 px differing, 98472 of
+      #      them above 1/255, max delta 207; then lit +0.00 and near +0.00,
+      #      both under their floors. Three arms, one cause.
       #   2. the in-layer blend put back to straight alpha -- overlayBlend's
-      #      premultiplied case returning SrcAlpha, while the shaders go on
-      #      premultiplying. Every antialiased edge gains a dark fringe:
-      #      PLACEHOLDER3. The GLOW arm stays green throughout, which is exactly
-      #      why the neutrality arm cannot be dropped.
-      #   3. glow leaked into elements that asked for none -- recordUIComposite
-      #      pushing a fixed emission into pc[44] for every panel draw rather
-      #      than the object's own. PLACEHOLDER4. A build that lights everything
-      #      looks like a HUD someone turned up, which is why lit and near alone
-      #      cannot carry this.
+      #      premultiplied case returning SrcAlpha while the shaders go on
+      #      premultiplying, so coverage is counted twice. 60747 px differ,
+      #      15204 of them above 1/255, max delta 60 against a tolerance of 2,
+      #      every one of them an antialiased edge. The GLOW arm stayed
+      #      completely green -- lit +49.63, near +5.64, far and scene +0.00 --
+      #      which is exactly why the neutrality arm cannot be dropped.
+      #   3. the glow applied per PASS rather than per object -- recordUIComposite
+      #      pushing the largest Glow in the frame into pc[44] for every panel
+      #      draw. The neutrality arm stayed green (5009 px, max 1/255: nothing
+      #      emits in the control, so the leak is invisible there), lit went UP
+      #      to +58.17 and near to +18.74 -- both comfortably passing, and the
+      #      frame just looks like a HUD someone turned up. far is the only arm
+      #      that fired: +43.68 against a ceiling of 0.50.
+      #
+      # A fourth, tried and not kept because it is caught twice over: pushing a
+      # fixed 2.0 for every panel draw unconditionally. That glows in the
+      # control too, so the neutrality arm fails at max delta 198 and lit fails
+      # at +0.16 -- the element is already blown out before anything is asked to
+      # emit -- while far reads +0.00, because the leak is in both captures.
       - |
         status=0
         d=examples/.uiglow
