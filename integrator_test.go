@@ -84,6 +84,37 @@ func TestCustomIntegratorDelegatingToIntegrateBodiesMatchesDefault(t *testing.T)
 	}
 }
 
+// TestNewSceneIntegratorCanBeWrapped: the field's doc says NewScene sets it to
+// IntegrateBodies, and the reason that is a promise rather than a detail is the
+// way a game extends it -- keep whatever was there, call it, then do its own
+// part -- which is a nil call if NewScene left the field for Tick's fallback
+// to cover. Nothing else here notices: with the default removed from NewScene
+// every other test in this file passes, because the fallback does the same
+// work. Verified exactly that way; this is the one that fails.
+func TestNewSceneIntegratorCanBeWrapped(t *testing.T) {
+	s := NewScene()
+	s.SetTerrain(flatTerrain(t, 0))
+	if s.Integrator == nil {
+		t.Fatal("NewScene left Integrator nil; a game wrapping the previous value would call nil")
+	}
+
+	prev := s.Integrator
+	wrapped := 0
+	s.Integrator = func(sc *Scene, dt float32) {
+		prev(sc, dt)
+		wrapped++
+	}
+	body := spawnBody(s, mgl32.Vec3{0, 8, 0})
+	step(s, 10)
+
+	if wrapped != 10 {
+		t.Errorf("the wrapping Integrator ran %d times in 10 ticks", wrapped)
+	}
+	if tr, _ := s.C.Transform.Get(body); tr.Position.Y() >= 8 {
+		t.Errorf("the body is at y=%v after 10 ticks; the wrapped default did not integrate it", tr.Position.Y())
+	}
+}
+
 // TestNilIntegratorFallsBackToIntegrateBodies builds a Scene the way NewScene
 // itself does NOT — a bare struct literal, standing in for a game type that
 // embeds Scene by value or otherwise ends up with one that never went through
