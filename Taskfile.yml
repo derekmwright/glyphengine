@@ -242,6 +242,16 @@ tasks:
         # would surface here and nowhere else.
         check 09-water -alien -time 0.35
         check 09-water -alien -time 0.0
+        # The light shafts, which need the sun actually in frame -- and no
+        # stock run of any example points at it, so every check above ran with
+        # the shaft strength faded to zero and the pipeline unbound. The pass
+        # binds the scene copy at set 0 and draws inside the WATER render pass
+        # with a pipeline built against it, which is the same render-pass
+        # compatibility trap that caught the blended draws above on frame one.
+        # The second run adds the blended geometry, so the layer sees the shaft
+        # draw and those in the same pass.
+        check 09-water -time 0.72 -yaw 1.771 -pitch -0.185 -pillars
+        check 09-water -time 0.72 -yaw 1.771 -pitch -0.185 -pillars -plume -ghost -marker -submerged
         exit $status
 
   sky:
