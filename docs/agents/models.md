@@ -362,8 +362,10 @@ which makes it the quickest way to see what a file exported from Blender turns
 into. Checked against a real export (Blender 5.0.1, custom properties and
 punctual lights ticked): the extras, the lamp's position and downward aim, its
 cone angles and the two Alt-D duplicates sharing one mesh all arrive as
-authored. Textures are not drawn by this example, and material tiling is not
-read by the loader at all yet (#69).
+authored. `spawnPrimitive` also draws textures now (`MaterialRef.PBR` when
+LoadGLTF built a `Material`, `.Texture` otherwise) and honours tiling -- see
+[`material-maps.md`](material-maps.md#khr_texture_transform-tiling-rotation-offset)
+for `KHR_texture_transform` and sampler wrap modes (issue #69).
 
 ### Placing every instance, not just the first
 
