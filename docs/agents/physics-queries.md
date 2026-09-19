@@ -24,6 +24,7 @@ api:
   - glyphengine.Scene.Integrator
   - glyphengine.QueryBackend
   - glyphengine.Scene.Queries
+  - glyphengine.Scene.BuiltinQueries
   - glyphengine.Engine.PickEntity
   - glyphengine.Engine.ScreenRay
   - glyphengine.ComputeConvexHull
@@ -160,6 +161,34 @@ swap because every internal consumer calls `Scene.Raycast` or
 `Engine.PickEntity`. A game that only implements `Raycaster` and hands it to
 `Camera.ResolveCollision` only affects the camera; `Scene.Queries` is what
 reaches the engine's own physics.
+
+**A replacement must not call `scene.Raycast` or `scene.OverlapAABB`.** With
+`Queries` set those are the replacement, so the call is the backend calling
+itself until the stack runs out. `Scene.BuiltinQueries()` is the engine's
+implementation as a `QueryBackend`, whatever `Queries` is set to, and it is how
+a backend that only wants to change part of the answer delegates the rest —
+the same way a custom `Integrator` calls `IntegrateBodies`:
+
+```go
+type ghostBackend struct {
+	inner glyphengine.QueryBackend // scene.BuiltinQueries()
+	ghost glyphengine.Entity
+}
+
+func (b *ghostBackend) OverlapAABB(box glyphengine.AABB, exclude glyphengine.Entity) []glyphengine.OverlapResult {
+	var kept []glyphengine.OverlapResult
+	for _, r := range b.inner.OverlapAABB(box, exclude) {
+		if r.Entity != b.ghost {
+			kept = append(kept, r)
+		}
+	}
+	return kept
+}
+```
+
+A backend built on it inherits the collision snapshot and needs no freeze of
+its own. `query_builtin_test.go` is that backend, written in the external test
+package so that it has only what a game has.
 
 **A replacement must honour the #57 order contracts** — `OverlapAABB`
 ascending by entity id, `Raycast` breaking exact ties on the lower entity id
@@ -309,6 +338,9 @@ walk produced.
 - **A custom `Integrator` silently stopped physics.** Assigning `nil` does
   not do this — `Tick` falls back to `IntegrateBodies`. Assigning a function
   that does nothing does; that is the only way integration turns off.
+- **The game dies with a stack overflow the first time anything queries the
+  world.** A `Queries` backend is calling `scene.Raycast` or
+  `scene.OverlapAABB`, which is itself. Delegate to `scene.BuiltinQueries()`.
 - **A custom `Queries` backend only affects some of the engine.** It must be
   set on the `Scene` (`scene.Queries = ...`), and passed to
   `Camera.ResolveCollision` as the `*Scene` itself rather than a narrower
