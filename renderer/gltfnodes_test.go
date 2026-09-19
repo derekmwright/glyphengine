@@ -42,11 +42,10 @@ var identQuat = [4]float64{0, 0, 0, 1}
 // something independent to disagree with.
 //
 // It has teeth: swapping resolveWorld's multiplication order (to
-// `nodes[i].Local.Mul4(resolve(p))`) fails the grandchild's World -- the
-// child node carries a rotation, so the two orders diverge -- while leaving
-// Parent untouched; a mistake in the parent-assignment loop (skipping the
-// grandchild's claim in the child's Children list) fails the Parent
-// assertions instead. Both were introduced and reverted to confirm.
+// `nodes[i].Local.Mul4(resolve(p))`) fails both the child's and the
+// grandchild's World -- the child node carries a rotation, so the two orders
+// diverge from there down the chain -- while leaving Parent untouched.
+// Introduced and reverted to confirm.
 func TestExtractNodesWorldTransform(t *testing.T) {
 	doc := &gltf.Document{
 		Nodes: []*gltf.Node{
@@ -215,10 +214,10 @@ func TestExtractNodesOrientationSurvives(t *testing.T) {
 // identity.
 //
 // It has teeth: dropping the .Inv() (using
-// `nodes[mm.Node].World.Mul4(node.World)`) fails the translation-only case --
-// it would add the mesh node's translation to the socket's instead of
-// subtracting it, landing at P+T rather than P-T. Introduced and reverted to
-// confirm.
+// `nodes[mm.Node].World.Mul4(node.World)`) fails both the translation-only
+// case -- it lands at P+T=(12,2,14) rather than P-T=(6,6,0) -- and the
+// rotation/scale case, since neither is inverting anything anymore.
+// Introduced and reverted to confirm.
 func TestNodeInMeshSpace(t *testing.T) {
 	t.Run("translation only: P - T", func(t *testing.T) {
 		nodes := []ModelNode{{World: mgl32.Translate3D(3, -2, 7)}} // mesh node, T
