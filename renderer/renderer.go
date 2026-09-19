@@ -995,13 +995,13 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	// scene exposure, and stops feeding bloom. Antialiasing a panel edge is the
 	// UI shader's job anyway, the way the glyph edge is already the distance
 	// field's.
-	r.msdfPipeline, err = createMSDFPipeline(r.deviceDriver, r.shaders, r.tonemapRenderPass, r.pipelineLayout, r.sc.extent, core1_0.Samples1)
+	r.msdfPipeline, err = createMSDFPipeline(r.deviceDriver, r.shaders, r.tonemapRenderPass, r.pipelineLayout, r.sc.extent, core1_0.Samples1, false)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create MSDF pipeline: %w", err)
 	}
 	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.msdfPipeline, nil) })
 
-	r.uiPipeline, err = createUIPipeline(r.deviceDriver, r.shaders, r.tonemapRenderPass, r.pipelineLayout, r.sc.extent, core1_0.Samples1)
+	r.uiPipeline, err = createUIPipeline(r.deviceDriver, r.shaders, r.tonemapRenderPass, r.pipelineLayout, r.sc.extent, core1_0.Samples1, false)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create UI pipeline: %w", err)
 	}
@@ -1026,13 +1026,13 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 		}
 		r.onInit(func() { r.deviceDriver.DestroyRenderPass(r.uiLayerRenderPass, nil) })
 
-		r.uiLayerUIPipeline, err = createUIPipeline(r.deviceDriver, r.shaders, r.uiLayerRenderPass, r.pipelineLayout, r.sc.extent, core1_0.Samples1)
+		r.uiLayerUIPipeline, err = createUIPipeline(r.deviceDriver, r.shaders, r.uiLayerRenderPass, r.pipelineLayout, r.sc.extent, core1_0.Samples1, true)
 		if err != nil {
 			return nil, fmt.Errorf("renderer: create UI layer panel pipeline: %w", err)
 		}
 		r.onInit(func() { r.deviceDriver.DestroyPipeline(r.uiLayerUIPipeline, nil) })
 
-		r.uiLayerMSDFPipeline, err = createMSDFPipeline(r.deviceDriver, r.shaders, r.uiLayerRenderPass, r.pipelineLayout, r.sc.extent, core1_0.Samples1)
+		r.uiLayerMSDFPipeline, err = createMSDFPipeline(r.deviceDriver, r.shaders, r.uiLayerRenderPass, r.pipelineLayout, r.sc.extent, core1_0.Samples1, true)
 		if err != nil {
 			return nil, fmt.Errorf("renderer: create UI layer text pipeline: %w", err)
 		}

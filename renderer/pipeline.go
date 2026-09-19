@@ -756,7 +756,44 @@ func createSkyPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPa
 
 // createMSDFPipeline creates a pipeline for MSDF text rendering: no depth test,
 // no culling, alpha blending enabled, using msdf.vert + msdf.frag shaders.
-func createMSDFPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
+// overlayBlend is the "over" both screen-space overlay pipelines use, in the two
+// forms the two destinations need.
+//
+// Straight (premultiplied false) is the direct path onto the swapchain: the
+// shader writes an unscaled colour and the blend unit multiplies it by the
+// source alpha. Premultiplied is the UI glow layer: ui.frag and msdf.frag have
+// already scaled by coverage, so the source factor is One and multiplying again
+// would count alpha twice.
+//
+// The ALPHA factors are One / OneMinusSrcAlpha in BOTH, and always were. That is
+// what makes the layer's accumulated alpha a correct "over" rather than a² --
+// the half of premultiplied alpha that was already right here before there was a
+// layer to need it.
+//
+// Getting this pair out of step is not a subtle miscolouring, it is the failure
+// this whole feature is one line away from: with the shader premultiplying and
+// the blend left at SrcAlpha, 13-ui through the layer differed from the direct
+// path on 33745 pixels at a maximum of 55/255, every one of them a glyph edge or
+// a panel border -- a dark fringe on exactly the antialiased edges #15 added.
+// Measured by doing it, before overlayBlend existed. `task uiglow` is the gate.
+func overlayBlend(premultiplied bool) core1_0.PipelineColorBlendAttachmentState {
+	src := core1_0.BlendFactorSrcAlpha
+	if premultiplied {
+		src = core1_0.BlendFactorOne
+	}
+	return core1_0.PipelineColorBlendAttachmentState{
+		ColorWriteMask:      core1_0.ColorComponentRed | core1_0.ColorComponentGreen | core1_0.ColorComponentBlue | core1_0.ColorComponentAlpha,
+		BlendEnabled:        true,
+		SrcColorBlendFactor: src,
+		DstColorBlendFactor: core1_0.BlendFactorOneMinusSrcAlpha,
+		ColorBlendOp:        core1_0.BlendOpAdd,
+		SrcAlphaBlendFactor: core1_0.BlendFactorOne,
+		DstAlphaBlendFactor: core1_0.BlendFactorOneMinusSrcAlpha,
+		AlphaBlendOp:        core1_0.BlendOpAdd,
+	}
+}
+
+func createMSDFPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags, premultiplied bool) (core1_0.Pipeline, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
 		Code: bytesToUint32Slice(sh.MsdfVert),
 	})
@@ -810,16 +847,7 @@ func createMSDFPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderP
 			DepthWriteEnable: false,
 		},
 		ColorBlendState: &core1_0.PipelineColorBlendStateCreateInfo{
-			Attachments: []core1_0.PipelineColorBlendAttachmentState{{
-				ColorWriteMask:      core1_0.ColorComponentRed | core1_0.ColorComponentGreen | core1_0.ColorComponentBlue | core1_0.ColorComponentAlpha,
-				BlendEnabled:        true,
-				SrcColorBlendFactor: core1_0.BlendFactorSrcAlpha,
-				DstColorBlendFactor: core1_0.BlendFactorOneMinusSrcAlpha,
-				ColorBlendOp:        core1_0.BlendOpAdd,
-				SrcAlphaBlendFactor: core1_0.BlendFactorOne,
-				DstAlphaBlendFactor: core1_0.BlendFactorOneMinusSrcAlpha,
-				AlphaBlendOp:        core1_0.BlendOpAdd,
-			}},
+			Attachments: []core1_0.PipelineColorBlendAttachmentState{overlayBlend(premultiplied)},
 		},
 		DynamicState: &core1_0.PipelineDynamicStateCreateInfo{
 			DynamicStates: []core1_0.DynamicState{
@@ -1165,7 +1193,7 @@ func createSkinnedPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, frag
 
 // createUIPipeline creates a pipeline for textured UI panels: no depth test,
 // no culling, alpha blending enabled, using ui.vert + ui.frag shaders.
-func createUIPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
+func createUIPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags, premultiplied bool) (core1_0.Pipeline, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
 		Code: bytesToUint32Slice(sh.UIVert),
 	})
@@ -1219,16 +1247,7 @@ func createUIPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPas
 			DepthWriteEnable: false,
 		},
 		ColorBlendState: &core1_0.PipelineColorBlendStateCreateInfo{
-			Attachments: []core1_0.PipelineColorBlendAttachmentState{{
-				ColorWriteMask:      core1_0.ColorComponentRed | core1_0.ColorComponentGreen | core1_0.ColorComponentBlue | core1_0.ColorComponentAlpha,
-				BlendEnabled:        true,
-				SrcColorBlendFactor: core1_0.BlendFactorSrcAlpha,
-				DstColorBlendFactor: core1_0.BlendFactorOneMinusSrcAlpha,
-				ColorBlendOp:        core1_0.BlendOpAdd,
-				SrcAlphaBlendFactor: core1_0.BlendFactorOne,
-				DstAlphaBlendFactor: core1_0.BlendFactorOneMinusSrcAlpha,
-				AlphaBlendOp:        core1_0.BlendOpAdd,
-			}},
+			Attachments: []core1_0.PipelineColorBlendAttachmentState{overlayBlend(premultiplied)},
 		},
 		DynamicState: &core1_0.PipelineDynamicStateCreateInfo{
 			DynamicStates: []core1_0.DynamicState{
