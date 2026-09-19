@@ -1072,6 +1072,18 @@ tasks:
       # water.frag would still be caught, by the angle rather than the floor.
       #
       # Restored from a copy, not with git checkout.
+      #
+      # The fourth box is the clouds, and it is here because a second break
+      # found the first three blind to them. clouds.frag calls atmSkyPalette
+      # itself, for the march's ambient fill, in a pipeline nothing else reads
+      # from. Handed Earth's six colours while every other caller took the
+      # uniform, sky, fog and water read 122.32, 40.05 and 105.15 -- to the
+      # digit what they read above -- and this gate PASSED over a frame with
+      # 23.3% of its pixels wrong, by up to 22 of 255: Earth-grey cumulus
+      # hanging in a violet sky. With the box, that build reads 4.13 in it
+      # against the shipped build's 24.67 and reports THE PALETTE DID NOT REACH
+      # THE CLOUD. The 4.13 is not noise -- it is the alien dome showing through
+      # a cloud that is not opaque -- which is why this box has its own floor.
       - |
         status=0
         d=.skypalette
@@ -1091,10 +1103,13 @@ tasks:
         # skyline in this pose sits at y 366; sky is clear dome above it, fog is
         # the far shore below it, and water is the first band of lake, where the
         # view is grazing enough that Fresnel is near one and the surface is
-        # mostly the dome reflected.
+        # mostly the dome reflected. Cloud is the shaded underside of the large
+        # cumulus left of centre, where the sun's own light has been
+        # extinguished and the fill is most of what is left.
         go run ../cmd/palettecheck -a $d/alien.png -b $d/earth.png \
           -sky 200,346,200,18 -fog 200,370,200,16 -water 200,408,200,16 \
-          -min 6 -tol 12 || status=1
+          -min 6 -tol 12 \
+          -cloud 600,215,120,35 -cloudmin 12 -cloudtol 20 || status=1
         # A failure here is a picture -- whether the fog stayed Earth-blue or
         # merely moved less is the difference between a missing uniform and a
         # tuning question -- so keep the pair, the way `task lights` does.

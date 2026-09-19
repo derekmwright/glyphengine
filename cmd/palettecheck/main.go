@@ -16,6 +16,20 @@
 //   - water is the lake at a grazing angle, where the Fresnel term is near one
 //     and what the surface shows is the dome reflected.
 //
+// and, optionally, a fourth:
+//
+//   - cloud is the shaded core of a cumulus, where the sun's own light is mostly
+//     extinguished and what is left is the march's ambient fill -- which
+//     clouds.frag takes from the same palette, through its own call.
+//
+// The fourth is there because the first three cannot see it. clouds.frag is a
+// separate caller of atmSkyPalette in a separate pipeline, nothing in the lit
+// family depends on it, and handing it Earth's six colours while everything
+// else took the uniform left sky, fog and water reading exactly what they read
+// on the shipped build -- this check passed -- over a frame in which 23% of the
+// pixels were wrong by up to 22 of 255. It has its own floor and its own angle,
+// for the reasons given on the flags.
+//
 // # Why the direction of the change and not its size
 //
 // The three regions do not carry the palette in the same proportion, and
@@ -83,6 +97,18 @@ func main() {
 	// linear, so two regions moving by different amounts along the same
 	// palette change do not come out exactly parallel after encoding.
 	tol := flag.Float64("tol", 12, "how far each box's movement may differ in direction from the sky's, in degrees")
+
+	// The cloud box needs a higher floor than the others, because a cloud is
+	// not opaque: with the march fed the wrong palette outright, the dome
+	// showing through the box still moves it 4.13. The shipped build moves it
+	// 24.67, so 12 sits a factor of two or more from both. And it needs a wider
+	// angle, because the fill is `mix(zenith, horizon, 0.5)` -- half zenith --
+	// where the sky box is nine tenths horizon; 10.3 degrees apart is what a
+	// correct build reads, and that is the two colours being different colours
+	// rather than the two callers being on different palettes.
+	cloudBox := flag.String("cloud", "", "x,y,w,h of a cumulus's shaded core (optional)")
+	cloudMin := flag.Float64("cloudmin", 12, "the cloud box's floor, in 8-bit steps")
+	cloudTol := flag.Float64("cloudtol", 20, "the cloud box's angle from the sky's movement, in degrees")
 	flag.Parse()
 
 	if *a == "" || *b == "" || *skyBox == "" || *fogBox == "" || *waterBox == "" {
@@ -90,13 +116,18 @@ func main() {
 		os.Exit(2)
 	}
 
-	named := []struct {
-		name string
-		spec string
-	}{
-		{"sky", *skyBox},
-		{"fog", *fogBox},
-		{"water", *waterBox},
+	type region struct {
+		name     string
+		spec     string
+		min, tol float64
+	}
+	named := []region{
+		{"sky", *skyBox, *min, *tol},
+		{"fog", *fogBox, *min, *tol},
+		{"water", *waterBox, *min, *tol},
+	}
+	if *cloudBox != "" {
+		named = append(named, region{"cloud", *cloudBox, *cloudMin, *cloudTol})
 	}
 
 	alien, err := load(*a)
@@ -118,6 +149,7 @@ func main() {
 		name         string
 		before, move [3]float64
 		length       float64
+		min, tol     float64
 	}
 	readings := make([]reading, 0, len(named))
 	for _, n := range named {
@@ -136,7 +168,7 @@ func main() {
 		for i := range move {
 			move[i] = after[i] - before[i]
 		}
-		readings = append(readings, reading{name: n.name, before: before, move: move, length: norm(move)})
+		readings = append(readings, reading{name: n.name, before: before, move: move, length: norm(move), min: n.min, tol: n.tol})
 	}
 
 	for _, r := range readings {
@@ -146,9 +178,9 @@ func main() {
 
 	fail := false
 	for _, r := range readings {
-		if r.length < *min {
+		if r.length < r.min {
 			fmt.Printf("THE PALETTE DID NOT REACH THE %s: it moved %.2f, want at least %.0f\n",
-				strings.ToUpper(r.name), r.length, *min)
+				strings.ToUpper(r.name), r.length, r.min)
 			fail = true
 		}
 	}
@@ -162,9 +194,9 @@ func main() {
 	sky := readings[0]
 	for _, r := range readings[1:] {
 		deg := angle(sky.move, r.move)
-		if deg > *tol {
+		if deg > r.tol {
 			fmt.Printf("THE %s IS ON A DIFFERENT PALETTE FROM THE SKY: %.1f degrees apart, want at most %.0f\n",
-				strings.ToUpper(r.name), deg, *tol)
+				strings.ToUpper(r.name), deg, r.tol)
 			fail = true
 		} else {
 			fmt.Printf("%-5s moved with the sky: %.1f degrees apart\n", r.name, deg)
@@ -173,6 +205,10 @@ func main() {
 
 	if fail {
 		os.Exit(1)
+	}
+	if *cloudBox != "" {
+		fmt.Println("the sky, the fog, the water's reflection and the clouds are on one palette")
+		return
 	}
 	fmt.Println("the sky, the fog and the water's reflection are on one palette")
 }
