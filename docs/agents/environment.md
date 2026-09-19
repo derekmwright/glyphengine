@@ -227,7 +227,10 @@ cascade matrices and the night grade. `sky.frag` and `clouds.frag` read the
 same buffer through binding 1 of the cloud descriptor set — the same buffer,
 not a copy, because a second copy is a second thing to get wrong. `task
 skypalette` is the gate on that, and it fails if the palette reaches the dome
-but not the fog.
+but not the fog, the water or the clouds. The clouds have their own box because
+`clouds.frag` is a separate caller in a separate pipeline: fed the old colours
+on its own, it left the other three boxes reading exactly what a correct build
+reads, over a frame with 23% of its pixels wrong.
 
 The palette works with `Sky` nil as well, because fog does not need a dome to
 fade into a horizon colour. That, and the upgrade argument under [convenience
@@ -302,6 +305,6 @@ the weather.
 - **A custom sky shader gives a violet dome over Earth-blue haze.** The palette
   is shared with `applyFog` and the water's reflection, which the replaced
   shader does not touch. Use `SetSkyPalette` instead of replacing `sky.frag`.
-- **The sky changed colour but the distant hills did not.** Something is
-  reading `atmSkyPalette`'s old constants rather than `shadow.skyPalette`.
-  `task skypalette` is the check for exactly that.
+- **The sky changed colour but the distant hills, or the clouds, did not.**
+  Something is handing `atmSkyPalette` its own six colours rather than
+  `shadow.skyPalette`. `task skypalette` is the check for exactly that.
