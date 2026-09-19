@@ -457,6 +457,12 @@ tasks:
         # the fixed clock does not suppress it, and 08-grass is a mouse-look
         # scene with the cursor locked -- but that is a suspect and not a
         # finding, which is the reason for keeping the evidence.
+        #
+        # Both reports verified by causing them, in one run: with sortDraws'
+        # final tiebreak replaced by `return 0`, eight cases fail and every one
+        # says the camera agrees; with 19-instanced's second run given `-width
+        # 1000`, so that only its projection changed, that case says the camera
+        # differs. The run exits 1 and leaves all thirteen pairs of traces.
         seq=0
         drawseq() {
           set -- $1
