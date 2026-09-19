@@ -508,6 +508,21 @@ geometry-nodes-scatter props landed; and a warm, bloomed pool of light on
 the ground directly under `SpotLamp`. Two renders under the same fixed
 clock are byte-identical (`cmp`), confirmed 2026-09-19.
 
+## Re-export, reload, keep looking at it
+
+The loop this pipeline is for — change the scene in Blender, export, see it —
+no longer needs the game restarted. `Renderer.DestroyModel`
+([`models.md`](models.md#releasing-one)) gives a loaded `Model` back, so a
+game can load the new file, spawn it, and release the old one **in the same
+tick**: the level is replaced without a frame ever being drawn without it, and
+a broken export leaves the old level on screen with an error rather than an
+empty world. Releasing first and loading afterwards is the version that blinks,
+and it is the one to avoid.
+
+`examples/22-level -reload N` is that swap N times over with the file held
+still, which is the part worth gating; `task reload` asserts the frame's draw
+count never moves while it runs.
+
 ## Verified against
 
 | Blender version | Checked | Options RNA-detected | Fixture built | Notes |

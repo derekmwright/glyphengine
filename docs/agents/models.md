@@ -334,6 +334,151 @@ and a skinned primitive decodes to `SkinnedVertex` — see the failure mode
 below). Skipping that would mean a second decode path behind a flag, which is
 the drift this split exists to prevent.
 
+## Releasing one
+
+```go
+r.DestroyModel(model)          // or r.DestroySkinnedModel(skinned)
+```
+
+Every GPU resource `LoadGLTF` created for the model, released exactly once,
+after the frames currently in flight have finished with it. Afterwards every
+`ModelMesh`'s `Mesh`, `Texture` and `Material` is `nil`, so a draw that still
+points at the model fails on a nil pointer in Go rather than inside the driver.
+`Nodes`, `Lights`, `Verts` and `Idx` are untouched — they are CPU data the
+model never owned on the GPU, and a game that keeps using a released level's
+collider geometry is doing something reasonable.
+
+It is idempotent, and a `Model` from `ReadGLTF` — which owns no GPU resources —
+is a no-op rather than a panic.
+
+**Do not walk `Model.Meshes` and destroy what each entry points at.** That is
+the trap this closes. A model SHARES textures and cached materials across its
+primitives: a level with one atlas and twenty primitives has twenty
+`ModelMesh.Texture` fields naming one `Texture`. In the other direction, an
+image the document carries that no material references is uploaded all the
+same, appears on no `ModelMesh`, and a walk leaks it. `DestroyModel` releases
+what the upload recorded creating, not what the slice happens to name.
+
+The double-free half of that is worth knowing precisely, because it is quieter
+than it sounds: `DestroyTexture`, `DestroyMesh` and `DestroyMaterial` each
+carry a `destroyed` flag, so a second free returns before it reaches Vulkan
+and **the validation layer never sees it**. Measured — deliberately recording
+each shared texture twice and running `22-level -reload 20` under the layer
+produced zero messages. Only `renderer/modeldestroy_test.go` catches it.
+
+### Stop drawing it first
+
+Remove the `MeshRef` (and `MaterialRef`) components of every entity spawned
+from the model, or despawn those entities, **before** calling `DestroyModel`.
+
+The failure if you do not is real and the validation layer does report it.
+`DestroyModel` nils the handles on the `Model`, but an entity's `MeshRef` holds
+its own copy of the `*Mesh` pointer and the engine draws from that. Measured by
+removing the despawn from `examples/22-level`'s release path and running it
+under the layer:
+
+```
+VULKAN ERROR [Validation] VUID-vkDestroyBuffer-buffer-00922: vkDestroyBuffer():
+can't be called on VkBuffer 0x…[] that is currently in use by VkCommandBuffer 0x…[].
+VULKAN ERROR [Validation] VUID-vkDestroySampler-sampler-01082: vkDestroySampler():
+sampler can't be called on VkSampler 0x…[] that is currently in use by
+VkDescriptorSet 0x…[].
+```
+
+Thirteen messages in six reload cycles, and a non-zero exit. Without the layer
+the same run is silent and draws whatever the driver left in that memory.
+
+`examples/22-level`'s `releaseLevel` is that order in one place: despawn, then
+`DestroyModel`.
+
+### Reloading a level without a hole in the frame
+
+The obvious shape — release the old model, load the new one — is wrong, and
+wrong in a way no gate here caught: the level is missing for however many
+frames the load takes, and the world blinks. The first version of
+`22-level -reload` did exactly that, passed the validation layer in silence,
+and was caught by someone watching the window.
+
+Load first, swap, release after, all inside one tick:
+
+```go
+newModel, err := r.LoadGLTF(levelFS, name)
+if err != nil {
+    return err // nothing has been given back; the old level is still up
+}
+newEntities := spawnLevel(e, newModel)
+
+for _, ent := range oldEntities {
+    e.Scene.Despawn(ent)
+}
+r.DestroyModel(oldModel)
+```
+
+That also fails safely: a broken re-export returns an error with the old level
+still on screen.
+
+This is the HARDER case for `DestroyModel`, not the easier one. At the moment
+of the swap the frames still in flight reference the old buffers, which is why
+the release is deferred: `DestroyMesh` and `DestroyTexture` free a static
+resource immediately (only a dynamic mesh already went through `DeferDestroy`),
+which is correct at shutdown, where `Renderer.Destroy` has waited for the
+device to go idle, and a use-after-free here. Their behaviour is unchanged for
+every other caller; `DestroyModel` routes its own release through
+`DeferDestroy` instead.
+
+**Do not expect the validation layer to catch a missing deferral.** Measured:
+with `DestroyModel` freeing inline instead of deferring, `22-level -reload 20`
+ran all twenty swaps under the layer with **zero** messages. The layer reports
+a resource freed while the draw list still names it (the stale-`MeshRef` case
+above) and said nothing about one freed while only an already-submitted frame
+still referenced it. What catches that is the resource count, which is why
+`ResourceCounts` exists and why the reload loop asserts the counts do not drop
+in the tick of the swap.
+
+`examples/22-level -reload N` does all of this N times over; `task reload`
+asserts the frame's draw count never moves while it does, and `task validate`
+runs the same loop under the layer.
+
+### Counting what is live
+
+```go
+counts := r.ResourceCounts() // Meshes, Textures, Materials, Deferred
+```
+
+The renderer's own cleanup lists, plus how many destructions are still waiting
+out the frames in flight. It is exported because a check that teardown happened
+cannot otherwise be written from outside the package, and this repo has shipped
+a teardown test that reported zero leaks because teardown never ran.
+
+`Deferred` is not a detail: a count taken immediately after `DestroyModel`
+still includes the model, because those resources are genuinely still alive.
+
+### The limit: descriptor sets are not returned
+
+Measured on Windows 11 with `22-level -reload N -level
+renderer/testdata/blender/level.glb`, a level carrying one texture: **676
+reloads succeed and the 677th fails.**
+
+```
+-reload: reloading the level: load level.glb: load gltf images:
+upload texture 0 (GroundTex): allocate descriptor set: vulkan error: out of pool memory
+```
+
+Every `Texture` and every `Material` allocates a descriptor set from the
+renderer's single pool, and that pool is created without
+`VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT`, so nothing can give a set
+back short of resetting the whole pool. `DestroyModel` releases the image, the
+view, the sampler and the memory; the descriptor set is the one thing it
+cannot.
+
+Nothing else about the model accumulates: across those cycles the mesh, texture
+and material counts return to the identical numbers at the top of every one,
+and a level with no textures (`22-level`'s built-in one) consumes no set at all
+and reloads indefinitely. So this bounds how many TEXTURED models one process
+may load over its lifetime, not how long a reload loop can run. Fixing it means
+the pool flag plus a deferred `vkFreeDescriptorSets`, which changes behaviour
+for every texture in the engine and is deliberately not part of this.
+
 ## Memory
 
 Geometry is retained by default, because the decode allocated it anyway and
