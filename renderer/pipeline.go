@@ -1351,22 +1351,19 @@ func createWaterPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, render
 // createGodRayPipeline creates the light-shaft pipeline: a fullscreen triangle
 // blended additively over the frame.
 //
-// **Nothing draws with it.** The pipeline is created, handed to
-// recordCommandBuffer and then to recordWaterPass, and never bound; no push
-// constant or uniform carries SceneLighting.LightShafts or SunScreenPos either,
-// so godray.frag could not read where the sun is if it did run. The effect is
-// wired up to the point of pipeline creation and stops there. This comment used
-// to say "it runs in the water render pass rather than one of its own", which
-// is where it was *meant* to run and where its render pass says it would.
+// It runs in the water render pass rather than one of its own, which is what
+// the renderPass parameter has to be: godray.frag samples the scene copy that
+// pass makes, and a pass of its own would need a second copy for nothing. See
+// recordLightShafts for where in that pass it goes and why.
 //
-// It is left in place rather than deleted because finishing it is a small
-// change -- one bind, one draw, two floats in the push block -- and because
-// `LightShafts > 0` is still what makes a shafts-and-no-water frame enter the
-// water pass at all. Deleting one without the other changes which frames
-// resolve twice.
+// From 2026-07-29 (b14c350) to 2026-09-19 this pipeline was created, handed to
+// recordCommandBuffer, handed on to recordWaterPass and never bound by
+// anything, and neither LightShafts nor SunScreenPos was packed into any push
+// constant -- so the shader could not have found the sun even if it had run.
+// Nothing noticed for seven weeks, which is why `task shafts` exists.
 //
-// No depth test: the shafts are light in the air between the eye and
-// everything else, so there is nothing for them to be behind.
+// No depth test: the shafts are light in the air between the eye and everything
+// else, so there is nothing for them to be behind.
 func createGodRayPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
 		Code: bytesToUint32Slice(sh.SkyVert),

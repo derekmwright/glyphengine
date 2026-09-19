@@ -129,10 +129,24 @@ func benchName(n int) string {
 // impostor and mesh draw paths were never reached. Fixing the camera (a real
 // reverse-Z perspective looking down +X) changed how many calls the SAME
 // verified-unchanged recording code makes, which is why this moved from
-// 0xfe4146bf2977758c to the value below; it did not move because of anything
+// 0xfe4146bf2977758c to 0xfc9618c8db98fa0f; it did not move because of anything
 // in commands.go, which TestRecordCommandBufferAllocsAreConstant and a manual
 // before/after diff of this constant both still agreed on at the time.
-const goldenStreamHash = Hasher(0xfc9618c8db98fa0f)
+//
+// Recomputed a second time, for #50: the light-shaft draw. godRayPipeline had
+// been built and handed to this recorder since 2026-07-29 and never bound, and
+// recordWaterPass now binds it, pushes the sun's screen position and draws a
+// fullscreen triangle. buildFrame also turns LightShafts on, because a draw the
+// fixture never asks for is a draw this hash cannot pin.
+//
+// SIX driver calls, and nothing else: bind pipeline, set viewport, set scissor,
+// bind descriptor sets, push constants, draw. Verified by flipping only the
+// fixture's LightShafts back to 0 and re-running this test -- 3293 calls and
+// 0xfc9618c8db98fa0f, the old value exactly -- then back to 0.35: 3299 calls
+// and the value below. Nothing else in the stream moved, and in particular the
+// PassShafts timestamps did not, because the fixture's gpuTimer is unsupported
+// and writes none.
+const goldenStreamHash = Hasher(0x08525eb349c579bc)
 
 // TestRecordCommandBufferStreamIsUnchanged is the GPU-free half of "nothing
 // changed": every driver call the recorder makes, folded in order with its

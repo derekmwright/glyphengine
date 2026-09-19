@@ -1457,6 +1457,13 @@ func (e *Engine) renderFrame() {
 	// Project the sun to screen space for the light shafts. It sits at a fixed
 	// distance along its direction, the same place the disc is drawn, so the
 	// shafts radiate from the disc rather than from a point near it.
+	//
+	// What leaves here is the strength the pass will DRAW with, edge fade and
+	// all, not the strength the game set. Zero means the pass cannot put a
+	// pixel on screen, and renderer.recordCommandBuffer reads it that way: a
+	// frame with no water runs the whole water pass -- a full scene copy and a
+	// second render pass -- for the shafts alone, so every case that could not
+	// contribute has to be decided before it gets there.
 	var sunScreen [2]float32
 	shaftStrength := env.LightShafts
 	if shaftStrength > 0 {
@@ -1465,6 +1472,7 @@ func (e *Engine) renderFrame() {
 		if clip.W() > 0 {
 			ndc := mgl32.Vec3{clip.X() / clip.W(), clip.Y() / clip.W(), clip.Z() / clip.W()}
 			sunScreen = [2]float32{ndc.X()*0.5 + 0.5, ndc.Y()*0.5 + 0.5}
+			shaftStrength *= shaftEdgeFade(sunScreen)
 		} else {
 			// Behind the camera: there is nothing on screen to radiate from.
 			shaftStrength = 0
@@ -2089,4 +2097,45 @@ func (e *Engine) handleDebugKeys() {
 		r.SetTonemap(exposure, float32(next), white)
 		log.Printf("debug: tonemap curve %d, %s", next, tonemapCurveNames[next])
 	}
+}
+
+// Light-shaft screen-edge fade. See shaftEdgeFade.
+const (
+	shaftFadeStart = 0.75
+	shaftFadeEnd   = 1.35
+)
+
+// shaftEdgeFade is how much of the requested shaft strength survives the sun's
+// distance from the middle of the frame. 1 at the centre, 0 once the sun is far
+// enough outside the frame that nothing it lit is still on screen.
+//
+// The argument is the sun in UV space; the measure is max(|x-0.5|,|y-0.5|)*2,
+// so 1.0 is the sun exactly on the frame edge and the fade is square rather
+// than round -- the frame is square-cornered, and a round fade would cut the
+// sun off early in the corners where it is still visible.
+//
+// A hard cutoff at the edge makes the shafts vanish in a single frame as the
+// camera turns, which is far more noticeable than their absence, so the fade
+// starts before the sun reaches the edge and finishes after it leaves.
+//
+// It lives here rather than in godray.frag, where it used to: it depends only
+// on the sun, so it is one number per frame rather than one per pixel, and
+// keeping it on this side is what lets the renderer skip the pass. A frame with
+// no water enters the water pass for the shafts alone -- a full scene copy plus
+// a second render pass -- and a faded-out sun is exactly the case where that
+// buys nothing.
+func shaftEdgeFade(sunUV [2]float32) float32 {
+	dx := sunUV[0] - 0.5
+	if dx < 0 {
+		dx = -dx
+	}
+	dy := sunUV[1] - 0.5
+	if dy < 0 {
+		dy = -dy
+	}
+	d := dx
+	if dy > d {
+		d = dy
+	}
+	return 1 - smoothstep(shaftFadeStart, shaftFadeEnd, d*2)
 }

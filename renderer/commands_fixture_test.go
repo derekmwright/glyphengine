@@ -350,6 +350,13 @@ func buildFrame(n int) *frame {
 			DrawSky: true, DrawStars: true, ShadowEnabled: true, CloudSteps: 0,
 			VP: camVP, CameraRight: [3]float32{0, 0, -1}, CameraUp: [3]float32{0, 1, 0},
 			CameraPos: [3]float32{-5, 2, 0},
+			// Light shafts on, with the sun off centre so the fixture exercises
+			// a real sun position rather than the degenerate middle of the
+			// frame. Without this the god-ray draw is never recorded and
+			// TestRecordCommandBufferStreamIsUnchanged cannot see it: the whole
+			// point of pinning the stream is that a draw that stops happening
+			// shows up, and a draw the fixture never asks for cannot.
+			LightShafts: 0.35, SunScreenPos: [2]float32{0.62, 0.71},
 		},
 		split:           blendSplit{}, // inactive: everything records in the main pass
 		fallbackTexture: fakeTexture(h),

@@ -372,10 +372,25 @@ func (env *Environment) State() EnvironmentState {
 	if env.Sky != nil {
 		s.DrawSky = true
 		s.CloudSteps = env.Sky.CloudSteps
-		// Shafts come from the sun disc in the drawn sky, so they need one.
-		if s.SunElevation > 0 {
-			s.LightShafts = env.Sky.LightShafts
-		}
+		// Shafts come from the sun disc in the drawn sky, so they live and die
+		// with it rather than with the horizon.
+		//
+		// This used to be `if s.SunElevation > 0`, which deleted them in a
+		// single frame at the moment they look best. The disc does not go out
+		// at zero elevation -- DrawSun keeps drawing it to -0.15 and
+		// SunDiscColor keeps it at most of its boost the whole way down -- so
+		// the sky the shafts are built from is still in full sunset while they
+		// had already stopped. Measured, `09-water -yaw 1.771 -pitch -0.185
+		// -pillars`: at time 0.745, elevation +0.031, the pass added mean sRGB
+		// luma +1.83 across the frame and peaked at +74; at 0.755, elevation
+		// -0.031, it added exactly nothing. That is a blink, not a sunset.
+		//
+		// The window ends where DrawSun does, so the shafts are gone before
+		// their source stops being drawn. It is deliberately not SunDiscColor's
+		// own (-0.20, -0.02): that one is wider because the disc's COLOUR has
+		// to stay continuous as the cycle wraps past midnight, and a shaft
+		// radiating from a disc nobody is drawing is a different mistake.
+		s.LightShafts = env.Sky.LightShafts * smoothstep(-0.15, -0.02, s.SunElevation)
 		s.DrawStars = env.Sky.Stars && s.StarFade > 0
 		s.StarDensity = env.Sky.StarDensity
 		if s.StarDensity < 0 {

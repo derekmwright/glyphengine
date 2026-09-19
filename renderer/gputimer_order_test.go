@@ -82,7 +82,7 @@ func TestAPassEndIsTimedAsAResolveAndNothingElse(t *testing.T) {
 			t.Errorf("%s brackets %v, want exactly one pass end", p, in)
 		}
 	}
-	for _, p := range []Pass{PassOverlay, PassOverWater, PassWater, PassParticles, PassTranslucent} {
+	for _, p := range []Pass{PassOverlay, PassOverWater, PassWater, PassShafts, PassParticles, PassTranslucent} {
 		for _, ev := range between(t, d.events, p) {
 			if ev == "endpass" {
 				t.Errorf("%s holds a pass end: its number includes a resolve it did not cause", p)
@@ -94,5 +94,53 @@ func TestAPassEndIsTimedAsAResolveAndNothingElse(t *testing.T) {
 	// work do; otherwise "no pass end inside them" would be true of empty ones.
 	if n := len(between(t, d.events, PassOverWater)); n == 0 {
 		t.Error("PassOverWater is empty in this fixture, so the check above proved nothing about it")
+	}
+}
+
+// TestShaftBracketHoldsTheShaftDrawAndOnlyIt pins what PassShafts measures.
+//
+// It exists because the thing it measures spent seven weeks not existing:
+// godRayPipeline was created, threaded through this recorder and never bound,
+// and no test, gate or timing report noticed. A bracket that contains nothing
+// would have read 0.000 ms and looked like a cheap pass rather than like a
+// missing one, so the number alone is not evidence -- what is in the bracket is.
+//
+// Both halves matter. With shafts on it must hold exactly one draw, so that a
+// bind that stops happening fails here. With shafts off it must hold none and
+// still write both timestamps, because a query that is reset and never written
+// makes the whole frame's readback come back NotReady; see recordCommandBuffer.
+//
+// Verified to fail: deleting the recordLightShafts call reports "shafts bracket
+// holds [] draws, want exactly one draw". Verified the other way too: writing
+// the draw unconditionally, ignoring LightShafts, reports the off case holding
+// one.
+func TestShaftBracketHoldsTheShaftDrawAndOnlyIt(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		strength float32
+		want     int
+	}{
+		{"on", 0.35, 1},
+		{"off", 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := buildFrame(61)
+			fx.timer = &gpuTimer{supported: true}
+			fx.lighting.LightShafts = tc.strength
+			d := &timingDriver{fakeDriver: &fakeDriver{}}
+			if err := fx.record(d, 0); err != nil {
+				t.Fatalf("record: %v", err)
+			}
+			in := between(t, d.events, PassShafts)
+			draws := 0
+			for _, ev := range in {
+				if ev == "draw" {
+					draws++
+				}
+			}
+			if draws != tc.want || len(in) != tc.want {
+				t.Errorf("shafts bracket holds %v, want exactly %d draw(s)", in, tc.want)
+			}
+		})
 	}
 }
