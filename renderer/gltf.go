@@ -224,119 +224,120 @@ func openGLTF(fsys fs.FS, name string) (*gltf.Document, fs.FS, error) {
 
 // LoadGLTF reads a glTF or GLB document from fsys and returns a Model with
 // GPU-uploaded meshes and textures.
+//
+// It is ReadGLTF followed by an upload of what the read produced, and
+// deliberately nothing else (issue #75). The decode -- node graph, lights,
+// material factors, alpha, and every primitive's vertices and indices -- has
+// exactly one implementation, shared with the GPU-free ReadGLTF, so a server
+// or a tool reading a level cannot end up with different numbers from the
+// client drawing it.
 func (r *Renderer) LoadGLTF(fsys fs.FS, name string) (*Model, error) {
-	doc, base, err := openGLTF(fsys, name)
+	rd, err := readGLTF(fsys, name)
 	if err != nil {
 		return nil, err
 	}
-
-	// Load all images referenced by the document
-	textures, err := r.loadGLTFImages(doc, base)
-	if err != nil {
-		return nil, fmt.Errorf("load gltf images: %w", err)
+	if err := r.uploadModel(rd); err != nil {
+		return nil, err
 	}
+	warnUntransformedMeshNodes(name, rd.model.Nodes, rd.model.Meshes)
+	return rd.model, nil
+}
 
-	var model Model
+// uploadModel is LoadGLTF's upload half: it walks what the read produced and
+// fills in the GPU handles the read left nil.
+//
+// Images are decoded HERE and nowhere else. That is the whole point of the
+// split: a document's textures are the expensive part of opening it and the
+// part a server, a navmesh baker or a level validator has no use for.
+func (r *Renderer) uploadModel(rd *gltfRead) error {
+	textures, err := r.uploadGLTFImages(rd.doc, rd.base)
+	if err != nil {
+		return fmt.Errorf("load gltf images: %w", err)
+	}
 	materialCache := make(map[int]*Material)
-	uvCache := make(map[int]uvAffine)
-
-	model.Nodes = extractNodes(doc)
-	model.Lights = extractLights(doc, model.Nodes)
-	meshOwners := meshOwnerNodes(doc)
-
-	for meshIdx, mesh := range doc.Meshes {
-		for _, prim := range mesh.Primitives {
-			if prim.Mode != gltf.PrimitiveTriangles {
-				continue
-			}
-
-			matIdx := -1
-			if prim.Material != nil {
-				matIdx = int(*prim.Material)
-			}
-			uv := resolveUVTransform(name, doc, uvCache, matIdx)
-
-			vertices, indices, err := r.extractPrimitive(doc, prim, uv)
+	for i := range rd.model.Meshes {
+		mm := &rd.model.Meshes[i]
+		if err := r.uploadPrimitiveMesh(rd, i); err != nil {
+			return err
+		}
+		if matIdx := rd.prims[i].material; matIdx >= 0 {
+			mm.Texture = r.resolveBaseColorTexture(rd.doc, textures, matIdx)
+			mm.Material, err = r.resolveMaterialMaps(rd.doc, textures, materialCache, matIdx)
 			if err != nil {
-				return nil, fmt.Errorf("extract primitive from mesh %q: %w", mesh.Name, err)
+				return err
 			}
-
-			// Reverse winding order: glTF uses CCW, our engine uses CW
-			for i := 0; i+2 < len(indices); i += 3 {
-				indices[i+1], indices[i+2] = indices[i+2], indices[i+1]
-			}
-
-			// Create GPU mesh — choose uint16 vs uint32 based on vertex count
-			var gpuMesh *Mesh
-			if len(vertices) <= 65535 {
-				idx16 := make([]uint16, len(indices))
-				for i, v := range indices {
-					idx16[i] = uint16(v)
-				}
-				gpuMesh, err = r.CreateIndexedMesh(vertices, idx16)
-			} else {
-				gpuMesh, err = r.CreateIndexedMesh32(vertices, indices)
-			}
-			if err != nil {
-				return nil, fmt.Errorf("create mesh for %q: %w", mesh.Name, err)
-			}
-
-			// Resolve texture and PBR material from glTF
-			var tex *Texture
-			var material *Material
-			baseColor := [3]float32{1, 1, 1}
-			var metallic, roughness float32
-			var doubleSided bool
-			roughness = 0.5
-			if prim.Material != nil {
-				tex = r.resolveBaseColorTexture(doc, textures, *prim.Material)
-				baseColor, metallic, roughness = resolveMaterial(doc, int(*prim.Material))
-				doubleSided = doc.Materials[*prim.Material].DoubleSided
-				material, err = r.resolveMaterialMaps(doc, textures, materialCache, int(*prim.Material))
-				if err != nil {
-					return nil, err
-				}
-			}
-			alphaMode, alphaCutoff, baseAlpha := resolveAlpha(doc, matIdx)
-
-			model.Meshes = append(model.Meshes, ModelMesh{
-				Name:        materialName(doc, prim.Material),
-				Mesh:        gpuMesh,
-				Texture:     tex,
-				Material:    material,
-				DoubleSided: doubleSided,
-				BaseColor:   baseColor,
-				Metallic:    metallic,
-				Roughness:   roughness,
-				AlphaMode:   alphaMode,
-				AlphaCutoff: alphaCutoff,
-				BaseAlpha:   baseAlpha,
-				Verts:       vertices,
-				Idx:         indices,
-				Node:        meshOwners[meshIdx],
-				DocMesh:     meshIdx,
-			})
 		}
 	}
+	return nil
+}
 
-	// LoadGLTF draws every primitive in mesh-local space -- it never applies a
-	// node's transform to the vertices above. That is silently correct only
-	// when the node instancing a mesh has an identity transform. Making the
-	// exception visible costs one log line; finding it by hand cost someone a
-	// hand-measured constant that broke on re-export (issue #46).
-	//
-	// A level file (docs/agents/models.md's "Loading a level" section) is the
-	// case where this fires for EVERY mesh node on purpose: the per-node
-	// pattern places each mesh from Model.Nodes itself, which is the correct
-	// handling and makes this specific warning a false alarm there. cappedNodeList
-	// keeps the line readable regardless of how many nodes that is, and the
-	// message points at the pattern that makes the warning moot rather than
-	// just repeating that something is untransformed.
-	if names := untransformedMeshNodes(model.Nodes, model.Meshes); len(names) > 0 {
+// uploadPrimitiveMesh creates the GPU mesh for one primitive of a read,
+// choosing uint16 or uint32 indices by vertex count the way this loader always
+// has.
+func (r *Renderer) uploadPrimitiveMesh(rd *gltfRead, i int) error {
+	g := rd.prims[i]
+	meshName := rd.doc.Meshes[rd.model.Meshes[i].DocMesh].Name
+
+	var gpuMesh *Mesh
+	var err error
+	if g.skinned != nil {
+		if len(g.skinned) <= 65535 {
+			gpuMesh, err = r.CreateSkinnedIndexedMesh(g.skinned, narrowIndices(g.idx))
+		} else {
+			gpuMesh, err = r.CreateSkinnedIndexedMesh32(g.skinned, g.idx)
+		}
+		if err != nil {
+			return fmt.Errorf("create skinned mesh for %q: %w", meshName, err)
+		}
+	} else {
+		if len(g.verts) <= 65535 {
+			gpuMesh, err = r.CreateIndexedMesh(g.verts, narrowIndices(g.idx))
+		} else {
+			gpuMesh, err = r.CreateIndexedMesh32(g.verts, g.idx)
+		}
+		if err != nil {
+			return fmt.Errorf("create mesh for %q: %w", meshName, err)
+		}
+	}
+	rd.model.Meshes[i].Mesh = gpuMesh
+	return nil
+}
+
+// narrowIndices copies uint32 indices down to uint16 for a mesh small enough
+// to use them.
+func narrowIndices(idx []uint32) []uint16 {
+	out := make([]uint16, len(idx))
+	for i, v := range idx {
+		out[i] = uint16(v)
+	}
+	return out
+}
+
+// warnUntransformedMeshNodes emits the one log line LoadGLTF and
+// LoadGLTFSkinned each print when a mesh's instancing node carries a transform.
+//
+// This loader draws every primitive in mesh-local space -- it never applies a
+// node's transform to the vertices it decoded. That is silently correct only
+// when the node instancing a mesh has an identity transform. Making the
+// exception visible costs one log line; finding it by hand cost someone a
+// hand-measured constant that broke on re-export (issue #46).
+//
+// A level file (docs/agents/models.md's "Loading a level" section) is the
+// case where this fires for EVERY mesh node on purpose: the per-node
+// pattern places each mesh from Model.Nodes itself, which is the correct
+// handling and makes this specific warning a false alarm there. cappedNodeList
+// keeps the line readable regardless of how many nodes that is, and the
+// message points at the pattern that makes the warning moot rather than
+// just repeating that something is untransformed.
+//
+// It belongs to the UPLOAD half, not the read: it is a statement about how the
+// geometry is about to be DRAWN. ReadGLTF's callers -- a server, a navmesh
+// baker, a level validator -- place geometry themselves from Model.Nodes and
+// would be reading a warning about a decision they never made.
+func warnUntransformedMeshNodes(name string, nodes []ModelNode, meshes []ModelMesh) {
+	if names := untransformedMeshNodes(nodes, meshes); len(names) > 0 {
 		log.Printf("gltf %q: static geometry drawn without its node transform -- node(s) %s carry a transform LoadGLTF does not apply to their mesh's vertices; if this is a level file, place these with Model.Nodes per-node (see docs/agents/models.md#loading-a-level) rather than treating this as an error", name, cappedNodeList(names, untransformedNodeListCap))
 	}
-
-	return &model, nil
 }
 
 // extractPrimitive reads vertex attributes and indices from a glTF
@@ -353,7 +354,12 @@ func (r *Renderer) LoadGLTF(fsys fs.FS, name string) (*Model, error) {
 // confirmed by reading modeler/read.go rather than assumed, per the issue's
 // instruction to verify this claim before relying on it. Each primitive's uvs
 // here is therefore its own copy, never aliased with a sibling primitive's.
-func (r *Renderer) extractPrimitive(doc *gltf.Document, prim *gltf.Primitive, uv uvAffine) ([]Vertex, []uint32, error) {
+//
+// A free function rather than a method: it never touched the *Renderer it used
+// to hang off, which is exactly the shape issue #75 was about -- a pure decode
+// reachable only through the GPU path. Tests used to call it on a nil receiver
+// to say so; now they just call it.
+func extractPrimitive(doc *gltf.Document, prim *gltf.Primitive, uv uvAffine) ([]Vertex, []uint32, error) {
 	// Positions (required)
 	posIdx, ok := prim.Attributes[gltf.POSITION]
 	if !ok {
@@ -469,13 +475,19 @@ func dataImageIndices(doc *gltf.Document) map[int]bool {
 	return data
 }
 
-// loadGLTFImages decodes all images in the document and uploads them as GPU textures.
-// Returns a map from image index to Texture.
-func (r *Renderer) loadGLTFImages(doc *gltf.Document, base fs.FS) (map[int]*Texture, error) {
-	textures := make(map[int]*Texture)
-	dataImages := dataImageIndices(doc)
-	wrapModes, wrapConflicts := imageWrapModes(doc)
-
+// decodeGLTFImages reads and decodes every image the document carries, keyed
+// by image index.
+//
+// Split out from the upload (issue #75) so the expensive half of opening a
+// glTF -- reading a 4K PNG off disk and turning it into pixels -- is a step
+// LoadGLTF takes and ReadGLTF does not. It is also the step that FAILS on a
+// document with corrupt image bytes, which is how TestReadGLTFDoesNotDecodeImages
+// can prove the read skips it without a device: the read succeeds on bytes
+// this rejects.
+//
+// A pure function of the document and its directory: no Renderer, no GPU.
+func decodeGLTFImages(doc *gltf.Document, base fs.FS) (map[int]*decodedImage, error) {
+	decoded := make(map[int]*decodedImage)
 	for i, img := range doc.Images {
 		var imgBytes []byte
 
@@ -502,9 +514,34 @@ func (r *Renderer) loadGLTFImages(doc *gltf.Document, base fs.FS) (map[int]*Text
 			continue
 		}
 
-		decoded, err := decodeImage(imgBytes)
+		d, err := decodeImage(imgBytes)
 		if err != nil {
 			return nil, fmt.Errorf("decode image %d (%s): %w", i, img.Name, err)
+		}
+		decoded[i] = d
+	}
+	return decoded, nil
+}
+
+// uploadGLTFImages decodes all images in the document and uploads them as GPU
+// textures. Returns a map from image index to Texture.
+func (r *Renderer) uploadGLTFImages(doc *gltf.Document, base fs.FS) (map[int]*Texture, error) {
+	decoded, err := decodeGLTFImages(doc, base)
+	if err != nil {
+		return nil, err
+	}
+
+	textures := make(map[int]*Texture)
+	dataImages := dataImageIndices(doc)
+	wrapModes, wrapConflicts := imageWrapModes(doc)
+
+	// doc.Images order, not map order: an upload failure names an image index,
+	// and the textures created before it have to be the same set on every run
+	// for that to mean anything.
+	for i, img := range doc.Images {
+		d, ok := decoded[i]
+		if !ok {
+			continue
 		}
 
 		wrap, ok := wrapModes[i]
@@ -520,8 +557,7 @@ func (r *Renderer) loadGLTFImages(doc *gltf.Document, base fs.FS) (map[int]*Text
 		// public constructor: both hardcode repeat addressing, and a glTF
 		// image's wrap mode is per-Texture (image+sampler pair) data this
 		// loader now has to honour instead (issue #69).
-		var tex *Texture
-		tex, err = r.createTexture(decoded.pixels, decoded.width, decoded.height, textureOptions{
+		tex, err := r.createTexture(d.pixels, d.width, d.height, textureOptions{
 			srgb:     !dataImages[i],
 			filter:   core1_0.FilterLinear,
 			addressU: wrap.u,
@@ -569,11 +605,16 @@ func decodeImage(data []byte) (*decodedImage, error) {
 func resolveMaterial(doc *gltf.Document, materialIdx int) (baseColor [3]float32, metallic, roughness float32) {
 	baseColor = [3]float32{1, 1, 1}
 	roughness = 0.5
-	if materialIdx >= len(doc.Materials) {
+	// materialIdx < 0 means "no material at all", the same thing resolveAlpha
+	// and resolveDoubleSided answer with glTF's defaults for. It reaches here
+	// now that one decode path serves both loaders (issue #75); before, every
+	// caller checked prim.Material != nil first and a negative index would
+	// have indexed out of bounds.
+	if materialIdx < 0 || materialIdx >= len(doc.Materials) {
 		return
 	}
 	mat := doc.Materials[materialIdx]
-	if mat.PBRMetallicRoughness == nil {
+	if mat == nil || mat.PBRMetallicRoughness == nil {
 		return
 	}
 	pbr := mat.PBRMetallicRoughness
@@ -673,11 +714,11 @@ func (r *Renderer) resolveMaterialMaps(doc *gltf.Document, textures map[int]*Tex
 
 // resolveBaseColorTexture finds the base color texture for a material, if any.
 func (r *Renderer) resolveBaseColorTexture(doc *gltf.Document, textures map[int]*Texture, materialIdx int) *Texture {
-	if materialIdx >= len(doc.Materials) {
+	if materialIdx < 0 || materialIdx >= len(doc.Materials) {
 		return nil
 	}
 	mat := doc.Materials[materialIdx]
-	if mat.PBRMetallicRoughness == nil {
+	if mat == nil || mat.PBRMetallicRoughness == nil {
 		return nil
 	}
 	pbr := mat.PBRMetallicRoughness
@@ -697,221 +738,72 @@ func (r *Renderer) resolveBaseColorTexture(doc *gltf.Document, textures map[int]
 
 // LoadGLTFSkinned reads a glTF or GLB document from fsys with its skin and
 // animation data.
+//
+// Like LoadGLTF, this is a read followed by an upload of what the read
+// produced (issue #75): ReadGLTFSkinned decodes the skeleton, the animations,
+// the armature root transform and every primitive, and the step below only
+// turns that into GPU resources.
 func (r *Renderer) LoadGLTFSkinned(fsys fs.FS, name string) (*SkinnedModel, error) {
-	doc, base, err := openGLTF(fsys, name)
+	rd, err := readGLTFSkinned(fsys, name)
 	if err != nil {
 		return nil, err
 	}
-
-	textures, err := r.loadGLTFImages(doc, base)
-	if err != nil {
-		return nil, fmt.Errorf("load gltf images: %w", err)
-	}
-
-	if len(doc.Skins) == 0 {
-		return nil, fmt.Errorf("gltf has no skins")
-	}
-
-	skeleton, err := buildSkeleton(doc, doc.Skins[0])
-	if err != nil {
-		return nil, fmt.Errorf("build skeleton: %w", err)
-	}
-
-	animations, err := loadAnimations(doc, skeleton)
-	if err != nil {
-		return nil, fmt.Errorf("load animations: %w", err)
-	}
-
-	var model Model
-	loadedMeshes := make(map[int]bool) // track which doc.Meshes indices we've loaded
-	uvCache := make(map[int]uvAffine)  // shared across both passes below, keyed by materialIdx
-
-	// Nodes are filled the same way LoadGLTF fills them (same pure function),
-	// so a socket works identically on a skinned model's non-animated
-	// attachment points. This is NOT a way to attach to an animated joint:
-	// World below is the authored bind-pose transform, not the joint's
-	// current pose during playback -- see the Skeleton/Joint types for that.
-	model.Nodes = extractNodes(doc)
-	// Lights are filled the same pure function as LoadGLTF, cheap because it
-	// only reads doc and the nodes just extracted above -- there is no
-	// skinning-specific reason a level's lamp posts would carry a skin, so
-	// there is nothing here for this to interact with.
-	model.Lights = extractLights(doc, model.Nodes)
-	meshOwners := meshOwnerNodes(doc)
-
-	// Pass 1: Load skinned meshes from nodes with a Skin reference.
-	for _, node := range doc.Nodes {
-		if node.Skin == nil || node.Mesh == nil {
-			continue
-		}
-		meshIdx := *node.Mesh
-		loadedMeshes[meshIdx] = true
-		mesh := doc.Meshes[meshIdx]
-		for _, prim := range mesh.Primitives {
-			if prim.Mode != gltf.PrimitiveTriangles {
-				continue
-			}
-
-			matIdx := -1
-			if prim.Material != nil {
-				matIdx = int(*prim.Material)
-			}
-			uv := resolveUVTransform(name, doc, uvCache, matIdx)
-
-			vertices, indices, err := extractSkinnedPrimitive(doc, prim, uv)
-			if err != nil {
-				return nil, fmt.Errorf("extract skinned primitive from mesh %q: %w", mesh.Name, err)
-			}
-
-			for i := 0; i+2 < len(indices); i += 3 {
-				indices[i+1], indices[i+2] = indices[i+2], indices[i+1]
-			}
-
-			var gpuMesh *Mesh
-			if len(vertices) <= 65535 {
-				idx16 := make([]uint16, len(indices))
-				for i, v := range indices {
-					idx16[i] = uint16(v)
-				}
-				gpuMesh, err = r.CreateSkinnedIndexedMesh(vertices, idx16)
-			} else {
-				gpuMesh, err = r.CreateSkinnedIndexedMesh32(vertices, indices)
-			}
-			if err != nil {
-				return nil, fmt.Errorf("create skinned mesh for %q: %w", mesh.Name, err)
-			}
-
-			var tex *Texture
-			baseColor := [3]float32{1, 1, 1}
-			var metallic, roughness float32
-			roughness = 0.5
-			if prim.Material != nil {
-				tex = r.resolveBaseColorTexture(doc, textures, *prim.Material)
-				baseColor, metallic, roughness = resolveMaterial(doc, int(*prim.Material))
-			}
-			alphaMode, alphaCutoff, baseAlpha := resolveAlpha(doc, matIdx)
-
-			// Skinned primitives carry the name but not Verts: they decode to
-			// SkinnedVertex, which is a different layout, so there is nothing
-			// to put in a []Vertex. Model.Bounds and CombineModel therefore
-			// report "cannot answer" for a purely skinned model rather than
-			// answering from an empty set.
-			model.Meshes = append(model.Meshes, ModelMesh{
-				Name:        materialName(doc, prim.Material),
-				Mesh:        gpuMesh,
-				Texture:     tex,
-				Skinned:     true,
-				BaseColor:   baseColor,
-				Metallic:    metallic,
-				Roughness:   roughness,
-				AlphaMode:   alphaMode,
-				AlphaCutoff: alphaCutoff,
-				BaseAlpha:   baseAlpha,
-				Node:        meshOwners[meshIdx],
-				DocMesh:     meshIdx,
-			})
-		}
-	}
-
-	// Pass 2: Load non-skinned meshes from nodes without a Skin reference.
-	staticStart := len(model.Meshes)
-	for _, node := range doc.Nodes {
-		if node.Mesh == nil || node.Skin != nil {
-			continue
-		}
-		meshIdx := *node.Mesh
-		if loadedMeshes[meshIdx] {
-			continue
-		}
-		loadedMeshes[meshIdx] = true
-		mesh := doc.Meshes[meshIdx]
-		for _, prim := range mesh.Primitives {
-			if prim.Mode != gltf.PrimitiveTriangles {
-				continue
-			}
-
-			matIdx := -1
-			if prim.Material != nil {
-				matIdx = int(*prim.Material)
-			}
-			uv := resolveUVTransform(name, doc, uvCache, matIdx)
-
-			vertices, indices, err := r.extractPrimitive(doc, prim, uv)
-			if err != nil {
-				return nil, fmt.Errorf("extract static primitive from mesh %q: %w", mesh.Name, err)
-			}
-
-			for i := 0; i+2 < len(indices); i += 3 {
-				indices[i+1], indices[i+2] = indices[i+2], indices[i+1]
-			}
-
-			var gpuMesh *Mesh
-			if len(vertices) <= 65535 {
-				idx16 := make([]uint16, len(indices))
-				for i, v := range indices {
-					idx16[i] = uint16(v)
-				}
-				gpuMesh, err = r.CreateIndexedMesh(vertices, idx16)
-			} else {
-				gpuMesh, err = r.CreateIndexedMesh32(vertices, indices)
-			}
-			if err != nil {
-				return nil, fmt.Errorf("create static mesh for %q: %w", mesh.Name, err)
-			}
-
-			var tex *Texture
-			baseColor := [3]float32{1, 1, 1}
-			var metallic, roughness float32
-			roughness = 0.5
-			if prim.Material != nil {
-				tex = r.resolveBaseColorTexture(doc, textures, *prim.Material)
-				baseColor, metallic, roughness = resolveMaterial(doc, int(*prim.Material))
-			}
-			alphaMode, alphaCutoff, baseAlpha := resolveAlpha(doc, matIdx)
-
-			model.Meshes = append(model.Meshes, ModelMesh{
-				Name:        materialName(doc, prim.Material),
-				Mesh:        gpuMesh,
-				Texture:     tex,
-				Skinned:     false,
-				BaseColor:   baseColor,
-				Metallic:    metallic,
-				Roughness:   roughness,
-				AlphaMode:   alphaMode,
-				AlphaCutoff: alphaCutoff,
-				BaseAlpha:   baseAlpha,
-				Verts:       vertices,
-				Idx:         indices,
-				Node:        meshOwners[meshIdx],
-				DocMesh:     meshIdx,
-			})
-		}
+	if err := r.uploadSkinnedModel(rd); err != nil {
+		return nil, err
 	}
 
 	// Pass 2's static primitives go through the same extractPrimitive as
 	// LoadGLTF and are just as silently missing their node's transform (see
 	// the identical check there). Skinned primitives are excluded: their
-	// placement goes through the skeleton/RootTransform, not this trap. See
-	// the LoadGLTF version of this log line for why it is capped and what it
-	// points at.
-	if names := untransformedMeshNodes(model.Nodes, model.Meshes[staticStart:]); len(names) > 0 {
-		log.Printf("gltf %q: static geometry drawn without its node transform -- node(s) %s carry a transform this loader does not apply to their mesh's vertices; if this is a level file, place these with Model.Nodes per-node (see docs/agents/models.md#loading-a-level) rather than treating this as an error", name, cappedNodeList(names, untransformedNodeListCap))
-	}
-
-	// Compute root transform from the parent chain of the first skinned mesh
-	// node, collecting transforms from nodes above the joint hierarchy (e.g.
-	// an Armature node with scale 0.01 and a Z-up to Y-up rotation).
-	rootTransform := computeArmatureRootTransform(doc, skeleton)
+	// placement goes through the skeleton/RootTransform, not this trap.
+	warnUntransformedMeshNodes(name, rd.model.Nodes, staticMeshes(rd.model.Meshes))
 
 	log.Printf("Loaded skinned model: %d meshes, %d joints, %d animations",
-		len(model.Meshes), len(skeleton.Joints), len(animations))
+		len(rd.model.Meshes), len(rd.skinned.Skeleton.Joints), len(rd.skinned.Animations))
 
-	return &SkinnedModel{
-		Model:         model,
-		Skeleton:      skeleton,
-		Animations:    animations,
-		RootTransform: rootTransform,
-	}, nil
+	return rd.skinned, nil
+}
+
+// staticMeshes is the non-skinned tail of a skinned read's Model.Meshes.
+//
+// readGLTFSkinned appends every skinned primitive before every static one, so
+// this is the slice the untransformed-node check is allowed to look at -- it
+// used to be written as model.Meshes[staticStart:] inside the loader, which
+// said the same thing while depending on a local variable set two loops
+// earlier. Filtering on Skinned says it in terms of the data.
+func staticMeshes(meshes []ModelMesh) []ModelMesh {
+	for i := range meshes {
+		if !meshes[i].Skinned {
+			return meshes[i:]
+		}
+	}
+	return nil
+}
+
+// uploadSkinnedModel is LoadGLTFSkinned's upload half.
+//
+// It differs from uploadModel in exactly one place, on purpose: it does not
+// call resolveMaterialMaps, so ModelMesh.Material is nil on everything a
+// skinned load returns. That is what this loader has always done -- the
+// skinned pipelines take a plain base-colour Texture, and 06-skinned's
+// character reaches the skinned MATERIAL pipeline through a Material the
+// example builds itself. Folding the two loops together would start
+// allocating descriptor sets for skinned models that nothing binds.
+func (r *Renderer) uploadSkinnedModel(rd *gltfRead) error {
+	textures, err := r.uploadGLTFImages(rd.doc, rd.base)
+	if err != nil {
+		return fmt.Errorf("load gltf images: %w", err)
+	}
+	for i := range rd.model.Meshes {
+		mm := &rd.model.Meshes[i]
+		if err := r.uploadPrimitiveMesh(rd, i); err != nil {
+			return err
+		}
+		if matIdx := rd.prims[i].material; matIdx >= 0 {
+			mm.Texture = r.resolveBaseColorTexture(rd.doc, textures, matIdx)
+		}
+	}
+	return nil
 }
 
 // extractSkinnedPrimitive is extractPrimitive's skinned counterpart: a

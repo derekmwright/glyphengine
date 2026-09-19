@@ -30,6 +30,9 @@ api:
   - renderer.Model.LightWorldPosDir
   - renderer.Renderer.CombineModel
   - renderer.Renderer.LoadGLTF
+  - renderer.Renderer.LoadGLTFSkinned
+  - renderer.ReadGLTF
+  - renderer.ReadGLTFSkinned
 example: examples/08-grass
 run: task example:08-grass
 requires:
@@ -274,6 +277,59 @@ has always drawn in. Picking one primitive's node transform to apply to the
 merged whole would privilege that primitive over its siblings for no
 defensible reason.
 
+## Reading a model with no GPU
+
+`ReadGLTF` returns the same `*Model` `LoadGLTF` does, with every GPU handle
+left nil and no device involved:
+
+```go
+model, err := renderer.ReadGLTF(os.DirFS("levels"), "town.glb")
+```
+
+`LoadGLTF` **is** this read followed by an upload of what it produced, so the
+two cannot drift: there is one decode, and the GPU path walks its output.
+
+This exists for the callers that need a level's *data* and not its pixels: a
+dedicated server that wants the same colliders and spawn points its clients
+have, from the same file; a tool (a navmesh baker, a level validator that
+fails CI on a sheared or untagged node); and a game's own level-loading tests,
+which is how `TestLevelGLTFToSceneCollidersWithoutDevice` in the root package
+takes `renderer/testdata/blender/level.glb` all the way to `Scene.Raycast`
+with no Vulkan anywhere.
+
+**What a read `Model` carries:**
+
+| | |
+|---|---|
+| `Nodes` | the whole scene graph, including `Extras` |
+| `Lights` | every `KHR_lights_punctual` light |
+| `Meshes[i].Verts` / `.Idx` | the decoded geometry, byte for byte what `LoadGLTF` retains — UVs with `KHR_texture_transform` already baked, winding already reversed |
+| `Meshes[i]` factors | `Name`, `BaseColor`, `Metallic`, `Roughness`, `DoubleSided`, `AlphaMode`, `AlphaCutoff`, `BaseAlpha`, `Node`, `DocMesh` |
+
+**What it does not:** `Mesh`, `Texture` and `Material` are nil.
+
+**It does not decode images.** Not the pixels, and not the bytes — an external
+image file that is missing, or present and corrupt, does not stop a read. A
+server does not want to spend a 4K PNG decode learning where the doors are,
+and a level handed to one without its textures is the normal case rather than
+a broken one. `renderer/gltfread_test.go` proves this rather than asserting
+it: the same in-memory document reads clean and fails the decode step
+`LoadGLTF` takes on it.
+
+Every `Model` method that is pure arithmetic works on a read model —
+`Bounds`, `Node`, `NodeInMeshSpace`, `NodeMeshes`, `LightWorldPosDir`,
+`ReleaseGeometry` — and they are walked on one by test rather than by
+inspection. `Renderer.CombineModel` is the exception and always will be: it
+uploads.
+
+`ReadGLTFSkinned` is the same door for a skinned file, returning the
+`Skeleton`, the `AnimationClip`s and the armature `RootTransform` alongside
+the `Model`. One honest cost: it still decodes each skinned primitive's
+vertices even though it cannot return them (`ModelMesh.Verts` is `[]Vertex`
+and a skinned primitive decodes to `SkinnedVertex` — see the failure mode
+below). Skipping that would mean a second decode path behind a flag, which is
+the drift this split exists to prevent.
+
 ## Memory
 
 Geometry is retained by default, because the decode allocated it anyway and
@@ -295,7 +351,12 @@ joint indices and weights, so there is nothing to put in a `[]Vertex`.
 `LoadGLTFSkinned` with a skin, and a purely skinned model answers `Bounds` with
 `ok == false` and cannot be combined.
 
-`Name` is set regardless, so identifying a skinned primitive works.
+`Name` is set regardless, so identifying a skinned primitive works, and so is
+`DoubleSided` — which `LoadGLTFSkinned` used to drop and now reports, since
+both loaders share one decode (issue #75). Nothing in the engine acts on it
+for a skinned mesh, and no example's render moved: the only reader of
+`ModelMesh.DoubleSided` is `examples/22-level`, which loads through
+`LoadGLTF`.
 
 Verified against `examples/06-skinned/assets/character.glb`: two skinned
 primitives, both `Name == "colormap"`, both with no retained vertices, and
@@ -533,6 +594,13 @@ against glTF documents built in memory rather than against `08-grass` or
 another bundled asset — this needs no device either, since it is all
 arithmetic over `*gltf.Document` and `Model.Nodes`. See
 `renderer/gltfnodes_test.go` and `renderer/gltflights_test.go`.
+
+`renderer/gltfread_test.go` pins the decode itself: a SHA-256 of every
+primitive's upload bytes (`Verts` then `Idx`) for both committed level
+fixtures, captured on the commit *before* `LoadGLTF` was split into a read and
+an upload. That is the only check in the suite that would notice the split
+quietly moving a vertex — everything else would still load, still draw and
+still pass.
 
 One more test parses the actual bytes of the committed
 `examples/22-level/assets/level.glb` and runs the same extractors over it,
