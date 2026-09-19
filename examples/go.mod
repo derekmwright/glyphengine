@@ -5,6 +5,7 @@ go 1.26.2
 require (
 	github.com/derekmwright/glyphengine v0.0.0
 	github.com/go-gl/mathgl v1.2.0
+	github.com/qmuntal/gltf v0.28.0
 )
 
 // The examples are never published, so this replace is safe and keeps them
@@ -20,7 +21,6 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/markus-wa/quickhull-go/v2 v2.2.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
-	github.com/qmuntal/gltf v0.28.0 // indirect
 	github.com/vkngwrapper/core/v3 v3.1.2-0.20260223161040-227274a7d9ae // indirect
 	github.com/vkngwrapper/extensions/v3 v3.3.0 // indirect
 	golang.org/x/image v0.44.0 // indirect
