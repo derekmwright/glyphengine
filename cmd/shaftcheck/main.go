@@ -29,6 +29,24 @@
 // passes that floor and fails on the ratio, because a wash lands on both boxes
 // equally. Neither failure can be reached by making the scene brighter.
 //
+// A third region, optional, closes the hole those two leave:
+//
+//   - near is ground a few metres from the eye, well away from the sun on
+//     screen, which light in the air between the eye and a distant ridge has no
+//     business reaching.
+//
+// It is here because the ratio turned out not to be the wash detector it was
+// described as. That claim was proved on a constructed file -- the off frame
+// plus a flat +30 -- and a real wash is not flat. Rendered for real, with the
+// brightness window opened to admit everything, the decay at 1 and the lobe
+// fifty screens wide (`-shaftlow 0 -shafthigh 0.0001 -shaftdecay 1 -shaftradius
+// 50`), the frame is the dirty lens this effect is always one constant away
+// from: pale pillars, the whole hillside hazed. And it PASSED, gap +83.0 over
+// streak +33.7, ratio 2.47 against a floor of 2 -- because a radial smear of
+// the image still carries the image's occluders in it. What that frame cannot
+// hide is the foreground: +24.3 there, against +0.2 for the working build and
+// +1.3 with the lobe widened to 1.3. So the ceiling is on that.
+//
 // The ratio is deliberately not "shadow must be zero". The shadow box is
 // terrain that genuinely receives some light: its own line to the sun leaves
 // the occluder before it reaches the disc, and it sits under the same lobe.
@@ -52,6 +70,8 @@ func main() {
 	shadowArg := flag.String("shadow", "", "x,y,w,h of ground in an occluder's streak")
 	minGain := flag.Float64("min", 12, "the gap must gain at least this much mean luma (0-255)")
 	minRatio := flag.Float64("ratio", 2, "gap gain as a multiple of shadow gain")
+	nearArg := flag.String("near", "", "x,y,w,h of ground close to the eye and away from the sun (optional)")
+	nearMax := flag.Float64("nearmax", 4, "the near ground may gain at most this much mean luma")
 	flag.Parse()
 
 	if *a == "" || *b == "" || *gapArg == "" || *shadowArg == "" {
@@ -84,6 +104,18 @@ func main() {
 		fmt.Fprintf(os.Stderr, "shaftcheck: captures differ in size: %v vs %v\n",
 			withShafts.Bounds(), without.Bounds())
 		os.Exit(2)
+	}
+	var near image.Rectangle
+	if *nearArg != "" {
+		near, err = parseBox(*nearArg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "shaftcheck: -near: %v\n", err)
+			os.Exit(2)
+		}
+		if !near.In(withShafts.Bounds()) {
+			fmt.Fprintf(os.Stderr, "shaftcheck: region %v is outside the capture %v\n", near, withShafts.Bounds())
+			os.Exit(2)
+		}
 	}
 	for _, r := range []image.Rectangle{gap, shadow} {
 		if !r.In(withShafts.Bounds()) {
@@ -122,6 +154,17 @@ func main() {
 			fmt.Printf("  FAIL: the streak is %.0f%% as bright as the gap -- this is a wash, not shafts.\n", 100/ratio)
 			fmt.Printf("  bright()'s threshold in godray.frag is what makes an occluder occlude; a\n")
 			fmt.Printf("  window that admits plain sky smears the whole frame instead\n")
+			status = 1
+		}
+	}
+
+	if *nearArg != "" {
+		nearGain, nearBase := gain(withShafts, without, near)
+		fmt.Printf("near ground     %v: +%.1f mean luma (background %.1f), ceiling %.1f\n", near, nearGain, nearBase, *nearMax)
+		if nearGain > *nearMax {
+			fmt.Printf("  FAIL: ground metres from the eye gained %.1f -- this is haze on the lens, not light in\n", nearGain)
+			fmt.Printf("  the air. The pass has no depth; the lobe (LightShaftShape.Radius) and the brightness\n")
+			fmt.Printf("  window (Threshold) are all that keep it off the foreground, and one of them has gone\n")
 			status = 1
 		}
 	}

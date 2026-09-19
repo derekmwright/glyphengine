@@ -994,8 +994,15 @@ tasks:
             exit 1
           fi
         done
+        # -near is the foreground hillside, and it is the arm that catches the
+        # failure this effect is always one constant away from. A real dirty-lens
+        # render -- no brightness window, no decay, no lobe -- passes the two
+        # boxes above it, ratio 2.47, because a smear of the image still has the
+        # image's pillars in it; it puts +24.3 on this box, where the shipped
+        # shape puts +0.2 and a lobe widened to 1.3 puts +1.3. See cmd/shaftcheck.
         go run ../cmd/shaftcheck -a $d/on.png -b $d/off.png \
-          -gap 739,440,80,80 -shadow 459,440,80,80 -min 12 -ratio 2.0 || status=1
+          -gap 739,440,80,80 -shadow 459,440,80,80 -min 12 -ratio 2.0 \
+          -near 50,600,300,100 -nearmax 4 || status=1
         if diff -q $d/gone-on.png $d/gone-off.png >/dev/null 2>&1; then
           echo "sun off screen: on and off are byte identical"
         else
