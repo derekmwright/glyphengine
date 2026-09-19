@@ -210,3 +210,44 @@ func nodeInMeshSpace(nodes []ModelNode, mm ModelMesh, node ModelNode) mgl32.Mat4
 	}
 	return nodes[mm.Node].World.Inv().Mul4(node.World)
 }
+
+// NodeMeshes returns the indices into Model.Meshes of every primitive the
+// node at index node instances -- every ModelMesh split from the doc mesh
+// Model.Nodes[node].Mesh names, not only the one ModelMesh.Node happens to
+// point back at.
+//
+// ModelMesh.Node exists to answer a different question and answers it
+// wrong for this one: it names the FIRST node (in glTF node order) that
+// instances a doc mesh, because a primitive is drawn once regardless of
+// instance count. Placement is the opposite question -- a level with forty
+// identical lamp posts sharing one doc mesh needs that mesh's primitives
+// drawn once per node, each at that node's own World, and "first owner
+// only" would place all forty on top of the first post. NodeMeshes goes
+// from a specific node to its primitives instead, so every instance gets
+// the right one.
+//
+// Returns nil for a node with no mesh (Model.Nodes[node].Mesh == -1, an
+// empty node, a light, a joint) or an out-of-range index, rather than
+// panicking or returning every mesh in the model.
+func (m *Model) NodeMeshes(node int) []int {
+	return nodeMeshes(m.Nodes, m.Meshes, node)
+}
+
+// nodeMeshes is NodeMeshes' pure arithmetic, split out so it can be tested
+// without a Renderer.
+func nodeMeshes(nodes []ModelNode, meshes []ModelMesh, node int) []int {
+	if node < 0 || node >= len(nodes) {
+		return nil
+	}
+	docMesh := nodes[node].Mesh
+	if docMesh < 0 {
+		return nil
+	}
+	var out []int
+	for i := range meshes {
+		if meshes[i].DocMesh == docMesh {
+			out = append(out, i)
+		}
+	}
+	return out
+}
