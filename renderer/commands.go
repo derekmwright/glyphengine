@@ -82,6 +82,11 @@ type SceneLighting struct {
 	// has never heard of this field would silently lose its nights.
 	NightGrade *NightGrade
 
+	// SkyPalette is the six colours the dome, the fog and the water's
+	// reflection all blend between. Nil means DefaultSkyPalette, for the same
+	// reason NightGrade is a pointer: the zero value is six black colours.
+	SkyPalette *SkyPalette
+
 	// Lights are the unshadowed point + spot lights for the GPU light buffer
 	// (see shaders/lights.inc), in Clusters.Order: the cell lists in Clusters
 	// index this slice, so the two must come from the same frame's binning.

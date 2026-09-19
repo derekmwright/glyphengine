@@ -42,6 +42,11 @@ layout(set = 1, binding = 0) uniform ShadowData {
     // scotopic tint, w the strength (0 disables). All seven ShadowData
     // declarations and renderer/shadow.go's litUBOSize must agree.
     vec4 nightGrade;
+    // The sky gradient's six palette endpoints; see atmSkyPalette in
+    // atmosphere.inc for the order. They live here rather than as constants
+    // in that file so the horizon colour applyFog fades geometry into and the
+    // dome sky.frag draws come out of ONE buffer and cannot drift.
+    vec4 skyPalette[6];
 } shadow;
 layout(set = 1, binding = 1) uniform sampler2DArrayShadow shadowMap;
 layout(set = 1, binding = 2) uniform samplerCube pointShadowMap;

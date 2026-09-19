@@ -31,19 +31,33 @@ var cascadeRadii = [ShadowCascades]float32{15, 90}
 // lit.frag, lit_material.frag, skinned_lit.frag, skinned_lit_material.frag,
 // terrain.frag, grass.frag and water.frag; all seven must agree with this.
 //
+// sky.frag and clouds.frag read the SAME buffer through a different set --
+// binding 1 of the cloud descriptor set, see createCloudTargets -- because the
+// sky palette below has to be one value for the dome, for the fog distant
+// geometry fades into and for the water's reflection of both. They declare the
+// members ahead of the one they want purely to land on its offset.
+//
 // It starts as the cascade matrices and continues with environment values the
 // fragment shaders grade with. That second region exists because the push
 // constant block is full at its 256-byte guaranteed minimum and there is
 // nowhere to put a fifth vec4, and because a look value a game is expected to
 // set has no business being a constant compiled into a shader every lit
 // surface includes. Add to the tail rather than the middle: each new vec4 is
-// one more offset here, one more line in seven shader declarations, and no
+// one more offset here, one more line in nine shader declarations, and no
 // change to anything already at a lower offset.
 const (
 	cascadeUBOSize   = ShadowCascades * 64 // mat4 cascadeVP[ShadowCascades]
 	nightGradeOffset = cascadeUBOSize      // vec4 nightGrade
-	litUBOSize       = nightGradeOffset + 16
+	skyPaletteOffset = nightGradeOffset + 16
+	// vec4 skyPalette[6]. vec4 rather than vec3 because std140 gives an array
+	// of either a 16-byte stride, so the padding is there whichever is
+	// written and a vec4 says so.
+	litUBOSize = skyPaletteOffset + skyPaletteCount*16
 )
+
+// skyPaletteCount is how many endpoints atmSkyPalette blends between: zenith
+// and horizon for day, twilight and night.
+const skyPaletteCount = 6
 
 // NightGrade is the scotopic colour grade the lit shaders apply as daylight
 // goes -- see atmNightShift in shaders/atmosphere.inc. Strength 0 turns it off
@@ -67,6 +81,65 @@ type NightGrade struct {
 // from outside now.
 func DefaultNightGrade() NightGrade {
 	return NightGrade{Strength: 0.8, Tint: [3]float32{0.72, 0.86, 1.30}}
+}
+
+// SkyPalette is the six colours the atmosphere blends between -- zenith and
+// horizon for day, twilight and night. atmSkyPalette in
+// shaders/atmosphere.inc mixes night toward day on the daylight curve and then
+// toward twilight on the twilight curve, so these are endpoints rather than a
+// gradient anyone samples directly.
+//
+// It is one value for the whole atmosphere, not just for the dome:
+// `applyFog` blends distant geometry toward the same horizon colour and water
+// reflects the dome, so a game that changed only the sky shader would get a
+// violet sky over a landscape still fading into Earth-blue haze. That is what
+// made this data rather than constants.
+//
+// SceneLighting carries it as a pointer for the reason NightGrade is one: a
+// zero value here is six black colours, which is a sky nobody wants and which
+// a caller driving this package directly would get by never having heard of
+// the field. Nil means DefaultSkyPalette.
+type SkyPalette struct {
+	ZenithDay, HorizonDay           [3]float32
+	ZenithTwilight, HorizonTwilight [3]float32
+	ZenithNight, HorizonNight       [3]float32
+}
+
+// DefaultSkyPalette is Earth's, and is exactly the constants that used to sit
+// in atmSkyPalette. Changing these numbers changes the sky of every game that
+// has not set its own, which is the whole reason they are reachable now.
+//
+// The horizon is pale because that is what looking through more atmosphere
+// does, but not white: distant geometry fades into this colour, so a
+// washed-out horizon washes out the whole landscape with it.
+//
+// Night is deliberately dark. These are the endpoints the whole scene reaches
+// at midnight -- the dome, the fog and the water's reflection all read from
+// here -- so lifting them to make the sky legible washes out the entire
+// landscape with it. If night needs to be brighter, brighten the moon, not the
+// air.
+func DefaultSkyPalette() SkyPalette {
+	return SkyPalette{
+		ZenithDay:  [3]float32{0.13, 0.30, 0.78},
+		HorizonDay: [3]float32{0.52, 0.70, 0.93},
+
+		ZenithTwilight:  [3]float32{0.055, 0.085, 0.26},
+		HorizonTwilight: [3]float32{0.88, 0.42, 0.22},
+
+		ZenithNight:  [3]float32{0.0014, 0.0017, 0.0060},
+		HorizonNight: [3]float32{0.0034, 0.0050, 0.0130},
+	}
+}
+
+// endpoints returns the palette in the order the shader indexes it, which is
+// the order atmosphere.inc's ATM_* defines name. One function so the packing
+// and the tests cannot disagree about it.
+func (p SkyPalette) endpoints() [skyPaletteCount][3]float32 {
+	return [skyPaletteCount][3]float32{
+		p.ZenithDay, p.HorizonDay,
+		p.ZenithTwilight, p.HorizonTwilight,
+		p.ZenithNight, p.HorizonNight,
+	}
 }
 
 // shadowResources holds all Vulkan resources for the shadow mapping pass.
@@ -856,19 +929,20 @@ func createShadowPipelineWithInput(deviceDriver core1_0.DeviceDriver, sh ShaderS
 	return pipelines[0], nil
 }
 
-// uploadLitUBO writes this frame's cascade matrices and environment grade to
+// uploadLitUBO writes this frame's cascade matrices and environment values to
 // the per-frame UBO (persistently mapped).
-func (s *shadowResources) uploadLitUBO(frame int, vps [ShadowCascades]mgl32.Mat4, grade *NightGrade) {
-	packLitUBO(s.lightVPMapped[frame], vps, grade)
+func (s *shadowResources) uploadLitUBO(frame int, vps [ShadowCascades]mgl32.Mat4, grade *NightGrade, palette *SkyPalette) {
+	packLitUBO(s.lightVPMapped[frame], vps, grade, palette)
 }
 
 // packLitUBO writes the whole block, every frame. Partial writes would leave
 // whatever the last frame using this buffer put there, and with two frames in
 // flight that is not even the previous frame's value.
 //
-// grade nil means DefaultNightGrade -- see NightGrade for why the caller's
-// zero value must not be read as "no shift".
-func packLitUBO(dst []byte, vps [ShadowCascades]mgl32.Mat4, grade *NightGrade) {
+// grade nil means DefaultNightGrade and palette nil means DefaultSkyPalette --
+// see NightGrade and SkyPalette for why a caller's zero value must not be read
+// as "no shift" or as "six black colours".
+func packLitUBO(dst []byte, vps [ShadowCascades]mgl32.Mat4, grade *NightGrade, palette *SkyPalette) {
 	src := unsafe.Slice((*byte)(unsafe.Pointer(&vps[0][0])), cascadeUBOSize)
 	copy(dst[:cascadeUBOSize], src)
 
@@ -879,6 +953,21 @@ func packLitUBO(dst []byte, vps [ShadowCascades]mgl32.Mat4, grade *NightGrade) {
 	off := nightGradeOffset
 	for i, v := range [4]float32{g.Tint[0], g.Tint[1], g.Tint[2], g.Strength} {
 		binary.LittleEndian.PutUint32(dst[off+i*4:], math.Float32bits(v))
+	}
+
+	p := DefaultSkyPalette()
+	if palette != nil {
+		p = *palette
+	}
+	// The fourth component is std140 padding the shader never reads. It is
+	// written anyway rather than skipped, because this buffer is reused by a
+	// frame in flight and "unread" is not the same as "safe to leave stale" --
+	// see the note above about partial writes.
+	for i, c := range p.endpoints() {
+		o := skyPaletteOffset + i*16
+		for j, v := range [4]float32{c[0], c[1], c[2], 0} {
+			binary.LittleEndian.PutUint32(dst[o+j*4:], math.Float32bits(v))
+		}
 	}
 }
 

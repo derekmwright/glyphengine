@@ -24,12 +24,29 @@ type cloudTarget struct {
 	images  []core1_0.Image
 	memory  []core1_0.DeviceMemory
 	views   []core1_0.ImageView
-	sets    []core1_0.DescriptorSet
 	fbs     []core1_0.Framebuffer
 	sampler core1_0.Sampler
 
+	// sets is indexed [buffer][frame in flight] and flattened, because the two
+	// things it binds are on different cycles: binding 0 is one of the
+	// cloudBufferCount half-resolution targets, binding 1 is the environment
+	// UBO of the frame in flight -- the same buffer the lit pipelines read.
+	// A descriptor set names both, so it takes the product; see set.
+	sets []core1_0.DescriptorSet
+
 	extent core1_0.Extent2D
 }
+
+// set returns the descriptor for a given cloud buffer seen by a given frame in
+// flight.
+func (t *cloudTarget) set(buf, frame int) core1_0.DescriptorSet {
+	return t.sets[buf*maxFramesInFlight+frame]
+}
+
+// bufferCount is how many half-resolution targets the ping-pong holds. Taken
+// from the framebuffers rather than from the constant so the indexing here
+// cannot outlive a change to it.
+func (t *cloudTarget) bufferCount() int { return len(t.fbs) }
 
 // cloudBufferCount is how many half-resolution buffers the ping-pong needs.
 //
@@ -58,6 +75,7 @@ func createCloudTargets(
 	renderPass core1_0.RenderPass,
 	full core1_0.Extent2D,
 	count int,
+	envBuffers [maxFramesInFlight]core1_0.Buffer,
 ) (*cloudTarget, error) {
 	t := &cloudTarget{extent: cloudExtent(full)}
 
@@ -100,7 +118,13 @@ func createCloudTargets(
 		t.fbs = append(t.fbs, fb)
 	}
 
-	layouts := make([]core1_0.DescriptorSetLayout, count)
+	// One set per (buffer, frame in flight) pair: see the note on cloudTarget.
+	// This is the only place in the engine that writes binding 1 of the shared
+	// texture set layout, because the sky and cloud passes are the only ones
+	// whose shaders declare it -- they have no push-constant room left and no
+	// other set to put the palette on.
+	setCount := count * maxFramesInFlight
+	layouts := make([]core1_0.DescriptorSetLayout, setCount)
 	for i := range layouts {
 		layouts[i] = texSetLayout
 	}
@@ -114,17 +138,31 @@ func createCloudTargets(
 	}
 	t.sets = sets
 
-	writes := make([]core1_0.WriteDescriptorSet, count)
-	for i := range writes {
-		writes[i] = core1_0.WriteDescriptorSet{
-			DstSet:         sets[i],
-			DstBinding:     0,
-			DescriptorType: core1_0.DescriptorTypeCombinedImageSampler,
-			ImageInfo: []core1_0.DescriptorImageInfo{{
-				Sampler:     sampler,
-				ImageView:   t.views[i],
-				ImageLayout: core1_0.ImageLayoutShaderReadOnlyOptimal,
-			}},
+	writes := make([]core1_0.WriteDescriptorSet, 0, setCount*2)
+	for buf := 0; buf < count; buf++ {
+		for frame := 0; frame < maxFramesInFlight; frame++ {
+			set := t.set(buf, frame)
+			writes = append(writes,
+				core1_0.WriteDescriptorSet{
+					DstSet:         set,
+					DstBinding:     0,
+					DescriptorType: core1_0.DescriptorTypeCombinedImageSampler,
+					ImageInfo: []core1_0.DescriptorImageInfo{{
+						Sampler:     sampler,
+						ImageView:   t.views[buf],
+						ImageLayout: core1_0.ImageLayoutShaderReadOnlyOptimal,
+					}},
+				},
+				core1_0.WriteDescriptorSet{
+					DstSet:         set,
+					DstBinding:     1,
+					DescriptorType: core1_0.DescriptorTypeUniformBuffer,
+					BufferInfo: []core1_0.DescriptorBufferInfo{{
+						Buffer: envBuffers[frame],
+						Offset: 0,
+						Range:  litUBOSize,
+					}},
+				})
 		}
 	}
 	if err := deviceDriver.UpdateDescriptorSets(writes, nil); err != nil {
@@ -242,12 +280,12 @@ func (t *cloudTarget) destroy(deviceDriver core1_0.DeviceDriver) {
 // tables both fell into. With zero steps the shader early-outs to fully
 // transmissive and the composite is a no-op, at a cost of a quarter-resolution
 // fullscreen triangle.
-func (r *Renderer) recordClouds(cmdBuf core1_0.CommandBuffer, lighting SceneLighting) error {
+func (r *Renderer) recordClouds(cmdBuf core1_0.CommandBuffer, lighting SceneLighting, frame int) error {
 	t := r.clouds
 	// Indexed by a frame counter rather than the swapchain image index: the
 	// presentation engine is free to hand back indices in any order, and the
 	// history chain has to be strictly the previous frame's.
-	idx := r.cloudFrame % len(t.fbs)
+	idx := r.cloudFrame % t.bufferCount()
 
 	if err := r.deviceDriver.CmdBeginRenderPass(cmdBuf, core1_0.SubpassContentsInline, core1_0.RenderPassBeginInfo{
 		RenderPass:  r.cloudRenderPass,
@@ -261,10 +299,11 @@ func (r *Renderer) recordClouds(cmdBuf core1_0.CommandBuffer, lighting SceneLigh
 		Width: float32(t.extent.Width), Height: float32(t.extent.Height), MinDepth: 0, MaxDepth: 1,
 	})
 	r.deviceDriver.CmdSetScissor(cmdBuf, core1_0.Rect2D{Offset: core1_0.Offset2D{X: 0, Y: 0}, Extent: t.extent})
-	// The previous frame's target, which this pass reprojects and blends.
-	prev := (r.cloudFrame + len(t.sets) - 1) % len(t.sets)
+	// The previous frame's target, which this pass reprojects and blends, plus
+	// this frame's environment block at binding 1 of the same set.
+	prev := (r.cloudFrame + t.bufferCount() - 1) % t.bufferCount()
 	r.deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, r.pipelineLayout, 0,
-		[]core1_0.DescriptorSet{t.sets[prev]}, nil)
+		[]core1_0.DescriptorSet{t.set(prev, frame)}, nil)
 
 	// The same packing the sky uses, because the march was lifted out of it and
 	// reads the same values from the same offsets.
@@ -297,7 +336,9 @@ func (r *Renderer) recordClouds(cmdBuf core1_0.CommandBuffer, lighting SceneLigh
 }
 
 // cloudSetFor is the descriptor the sky pass samples the cloud layer through:
-// whatever this frame's march just wrote.
-func (r *Renderer) cloudSetFor() core1_0.DescriptorSet {
-	return r.clouds.sets[r.cloudFrame%len(r.clouds.sets)]
+// whatever this frame's march just wrote, plus the environment block this
+// frame's shaders read the sky palette out of.
+func (r *Renderer) cloudSetFor(frame int) core1_0.DescriptorSet {
+	t := r.clouds
+	return t.set(r.cloudFrame%t.bufferCount(), frame)
 }
