@@ -22,6 +22,8 @@ api:
   - glyphengine.Scene.RebuildStatics
   - glyphengine.IntegrateBodies
   - glyphengine.Scene.Integrator
+  - glyphengine.QueryBackend
+  - glyphengine.Scene.Queries
   - glyphengine.Engine.PickEntity
   - glyphengine.Engine.ScreenRay
   - glyphengine.ComputeConvexHull
@@ -128,6 +130,63 @@ sort is an insertion as results are appended, so it costs nothing measurable
 at the overlap counts a single query actually sees (a handful of nearby
 colliders) and adds no allocations beyond the result slice's own growth;
 `BenchmarkOverlapAABB` in `physics_order_test.go` has the measured numbers.
+
+## Swapping the query backend
+
+`Scene.Queries` replaces Raycast and OverlapAABB together, for a game backing
+collision queries with its own broadphase (a BVH, say) instead of the
+spatial-grid implementation above:
+
+```go
+type myBackend struct{ /* your own broadphase */ }
+
+func (b *myBackend) Raycast(origin, dir mgl32.Vec3, maxDist float32, exclude glyphengine.Entity) (glyphengine.RayHit, bool) {
+	// ...
+}
+
+func (b *myBackend) OverlapAABB(box glyphengine.AABB, exclude glyphengine.Entity) []glyphengine.OverlapResult {
+	// ...
+}
+
+scene.Queries = &myBackend{}
+```
+
+Nil (the default) keeps the built-in implementation. Setting it is a one-step
+swap because every internal consumer calls `Scene.Raycast` or
+`Scene.OverlapAABB` and nothing else — `IntegrateBodies`'s grounding fallback,
+`MoveCharacter`'s ground detection and collision check, `Unstick`,
+`Camera.ResolveCollision` (through the `Raycaster` it takes — pass the
+`*Scene` itself, not a narrower value, or the swap will not reach it), and
+`Engine.PickEntity`. A game that only implements `Raycaster` and hands it to
+`Camera.ResolveCollision` only affects the camera; `Scene.Queries` is what
+reaches the engine's own physics.
+
+**A replacement must honour the #57 order contracts** — `OverlapAABB`
+ascending by entity id, `Raycast` breaking exact ties on the lower entity id
+with terrain first — documented in full on `QueryBackend`. Measured, not
+assumed: scrambling `OverlapAABB`'s order does not currently break `Unstick`
+or `MoveCharacter`, because both scan the whole result list themselves rather
+than reading a positional index (see `QueryBackend`'s doc comment and
+`query_backend_test.go`). The contract is still required of a replacement
+because `OverlapAABB` documents it to callers outside the engine too, the same
+guarantee `Unstick` itself used to violate before #57.
+
+**A replacement must honour the collision snapshot**, or
+`MoveCharactersParallel` becomes timing-dependent. There is no lifecycle hook
+for this — `QueryBackend` is deliberately just the two query methods. A
+replacement backed by its own index that is only rebuilt between ticks
+satisfies the freeze requirement automatically, since nothing in it changes
+during the parallel phase in the first place; a replacement that reads
+Scene's live `Transform`/`Velocity` itself needs to freeze its own copy the
+way `colliderAABB` does.
+
+**A replacement must not keep scratch state shared across calls.** Raycast and
+OverlapAABB run concurrently from multiple goroutines during
+`MoveCharactersParallel` — the built-in implementation uses
+`SpatialGrid.QueryRadiusAlloc`, which allocates a fresh slice per call, rather
+than `QueryRadius`, which reuses one and is documented NOT safe for this.
+`controller_race_test.go`-style coverage with a custom backend installed is in
+`query_backend_test.go` (`TestMoveCharactersParallelRaceWithCustomQueryBackend`).
 
 ## Screen picking
 
@@ -250,3 +309,11 @@ walk produced.
 - **A custom `Integrator` silently stopped physics.** Assigning `nil` does
   not do this — `Tick` falls back to `IntegrateBodies`. Assigning a function
   that does nothing does; that is the only way integration turns off.
+- **A custom `Queries` backend only affects some of the engine.** It must be
+  set on the `Scene` (`scene.Queries = ...`), and passed to
+  `Camera.ResolveCollision` as the `*Scene` itself rather than a narrower
+  `Raycaster`-only value — otherwise the camera keeps using the built-in
+  implementation while everything else uses the replacement.
+- **`MoveCharactersParallel` behaves differently tick to tick with a custom
+  `Queries` backend.** The backend is not honouring the collision snapshot —
+  see "Swapping the query backend" above.
