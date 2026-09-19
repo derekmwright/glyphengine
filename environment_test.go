@@ -387,3 +387,27 @@ func TestFixedSunElevationDrawsStars(t *testing.T) {
 		}
 	}
 }
+
+// TestLightShaftShapeReachesTheFrameState: what a game sets on the Sky is what
+// State hands the engine, untouched -- including the zeros, because resolving
+// them is the renderer's job and doing it here as well would make "zero means
+// default" true in two places that could come to disagree.
+//
+// Verified to fail: without the pass-through line in Environment.State the
+// frame state reports a zero shape for the custom case.
+func TestLightShaftShapeReachesTheFrameState(t *testing.T) {
+	env := DefaultEnvironment()
+	if got := env.State().LightShaftShape; got != (LightShaftShape{}) {
+		t.Errorf("an untouched Sky hands on the shape %+v, want the zero value", got)
+	}
+
+	want := LightShaftShape{Radius: 1.3, Threshold: [2]float32{0.3, 0.5}}
+	env.Sky.LightShaftShape = want
+	if got := env.State().LightShaftShape; got != want {
+		t.Errorf("State hands on the shape %+v, want %+v", got, want)
+	}
+
+	if d := DefaultLightShaftShape(); d.Radius <= 0 || d.Decay <= 0 || d.Decay > 1 || !(d.Threshold[1] > d.Threshold[0]) {
+		t.Errorf("DefaultLightShaftShape is %+v, which is not a drawable shape", d)
+	}
+}
