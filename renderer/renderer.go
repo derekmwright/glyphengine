@@ -1203,6 +1203,10 @@ func (r *Renderer) recreateSwapchain() error {
 		return nil
 	}
 
+	// Remembered because not every rebuild is a resize, and one of the things
+	// rebuilt below accumulates across frames. See the cloud targets.
+	oldExtent := r.sc.extent
+
 	r.deviceDriver.DeviceWaitIdle()
 
 	// Destroy old resources
@@ -1278,18 +1282,35 @@ func (r *Renderer) recreateSwapchain() error {
 		return err
 	}
 
-	r.clouds.destroy(r.deviceDriver)
-	r.clouds, err = createCloudTargets(r.instanceDriver, r.deviceDriver, r.physicalDevice,
-		r.descriptorPool, r.descriptorSetLayout, r.cloudRenderPass, r.sc.extent, cloudBufferCount)
-	if err != nil {
-		return err
-	}
-	// The history chain is meaningless across a resize: the buffers are a
-	// different size and were rendered through a different projection. Priming
-	// them gives a defined layout, and the reprojection rejects the contents on
-	// the next frame anyway because nothing was written at the new size yet.
-	if err := r.primeSampledImages(r.clouds.images); err != nil {
-		return err
+	// The cloud targets are the one thing here that accumulates, and they are
+	// sized by the extent and nothing else -- their count is a constant and
+	// they hold no swapchain image. So they are rebuilt only when the extent
+	// actually moved.
+	//
+	// The history chain is meaningless across a *resize*: the buffers are a
+	// different size and were rendered through a different projection. It is
+	// perfectly good across a rebuild that kept the size, and not every rebuild
+	// is a resize -- showing a window, moving it to another monitor, a
+	// compositor change and a suboptimal present all produce an out-of-date
+	// swapchain at the same extent. Throwing the history away on those restarts
+	// the temporal blend, and how much that moves the picture depends on how
+	// late it happened: measured on 08-grass -timeofday 0.28 -frames 150 under
+	// a fixed clock, a rebuild forced on frame 40 moved 1685 pixels and one
+	// forced on frame 149 moved 257601 of them (27.95 %, max delta 104).
+	// task determinism's rebuild case is what holds this.
+	if r.sc.extent != oldExtent {
+		r.clouds.destroy(r.deviceDriver)
+		r.clouds, err = createCloudTargets(r.instanceDriver, r.deviceDriver, r.physicalDevice,
+			r.descriptorPool, r.descriptorSetLayout, r.cloudRenderPass, r.sc.extent, cloudBufferCount)
+		if err != nil {
+			return err
+		}
+		// Priming gives a defined layout, and the reprojection rejects the
+		// contents on the next frame anyway because nothing was written at the
+		// new size yet.
+		if err := r.primeSampledImages(r.clouds.images); err != nil {
+			return err
+		}
 	}
 
 	if err := r.primeBloomLayouts(r.bloom); err != nil {
@@ -1489,21 +1510,27 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 		r.trace.Str("outcome", "present-error")
 		return err
 	}
+	// Advance the cloud history chain and remember what this frame was rendered
+	// with, so the next one can reproject into it.
+	//
+	// Above the rebuild check rather than below it. This frame was recorded,
+	// submitted and presented whatever the present result said, so its
+	// bookkeeping is due either way. Skipping it on a suboptimal present left
+	// the next frame marching clouds into the buffer it was supposed to be
+	// reading as history, and reprojecting with the view-projection of the
+	// frame before last -- a broken chain rather than merely a different one.
+	r.cloudFrame++
+	r.prevVP = lighting.VP
+	r.currentFrame = (f + 1) % maxFramesInFlight
+
 	if presentResult == khr_swapchain.VKErrorOutOfDate || presentResult == khr_swapchain.VKSuboptimal || r.framebufferResized {
-		// The frame WAS drawn and presented here, unlike the acquire path, but
-		// the per-frame bookkeeping below is skipped -- so the trace
-		// distinguishes the two rather than calling both "recreate".
+		// The frame WAS drawn and presented here, unlike the acquire path, so
+		// the trace distinguishes the two rather than calling both "recreate".
 		r.trace.Str("outcome", "present-recreate")
 		r.framebufferResized = false
 		return r.recreateSwapchain()
 	}
 
-	// Advance the cloud history chain and remember what this frame was rendered
-	// with, so the next one can reproject into it.
-	r.cloudFrame++
-	r.prevVP = lighting.VP
-
-	r.currentFrame = (f + 1) % maxFramesInFlight
 	r.trace.Str("outcome", "present")
 	return nil
 }
