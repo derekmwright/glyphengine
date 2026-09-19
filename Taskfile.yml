@@ -1053,14 +1053,17 @@ tasks:
       #
       # PROVED: with lighting.inc's fogColor reading the compiled-in constants
       # while sky.frag reads the uniform -- exactly the drift this issue exists
-      # to prevent, and a build in which `task ci`, `task validate`, `task
-      # determinism`, `task sky`, `task hud`, `task lights`, `task nightlight`,
-      # `task waterlight` and `task waterblend` are all still green -- the fog
-      # box collapses from 40.05 to 0.49 and the water box from 105.15 to
-      # exactly 0.00, and both report THE PALETTE DID NOT REACH. The sky box is
-      # unmoved at 122.32, which is the point: the dome on its own looks
-      # completely correct, and the capture kept from that run is the violet
-      # sky over the Earth-blue lake from the issue.
+      # to prevent -- the fog box collapses from 40.05 to 0.49 and the water
+      # box from 105.15 to exactly 0.00, and both report THE PALETTE DID NOT
+      # REACH. The sky box is unmoved at 122.32, which is the point: the dome
+      # on its own looks completely correct, and the capture kept from that run
+      # is the violet sky over the Earth-blue lake from the issue.
+      #
+      # And nothing else could have caught it, which is measured rather than
+      # argued: that build's -alien capture is the broken one, but its capture
+      # of the SAME frame under the stock palette is byte-identical to the
+      # shipped build's. Every other gate in this file renders the stock
+      # palette, so every other gate sees exactly the frame it saw before.
       #
       # The water going to 0.00 rather than merely shrinking is worth knowing:
       # water.frag's Fresnel reflection is fogColor() too, so breaking the fog
