@@ -421,6 +421,10 @@ tasks:
         # 21-streetlights 90. The three 08-grass poses, 15-kitchen-sink and
         # 19-instanced happened to match on that run, which is what "randomised"
         # means -- it is not a property of the scene.
+        #
+        # And verified by breaking the fix: with sortDraws' final tiebreak
+        # replaced by `return 0`, this reports 18-translucent, 21-streetlights
+        # and 12-particles as differing on all 90 lines and exits 1.
         drawseq() {
           set -- $1
           name=$1; shift
