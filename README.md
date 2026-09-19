@@ -137,6 +137,11 @@ model, err := r.LoadGLTFSkinned(assetsFS, "assets/character.glb")
 hm, err := glyph.LoadHeightmap(assetsFS, "assets/island.heightmap")
 ```
 
+`.heightmap` files come from `cmd/heightmapconv` — rasterised from a
+sculpted Blender mesh, or converted from a heightmap image/raw grid — or
+from `(*glyph.Heightmap).WriteTo` in a game's own pipeline. See
+[`docs/agents/terrain-heightmap.md`](docs/agents/terrain-heightmap.md).
+
 ## Moving a character
 
 Simulation runs on a fixed tick; rendering runs at the display rate and
@@ -166,7 +171,7 @@ bit-identical results at 60Hz and at 300Hz.
 
 | Package | What it does |
 |---|---|
-| `glyphengine` | Root. `Engine` (window, frame loop), `Scene` (simulation), components, physics, terrain, water, environment, cameras, character controller |
+| `glyphengine` | Root. `Engine` (window, frame loop), `Scene` (simulation), components, physics, terrain, water, environment, cameras, character controller; `.heightmap` encoder/decoder, with a Blender-mesh/image/raw-to-`.heightmap` conversion CLI at `cmd/heightmapconv` |
 | `glyphengine/ecs` | Generic ECS — typed `Store[T]`, `Query2/3/4` |
 | `glyphengine/renderer` | Vulkan renderer: forward + reverse-Z, cascaded shadows, GPU skinning, MSDF text, instanced grass, water, particles |
 | `glyphengine/window` | GLFW window and Vulkan surface |
