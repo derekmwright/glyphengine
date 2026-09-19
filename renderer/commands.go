@@ -4,7 +4,6 @@ import (
 	"log"
 	"math"
 	"slices"
-	"unsafe"
 
 	"github.com/go-gl/mathgl/mgl32"
 	"github.com/vkngwrapper/core/v3/core1_0"
@@ -480,6 +479,7 @@ func recordCommandBuffer(
 	msaaEnabled bool,
 	timer *gpuTimer,
 	trace *StateTrace,
+	scratch *commandScratch,
 ) error {
 	_, err := deviceDriver.BeginCommandBuffer(cmdBuf, core1_0.CommandBufferBeginInfo{})
 	if err != nil {
@@ -504,18 +504,13 @@ func recordCommandBuffer(
 	// ── Sun shadow depth passes (one per cascade) ──
 	// Always run each pass to ensure the depth layer is cleared to 1.0
 	// (fully lit). When shadows are disabled, we clear but skip drawing geometry.
+	shadowCascadeArea := core1_0.Rect2D{
+		Offset: core1_0.Offset2D{X: 0, Y: 0},
+		Extent: core1_0.Extent2D{Width: ShadowMapSize, Height: ShadowMapSize},
+	}
 	for cascade := 0; cascade < ShadowCascades; cascade++ {
-		err = deviceDriver.CmdBeginRenderPass(cmdBuf, core1_0.SubpassContentsInline, core1_0.RenderPassBeginInfo{
-			RenderPass:  shadow.renderPass,
-			Framebuffer: shadow.framebuffers[frame][cascade],
-			RenderArea: core1_0.Rect2D{
-				Offset: core1_0.Offset2D{X: 0, Y: 0},
-				Extent: core1_0.Extent2D{Width: ShadowMapSize, Height: ShadowMapSize},
-			},
-			ClearValues: []core1_0.ClearValue{
-				core1_0.ClearValueDepthStencil{Depth: 1.0, Stencil: 0},
-			},
-		})
+		err = scratch.beginRenderPass(deviceDriver, cmdBuf, core1_0.SubpassContentsInline, shadow.renderPass,
+			shadow.framebuffers[frame][cascade], shadowCascadeArea, core1_0.ClearValueDepthStencil{Depth: 1.0, Stencil: 0})
 		if err != nil {
 			return err
 		}
@@ -529,14 +524,11 @@ func recordCommandBuffer(
 				Width: ShadowMapSize, Height: ShadowMapSize,
 				MinDepth: 0, MaxDepth: 1,
 			}
-			shadowScissor := core1_0.Rect2D{
-				Offset: core1_0.Offset2D{X: 0, Y: 0},
-				Extent: core1_0.Extent2D{Width: ShadowMapSize, Height: ShadowMapSize},
-			}
+			shadowScissor := shadowCascadeArea
 
 			deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, shadow.pipeline)
-			deviceDriver.CmdSetViewport(cmdBuf, shadowViewport)
-			deviceDriver.CmdSetScissor(cmdBuf, shadowScissor)
+			scratch.setViewport(deviceDriver, cmdBuf, shadowViewport)
+			scratch.setScissor(deviceDriver, cmdBuf, shadowScissor)
 			currentShadowSkinned := false
 
 			for i := range draws {
@@ -568,28 +560,26 @@ func recordCommandBuffer(
 					} else {
 						deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, shadow.pipeline)
 					}
-					deviceDriver.CmdSetViewport(cmdBuf, shadowViewport)
-					deviceDriver.CmdSetScissor(cmdBuf, shadowScissor)
+					scratch.setViewport(deviceDriver, cmdBuf, shadowViewport)
+					scratch.setScissor(deviceDriver, cmdBuf, shadowScissor)
 					currentShadowSkinned = skinned
 				}
 
 				if skinned {
-					deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, shadow.skinnedPipelineLayout, 0, []core1_0.DescriptorSet{d.Joints.descriptorSets[frame]}, nil)
+					scratch.bindDescriptorSets(deviceDriver, cmdBuf, core1_0.PipelineBindPointGraphics, shadow.skinnedPipelineLayout, 0, d.Joints.descriptorSets[frame])
 				}
 
-				deviceDriver.CmdBindVertexBuffers(cmdBuf, 0, []core1_0.Buffer{d.Mesh.vertexBuffer}, []int{0})
+				scratch.bindVertexBuffers(deviceDriver, cmdBuf, 0, d.Mesh.vertexBuffer)
 
 				// Push constants: cascadeVP * model as MVP, and model matrix
 				lightModel := cascadeVP.Mul4(d.Model)
-				var shadowPC [32]float32
-				copy(shadowPC[:16], lightModel[:])
-				copy(shadowPC[16:32], d.Model[:])
+				copy(scratch.shadowPC[:16], lightModel[:])
+				copy(scratch.shadowPC[16:32], d.Model[:])
 				activeLayout := shadow.pipelineLayout
 				if skinned {
 					activeLayout = shadow.skinnedPipelineLayout
 				}
-				pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&shadowPC[0])), 128)
-				deviceDriver.CmdPushConstants(cmdBuf, activeLayout, core1_0.StageVertex, 0, pcBytes)
+				scratch.pushShadowConstants(deviceDriver, cmdBuf, activeLayout)
 
 				stats.addDraw(1, d.Mesh.IndexCount, d.Mesh.VertexCount)
 				if d.Mesh.IndexCount > 0 {
@@ -605,7 +595,7 @@ func recordCommandBuffer(
 			var cvp [16]float32
 			copy(cvp[:], cascadeVP[:])
 			recordInstancedShadow(deviceDriver, stats, cmdBuf, shadow.instancedPipeline,
-				shadow.pipelineLayout, shadowViewport, shadowScissor, draws, cvp, cascadeFrustum)
+				shadow.pipelineLayout, shadowViewport, shadowScissor, draws, cvp, cascadeFrustum, scratch)
 		}
 
 		deviceDriver.CmdEndRenderPass(cmdBuf)
@@ -628,11 +618,7 @@ func recordCommandBuffer(
 		// Pre-cull casters against the light's range sphere once; the face
 		// loops below then only frustum-test this subset. A zero radius means
 		// unbounded — always considered in range.
-		type cubeCaster struct {
-			idx            int
-			cx, cy, cz, cr float32
-		}
-		casters := make([]cubeCaster, 0, len(draws))
+		casters := scratch.cubeCasters[:0]
 		for i := range draws {
 			d := &draws[i]
 			if d.Emissive || d.NoCastShadow || d.Water != nil {
@@ -650,29 +636,25 @@ func recordCommandBuffer(
 			}
 			casters = append(casters, cubeCaster{idx: i, cx: cx, cy: cy, cz: cz, cr: cr})
 		}
+		scratch.cubeCasters = casters
 
+		cubeArea := core1_0.Rect2D{
+			Offset: core1_0.Offset2D{X: 0, Y: 0},
+			Extent: core1_0.Extent2D{Width: PointShadowMapSize, Height: PointShadowMapSize},
+		}
 		for face := 0; face < 6; face++ {
 			faceVP := ComputeCubeFaceVP(lightPos, lighting.PointRange, face)
 			faceFrustum := ExtractFrustum(faceVP)
 
-			err = deviceDriver.CmdBeginRenderPass(cmdBuf, core1_0.SubpassContentsInline, core1_0.RenderPassBeginInfo{
-				RenderPass:  shadow.renderPass,
-				Framebuffer: shadow.cubeFramebuffers[frame][face],
-				RenderArea: core1_0.Rect2D{
-					Offset: core1_0.Offset2D{X: 0, Y: 0},
-					Extent: core1_0.Extent2D{Width: PointShadowMapSize, Height: PointShadowMapSize},
-				},
-				ClearValues: []core1_0.ClearValue{
-					core1_0.ClearValueDepthStencil{Depth: 1.0, Stencil: 0},
-				},
-			})
+			err = scratch.beginRenderPass(deviceDriver, cmdBuf, core1_0.SubpassContentsInline, shadow.renderPass,
+				shadow.cubeFramebuffers[frame][face], cubeArea, core1_0.ClearValueDepthStencil{Depth: 1.0, Stencil: 0})
 			if err != nil {
 				return err
 			}
 
 			deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, shadow.pipeline)
-			deviceDriver.CmdSetViewport(cmdBuf, cubeViewport)
-			deviceDriver.CmdSetScissor(cmdBuf, cubeScissor)
+			scratch.setViewport(deviceDriver, cmdBuf, cubeViewport)
+			scratch.setScissor(deviceDriver, cmdBuf, cubeScissor)
 			currentCubeSkinned := false
 
 			for _, c := range casters {
@@ -688,27 +670,25 @@ func recordCommandBuffer(
 					} else {
 						deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, shadow.pipeline)
 					}
-					deviceDriver.CmdSetViewport(cmdBuf, cubeViewport)
-					deviceDriver.CmdSetScissor(cmdBuf, cubeScissor)
+					scratch.setViewport(deviceDriver, cmdBuf, cubeViewport)
+					scratch.setScissor(deviceDriver, cmdBuf, cubeScissor)
 					currentCubeSkinned = skinned
 				}
 
 				if skinned {
-					deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, shadow.skinnedPipelineLayout, 0, []core1_0.DescriptorSet{d.Joints.descriptorSets[frame]}, nil)
+					scratch.bindDescriptorSets(deviceDriver, cmdBuf, core1_0.PipelineBindPointGraphics, shadow.skinnedPipelineLayout, 0, d.Joints.descriptorSets[frame])
 				}
 
-				deviceDriver.CmdBindVertexBuffers(cmdBuf, 0, []core1_0.Buffer{d.Mesh.vertexBuffer}, []int{0})
+				scratch.bindVertexBuffers(deviceDriver, cmdBuf, 0, d.Mesh.vertexBuffer)
 
 				faceMVP := faceVP.Mul4(d.Model)
-				var cubePC [32]float32
-				copy(cubePC[:16], faceMVP[:])
-				copy(cubePC[16:32], d.Model[:])
+				copy(scratch.shadowPC[:16], faceMVP[:])
+				copy(scratch.shadowPC[16:32], d.Model[:])
 				activeLayout := shadow.pipelineLayout
 				if skinned {
 					activeLayout = shadow.skinnedPipelineLayout
 				}
-				pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&cubePC[0])), 128)
-				deviceDriver.CmdPushConstants(cmdBuf, activeLayout, core1_0.StageVertex, 0, pcBytes)
+				scratch.pushShadowConstants(deviceDriver, cmdBuf, activeLayout)
 
 				stats.addDraw(1, d.Mesh.IndexCount, d.Mesh.VertexCount)
 				if d.Mesh.IndexCount > 0 {
@@ -724,23 +704,17 @@ func recordCommandBuffer(
 	}
 
 	// ── Main render pass ──
-	clearValues := []core1_0.ClearValue{
-		core1_0.ClearValueFloat{lighting.SkyColor[0], lighting.SkyColor[1], lighting.SkyColor[2], lighting.SkyColor[3]},
-		core1_0.ClearValueDepthStencil{Depth: 0.0, Stencil: 0},
-	}
+	mainArea := core1_0.Rect2D{Offset: core1_0.Offset2D{X: 0, Y: 0}, Extent: extent}
+	scratch.colorClear = core1_0.ClearValueFloat{lighting.SkyColor[0], lighting.SkyColor[1], lighting.SkyColor[2], lighting.SkyColor[3]}
+	mainDepthClear := core1_0.ClearValueDepthStencil{Depth: 0.0, Stencil: 0}
 	if msaaEnabled {
 		// 3rd clear value for the resolve attachment (LoadOpDontCare, but Vulkan requires the count to match)
-		clearValues = append(clearValues, core1_0.ClearValueFloat{0, 0, 0, 1})
+		err = scratch.beginRenderPass(deviceDriver, cmdBuf, core1_0.SubpassContentsInline, renderPass, framebuffer, mainArea,
+			&scratch.colorClear, mainDepthClear, core1_0.ClearValueFloat{0, 0, 0, 1})
+	} else {
+		err = scratch.beginRenderPass(deviceDriver, cmdBuf, core1_0.SubpassContentsInline, renderPass, framebuffer, mainArea,
+			&scratch.colorClear, mainDepthClear)
 	}
-	err = deviceDriver.CmdBeginRenderPass(cmdBuf, core1_0.SubpassContentsInline, core1_0.RenderPassBeginInfo{
-		RenderPass:  renderPass,
-		Framebuffer: framebuffer,
-		RenderArea: core1_0.Rect2D{
-			Offset: core1_0.Offset2D{X: 0, Y: 0},
-			Extent: extent,
-		},
-		ClearValues: clearValues,
-	})
 	if err != nil {
 		return err
 	}
@@ -760,8 +734,8 @@ func recordCommandBuffer(
 
 	// Draw lit scene geometry (static, double-sided, and skinned)
 	deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, pipeline)
-	deviceDriver.CmdSetViewport(cmdBuf, viewport)
-	deviceDriver.CmdSetScissor(cmdBuf, scissor)
+	scratch.setViewport(deviceDriver, cmdBuf, viewport)
+	scratch.setScissor(deviceDriver, cmdBuf, scissor)
 	currentSkinned := false
 	currentDoubleSided := false
 
@@ -781,26 +755,25 @@ func recordCommandBuffer(
 		}
 		if !terrainBound {
 			deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, terrainPipeline)
-			deviceDriver.CmdSetViewport(cmdBuf, viewport)
-			deviceDriver.CmdSetScissor(cmdBuf, scissor)
+			scratch.setViewport(deviceDriver, cmdBuf, viewport)
+			scratch.setScissor(deviceDriver, cmdBuf, scissor)
 			terrainBound = true
 		}
-		deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, terrainPipelineLayout, 0, []core1_0.DescriptorSet{d.TerrainMat.DescriptorSet, shadowDS}, nil)
-		deviceDriver.CmdBindVertexBuffers(cmdBuf, 0, []core1_0.Buffer{d.Mesh.vertexBuffer}, []int{0})
+		scratch.bindDescriptorSets(deviceDriver, cmdBuf, core1_0.PipelineBindPointGraphics, terrainPipelineLayout, 0, d.TerrainMat.DescriptorSet, shadowDS)
+		scratch.bindVertexBuffers(deviceDriver, cmdBuf, 0, d.Mesh.vertexBuffer)
 
-		var pc [64]float32
-		copy(pc[:16], d.MVP[:])
-		copy(pc[16:32], d.Model[:])
-		pc[32], pc[33], pc[34], pc[35] = d.Color[0], d.Color[1], d.Color[2], 0.0
-		packLightingPC(&pc, lighting)
+		scratch.resetPC()
+		copy(scratch.pc[:16], d.MVP[:])
+		copy(scratch.pc[16:32], d.Model[:])
+		scratch.pc[32], scratch.pc[33], scratch.pc[34], scratch.pc[35] = d.Color[0], d.Color[1], d.Color[2], 0.0
+		packLightingPC(&scratch.pc, lighting)
 		roughness := d.Roughness
 		if roughness == 0 {
 			roughness = 0.5
 		}
-		pc[51] = roughness
-		pc[55] = d.Metallic
-		pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
-		deviceDriver.CmdPushConstants(cmdBuf, terrainPipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
+		scratch.pc[51] = roughness
+		scratch.pc[55] = d.Metallic
+		scratch.pushConstants(deviceDriver, cmdBuf, terrainPipelineLayout, core1_0.StageVertex|core1_0.StageFragment)
 
 		stats.addDraw(1, d.Mesh.IndexCount, d.Mesh.VertexCount)
 		if d.Mesh.IndexCount > 0 {
@@ -858,8 +831,8 @@ func recordCommandBuffer(
 			default:
 				deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, pipeline)
 			}
-			deviceDriver.CmdSetViewport(cmdBuf, viewport)
-			deviceDriver.CmdSetScissor(cmdBuf, scissor)
+			scratch.setViewport(deviceDriver, cmdBuf, viewport)
+			scratch.setScissor(deviceDriver, cmdBuf, scissor)
 			currentSkinned = skinned
 			currentDoubleSided = doubleSided
 			currentMaterial = material
@@ -876,8 +849,8 @@ func recordCommandBuffer(
 			// Skinned material: set 0=material, set 1=joints, set 2=shadow.
 			activeLayout = mat.skinnedLayout
 			if !bindValid || d.Material != lastMaterial || d.Joints != lastJoints {
-				deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, activeLayout, 0,
-					[]core1_0.DescriptorSet{d.Material.DescriptorSet, d.Joints.descriptorSets[frame], shadowDS}, nil)
+				scratch.bindDescriptorSets(deviceDriver, cmdBuf, core1_0.PipelineBindPointGraphics, activeLayout, 0,
+					d.Material.DescriptorSet, d.Joints.descriptorSets[frame], shadowDS)
 				lastMaterial = d.Material
 				lastJoints = d.Joints
 				bindValid = true
@@ -890,7 +863,7 @@ func recordCommandBuffer(
 				activeLayout = mat.doubleSidedLayout
 			}
 			if !bindValid || d.Material != lastMaterial {
-				deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, activeLayout, 0, []core1_0.DescriptorSet{d.Material.DescriptorSet, shadowDS}, nil)
+				scratch.bindDescriptorSets(deviceDriver, cmdBuf, core1_0.PipelineBindPointGraphics, activeLayout, 0, d.Material.DescriptorSet, shadowDS)
 				lastMaterial = d.Material
 				bindValid = true
 			}
@@ -898,41 +871,40 @@ func recordCommandBuffer(
 			activeLayout = skinnedPipelineLayout
 			if !bindValid || tex != lastTex || d.Joints != lastJoints {
 				// Skinned: set 0=tex, set 1=joints, set 2=shadow
-				deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, skinnedPipelineLayout, 0, []core1_0.DescriptorSet{tex.DescriptorSet, d.Joints.descriptorSets[frame], shadowDS}, nil)
+				scratch.bindDescriptorSets(deviceDriver, cmdBuf, core1_0.PipelineBindPointGraphics, skinnedPipelineLayout, 0, tex.DescriptorSet, d.Joints.descriptorSets[frame], shadowDS)
 				lastTex = tex
 				lastJoints = d.Joints
 				bindValid = true
 			}
 		} else if !bindValid || tex != lastTex {
 			// Static lit: set 0=tex, set 1=shadow
-			deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, litPipelineLayout, 0, []core1_0.DescriptorSet{tex.DescriptorSet, shadowDS}, nil)
+			scratch.bindDescriptorSets(deviceDriver, cmdBuf, core1_0.PipelineBindPointGraphics, litPipelineLayout, 0, tex.DescriptorSet, shadowDS)
 			lastTex = tex
 			bindValid = true
 		}
 
-		deviceDriver.CmdBindVertexBuffers(cmdBuf, 0, []core1_0.Buffer{d.Mesh.vertexBuffer}, []int{0})
+		scratch.bindVertexBuffers(deviceDriver, cmdBuf, 0, d.Mesh.vertexBuffer)
 
-		var pc [64]float32
-		copy(pc[:16], d.MVP[:])
-		copy(pc[16:32], d.Model[:])
-		pc[32] = d.Color[0]
-		pc[33] = d.Color[1]
-		pc[34] = d.Color[2]
-		pc[35] = 0.0
+		scratch.resetPC()
+		copy(scratch.pc[:16], d.MVP[:])
+		copy(scratch.pc[16:32], d.Model[:])
+		scratch.pc[32] = d.Color[0]
+		scratch.pc[33] = d.Color[1]
+		scratch.pc[34] = d.Color[2]
+		scratch.pc[35] = 0.0
 		if d.Emissive {
-			pc[35] = 1.0
+			scratch.pc[35] = 1.0
 		} else if d.DoubleSided {
-			pc[35] = -1.0 // signal flat shading for foliage
+			scratch.pc[35] = -1.0 // signal flat shading for foliage
 		}
-		packLightingPC(&pc, lighting)
+		packLightingPC(&scratch.pc, lighting)
 		roughness := d.Roughness
 		if roughness == 0 {
 			roughness = 0.5 // default to semi-rough if unset
 		}
-		pc[51] = roughness  // pointColor.w = roughness
-		pc[55] = d.Metallic // ambient.w = metallic
-		pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
-		deviceDriver.CmdPushConstants(cmdBuf, activeLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
+		scratch.pc[51] = roughness  // pointColor.w = roughness
+		scratch.pc[55] = d.Metallic // ambient.w = metallic
+		scratch.pushConstants(deviceDriver, cmdBuf, activeLayout, core1_0.StageVertex|core1_0.StageFragment)
 
 		stats.addDraw(1, d.Mesh.IndexCount, d.Mesh.VertexCount)
 		if d.Mesh.IndexCount > 0 {
@@ -946,7 +918,7 @@ func recordCommandBuffer(
 	// Instance sets, inside the opaque pass so they depth-test against
 	// everything else exactly as individually drawn props would.
 	recordInstanced(deviceDriver, stats, cmdBuf, instancedPipeline, instancedDoubleSidedPipeline,
-		litPipelineLayout, viewport, scissor, draws, lighting, fallbackTexture, shadowDS)
+		litPipelineLayout, viewport, scissor, draws, lighting, fallbackTexture, shadowDS, scratch)
 
 	timer.end(deviceDriver, cmdBuf, frame, PassOpaque)
 	timer.begin(deviceDriver, cmdBuf, frame, PassGrass)
@@ -960,31 +932,30 @@ func recordCommandBuffer(
 	// Draw instanced grass variants (two-sided, depth tested, lit)
 	if grass != nil && len(grass.Variants) > 0 {
 		deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, grassPipeline)
-		deviceDriver.CmdSetViewport(cmdBuf, viewport)
-		deviceDriver.CmdSetScissor(cmdBuf, scissor)
+		scratch.setViewport(deviceDriver, cmdBuf, viewport)
+		scratch.setScissor(deviceDriver, cmdBuf, scissor)
 
 		// Push constants shared across all variants
-		var pc [64]float32
-		copy(pc[:16], lighting.VP[:])
+		scratch.resetPC()
+		copy(scratch.pc[:16], lighting.VP[:])
 		// model = identity
-		pc[16] = 1
-		pc[21] = 1
-		pc[26] = 1
-		pc[31] = 1
+		scratch.pc[16] = 1
+		scratch.pc[21] = 1
+		scratch.pc[26] = 1
+		scratch.pc[31] = 1
 		// tint = white (vertex colors provide grass color)
-		pc[32] = 1.0
-		pc[33] = 1.0
-		pc[34] = 1.0
-		pc[35] = -1.0 // flat shading for grass (double-sided foliage)
-		packLightingPC(&pc, lighting)
-		pc[39] = lighting.Time // sunDir.w = time for wind animation
+		scratch.pc[32] = 1.0
+		scratch.pc[33] = 1.0
+		scratch.pc[34] = 1.0
+		scratch.pc[35] = -1.0 // flat shading for grass (double-sided foliage)
+		packLightingPC(&scratch.pc, lighting)
+		scratch.pc[39] = lighting.Time // sunDir.w = time for wind animation
 		// pointPos.xy: the distance tuning grass.vert culls and fades by.
-		pc[44] = grassLOD.MaxDistance
-		pc[45] = grassLOD.FadeStart
-		pc[51] = 1.0 // roughness = fully matte
-		pc[55] = 0.0 // metallic = non-metal
-		pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
-		deviceDriver.CmdPushConstants(cmdBuf, litPipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
+		scratch.pc[44] = grassLOD.MaxDistance
+		scratch.pc[45] = grassLOD.FadeStart
+		scratch.pc[51] = 1.0 // roughness = fully matte
+		scratch.pc[55] = 0.0 // metallic = non-metal
+		scratch.pushConstants(deviceDriver, cmdBuf, litPipelineLayout, core1_0.StageVertex|core1_0.StageFragment)
 
 		// Cull tiles against the camera frustum and the shader's hard cull
 		// distance; only visible tiles are drawn (contiguous instance ranges).
@@ -1013,11 +984,11 @@ func recordCommandBuffer(
 				tex = fallbackTexture
 			}
 			if tex != lastFloraTex {
-				deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, litPipelineLayout, 0, []core1_0.DescriptorSet{tex.DescriptorSet, shadowDS}, nil)
+				scratch.bindDescriptorSets(deviceDriver, cmdBuf, core1_0.PipelineBindPointGraphics, litPipelineLayout, 0, tex.DescriptorSet, shadowDS)
 				lastFloraTex = tex
 			}
 
-			deviceDriver.CmdBindVertexBuffers(cmdBuf, 0, []core1_0.Buffer{v.Mesh.vertexBuffer, v.InstanceBuffer}, []int{0, 0})
+			scratch.bindVertexBuffers(deviceDriver, cmdBuf, 0, v.Mesh.vertexBuffer, v.InstanceBuffer)
 			deviceDriver.CmdBindIndexBuffer(cmdBuf, v.Mesh.indexBuffer, 0, v.Mesh.indexType)
 
 			// Cull first, then draw nearest tile first.
@@ -1102,24 +1073,23 @@ func recordCommandBuffer(
 		// depth, so the nearest blade wins wherever two overlap.
 		if len(impostorTiles) > 0 {
 			deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, grassImpostorPipeline)
-			deviceDriver.CmdSetViewport(cmdBuf, viewport)
-			deviceDriver.CmdSetScissor(cmdBuf, scissor)
+			scratch.setViewport(deviceDriver, cmdBuf, viewport)
+			scratch.setScissor(deviceDriver, cmdBuf, scissor)
 			// The atlas at set 0 in place of the flora texture; grass.frag reads
 			// whichever is bound and does not care which.
-			deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, litPipelineLayout, 0,
-				[]core1_0.DescriptorSet{impostor.set, shadowDS}, nil)
+			scratch.bindDescriptorSets(deviceDriver, cmdBuf, core1_0.PipelineBindPointGraphics, litPipelineLayout, 0, impostor.set, shadowDS)
 
 			// Billboard geometry only. The lighting slots stay exactly as the
 			// mesh draws left them, which is what makes the two agree.
-			pc[pcImpostorWidth] = impostor.worldWidth
-			pc[pcImpostorHeight] = impostor.worldHeight
+			scratch.pc[pcImpostorWidth] = impostor.worldWidth
+			scratch.pc[pcImpostorHeight] = impostor.worldHeight
 
 			for _, vt := range impostorTiles {
 				v := &grass.Variants[vt.variant]
-				deviceDriver.CmdBindVertexBuffers(cmdBuf, 1, []core1_0.Buffer{v.InstanceBuffer}, []int{0})
+				scratch.bindVertexBuffers(deviceDriver, cmdBuf, 1, v.InstanceBuffer)
 
-				pc[pcImpostorCell] = float32(impostor.cells*grassImpostorCellStride + vt.variant)
-				deviceDriver.CmdPushConstants(cmdBuf, litPipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
+				scratch.pc[pcImpostorCell] = float32(impostor.cells*grassImpostorCellStride + vt.variant)
+				scratch.pushConstants(deviceDriver, cmdBuf, litPipelineLayout, core1_0.StageVertex|core1_0.StageFragment)
 
 				for _, t := range impostorScratch[vt.start:vt.end] {
 					tile := t.tile
@@ -1162,43 +1132,42 @@ func recordCommandBuffer(
 	// Greater would reject it everywhere.
 	if lighting.DrawSky {
 		deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, skyPipeline)
-		deviceDriver.CmdSetViewport(cmdBuf, viewport)
-		deviceDriver.CmdSetScissor(cmdBuf, scissor)
+		scratch.setViewport(deviceDriver, cmdBuf, viewport)
+		scratch.setScissor(deviceDriver, cmdBuf, scissor)
 		// The half-resolution cloud target, which the sky composites over its
 		// dome. It is written earlier in this same command buffer.
-		deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, []core1_0.DescriptorSet{cloudSet}, nil)
+		scratch.bindDescriptorSets(deviceDriver, cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, cloudSet)
 
-		var pc [64]float32
-		copy(pc[:16], lighting.InvVP[:])
-		pc[16] = lighting.CameraPos[0]
-		pc[17] = lighting.CameraPos[1]
-		pc[18] = lighting.CameraPos[2]
-		pc[32] = lighting.Time
-		pc[33] = lighting.NightFactor
-		pc[34] = float32(lighting.CloudSteps)
-		pc[36] = lighting.SunDir[0]
-		pc[37] = lighting.SunDir[1]
-		pc[38] = lighting.SunDir[2]
-		pc[40] = lighting.SunColor[0]
-		pc[41] = lighting.SunColor[1]
-		pc[42] = lighting.SunColor[2]
-		pc[43] = lighting.SunElevation
+		scratch.resetPC()
+		copy(scratch.pc[:16], lighting.InvVP[:])
+		scratch.pc[16] = lighting.CameraPos[0]
+		scratch.pc[17] = lighting.CameraPos[1]
+		scratch.pc[18] = lighting.CameraPos[2]
+		scratch.pc[32] = lighting.Time
+		scratch.pc[33] = lighting.NightFactor
+		scratch.pc[34] = float32(lighting.CloudSteps)
+		scratch.pc[36] = lighting.SunDir[0]
+		scratch.pc[37] = lighting.SunDir[1]
+		scratch.pc[38] = lighting.SunDir[2]
+		scratch.pc[40] = lighting.SunColor[0]
+		scratch.pc[41] = lighting.SunColor[1]
+		scratch.pc[42] = lighting.SunColor[2]
+		scratch.pc[43] = lighting.SunElevation
 		// fog.zw, at the same offsets every other shader reads it from: the real
 		// sun's horizontal direction. sky.frag declares the intervening cameraPos
 		// and fog members solely to land on these offsets, so that there is one
 		// convention rather than a per-shader packing to get wrong.
-		pc[62] = lighting.RealSunDir[0]
-		pc[63] = lighting.RealSunDir[2]
-		pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
-		deviceDriver.CmdPushConstants(cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
+		scratch.pc[62] = lighting.RealSunDir[0]
+		scratch.pc[63] = lighting.RealSunDir[2]
+		scratch.pushConstants(deviceDriver, cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment)
 		deviceDriver.CmdDraw(cmdBuf, 3, 1, 0, 0)
 	}
 
 	// Draw procedural stars (additive blend, no vertex buffer)
 	if lighting.DrawStars {
 		deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, starsPipeline)
-		deviceDriver.CmdSetViewport(cmdBuf, viewport)
-		deviceDriver.CmdSetScissor(cmdBuf, scissor)
+		scratch.setViewport(deviceDriver, cmdBuf, viewport)
+		scratch.setScissor(deviceDriver, cmdBuf, scissor)
 		// The star pass has always bound a descriptor here without sampling it.
 		// When a panorama is supplied it goes in that slot, and sunDir.x -- which
 		// this pass does not otherwise use -- says whether it is real.
@@ -1208,20 +1177,19 @@ func recordCommandBuffer(
 			starTex = milkyWayTex
 			haveBand = 1
 		}
-		deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, []core1_0.DescriptorSet{starTex.DescriptorSet}, nil)
+		scratch.bindDescriptorSets(deviceDriver, cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, starTex.DescriptorSet)
 
-		var pc [64]float32
-		copy(pc[:16], lighting.InvVP[:])
-		pc[16] = lighting.CameraPos[0]
-		pc[17] = lighting.CameraPos[1]
-		pc[18] = lighting.CameraPos[2]
-		pc[32] = lighting.Time
-		pc[33] = lighting.NightFactor
-		pc[34] = lighting.MilkyWay
-		pc[35] = lighting.StarDensity
-		pc[36] = haveBand
-		pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
-		deviceDriver.CmdPushConstants(cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
+		scratch.resetPC()
+		copy(scratch.pc[:16], lighting.InvVP[:])
+		scratch.pc[16] = lighting.CameraPos[0]
+		scratch.pc[17] = lighting.CameraPos[1]
+		scratch.pc[18] = lighting.CameraPos[2]
+		scratch.pc[32] = lighting.Time
+		scratch.pc[33] = lighting.NightFactor
+		scratch.pc[34] = lighting.MilkyWay
+		scratch.pc[35] = lighting.StarDensity
+		scratch.pc[36] = haveBand
+		scratch.pushConstants(deviceDriver, cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment)
 		deviceDriver.CmdDraw(cmdBuf, 3, 1, 0, 0)
 	}
 
@@ -1231,29 +1199,28 @@ func recordCommandBuffer(
 	// for a cloud to pass in front of the sun.
 	if len(celestials) > 0 {
 		deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, celestialPipeline)
-		deviceDriver.CmdSetViewport(cmdBuf, viewport)
-		deviceDriver.CmdSetScissor(cmdBuf, scissor)
-		deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, []core1_0.DescriptorSet{fallbackTexture.DescriptorSet}, nil)
+		scratch.setViewport(deviceDriver, cmdBuf, viewport)
+		scratch.setScissor(deviceDriver, cmdBuf, scissor)
+		scratch.bindDescriptorSets(deviceDriver, cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, fallbackTexture.DescriptorSet)
 
 		for i := range celestials {
 			d := &celestials[i]
 			if d.Mesh == nil || (d.Mesh.IndexCount == 0 && d.Mesh.VertexCount == 0) {
 				continue
 			}
-			deviceDriver.CmdBindVertexBuffers(cmdBuf, 0, []core1_0.Buffer{d.Mesh.vertexBuffer}, []int{0})
+			scratch.bindVertexBuffers(deviceDriver, cmdBuf, 0, d.Mesh.vertexBuffer)
 
-			var pc [64]float32
-			copy(pc[:16], d.MVP[:])
-			pc[16] = 1
-			pc[21] = 1
-			pc[26] = 1
-			pc[31] = 1
-			pc[32] = d.Color[0]
-			pc[33] = d.Color[1]
-			pc[34] = d.Color[2]
-			pc[35] = 1.0
-			pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
-			deviceDriver.CmdPushConstants(cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
+			scratch.resetPC()
+			copy(scratch.pc[:16], d.MVP[:])
+			scratch.pc[16] = 1
+			scratch.pc[21] = 1
+			scratch.pc[26] = 1
+			scratch.pc[31] = 1
+			scratch.pc[32] = d.Color[0]
+			scratch.pc[33] = d.Color[1]
+			scratch.pc[34] = d.Color[2]
+			scratch.pc[35] = 1.0
+			scratch.pushConstants(deviceDriver, cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment)
 
 			stats.addDraw(1, d.Mesh.IndexCount, d.Mesh.VertexCount)
 			if d.Mesh.IndexCount > 0 {
@@ -1270,7 +1237,7 @@ func recordCommandBuffer(
 	timer.begin(deviceDriver, cmdBuf, frame, PassTranslucent)
 	recordTranslucent(deviceDriver, stats, cmdBuf, translucentPipeline, translucentDoubleSidedPipeline,
 		skinnedTranslucentPipeline, litPipelineLayout, skinnedPipelineLayout, viewport, scissor,
-		draws, lighting, fallbackTexture, shadowDS, frame, split, false)
+		draws, lighting, fallbackTexture, shadowDS, frame, split, false, scratch)
 	timer.end(deviceDriver, cmdBuf, frame, PassTranslucent)
 
 	timer.begin(deviceDriver, cmdBuf, frame, PassParticles)
@@ -1278,7 +1245,7 @@ func recordCommandBuffer(
 	// frame that is all of them and this is the only particle draw, exactly as
 	// it was before the split existed.
 	recordParticles(deviceDriver, cmdBuf, particlePipeline, pipelineLayout, viewport, scissor,
-		particles, lighting, fallbackTexture, frame, 0, particleBehind(particles))
+		particles, lighting, fallbackTexture, frame, 0, particleBehind(particles), scratch)
 
 	timer.end(deviceDriver, cmdBuf, frame, PassParticles)
 	timer.begin(deviceDriver, cmdBuf, frame, PassOverlay)
@@ -1292,7 +1259,7 @@ func recordCommandBuffer(
 	// painted over is two wrongs rather than one.
 	if !split.active() {
 		recordOverlays(deviceDriver, stats, cmdBuf, overlayPipeline, pipelineLayout,
-			viewport, scissor, overlays, fallbackTexture)
+			viewport, scissor, overlays, fallbackTexture, scratch)
 	}
 
 	deviceDriver.CmdEndRenderPass(cmdBuf)
@@ -1324,7 +1291,7 @@ func recordCommandBuffer(
 				fallback:           fallbackTexture,
 				split:              split,
 				frame:              frame,
-			}, timer); err != nil {
+			}, timer, scratch); err != nil {
 			return err
 		}
 	} else {
@@ -1337,7 +1304,7 @@ func recordCommandBuffer(
 	}
 
 	timer.begin(deviceDriver, cmdBuf, frame, PassBloom)
-	if err := recordBloom(deviceDriver, cmdBuf, bloom); err != nil {
+	if err := recordBloom(deviceDriver, cmdBuf, bloom, scratch); err != nil {
 		return err
 	}
 	timer.end(deviceDriver, cmdBuf, frame, PassBloom)
@@ -1347,8 +1314,8 @@ func recordCommandBuffer(
 	if err := recordTonemap(deviceDriver, cmdBuf, tonemap, tonemap.layout, extent, timer, frame,
 		func(cmdBuf core1_0.CommandBuffer) {
 			recordUIComposite(deviceDriver, stats, cmdBuf, uiPipeline, msdfPipeline,
-				pipelineLayout, extent, uiOverlays, msdfOverlays, fallbackTexture)
-		}); err != nil {
+				pipelineLayout, extent, uiOverlays, msdfOverlays, fallbackTexture, scratch)
+		}, scratch); err != nil {
 		return err
 	}
 
@@ -1387,30 +1354,30 @@ func recordParticles(
 	lighting SceneLighting,
 	fallbackTexture *Texture,
 	frame, first, count int,
+	scratch *commandScratch,
 ) {
 	if particles == nil || count <= 0 {
 		return
 	}
 	deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, particlePipeline)
-	deviceDriver.CmdSetViewport(cmdBuf, viewport)
-	deviceDriver.CmdSetScissor(cmdBuf, scissor)
-	deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, []core1_0.DescriptorSet{fallbackTexture.DescriptorSet}, nil)
+	scratch.setViewport(deviceDriver, cmdBuf, viewport)
+	scratch.setScissor(deviceDriver, cmdBuf, scissor)
+	scratch.bindDescriptorSets(deviceDriver, cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, fallbackTexture.DescriptorSet)
 
 	// Push constants: VP at [0..15], cameraRight packed into model col 0, cameraUp into model col 1
-	var pc [64]float32
-	copy(pc[:16], lighting.VP[:])
+	scratch.resetPC()
+	copy(scratch.pc[:16], lighting.VP[:])
 	// model column 0 = cameraRight
-	pc[16] = lighting.CameraRight[0]
-	pc[17] = lighting.CameraRight[1]
-	pc[18] = lighting.CameraRight[2]
+	scratch.pc[16] = lighting.CameraRight[0]
+	scratch.pc[17] = lighting.CameraRight[1]
+	scratch.pc[18] = lighting.CameraRight[2]
 	// model column 1 = cameraUp
-	pc[20] = lighting.CameraUp[0]
-	pc[21] = lighting.CameraUp[1]
-	pc[22] = lighting.CameraUp[2]
-	pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
-	deviceDriver.CmdPushConstants(cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
+	scratch.pc[20] = lighting.CameraUp[0]
+	scratch.pc[21] = lighting.CameraUp[1]
+	scratch.pc[22] = lighting.CameraUp[2]
+	scratch.pushConstants(deviceDriver, cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment)
 
-	deviceDriver.CmdBindVertexBuffers(cmdBuf, 0, []core1_0.Buffer{particles.QuadMesh.vertexBuffer, particles.InstanceBuffers[frame]}, []int{0, 0})
+	scratch.bindVertexBuffers(deviceDriver, cmdBuf, 0, particles.QuadMesh.vertexBuffer, particles.InstanceBuffers[frame])
 	deviceDriver.CmdBindIndexBuffer(cmdBuf, particles.QuadMesh.indexBuffer, 0, particles.QuadMesh.indexType)
 	deviceDriver.CmdDrawIndexed(cmdBuf, particles.QuadMesh.IndexCount, count, 0, 0, uint32(first))
 }
@@ -1433,37 +1400,37 @@ func recordOverlays(
 	scissor core1_0.Rect2D,
 	overlays []RenderObject,
 	fallbackTexture *Texture,
+	scratch *commandScratch,
 ) {
 	if len(overlays) == 0 {
 		return
 	}
 	deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, overlayPipeline)
-	deviceDriver.CmdSetViewport(cmdBuf, viewport)
-	deviceDriver.CmdSetScissor(cmdBuf, scissor)
-	deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, []core1_0.DescriptorSet{fallbackTexture.DescriptorSet}, nil)
+	scratch.setViewport(deviceDriver, cmdBuf, viewport)
+	scratch.setScissor(deviceDriver, cmdBuf, scissor)
+	scratch.bindDescriptorSets(deviceDriver, cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, fallbackTexture.DescriptorSet)
 
 	for i := range overlays {
 		d := &overlays[i]
 		if d.Mesh.IndexCount == 0 && d.Mesh.VertexCount == 0 {
 			continue
 		}
-		deviceDriver.CmdBindVertexBuffers(cmdBuf, 0, []core1_0.Buffer{d.Mesh.vertexBuffer}, []int{0})
+		scratch.bindVertexBuffers(deviceDriver, cmdBuf, 0, d.Mesh.vertexBuffer)
 
 		// Overlay: MVP + identity model + tint, lighting zeroed
-		var pc [64]float32
-		copy(pc[:16], d.MVP[:])
+		scratch.resetPC()
+		copy(scratch.pc[:16], d.MVP[:])
 		// model = identity
-		pc[16] = 1
-		pc[21] = 1
-		pc[26] = 1
-		pc[31] = 1
-		pc[32] = d.Color[0]
-		pc[33] = d.Color[1]
-		pc[34] = d.Color[2]
-		pc[35] = 1.0
+		scratch.pc[16] = 1
+		scratch.pc[21] = 1
+		scratch.pc[26] = 1
+		scratch.pc[31] = 1
+		scratch.pc[32] = d.Color[0]
+		scratch.pc[33] = d.Color[1]
+		scratch.pc[34] = d.Color[2]
+		scratch.pc[35] = 1.0
 		// lighting fields stay zero — overlay shader ignores them
-		pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
-		deviceDriver.CmdPushConstants(cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
+		scratch.pushConstants(deviceDriver, cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment)
 
 		stats.addDraw(1, d.Mesh.IndexCount, d.Mesh.VertexCount)
 		if d.Mesh.IndexCount > 0 {
@@ -1548,6 +1515,7 @@ func recordWaterPass(
 	msaa bool,
 	ow overWater,
 	timer *gpuTimer,
+	scratch *commandScratch,
 ) error {
 	colorRange := core1_0.ImageSubresourceRange{
 		AspectMask: core1_0.ImageAspectColor,
@@ -1561,35 +1529,33 @@ func recordWaterPass(
 	// Copying the HDR image rather than the swapchain is what keeps refraction
 	// working: the swapchain no longer holds the scene at this point in the
 	// frame -- nothing has been tonemapped into it yet.
-	deviceDriver.CmdPipelineBarrier(cmdBuf,
-		core1_0.PipelineStageColorAttachmentOutput, core1_0.PipelineStageTransfer, 0, nil, nil,
-		[]core1_0.ImageMemoryBarrier{
-			{
-				OldLayout:           core1_0.ImageLayoutShaderReadOnlyOptimal,
-				NewLayout:           core1_0.ImageLayoutTransferSrcOptimal,
-				SrcQueueFamilyIndex: -1, DstQueueFamilyIndex: -1,
-				Image:            sceneImage,
-				SubresourceRange: colorRange,
-				SrcAccessMask:    core1_0.AccessColorAttachmentWrite,
-				DstAccessMask:    core1_0.AccessTransferRead,
-			},
-			{
-				// Previous contents are irrelevant; the whole image is rewritten.
-				OldLayout:           core1_0.ImageLayoutUndefined,
-				NewLayout:           core1_0.ImageLayoutTransferDstOptimal,
-				SrcQueueFamilyIndex: -1, DstQueueFamilyIndex: -1,
-				Image:            sceneColor.image,
-				SubresourceRange: colorRange,
-				SrcAccessMask:    0,
-				DstAccessMask:    core1_0.AccessTransferWrite,
-			},
+	scratch.pipelineBarrier(deviceDriver, cmdBuf,
+		core1_0.PipelineStageColorAttachmentOutput, core1_0.PipelineStageTransfer,
+		core1_0.ImageMemoryBarrier{
+			OldLayout:           core1_0.ImageLayoutShaderReadOnlyOptimal,
+			NewLayout:           core1_0.ImageLayoutTransferSrcOptimal,
+			SrcQueueFamilyIndex: -1, DstQueueFamilyIndex: -1,
+			Image:            sceneImage,
+			SubresourceRange: colorRange,
+			SrcAccessMask:    core1_0.AccessColorAttachmentWrite,
+			DstAccessMask:    core1_0.AccessTransferRead,
+		},
+		core1_0.ImageMemoryBarrier{
+			// Previous contents are irrelevant; the whole image is rewritten.
+			OldLayout:           core1_0.ImageLayoutUndefined,
+			NewLayout:           core1_0.ImageLayoutTransferDstOptimal,
+			SrcQueueFamilyIndex: -1, DstQueueFamilyIndex: -1,
+			Image:            sceneColor.image,
+			SubresourceRange: colorRange,
+			SrcAccessMask:    0,
+			DstAccessMask:    core1_0.AccessTransferWrite,
 		})
 
 	layers := core1_0.ImageSubresourceLayers{
 		AspectMask: core1_0.ImageAspectColor,
 		LayerCount: 1,
 	}
-	deviceDriver.CmdCopyImage(cmdBuf,
+	scratch.copyImage(deviceDriver, cmdBuf,
 		sceneImage, core1_0.ImageLayoutTransferSrcOptimal,
 		sceneColor.image, core1_0.ImageLayoutTransferDstOptimal,
 		core1_0.ImageCopy{
@@ -1598,9 +1564,9 @@ func recordWaterPass(
 			Extent:         core1_0.Extent3D{Width: extent.Width, Height: extent.Height, Depth: 1},
 		})
 
-	deviceDriver.CmdPipelineBarrier(cmdBuf,
-		core1_0.PipelineStageTransfer, core1_0.PipelineStageFragmentShader, 0, nil, nil,
-		[]core1_0.ImageMemoryBarrier{{
+	scratch.pipelineBarrier(deviceDriver, cmdBuf,
+		core1_0.PipelineStageTransfer, core1_0.PipelineStageFragmentShader,
+		core1_0.ImageMemoryBarrier{
 			OldLayout:           core1_0.ImageLayoutTransferDstOptimal,
 			NewLayout:           core1_0.ImageLayoutShaderReadOnlyOptimal,
 			SrcQueueFamilyIndex: -1, DstQueueFamilyIndex: -1,
@@ -1608,7 +1574,7 @@ func recordWaterPass(
 			SubresourceRange: colorRange,
 			SrcAccessMask:    core1_0.AccessTransferWrite,
 			DstAccessMask:    core1_0.AccessShaderRead,
-		}})
+		})
 
 	// No barrier back for the HDR scene image. With MSAA the water pass
 	// declares its resolve target Undefined and rewrites it wholesale; without
@@ -1617,14 +1583,8 @@ func recordWaterPass(
 	// legal layout transition to ask for.
 	_ = msaa
 
-	err := deviceDriver.CmdBeginRenderPass(cmdBuf, core1_0.SubpassContentsInline, core1_0.RenderPassBeginInfo{
-		RenderPass:  waterRenderPass,
-		Framebuffer: framebuffer,
-		RenderArea: core1_0.Rect2D{
-			Offset: core1_0.Offset2D{X: 0, Y: 0},
-			Extent: extent,
-		},
-	})
+	err := scratch.beginRenderPass(deviceDriver, cmdBuf, core1_0.SubpassContentsInline, waterRenderPass, framebuffer,
+		core1_0.Rect2D{Offset: core1_0.Offset2D{X: 0, Y: 0}, Extent: extent})
 	if err != nil {
 		return err
 	}
@@ -1641,32 +1601,31 @@ func recordWaterPass(
 			continue
 		}
 		deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, waterPipeline)
-		deviceDriver.CmdSetViewport(cmdBuf, viewport)
-		deviceDriver.CmdSetScissor(cmdBuf, scissor)
+		scratch.setViewport(deviceDriver, cmdBuf, viewport)
+		scratch.setScissor(deviceDriver, cmdBuf, scissor)
 
 		// Set 0 is the opaque scene rather than a material texture.
-		deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, litPipelineLayout, 0,
-			[]core1_0.DescriptorSet{sceneColor.texture.DescriptorSet, shadowDS}, nil)
+		scratch.bindDescriptorSets(deviceDriver, cmdBuf, core1_0.PipelineBindPointGraphics, litPipelineLayout, 0,
+			sceneColor.texture.DescriptorSet, shadowDS)
 
-		var pc [64]float32
-		copy(pc[:16], d.MVP[:])
-		copy(pc[16:32], d.Model[:])
+		scratch.resetPC()
+		copy(scratch.pc[:16], d.MVP[:])
+		copy(scratch.pc[16:32], d.Model[:])
 		// tint carries the wave parameters; the water shader has no use for a
 		// colour there, since both of its colours are per-vertex.
-		pc[32] = lighting.Time
-		pc[33] = d.Water.Amplitude
-		pc[34] = d.Water.WaveLength
-		pc[35] = d.Water.RefractStrength
-		packLightingPC(&pc, lighting)
-		pc[51] = d.Water.AbsorptionDepth // pointColor.w
-		pc[55] = 0
+		scratch.pc[32] = lighting.Time
+		scratch.pc[33] = d.Water.Amplitude
+		scratch.pc[34] = d.Water.WaveLength
+		scratch.pc[35] = d.Water.RefractStrength
+		packLightingPC(&scratch.pc, lighting)
+		scratch.pc[51] = d.Water.AbsorptionDepth // pointColor.w
+		scratch.pc[55] = 0
 		// sunDir.w, which packLightingPC leaves as padding and only the grass
 		// pipeline otherwise claims. It is the last free scalar in this block.
-		pc[39] = d.Water.WaveNoise
-		pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
-		deviceDriver.CmdPushConstants(cmdBuf, litPipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
+		scratch.pc[39] = d.Water.WaveNoise
+		scratch.pushConstants(deviceDriver, cmdBuf, litPipelineLayout, core1_0.StageVertex|core1_0.StageFragment)
 
-		deviceDriver.CmdBindVertexBuffers(cmdBuf, 0, []core1_0.Buffer{d.Mesh.vertexBuffer}, []int{0})
+		scratch.bindVertexBuffers(deviceDriver, cmdBuf, 0, d.Mesh.vertexBuffer)
 		stats.addDraw(1, d.Mesh.IndexCount, d.Mesh.VertexCount)
 		if d.Mesh.IndexCount > 0 {
 			deviceDriver.CmdBindIndexBuffer(cmdBuf, d.Mesh.indexBuffer, 0, d.Mesh.indexType)
@@ -1689,17 +1648,17 @@ func recordWaterPass(
 	// everything. Only the water now sits underneath instead of on top.
 	recordTranslucent(deviceDriver, stats, cmdBuf, ow.translucent, ow.translucentDouble,
 		ow.skinnedTranslucent, litPipelineLayout, ow.skinnedLayout, viewport, scissor,
-		draws, lighting, ow.fallback, shadowDS, ow.frame, ow.split, true)
+		draws, lighting, ow.fallback, shadowDS, ow.frame, ow.split, true, scratch)
 
 	behind := particleBehind(ow.particles)
 	if ow.particles != nil {
 		recordParticles(deviceDriver, cmdBuf, ow.particlePipeline, pipelineLayout, viewport, scissor,
-			ow.particles, lighting, ow.fallback, ow.frame, behind, ow.particles.InstanceCount-behind)
+			ow.particles, lighting, ow.fallback, ow.frame, behind, ow.particles.InstanceCount-behind, scratch)
 	}
 
 	if ow.split.active() {
 		recordOverlays(deviceDriver, stats, cmdBuf, ow.overlayPipeline, pipelineLayout,
-			viewport, scissor, ow.overlays, ow.fallback)
+			viewport, scissor, ow.overlays, ow.fallback, scratch)
 	}
 
 	deviceDriver.CmdEndRenderPass(cmdBuf)

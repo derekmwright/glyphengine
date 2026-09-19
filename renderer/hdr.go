@@ -3,7 +3,6 @@ package renderer
 import (
 	"fmt"
 	"log"
-	"unsafe"
 
 	"github.com/vkngwrapper/core/v3/core1_0"
 	"github.com/vkngwrapper/extensions/v3/khr_swapchain"
@@ -467,6 +466,7 @@ func recordTonemap(
 	timer *gpuTimer,
 	frame int,
 	composite func(core1_0.CommandBuffer),
+	scratch *commandScratch,
 ) error {
 	timer.begin(deviceDriver, cmdBuf, frame, PassTonemap)
 	if err := deviceDriver.CmdBeginRenderPass(cmdBuf, core1_0.SubpassContentsInline, core1_0.RenderPassBeginInfo{
@@ -477,22 +477,20 @@ func recordTonemap(
 		return err
 	}
 	deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, tonemap.pipeline)
-	deviceDriver.CmdSetViewport(cmdBuf, core1_0.Viewport{
+	scratch.setViewport(deviceDriver, cmdBuf, core1_0.Viewport{
 		Width: float32(extent.Width), Height: float32(extent.Height), MinDepth: 0, MaxDepth: 1,
 	})
-	deviceDriver.CmdSetScissor(cmdBuf, core1_0.Rect2D{Offset: core1_0.Offset2D{X: 0, Y: 0}, Extent: extent})
-	deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0,
-		[]core1_0.DescriptorSet{tonemap.set}, nil)
+	scratch.setScissor(deviceDriver, cmdBuf, core1_0.Rect2D{Offset: core1_0.Offset2D{X: 0, Y: 0}, Extent: extent})
+	scratch.bindDescriptorSets(deviceDriver, cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, tonemap.set)
 
 	// Only tint is read, but the layout has to match what the pipeline layout
 	// declares, so the whole 256 bytes go across.
-	var pc [pushConstantSize / 4]float32
-	pc[32] = tonemap.exposure
-	pc[33] = tonemap.curve
-	pc[34] = tonemap.white
-	pc[35] = tonemap.bloom
-	deviceDriver.CmdPushConstants(cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0,
-		unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize))
+	scratch.resetPC()
+	scratch.pc[32] = tonemap.exposure
+	scratch.pc[33] = tonemap.curve
+	scratch.pc[34] = tonemap.white
+	scratch.pc[35] = tonemap.bloom
+	scratch.pushConstants(deviceDriver, cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment)
 
 	deviceDriver.CmdDraw(cmdBuf, 3, 1, 0, 0)
 	timer.end(deviceDriver, cmdBuf, frame, PassTonemap)

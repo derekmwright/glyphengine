@@ -1,8 +1,6 @@
 package renderer
 
 import (
-	"unsafe"
-
 	"github.com/vkngwrapper/core/v3/core1_0"
 )
 
@@ -37,6 +35,7 @@ func recordInstanced(
 	lighting SceneLighting,
 	fallbackTexture *Texture,
 	shadowDS core1_0.DescriptorSet,
+	scratch *commandScratch,
 ) {
 	bound := false
 	currentDoubleSided := false
@@ -55,8 +54,8 @@ func recordInstanced(
 				p = instancedDoubleSidedPipeline
 			}
 			deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, p)
-			deviceDriver.CmdSetViewport(cmdBuf, viewport)
-			deviceDriver.CmdSetScissor(cmdBuf, scissor)
+			scratch.setViewport(deviceDriver, cmdBuf, viewport)
+			scratch.setScissor(deviceDriver, cmdBuf, scissor)
 			currentDoubleSided = d.DoubleSided
 			lastTex = nil
 			bound = true
@@ -67,35 +66,35 @@ func recordInstanced(
 			tex = fallbackTexture
 		}
 		if tex != lastTex {
-			deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, litPipelineLayout, 0,
-				[]core1_0.DescriptorSet{tex.DescriptorSet, shadowDS}, nil)
+			scratch.bindDescriptorSets(deviceDriver, cmdBuf, core1_0.PipelineBindPointGraphics, litPipelineLayout, 0, tex.DescriptorSet, shadowDS)
 			lastTex = tex
 		}
 
 		// Binding 0 is the mesh, binding 1 is the placements.
-		deviceDriver.CmdBindVertexBuffers(cmdBuf, 0,
-			[]core1_0.Buffer{set.Mesh.vertexBuffer, set.buffer}, []int{0, 0})
+		scratch.bindVertexBuffers(deviceDriver, cmdBuf, 0, set.Mesh.vertexBuffer, set.buffer)
 
-		var pc [64]float32
-		copy(pc[:16], lighting.VP[:]) // view-projection, not MVP
-		pc[32] = d.Color[0]
-		pc[33] = d.Color[1]
-		pc[34] = d.Color[2]
-		pc[35] = 0.0
+		// The model columns (16:32) are never written here: the instanced
+		// shader takes the model from a per-instance attribute rather than the
+		// push constant, so they must read as zero, which resetPC guarantees.
+		scratch.resetPC()
+		copy(scratch.pc[:16], lighting.VP[:]) // view-projection, not MVP
+		scratch.pc[32] = d.Color[0]
+		scratch.pc[33] = d.Color[1]
+		scratch.pc[34] = d.Color[2]
+		scratch.pc[35] = 0.0
 		if d.Emissive {
-			pc[35] = 1.0
+			scratch.pc[35] = 1.0
 		} else if d.DoubleSided {
-			pc[35] = -1.0
+			scratch.pc[35] = -1.0
 		}
-		packLightingPC(&pc, lighting)
+		packLightingPC(&scratch.pc, lighting)
 		roughness := d.Roughness
 		if roughness == 0 {
 			roughness = 0.5
 		}
-		pc[51] = roughness
-		pc[55] = d.Metallic
-		pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
-		deviceDriver.CmdPushConstants(cmdBuf, litPipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
+		scratch.pc[51] = roughness
+		scratch.pc[55] = d.Metallic
+		scratch.pushConstants(deviceDriver, cmdBuf, litPipelineLayout, core1_0.StageVertex|core1_0.StageFragment)
 
 		stats.addDraw(set.count, set.Mesh.IndexCount, set.Mesh.VertexCount)
 		if set.Mesh.IndexCount > 0 {
@@ -130,6 +129,7 @@ func recordInstancedShadow(
 	draws []RenderObject,
 	cascadeVP [16]float32,
 	cascadeFrustum Frustum,
+	scratch *commandScratch,
 ) {
 	bound := false
 	for i := range draws {
@@ -148,20 +148,20 @@ func recordInstancedShadow(
 
 		if !bound {
 			deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, pipeline)
-			deviceDriver.CmdSetViewport(cmdBuf, viewport)
-			deviceDriver.CmdSetScissor(cmdBuf, scissor)
+			scratch.setViewport(deviceDriver, cmdBuf, viewport)
+			scratch.setScissor(deviceDriver, cmdBuf, scissor)
 			bound = true
 		}
 
-		deviceDriver.CmdBindVertexBuffers(cmdBuf, 0,
-			[]core1_0.Buffer{set.Mesh.vertexBuffer, set.buffer}, []int{0, 0})
+		scratch.bindVertexBuffers(deviceDriver, cmdBuf, 0, set.Mesh.vertexBuffer, set.buffer)
 
 		// The instanced depth stage reads the first matrix as the cascade's
-		// view-projection; the model comes from the instance attribute.
-		var shadowPC [32]float32
-		copy(shadowPC[:16], cascadeVP[:])
-		pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&shadowPC[0])), 128)
-		deviceDriver.CmdPushConstants(cmdBuf, layout, core1_0.StageVertex, 0, pcBytes)
+		// view-projection; the model comes from the instance attribute, so
+		// [16:32) must read as zero -- explicit here because, unlike every
+		// other shadowPC write, this one does not fill the whole array.
+		scratch.shadowPC = [32]float32{}
+		copy(scratch.shadowPC[:16], cascadeVP[:])
+		scratch.pushShadowConstants(deviceDriver, cmdBuf, layout)
 
 		stats.addDraw(set.count, set.Mesh.IndexCount, set.Mesh.VertexCount)
 		if set.Mesh.IndexCount > 0 {
