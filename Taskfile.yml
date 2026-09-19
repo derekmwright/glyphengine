@@ -273,24 +273,93 @@ tasks:
         shot() { GLYPHENGINE_FIXED_FRAME_TIME=$1 go run ./$2 -frames 90 $4 -screenshot $d/$3.png >/dev/null 2>&1; }
         same() {
           [ -s "$d/$1.png" ] && [ -s "$d/$2.png" ] || { echo "MISSING CAPTURE -- this gate proves nothing"; status=1; return 1; }
-          [ "$(sha256sum < $d/$1.png)" = "$(sha256sum < $d/$2.png)" ]
+          diff -q "$d/$1.png" "$d/$2.png" >/dev/null 2>&1
         }
+        # Prove the comparator before trusting a word it says.
+        #
+        # This used to hash with sha256sum, which is not on the PATH of the
+        # shell task runs on Windows. Both hashes came back empty, every pair
+        # compared equal, and the gate printed a column of "identical" that
+        # meant nothing -- the failure only surfaced at the very end, on the
+        # control. A comparator is a check like any other and gets checked
+        # first. diff is what sh can be relied on to have; if it is missing too
+        # it reports every pair as different, which fails loudly instead.
+        printf a > $d/x.png; printf a > $d/y.png
+        same x y || { echo "SELF-CHECK: two identical files compared unequal -- this gate proves nothing"; exit 1; }
+        printf b > $d/y.png
+        if same x y; then
+          echo "SELF-CHECK: two different files compared equal -- this gate proves nothing"
+          exit 1
+        fi
+        rm -f $d/x.png $d/y.png
         # The water/blended split is in here because it reorders a buffer every
         # frame from the camera's position: a partition that was not stable, or
         # that read a stale upload, would show up as two runs disagreeing long
         # before anyone noticed it in a picture.
-        for ex in "08-grass" "09-water" "12-particles" "06-skinned -demo" "15-kitchen-sink -demo" "09-water -plume -ghost -marker -submerged"; do
+        #
+        # 08-grass is rendered at night as well as at its default 0.28. Issue
+        # #40 was a night capture, and the gate rendering only 0.28 is named in
+        # the issue as the reason it went unseen: at night the sky is dim
+        # enough that the grass silhouette is most of what the image is, so a
+        # difference lands somewhere the daytime frame hides it.
+        for ex in "08-grass" "08-grass -timeofday 0.0" "08-grass -timeofday 0.03" "09-water" "12-particles" "06-skinned -demo" "15-kitchen-sink -demo" "09-water -plume -ghost -marker -submerged"; do
           set -- $ex
           name=$1; shift
           shot 16.667ms $name a "$*"
           shot 16.667ms $name b "$*"
           if same a b; then
-            echo "$name: identical"
+            echo "$name $*: identical"
           elif [ $? -eq 1 ] && [ -s $d/a.png ]; then
-            echo "$name: TWO RUNS DIFFER under a fixed clock"
+            echo "$name $*: TWO RUNS DIFFER under a fixed clock"
             status=1
           fi
         done
+
+        # Two runs matching only says the machine behaved the same way twice.
+        # What a fixed clock is supposed to buy is that the capture is a
+        # function of the simulation and of nothing else -- and it was not: it
+        # was also a function of how many frames the window system made the
+        # renderer drop, and when. That arrives while a window is being shown,
+        # when it moves between monitors, when the compositor changes mode, so
+        # waiting for it is not a test. The GLYPHENGINE_PROVOKE_* variables put
+        # one on a frame we name; see docs/agents/state-trace.md.
+        #
+        # Measured on this repo before the fixes, against the quiet capture of
+        # the same build (1280x720, fixed clock):
+        #
+        #   rebuild after 08-grass frame 149     257601 px (27.95 %), max delta 104
+        #   rebuild after 09-water frame 89      234723 px (25.47 %), max delta 114
+        #   frame 149 of 08-grass never drawn     12986 px (1.41 %),  max delta 2
+        #   frame 88 of 12-particles never drawn   9899 px (1.07 %),  max delta 2
+        #   20 frames x 40ms of stall                 no change
+        #   draw list reversed before the sort        no change
+        #
+        # The last two have never failed and are here as the other half of the
+        # statement: a wall-clock stall must not reach the image, and neither
+        # must the order an ECS query happens to walk its map in. The draw list
+        # arrives in a different order on every frame of every run already --
+        # the state trace shows draws= differing while drawsset= matches -- so
+        # this is the check that keeps that latent.
+        prov() {
+          label=$1; var=$2; val=$3; name=$4; frames=$5; shift 5
+          GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./$name -frames $frames $* -screenshot $d/q.png >/dev/null 2>&1
+          # A subshell so the provocation cannot leak into the next pair; the
+          # name is only known at runtime, so it is exported rather than
+          # written as an assignment prefix.
+          ( export "$var=$val"; GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./$name -frames $frames $* -screenshot $d/r.png >/dev/null 2>&1 )
+          if same q r; then
+            echo "$label: capture unchanged, as it must be"
+          elif [ $? -eq 1 ] && [ -s $d/q.png ]; then
+            echo "$label: THE CAPTURE CHANGED -- the picture depends on more than the simulation"
+            status=1
+          fi
+        }
+        prov "rebuild on the last frame"   GLYPHENGINE_PROVOKE_RECREATE_FRAMES 149        08-grass     150 -timeofday 0.28
+        prov "rebuild mid-run"             GLYPHENGINE_PROVOKE_RECREATE_FRAMES 89         09-water      90
+        prov "a frame never drawn"         GLYPHENGINE_PROVOKE_SKIP_FRAMES     149        08-grass     150 -timeofday 0.0
+        prov "frames never drawn"          GLYPHENGINE_PROVOKE_SKIP_FRAMES     3,40,88    12-particles  90
+        prov "a stalled cold start"        GLYPHENGINE_PROVOKE_STALL           20:40ms    08-grass     150 -timeofday 0.0
+        prov "draw list reversed"          GLYPHENGINE_PROVOKE_DRAW_ORDER      reverse    09-water      90 -plume -ghost -marker -submerged
         # A paused world must be frozen, not merely slowed. 09-water is the
         # scene for it because the things that move there run off different
         # clocks: the waves and shoreline foam off the elapsed clock the shaders
