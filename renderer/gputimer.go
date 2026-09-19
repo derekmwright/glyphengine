@@ -17,32 +17,40 @@ import (
 type Pass int
 
 const (
-	PassShadow      Pass = iota // both sun cascades plus the point-light cube
-	PassTerrain                 // the splat pipeline
-	PassOpaque                  // lit and skinned geometry
-	PassGrass                   // instanced flora
-	PassClouds                  // half-resolution volumetric cloud march
-	PassSky                     // sky dome, volumetric clouds, stars
-	PassTranslucent             // blended world geometry, back to front
-	PassParticles               // billboard particles
-	PassWater                   // scene copy and the refraction surfaces
-	PassOverWater               // blended draws that belong in front of the water
-	PassOverlay                 // world-space unlit overlays, plus the scene pass end
-	PassBloom                   // bright-pass, downsample and upsample chain
-	PassTonemap                 // HDR resolve to the swapchain
-	PassComposite               // UI panels and MSDF text, onto the resolved image
+	PassShadow       Pass = iota // both sun cascades plus the point-light cube
+	PassTerrain                  // the splat pipeline
+	PassOpaque                   // lit and skinned geometry
+	PassGrass                    // instanced flora
+	PassClouds                   // half-resolution volumetric cloud march
+	PassSky                      // sky dome, volumetric clouds, stars
+	PassTranslucent              // blended world geometry, back to front
+	PassParticles                // billboard particles
+	PassWater                    // scene copy and the refraction surfaces
+	PassOverWater                // blended draws that belong in front of the water
+	PassWaterResolve             // the end of the water pass: its MSAA resolve
+	PassOverlay                  // world-space unlit overlays
+	PassSceneResolve             // the end of the scene pass: its MSAA resolve
+	PassBloom                    // bright-pass, downsample and upsample chain
+	PassTonemap                  // HDR resolve to the swapchain
+	PassComposite                // UI panels and MSDF text, onto the resolved image
 
 	passCount
 )
 
-// PassOverlay is a slightly dishonest name and has been since before the
-// screen-space channels moved out of it: its closing timestamp sits after
-// vkCmdEndRenderPass, so it charges the scene pass's MSAA resolve to "overlay".
-// On 15-kitchen-sink, which sets no world-space overlays at all, it still reads
-// 0.046 ms. Read it as "the end of the scene pass" rather than as the cost of
-// SetOverlays. In a frame that contains water it is exactly that and nothing
-// else: the overlays themselves move to PassOverWater, because they have to be
-// drawn on top of the surface rather than under it.
+// PassSceneResolve and PassWaterResolve bracket vkCmdEndRenderPass and nothing
+// else. Ending a multisampled pass is where its colour resolves, which is real
+// GPU time that belongs to no draw, and for a long time it was charged to
+// whichever pass happened to close last: PassOverlay closed after the scene
+// pass ended and read 0.046 ms on 15-kitchen-sink, which sets no world-space
+// overlays at all, and PassOverWater later did the same for the water pass and
+// read 0.021 ms on a lake with nothing in front of it. A comment admitting that
+// a number is misleading is better than nothing and worse than fixing it.
+//
+// The alternative was to let the resolve fall between passes and show up only
+// as the frame total exceeding their sum. That is honest but unnamed, and
+// someone comparing MSAA settings would not know to look for a gap. Named, it
+// is a line they can read. In a frame with water the overlays themselves move
+// to PassOverWater, because they have to be drawn on top of the surface.
 //
 // PassOverWater is the blended geometry that had to move after the water:
 // translucent meshes, the particle instances in front of the surface, and the
@@ -52,11 +60,9 @@ const (
 // into PassTranslucent and PassParticles would need intervals that straddle the
 // water pass and overlap it.
 //
-// It carries the end of the water pass the way PassOverlay carries the end of
-// the scene pass, so in a frame with water but nothing blended in front of it
-// the number is that pass's MSAA resolve rather than zero: 0.021 ms on
-// 09-water. PassWater plus PassOverWater is what PassWater alone used to be.
-// In a frame with no water at all both are empty and read zero.
+// In a frame with water but nothing blended in front of it, it reads zero.
+// PassWater plus PassOverWater plus PassWaterResolve is what PassWater alone
+// used to be. In a frame with no water at all, all three are empty.
 
 // String is what shows up in the report; kept short so a per-frame line fits.
 func (p Pass) String() string {
@@ -79,6 +85,10 @@ func (p Pass) String() string {
 		return "particles"
 	case PassWater:
 		return "water"
+	case PassWaterResolve:
+		return "waterresolve"
+	case PassSceneResolve:
+		return "resolve"
 	case PassOverWater:
 		return "overwater"
 	case PassOverlay:

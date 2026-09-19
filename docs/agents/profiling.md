@@ -23,7 +23,7 @@ api:
   - renderer.RenderStats
 assets: none
 run: task bench
-verified: 2026-08-02
+verified: 2026-09-19
 ---
 
 # Measuring frame cost
@@ -106,6 +106,18 @@ For the CPU the phases run strictly in sequence, so a gap between sum and total
 is unmeasured work — useful after editing the loop.
 
 ## What the passes actually mean
+
+`PassSceneResolve` (`resolve`) and `PassWaterResolve` (`waterresolve`) bracket
+`vkCmdEndRenderPass` and nothing else: ending a multisampled pass is where its
+colour resolves, which is GPU time no draw caused. It used to be charged to
+whichever pass closed last — `overlay` read 0.046 ms on `15-kitchen-sink`, which
+sets no world-space overlays at all. Measured on this machine at 1280x720, 200
+frames, three runs: `15-kitchen-sink -demo` overlay 0.000 ms, resolve 0.101 /
+0.123 / 0.185 ms; `09-water` overlay 0.000, resolve 0.438 / 0.465 / 0.396 ms,
+waterresolve 0.030 / 0.021 / 0.021 ms. On `09-water` the scene resolve is close
+to a fifth of a 2.2 ms frame, and it spent a long time filed under "overlay".
+Anyone comparing MSAA settings should read these two lines, not the passes
+around them.
 
 `PassShadow` is the shadow *map render*, not shadow sampling. The PCF lookup
 happens inside the grass, terrain and lit fragment shaders, so it lands in those
