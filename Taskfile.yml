@@ -223,6 +223,17 @@ tasks:
         # dependency mismatch the attachments gave no hint of. See
         # sceneEntryDependency.
         check 09-water -plume -ghost -marker -submerged
+        # Lights over water. The water pipeline reads the three light storage
+        # buffers at set 1 bindings 3-5 -- which it has been bound for since
+        # clustered lighting landed, while the shader ignored them, so nothing
+        # had ever actually issued a load from them inside the water pass.
+        # -lampsoff is the same geometry with no lights at all, which is the
+        # other side of that branch, and the two debug modes are the two paths
+        # through resolveLightRange plus the heatmap's early return.
+        check 09-water -lamps 9 -spots 2 -time 0.02
+        check 09-water -lamps 9 -spots 2 -time 0.02 -lampsoff
+        check 09-water -lamps 9 -spots 2 -time 0.02 -lightdebug heatmap
+        check 09-water -lamps 9 -spots 2 -time 0.02 -lightdebug bruteforce
         exit $status
 
   sky:

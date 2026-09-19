@@ -27,6 +27,7 @@ task sky       # the sun and moon are behind the terrain, not on top of it
 task waterblend # a flame in front of the lake is not painted over by it
 task lights    # clustered and brute-force light renderers match exactly
 task nightlight # warm lamps stay warm on the ground at night
+task waterlight # a lamp beside a lake reaches the water, in the lamp's colour
 ```
 
 `task ci` is the minimum. Run `task validate` for anything touching the

@@ -33,7 +33,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-09-18
+verified: 2026-09-19
 ---
 
 # Light a scene with hundreds of point and spot lights
@@ -178,9 +178,16 @@ gives you yours; the CPU cost is the `cluster` phase of the engine's CPU timer
 - **Cone angles that make no sense are clamped, not rejected.** `Inner > Outer`
   becomes a hard edge at `Outer`; both angles are clamped to [0, pi]; NaN
   becomes 0. A hard edge (`Inner == Outer`) is supported.
-- **A lamp beside a lake does not light the water.** `water.frag` shades its
-  own surface and never consults the light list: no pool of light on the water
-  and no highlight from a lamp. Known gap.
+- **A lamp beside a lake puts no pool of light on the water.** It is not meant
+  to. Water takes local lights as a specular reflection only -- a streak
+  breaking up across the wavelets -- and nothing diffuse, because the body term
+  multiplies a lamp by the lake's cyan albedo and the lamp stops reading as
+  warm; the measurement is in [water](water.md#what-a-lamp-does-to-the-water).
+  What remains, and what does surprise people: a lamp shows on the surface at
+  exactly one place, the point where the half-vector lines up with the normal,
+  so a fixture whose cone is aimed anywhere else lights the lake BED and leaves
+  the surface dark. `task waterlight` is the gate; `task lights` includes
+  three water pairs.
 - **A warm lamp reads cold at night.** It should not: the night grade is
   weighted by how much of a fragment's light came from lamps and emission, so
   lamplit surfaces keep their colour. If one does not, see the failure mode of
@@ -215,15 +222,22 @@ and `-lightstats`.
 ```sh
 task lights      # clustered and brute force render byte-identical frames
 task nightlight  # a doorway pool stays warm at night; the ground beside it does not
+task waterlight  # a lamp beside a lake reaches the water, in the lamp's colour
 ```
 
 `task lights` captures `11-lights -lamps 400 -spots 32` in both modes at two
 poses — an overview, and one with the camera inside about forty lamp spheres
 and half a metre from the floor — at two resolutions, plus two `21-streetlights`
-pairs so the terrain and material shaders are covered, and requires every pair
-to match **byte for byte**. Exact equality is achievable because both modes run
-the same code over lights in the same relative order, and a light that does not
-reach a fragment adds exactly zero.
+pairs so the terrain and material shaders are covered and three `09-water`
+pairs so the water surface is, and requires every pair to match **byte for
+byte**. Exact equality is achievable because both modes run the same code over
+lights in the same relative order, and a light that does not reach a fragment
+adds exactly zero.
+
+Water is there in its own right rather than assumed covered: `water.frag` is
+not one of the shaders that call `evalLighting*`, it runs its own loop over the
+same `resolveLightRange`/`lightAt`, and it is drawn in a second pass from the
+same camera after the depth buffer is final.
 
 It has to be exact. Shrinking the binner's sphere test to 0.8 of the radius —
 a genuinely non-conservative binner — changed 25.79 % of the pixels in the near
@@ -233,8 +247,26 @@ gate also refuses to run on a scene that drops lights, since the two modes would
 then not be doing the same work, and carries a control (one lamp fewer must
 change the capture).
 
+**Water fails louder than that**, and it is worth knowing before measuring one.
+A lamp reaches water only as a specular lobe of exponent 220, so a light missing
+from a froxel deletes a whole glint rather than dimming a gradient. Under the
+same shrunk sphere test the dense water pose differs on 4.45 % of the frame with
+a largest channel difference of **42** of 255, and every one of those pixels is
+in the water band.
+
 `task nightlight` samples the pool under a 2800 K door light in
 `21-streetlights` and the moonlit ground beside it: the pool must come out
 R > G > B with red at least 60/255 above blue, the ground must stay blue-grey.
 It fails when the lamp weighting is removed or cut to 15 %; it cannot tell a cut
 to 35 % from an honest retune of the lamp, and says so in its own comment.
+
+`task waterlight` renders `09-water -lamps 9 -spots 2` at night twice — once
+with the lights and once under `-lampsoff`, which builds every pile and fixture
+and hands the scene nothing — and differences the pair. Water carrying a
+reflection must gain warm light, R above G above B, and water out of every
+lamp's range must be **byte-identical**, since `lightIrradiance` returns exactly
+`+0.0` outside a range test. Removing the local light from `water.frag` takes
+the lamp box from R +38.56 G +32.48 B +26.52 to +0.00 across the board;
+removing only the colour, so the surface keeps a local share it has not earned,
+brings it back as R −3.50 G +1.06 B +6.20 — lights on making the water bluer,
+which no brightness measure would report.

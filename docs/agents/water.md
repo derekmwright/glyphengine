@@ -19,7 +19,7 @@ requires:
 assets: none
 example: examples/09-water
 run: go run ./09-water
-verified: 2026-09-18
+verified: 2026-09-19
 ---
 
 # Water
@@ -71,6 +71,92 @@ depth zero, which is exactly what fades the surface out there.
 If `Level` is above all terrain, `WaterMesh` returns an error rather than an
 empty mesh — a surface with nothing under it is almost always a mistake in the
 level, not something to render.
+
+## What a lamp does to the water
+
+Point and spot lights from the clustered set ([lights](lights.md)) reach the
+surface as **specular only**: each one adds a reflection through the same lobe
+the sun's glint uses, over the same normal the waves and the per-fragment
+ripples built, so a lamp breaks up across the wavelets exactly where the sun
+does. There is no diffuse contribution to the body colour.
+
+That is a measurement, not a shortcut. The body term multiplies light by the
+water's albedo, which is cyan by default, so it repaints the lamp in the lake's
+colour. Measured on `09-water -lamps 9 -spots 2 -time 0.02` against the same
+scene under `-lampsoff`, what the lamps ADD to a patch of water carrying a
+reflection:
+
+| body term, as a share of the sun's weight | R | G | B |
+|---|---|---|---|
+| 0.00 (shipping) | +21.4 | +18.0 | +14.9 |
+| 0.10 | +24.9 | +26.1 | +24.6 |
+| 0.25 | +35.1 | +38.9 | +36.1 |
+
+A tenth of the sun's weight already puts green above red, which is the failure
+`task nightlight` exists to catch on the ground. At 0.25 the open lake between
+the reflections lifts by +13/+18/+18 with nothing on it: the pool of paint.
+Calm-to-rippled water is overwhelmingly specular anyway, so this is also the
+physical answer, and the light a lamp puts into the body is not lost — where
+the water is shallow enough for the body to matter, the bed shows through the
+refraction and the opaque pass has already lit that bed with the same lamp.
+
+Everything goes through `resolveLightRange` / `lightAt` / `lightIrradiance`, so
+the cluster grid, `LightDebugBruteForce` and the spot cone behave here exactly
+as on the terrain beside the lake. `task lights` requires the two modes to
+render the lake byte-identically, at three poses.
+
+The **froxel heatmap** covers water too. It used to be the one hole in that
+readout: the lake showed a refracted, absorbed, Fresnel-mixed picture of the
+*bed's* heatmap, in colours that read as a smaller count than the cells there
+hold. It is drawn at alpha 1.0 rather than the surface's own fade, because
+blending a count over another count gives a colour that means neither.
+
+### Where it is approximate
+
+The **night grade's local share** — how much of what leaves a fragment came
+from a lamp, which is what stops lamplit surfaces taking the full scotopic
+shift; see [day-night](day-night.md) — is set from the glint alone. Two things
+are counted as sky that are not purely sky:
+
+- **The refracted scene.** It is a pixel of the opaque pass, already lit,
+  already fogged and already graded, and nothing in the water shader can say
+  how much of it was lamplight. So water over a lamplit bed keeps more of the
+  night grade than the bed beside it does. The error is bounded by how much of
+  the bed survives absorption and goes to nothing as the water deepens.
+- **The Fresnel sky reflection**, even where what it reflects is a lit shore:
+  `fogColor()` is the atmosphere's horizon gradient and knows nothing about
+  lamps.
+
+Both err toward calling light "sky", so a lit surface comes out slightly cooler
+than the shore rather than warmer.
+
+A lamp's reflection is **unshadowed**, like every clustered light in the engine.
+
+### What it costs
+
+`gpu water` on this machine, 1280x720, 200 frames, six configurations
+interleaved over three rounds, with `-lampposts=false` so all six draw the same
+geometry and only the light count differs:
+
+| lamps in range | before | after |
+|---|---|---|
+| 0 | 0.050 / 0.050 / 0.051 ms | 0.055 / 0.055 / 0.058 ms |
+| 32 | 0.049 / 0.050 / 0.050 ms | 0.111 / 0.113 / 0.113 ms |
+| 400 | 0.049 / 0.049 / 0.049 ms | 0.542 / 0.556 / 0.570 ms |
+
+The "before" column is flat across all three, which is the bug stated as a
+number: the surface was not reading the light list at all.
+
+An empty lake costs 0.005 ms more than it did — the cluster lookup and its
+branch, paid once per water fragment whether or not any light is in the cell.
+It is consistent across all three rounds and the spreads do not overlap, so it
+is real rather than drift; it is about 11% of a pass that is 2% of the frame.
+
+400 lamps packed over one patch of lake cost 0.51 ms on a surface covering
+roughly the lower half of the frame, against 0.31 ms for the opaque pass over
+the same lights. A game with a lot of shoreline should watch this pass the way
+it watches the opaque one — the surface is cheap per fragment and there are a
+great many of them.
 
 ## Refraction costs a second render pass
 
@@ -209,6 +295,14 @@ not ripple. Setting `RefractStrength` to 0 selects the same path deliberately.
   whose bound centre sits inside the wave band can be classified onto either
   side, and on the wrong one it goes back to being painted over. Anything that
   has to be right at the waterline wants to be opaque.
+- **A lamp on the shore puts no reflection on the water.** Check where its
+  reflection would actually be. A specular surface returns a light from exactly
+  one place — on the line between the eye and the light's mirror image, a
+  fraction `eyeAboveSurface / (eyeAboveSurface + lightAboveSurface)` of the way
+  out — and the surface shows nothing anywhere else, however bright the fixture
+  is. A spot whose cone lands somewhere other than that point lights the bed
+  and not the water. `examples/09-water`'s `-spots` aims each fixture from that
+  arithmetic for exactly this reason.
 - **A submerged effect looks flat and unrefracted.** It was classified as being
   in front of the water. Check its bound centre rather than its silhouette: the
   split reads one point per draw, so a mesh whose origin is above the surface

@@ -32,7 +32,7 @@ requires:
 assets: none
 example: examples/09-water
 run: go run ./09-water -time 0.78
-verified: 2026-09-18
+verified: 2026-09-19
 ---
 
 # Day/night cycle
@@ -196,10 +196,15 @@ could not produce red > green > blue on any surface at any intensity.
 purpose-built dirt patch and still read pink. `task nightlight` is the gate; see
 `cmd/lampcheck` for the ablation that shows it fails when the weighting goes.
 
-`water.frag` is the one lit shader that does not participate: it shades its own
-surface rather than calling either `evalLighting*`, so it takes no local lights
-at all and its share is always zero. Giving water lamp highlights is a separate
-change, and it would start there.
+`water.frag` shades its own surface rather than calling either
+`evalLighting*`, so it sets `lightLocalLum` and `lightSkyLum` by hand from its
+own finished terms. Its local side is the lamp reflections and nothing else,
+which means two things are counted as sky that are not purely sky: the
+refracted scene, which arrives from the opaque pass already lit and already
+graded with no way to say how much of it was lamplight, and the Fresnel sky
+reflection. Both err toward calling light "sky", so lit water comes out
+slightly cooler than the shore beside it rather than warmer. See
+[water](water.md#where-it-is-approximate).
 
 ## Changing the sky's appearance
 
@@ -231,9 +236,10 @@ The clear colour behind it is `Environment.ClearColor`, and is only seen when
   `StarVisibility()`, not `atmosphere.inc`. See [stars](stars.md).
 - **A warm lamp reads cold at night.** The night shift is not being told the
   fragment is lamplit. Either the shader shades without going through
-  `evalLighting`/`evalLightingAO`/`evalLightingDiffuse` — water does, on
-  purpose — or the light is not in the local set: the directional light is the
-  moon after dusk and counts as sky, however warm it is made.
+  `evalLighting`/`evalLightingAO`/`evalLightingDiffuse` and without setting
+  `lightLocalLum` itself — `water.frag` shades its own surface and does set it
+  — or the light is not in the local set: the directional light is the moon
+  after dusk and counts as sky, however warm it is made.
 
 ## Watching it happen
 
