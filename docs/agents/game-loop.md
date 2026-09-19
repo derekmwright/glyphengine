@@ -49,7 +49,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-09-18
+verified: 2026-09-19
 ---
 
 # Run a game loop with Engine and Game
@@ -509,7 +509,11 @@ change a capture and are meant to:
   old size, so it is dropped; a resize changes the picture anyway.
 - **A minimized window.** The loop keeps simulating and stops rendering, by
   design, so the frame that eventually gets drawn is further along than it
-  would otherwise have been. Do not capture through one.
+  would otherwise have been. Do not capture through one. Every simulation
+  clock keeps running while it is down -- the ticks and the elapsed clock the
+  shaders read advance together in `advanceSimulation`, precisely so that a
+  `continue` in the frame loop cannot move one without the other. They used to
+  separate: a minimized game kept ticking while its waves stood still.
 
 When a capture does differ and it should not, set `GLYPHENGINE_STATE_TRACE` on
 both runs and diff the two files: one line per loop iteration, and the first
