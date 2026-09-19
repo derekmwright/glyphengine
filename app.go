@@ -431,8 +431,15 @@ type Engine struct {
 	// so the per-frame SceneLighting can point at it without allocating.
 	nightGrade renderer.NightGrade
 
-	drawBuf     []renderer.RenderObject // reused each frame to avoid allocs
-	animScratch renderer.AnimScratch    // reused each frame by TickAnimations
+	// The draw list is built into drawBuf, then permuted into drawSorted by
+	// the order sortDraws works out in drawOrderBuf. Three buffers rather than
+	// one sort in place: see drawOrder for what sorting 224-byte RenderObjects
+	// costs. All three are kept between frames so a steady scene allocates
+	// nothing for them.
+	drawBuf      []renderer.RenderObject
+	drawSorted   []renderer.RenderObject
+	drawOrderBuf []drawOrder
+	animScratch  renderer.AnimScratch // reused each frame by TickAnimations
 
 	tickDuration time.Duration
 	maxCatchUp   time.Duration
@@ -1659,6 +1666,7 @@ func (e *Engine) buildDrawList(vp mgl32.Mat4, shadowEnabled bool, lightVP mgl32.
 		draws = append(draws, renderer.RenderObject{
 			Mesh:        mesh,
 			Texture:     tex,
+			SortID:      uint64(entity),
 			MVP:         vp.Mul4(model),
 			Model:       model,
 			Color:       color,
@@ -1725,6 +1733,7 @@ func (e *Engine) buildDrawList(vp mgl32.Mat4, shadowEnabled bool, lightVP mgl32.
 		draws = append(draws, renderer.RenderObject{
 			Mesh:         im.Set.Mesh,
 			Instances:    im.Set,
+			SortID:       uint64(entity),
 			Texture:      tex,
 			Model:        identityModel,
 			Color:        color,
@@ -1747,51 +1756,123 @@ func (e *Engine) buildDrawList(vp mgl32.Mat4, shadowEnabled bool, lightVP mgl32.
 	// composite the wrong colours. It is redone every frame because it depends
 	// on where the camera is, not on what the scene contains.
 	//
-	// ViewDepth is recomputed on each comparison rather than cached in a
-	// parallel slice. The translucent subset is the handful of ghosts,
-	// indicators and panes a frame has, so the sort is short; precompute it if
-	// that ever stops being true.
 	// A permutation the query could have produced on its own, forced. See
-	// provoke.go: the list arrives in Go map order, so anything the sort below
-	// leaves tied is already decided by chance on every frame of every run.
+	// provoke.go, and TestReversedInputSortsToTheSameSequence: with a total
+	// order the sorted sequence is the same either way, which is a stronger
+	// statement than the capture gate's "the picture did not change".
 	if e.provoke.reverse {
 		slices.Reverse(draws)
 	}
 
 	eye := [3]float32{e.cameraEye.X(), e.cameraEye.Y(), e.cameraEye.Z()}
-	slices.SortFunc(draws, func(a, b renderer.RenderObject) int {
-		at, bt := a.IsTranslucent(), b.IsTranslucent()
-		if at != bt {
-			if at {
-				return 1
-			}
-			return -1
+	sorted := e.sortDraws(draws, eye)
+
+	e.drawBuf = draws // keep the assembly buffer for next frame
+	return sorted
+}
+
+// drawOrder is one draw's place in the sorted list: everything the comparison
+// reads, and the index to gather from.
+//
+// The draw list is sorted through this rather than in place because a
+// RenderObject is 224 bytes, and slices.SortFunc both copies its operands into
+// the comparison and moves them on every swap. Measured on 4000 opaque draws
+// arriving in map order (BenchmarkDrawSort): sorting the RenderObjects in place
+// costs 1095 us, sorting these 24-byte keys and gathering costs 306 us.
+//
+// It only started to matter when the sort became a total order. Before that
+// most pairs compared equal and pdqsort stopped early -- 59 us to produce an
+// order that was not one. That is the number the 306 has to be read against.
+//
+// Field order is load-bearing: written as declared this is exactly 24 bytes,
+// and reordering it so the uint64s do not lead pads it to 32.
+type drawOrder struct {
+	// key is RenderObject.SortKey for an opaque draw, and 1<<63 for a blended
+	// one -- SortKey leaves that bit clear so this single compare puts the
+	// blended tail after every opaque draw as well as grouping by state.
+	key   uint64
+	id    uint64
+	depth float32
+	idx   uint32
+}
+
+// sortDraws orders the frame's draws and returns them gathered into the
+// engine's second draw buffer.
+//
+// The comparison is a TOTAL order, and that is the whole reason the recorded
+// sequence is a function of the scene rather than of this frame. The list
+// arrives in Go map order -- ecs.Query2 and Store.Each range a map[Entity]*T,
+// which Go randomises per range statement -- and slices.SortFunc is not
+// stable, so anything left equal keeps whichever position the walk happened to
+// hand it. Two draws with the same variant and the same set-0 resource used to
+// be equal, as did two blended draws at the same distance from the eye, and
+// the key's low bits were a descriptor set ADDRESS, so even the groups changed
+// places between processes. draws= in the state trace differed between two
+// runs of eight of the thirteen scenes the determinism gate covers; the image
+// did not, which is why this sat latent until the trace went looking (issue
+// #53).
+//
+// Fixed here rather than by giving the ECS an iteration order: that would put
+// a cost on every query in the engine to remove a randomness this sort has to
+// absorb anyway. GLYPHENGINE_PROVOKE_DRAW_ORDER=reverse permutes the list on
+// purpose, and a stable sort over an ordered input would still have to answer
+// for it.
+func (e *Engine) sortDraws(draws []renderer.RenderObject, eye [3]float32) []renderer.RenderObject {
+	order := e.drawOrderBuf[:0]
+	for i := range draws {
+		d := &draws[i]
+		o := drawOrder{id: d.SortID, idx: uint32(i)}
+		if d.IsTranslucent() {
+			o.key = 1 << 63
+			o.depth = d.ViewDepth(eye)
+		} else {
+			o.key = d.SortKey()
 		}
-		if at {
-			// Farther first.
-			da, db := a.ViewDepth(eye), b.ViewDepth(eye)
-			switch {
-			case da > db:
-				return -1
-			case da < db:
-				return 1
-			default:
-				return 0
-			}
-		}
-		ka, kb := a.SortKey(), b.SortKey()
+		order = append(order, o)
+	}
+	e.drawOrderBuf = order
+
+	slices.SortFunc(order, func(a, b drawOrder) int {
 		switch {
-		case ka < kb:
+		case a.key < b.key:
 			return -1
-		case ka > kb:
+		case a.key > b.key:
+			return 1
+		}
+		// Farther first. Opaque draws all carry depth 0, so this costs them one
+		// compare and decides nothing -- their order is the key above.
+		switch {
+		case a.depth > b.depth:
+			return -1
+		case a.depth < b.depth:
+			return 1
+		}
+		// Equal depth, or the same variant and resource: the case that would
+		// flicker between frames rather than merely differ between runs.
+		// Entity ids come from a counter in spawn order, so this is stable
+		// across frames and across runs of the same program, and it is an
+		// identity the scene chose rather than one the allocator or the map
+		// walk did. No two draws reach here equal, so the result is one
+		// permutation whatever order the list arrived in.
+		switch {
+		case a.id < b.id:
+			return -1
+		case a.id > b.id:
 			return 1
 		default:
 			return 0
 		}
 	})
 
-	e.drawBuf = draws // keep the backing array for next frame
-	return draws
+	sorted := e.drawSorted[:0]
+	for i := range order {
+		sorted = append(sorted, draws[order[i].idx])
+	}
+	// Stored here rather than by the caller: a caller that forgot would hand
+	// back a correct list having reallocated the whole gather buffer, which
+	// costs three times the sort and shows up as nothing but a slow frame.
+	e.drawSorted = sorted
+	return sorted
 }
 
 // buildBillboard returns a model matrix for a camera-facing quad at pos,
