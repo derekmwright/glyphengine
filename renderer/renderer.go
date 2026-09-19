@@ -1147,20 +1147,19 @@ func (r *Renderer) NotifyResize() {
 // disables tracing, which is the default. See StateTrace.
 func (r *Renderer) SetStateTrace(t *StateTrace) { r.trace = t }
 
-// ProvokeSkipNextFrame makes the next DrawFrame return having recorded,
-// submitted and presented nothing, leaving the frame-in-flight slot, the cloud
-// history and prevVP exactly where they were.
+// ProvokeSkipNextFrame makes the next DrawFrame treat its acquire as having
+// come back out of date: the swapchain is rebuilt and the frame takes whatever
+// path a real one takes from there.
 //
-// That is what an out-of-date acquire does, and a window being shown, moved to
-// another monitor or DPI-scaled produces one at a time nobody controls. A frame
-// the simulation advanced and the renderer never drew is one of the few shapes
-// issue #40 could have, and waiting for the window system to hand one over is
-// not a way to test it. Drive it instead, from the engine's
-// GLYPHENGINE_PROVOKE_SKIP_FRAMES.
+// A window being shown, moved to another monitor or DPI-scaled produces that at
+// a time nobody controls, and it used to cost the frame -- which is one of the
+// few shapes issue #40 could have had. Waiting for the window system to hand
+// one over is not a way to test it. Drive it instead, from the engine's
+// GLYPHENGINE_PROVOKE_SKIP_FRAMES; the capture must not change.
 //
-// The skip is taken before the acquire rather than after a failed one, so no
-// semaphore is left signalled with nothing waiting on it. Everything the two
-// paths do differently afterwards -- which is to say nothing -- is the same.
+// It stands in before the acquire rather than after a failed one because
+// asking and being refused leaves no state behind: no semaphore is signalled,
+// no image is held. There is nothing for the substitute to undo.
 func (r *Renderer) ProvokeSkipNextFrame() { r.provokeSkip = true }
 
 // DeferDestroy queues a destruction callback that will execute after all
@@ -1351,6 +1350,74 @@ func (r *Renderer) recreateSwapchain() error {
 	return nil
 }
 
+// acquireImage gets this frame's swapchain image, rebuilding the swapchain and
+// asking once more if the presentation engine says the old one is out of date.
+// The second return is false when the frame cannot be drawn at all.
+//
+// Asking again rather than dropping the frame is what keeps a capture
+// repeatable. A dropped frame costs the simulation a step the renderer never
+// takes, and everything downstream that spans frames -- the cloud history
+// above all -- then sits one step behind for the rest of the run. Under a fixed
+// clock that turns `-frames 150` into two different pictures depending on
+// whether the window system produced an out-of-date acquire, which it does at
+// times nobody controls: while a window is being shown, when it moves between
+// monitors, when the compositor changes mode.
+//
+// The one case that still drops the frame is a rebuild that changed the
+// extent. Everything the caller built this frame from -- the projection
+// matrices, the light binning, the viewport -- came from the old one, so
+// drawing it into the new size would stretch it; the next frame is built
+// against the new extent and is the first one that can be right. A resize
+// changes the picture anyway, so nothing repeatable is lost.
+func (r *Renderer) acquireImage(f int) (int, bool, error) {
+	// A provoked out-of-date acquire takes the same path as a real one, minus
+	// the failed call: asking and being refused leaves no state behind, so
+	// there is nothing to undo. See ProvokeSkipNextFrame.
+	if r.provokeSkip {
+		r.provokeSkip = false
+		r.trace.Str("provoked", "out-of-date")
+		return r.rebuildAndAcquire(f)
+	}
+
+	imageIndex, result, err := r.swapchainExt.AcquireNextImage(r.sc.swapchain, common.NoTimeout, &r.sync.imageAvailable[f], nil)
+	if err == nil {
+		return imageIndex, true, nil
+	}
+	if result != khr_swapchain.VKErrorOutOfDate {
+		return 0, false, err
+	}
+	return r.rebuildAndAcquire(f)
+}
+
+// rebuildAndAcquire recreates the swapchain and acquires from the new one.
+func (r *Renderer) rebuildAndAcquire(f int) (int, bool, error) {
+	before := r.sc.extent
+	if err := r.recreateSwapchain(); err != nil {
+		return 0, false, err
+	}
+	// recreateSwapchain returns without rebuilding while the framebuffer is
+	// zero-sized, so the swapchain is still the out-of-date one and asking
+	// again would fail the same way. The caller skips minimized frames; this is
+	// the window that closes between that check and here.
+	if w, h := r.win.GetFramebufferSize(); w == 0 || h == 0 {
+		return 0, false, nil
+	}
+	if r.sc.extent != before {
+		return 0, false, nil
+	}
+
+	imageIndex, result, err := r.swapchainExt.AcquireNextImage(r.sc.swapchain, common.NoTimeout, &r.sync.imageAvailable[f], nil)
+	if err != nil {
+		if result == khr_swapchain.VKErrorOutOfDate {
+			// Out of date again immediately: the surface is still moving. Let
+			// the next frame deal with it rather than looping here.
+			return 0, false, nil
+		}
+		return 0, false, err
+	}
+	return imageIndex, true, nil
+}
+
 // DrawFrame records and submits one frame: waits for the in-flight fence, acquires
 // a swapchain image, records draw commands, submits to the GPU, and presents.
 func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, celestials []RenderObject, uiOverlays []UIRenderObject, msdfOverlays []RenderObject, lighting SceneLighting) error {
@@ -1381,28 +1448,18 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 	// a fence has been waited on.
 	r.flushDeferredDestroys()
 
-	// A provoked skip stands in for an out-of-date acquire; see
-	// ProvokeSkipNextFrame. Taken here so nothing downstream of the acquire
-	// runs, which is what the real thing does.
-	if r.provokeSkip {
-		r.provokeSkip = false
-		r.trace.Str("outcome", "skip-provoked")
-		return nil
-	}
-
-	// Acquire the next swapchain image
-	imageIndex, result, err := r.swapchainExt.AcquireNextImage(r.sc.swapchain, common.NoTimeout, &r.sync.imageAvailable[f], nil)
+	imageIndex, drawable, err := r.acquireImage(f)
 	if err != nil {
-		if result == khr_swapchain.VKErrorOutOfDate {
-			// Nothing is recorded, submitted or presented on this path, so the
-			// frame the engine simulated is never drawn. Naming it in the trace
-			// is the point: an iteration that ends here and one that ends in a
-			// present look identical from outside.
-			r.trace.Str("outcome", "skip-acquire-out-of-date")
-			return r.recreateSwapchain()
-		}
 		r.trace.Str("outcome", "acquire-error")
 		return err
+	}
+	if !drawable {
+		// Nothing is recorded, submitted or presented on this path, so the
+		// frame the engine simulated is never drawn. Naming it in the trace is
+		// the point: an iteration that ends here and one that ends in a present
+		// look identical from outside.
+		r.trace.Str("outcome", "skip-resized")
+		return nil
 	}
 	r.trace.Int("image", imageIndex)
 
