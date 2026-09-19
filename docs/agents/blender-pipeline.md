@@ -354,7 +354,12 @@ None of the following survive a glTF export, and nothing on this page or in
   Blender terrain or a heightmap image" section for the full flag reference
   and the orientation convention, and `cmd/heightmapconv/testdata/README.md`
   for a real Blender export (translated mesh, rotated parent Empty) checked
-  against hand-computed world coordinates.
+  against hand-computed world coordinates. One thing to decide on the game's
+  side: a terrain mesh that stays in the level file is still a mesh node, so a
+  per-node spawn loop will draw it as ordinary geometry on top of the terrain
+  the heightmap makes. Tag it (a custom property such as `terrain`, arriving in
+  `ModelNode.Extras`) and skip tagged nodes when spawning, or export the
+  terrain to a file of its own.
 - **Particle systems.** Not part of glTF; a Blender particle system exports
   nothing (or, if it is the kind the exporter recognises as an instancer,
   see "Instancing" below for what THAT turns into, which is not the
