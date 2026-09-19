@@ -298,9 +298,15 @@ func WithMaxCatchUp(d time.Duration) Option {
 	return func(c *config) { c.maxCatchUp = d }
 }
 
-// WithMaxFrames stops the main loop after n rendered frames. Zero, the
-// default, runs until the window closes. This is what makes the engine
-// testable on CI and profilable over a fixed workload.
+// WithMaxFrames stops the main loop after n frames. Zero, the default, runs
+// until the window closes. This is what makes the engine testable on CI and
+// profilable over a fixed workload.
+//
+// It counts iterations that got as far as rendering, which is all but the ones
+// skipped while minimized. Almost always that is also the number of frames
+// presented; the exception is a swapchain rebuilt at a new size, where the
+// frame already built for the old one is dropped. Under a fixed clock the
+// difference matters -- see Repeatable renders in docs/agents/game-loop.md.
 func WithMaxFrames(n int) Option {
 	return func(c *config) { c.maxFrames = n }
 }
@@ -903,7 +909,8 @@ func (e *Engine) FPS() float64 {
 	return 1.0 / e.smoothDelta
 }
 
-// FrameCount returns the number of frames rendered so far.
+// FrameCount returns the number of frames rendered so far, counted the same
+// way WithMaxFrames counts them.
 func (e *Engine) FrameCount() int { return e.frameCount }
 
 // GPUTimings returns the most recent per-pass GPU cost in milliseconds.

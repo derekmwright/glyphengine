@@ -444,8 +444,8 @@ drawing. Clear it game-side for now.
 
 ## Headless and CI
 
-`WithMaxFrames(n)` stops the loop after `n` rendered frames. Every example
-exposes it as `-frames N`:
+`WithMaxFrames(n)` stops the loop after `n` frames. Every example exposes it as
+`-frames N`:
 
 ```
 go run ./02-cube -frames 60
@@ -488,6 +488,32 @@ differ, so the check cannot pass vacuously.
 
 Particle spawn jitter is pinned alongside the clock, since `math/rand`'s global
 source is reseeded at every process start.
+
+### What a fixed clock does not fix by itself
+
+Two runs agreeing only says the machine behaved the same way twice. The clock
+is one input; the window system is another, and it arrives uninvited. An
+out-of-date acquire — a window being shown, moved between monitors, a
+compositor mode change — used to cost the frame outright, so the loop simulated
+one more step than it drew and everything that spans frames sat behind for the
+rest of the run. A swapchain rebuild threw away the cloud layer's temporal
+history whether or not the size had changed. Neither is under the run's
+control, and both moved the picture: a rebuild forced on the last frame of
+`08-grass` moved 27.95 % of the pixels.
+
+Both are fixed (see `docs/agents/state-trace.md`), and `task determinism` now
+forces them on a named frame rather than waiting for one. Two things still
+change a capture and are meant to:
+
+- **A rebuild that changed the extent.** The frame in flight was built for the
+  old size, so it is dropped; a resize changes the picture anyway.
+- **A minimized window.** The loop keeps simulating and stops rendering, by
+  design, so the frame that eventually gets drawn is further along than it
+  would otherwise have been. Do not capture through one.
+
+When a capture does differ and it should not, set `GLYPHENGINE_STATE_TRACE` on
+both runs and diff the two files: one line per loop iteration, and the first
+one that differs names the frame and the subsystem.
 
 ## Debug text
 
