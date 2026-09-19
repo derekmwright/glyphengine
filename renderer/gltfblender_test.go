@@ -570,10 +570,7 @@ func checkLoadedTilingAndAlpha(t *testing.T, doc *gltf.Document) {
 
 	ground, groundMat := meshOf("Ground")
 	uv := resolveUVTransform("level.glb", doc, map[int]uvAffine{}, groundMat)
-	// extractPrimitive never touches its receiver; see
-	// TestExtractPrimitiveBakesUVPerCopy.
-	var r *Renderer
-	verts, _, err := r.extractPrimitive(doc, ground.Primitives[0], uv)
+	verts, _, err := extractPrimitive(doc, ground.Primitives[0], uv)
 	if err != nil {
 		t.Fatalf("extract Ground: %v", err)
 	}

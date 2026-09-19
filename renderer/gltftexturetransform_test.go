@@ -10,13 +10,6 @@ import (
 	"github.com/qmuntal/gltf/modeler"
 )
 
-// nilRenderer lets extractPrimitive be called directly in these tests: it
-// never dereferences its receiver (verified by grepping the function body
-// for a real "r." selector before relying on this), so a nil *Renderer is a
-// harmless way to exercise the UV-baking codepath without a GPU. Declared
-// once here since several tests use it.
-var nilRenderer *Renderer
-
 // TestTextureTransformRoundTrip proves the premise the rest of this file
 // depends on: that ext/texturetransform's init() registers its Unmarshal so
 // a TextureInfo's Extensions["KHR_texture_transform"] decodes to
@@ -539,9 +532,10 @@ func TestMaterialUVTransformIgnoresTexCoordPointerIdentity(t *testing.T) {
 // splits a mesh by material produces) end up with independently correct
 // baked UVs when given different transforms.
 //
-// This calls extractPrimitive on a nil *Renderer: the function never
-// dereferences its receiver (grepped, not assumed -- see nilRenderer's own
-// comment), so this exercises the real UV-baking codepath without a GPU.
+// extractPrimitive needs no Renderer at all: it is a free function, which is
+// what issue #75 made of the *Renderer method that never dereferenced its
+// receiver. These tests used to call it on a nil *Renderer to say the same
+// thing.
 //
 // What this does NOT have teeth against, checked rather than assumed:
 // making extractPrimitive share modeler.ReadTextureCoord's destination
@@ -572,11 +566,11 @@ func TestExtractPrimitiveBakesUVPerCopy(t *testing.T) {
 	uvA := composeUVTransform(texturetransform.TextureTranform{Scale: [2]float64{1, 1}})
 	uvB := composeUVTransform(texturetransform.TextureTranform{Scale: [2]float64{2, 2}})
 
-	vertsA, _, err := nilRenderer.extractPrimitive(doc, primA, uvA)
+	vertsA, _, err := extractPrimitive(doc, primA, uvA)
 	if err != nil {
 		t.Fatalf("extractPrimitive A: %v", err)
 	}
-	vertsB, _, err := nilRenderer.extractPrimitive(doc, primB, uvB)
+	vertsB, _, err := extractPrimitive(doc, primB, uvB)
 	if err != nil {
 		t.Fatalf("extractPrimitive B: %v", err)
 	}
