@@ -108,9 +108,10 @@ type game struct {
 	// that its brightness must not move with the time of day or with the
 	// scene's exposure curve, and a claim like that is worth nothing unless
 	// someone outside the engine can render both and difference them.
-	timeOfDay              float32
-	sceneBloom, sceneThres float32
-	exposure, curve        float32
+	timeOfDay               float32
+	sceneBloom, sceneThres  float32
+	exposure, curve         float32
+	glowStrength, glowThres float32
 
 	t float32
 }
@@ -198,12 +199,16 @@ func (g *game) Init(e *glyph.Engine) error {
 	}
 
 	if r.UIGlowLayer() {
-		// The defaults, said out loud, whether or not anything is asking to glow
-		// yet: they are the game's numbers to tune, not the engine's opinion.
-		// 1.2 / 0.2 puts the foot of the ramp at exactly 1.0, which is the most
-		// an ordinary UI colour can reach once srgbToLinear and the premultiply
-		// have run -- so nothing here glows by accident.
-		r.SetUIGlow(0.7, 1.2, 0.2, 1.0)
+		// Flags rather than constants, because they are the game's numbers to
+		// tune and not the engine's opinion. The defaults are the engine's own
+		// starting point: 1.2 / 0.2 puts the foot of the ramp at exactly 1.0,
+		// which is the most an ordinary UI colour can reach once srgbToLinear
+		// and the premultiply have run, so nothing glows by accident.
+		//
+		// -glowstrength 0 is the row worth benchmarking against: it switches
+		// the UI's bloom chain off and skips recording it, leaving the layer
+		// itself and the composite.
+		r.SetUIGlow(g.glowStrength, g.glowThres, 0.2, 1.0)
 		r.SetUIExposure(1.0)
 	}
 	if g.mode >= glowDirect {
@@ -412,6 +417,8 @@ func main() {
 	timeOfDay := flag.Float64("time", 0.33, "time of day, 0 = midnight, 0.5 = noon")
 	sceneBloom := flag.Float64("bloom", 0, "scene bloom intensity (0 = off)")
 	sceneThres := flag.Float64("bloomthreshold", 1.2, "scene bloom threshold")
+	glowStrength := flag.Float64("glowstrength", 0.7, "UI glow strength; 0 switches the UI's bloom chain off and skips recording it")
+	glowThres := flag.Float64("glowthreshold", 1.2, "UI glow threshold, in linear light; keep it at or above 1 + the knee")
 	exposure := flag.Float64("exposure", 0, "scene tonemap exposure (0 = unchanged)")
 	curve := flag.Float64("curve", 0, "scene tonemap curve: 0 identity, 1 Reinhard, 2 ACES")
 	flag.Parse()
@@ -441,12 +448,14 @@ func main() {
 	}
 
 	e, err := glyph.New(&game{
-		mode:       mode,
-		timeOfDay:  float32(*timeOfDay),
-		sceneBloom: float32(*sceneBloom),
-		sceneThres: float32(*sceneThres),
-		exposure:   float32(*exposure),
-		curve:      float32(*curve),
+		mode:         mode,
+		timeOfDay:    float32(*timeOfDay),
+		sceneBloom:   float32(*sceneBloom),
+		sceneThres:   float32(*sceneThres),
+		glowStrength: float32(*glowStrength),
+		glowThres:    float32(*glowThres),
+		exposure:     float32(*exposure),
+		curve:        float32(*curve),
 	}, opts...)
 	if err != nil {
 		log.Fatalf("create engine: %v", err)

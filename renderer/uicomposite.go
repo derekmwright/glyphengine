@@ -76,22 +76,36 @@ func recordUIComposite(
 	uiOverlays []UIRenderObject,
 	msdfOverlays []RenderObject,
 	fallbackTexture *Texture,
-	premultiply bool,
+	intoLayer bool,
 	scratch *commandScratch,
 ) {
 	if len(uiOverlays) == 0 && len(msdfOverlays) == 0 {
 		return
 	}
 
-	// glowPremultiply is pc[45], read by both fragment shaders as glow.y. It is
-	// 1 only when these draws are going into the UI glow layer, where the
-	// destination is transparent and the colour has to be scaled by its own
-	// coverage before it is written; see ui.frag. On the direct path it stays
-	// at the zero resetPC already put there, so the shaders take the branch
-	// they always took and every pushed byte is what it was before the layer
-	// existed.
+	// Both halves of glow -- pc[44], the emission multiplier, and pc[45], the
+	// premultiply flag -- are pushed only when these draws are going into the
+	// UI glow layer.
+	//
+	// The premultiply half has to be: the layer's destination is transparent
+	// and the blend factor is One, so the colour must arrive already scaled by
+	// its own coverage; see ui.frag.
+	//
+	// The EMISSION half is a decision rather than a necessity, and it is the
+	// one worth writing down. An element's Glow could be honoured here too --
+	// the shader would multiply, the 8-bit target would clamp, and a mid-grey
+	// panel asking for glow 1 would come out white. That is not "no glow", it
+	// is a different colour, and it would break the one promise the direct
+	// path exists to keep: that a UI colour is the literal sRGB value a game
+	// wrote. There is nowhere above 1 to put emission without an HDR layer, so
+	// without one it does nothing at all. TestGlowIsZeroOnTheDirectPath holds
+	// that, and UIRenderObject.Glow says it.
+	//
+	// On the direct path both stay at the zero resetPC already put there, so
+	// the shaders take the branch they always took and every pushed byte is
+	// what it was before the layer existed.
 	var glowPremultiply float32
-	if premultiply {
+	if intoLayer {
 		glowPremultiply = 1
 	}
 
@@ -140,8 +154,11 @@ func recordUIComposite(
 				scratch.pc[36] = 1.0
 			}
 			// glow.x: the element's linear emission multiple, zero for every
-			// panel that has never heard of it.
-			scratch.pc[44] = d.Glow
+			// panel that has never heard of it and for every frame with no
+			// layer to put it in.
+			if intoLayer {
+				scratch.pc[44] = d.Glow
+			}
 			scratch.pc[45] = glowPremultiply
 			packUIFill(&scratch.pc, d.Fill)
 			scratch.pushConstants(deviceDriver, cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment)

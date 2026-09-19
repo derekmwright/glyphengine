@@ -386,9 +386,12 @@ func WithMSAASamples(n int) Option {
 // likewise inert without it -- the swapchain is 8 bits per channel, so with no
 // layer there is nowhere for a value above 1 to be.
 //
-// What it costs when on, at 1280x720 with three swapchain images: 21.1 MiB for
-// the layer itself (R16G16B16A16_SFLOAT at full resolution, one per swapchain
-// image) and 7.0 MiB for its five-level bloom chain. Measured GPU cost is in
+// What it costs when on, at 1280x720 with three swapchain images: 21.09 MiB for
+// the layer itself (R16G16B16A16_SFLOAT at full resolution, one image per
+// swapchain image) and 7.02 MiB for its five-level bloom chain, 28.12 MiB in
+// all. On a Radeon RX 7900 XTX at that size it is +0.094 ms of GPU time per
+// frame against the same scene with the layer off, of which the bloom chain is
+// 0.063 ms and is skipped entirely by SetUIGlow(0, ...). Full numbers in
 // docs/agents/overlay-composite.md.
 func WithUIGlowLayer() Option {
 	return func(r *Renderer) { r.uiGlowRequested = true }
