@@ -70,13 +70,14 @@ LEVEL_EXPORT_OPTIONS = [
      "lamp in the scene is simply absent from the file -- Model.Lights "
      "comes back empty, which is not an error the exporter reports."),
     ("export_gpu_instances", True,
-     "Include > GPU Instances -- OFF by default. Lets Blender's own "
-     "instancing (a collection instance, a duplicator the exporter "
-     "recognises as instanced) reach the file as EXT_mesh_gpu_instancing "
-     "on the doc mesh rather than being silently baked into N separate "
-     "meshes. The engine does not read the extension yet (issue #71) --"
-     "this only stops the exporter from baking, so #71 has something to "
-     "read."),
+     "Include > GPU Instances -- OFF by default. Set so that whatever the "
+     "exporter is prepared to write as EXT_mesh_gpu_instancing, it does. "
+     "Measured on 5.0.1 that is less than the name suggests: with this ON, "
+     "Alt-D duplicates still arrive as nodes sharing a mesh, a collection "
+     "instance as a child node per instance sharing a mesh, and a realised "
+     "geometry-nodes scatter as one baked mesh -- the extension was written "
+     "for none of them (docs/agents/blender-pipeline.md, 'Instancing'). The "
+     "engine does not read the extension yet either (issue #71)."),
     ("export_yup", True,
      "+Y up -- already the exporter's default; see the module comment "
      "above for why it is still set here."),
