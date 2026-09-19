@@ -291,8 +291,9 @@ func gridMesh(wantTris int) (tris []triangle, verticesPerSide int, worldW, world
 // upper bound never matters. Only the real Blender terrain caught it, by
 // accident of being a coarse mesh on a fine grid.
 //
-// Verified to fail that way: "sample (12,3) = hole, brute force says 10", and
-// 3810 of 4096 samples disagree.
+// Verified to fail that way: "sample (2,0) = 0, brute force says 10" -- the
+// sliver underneath was found and the ground above it was not -- and "4092 of
+// 4096 samples disagree with brute force".
 func TestIndexFindsATriangleInEveryCellItCovers(t *testing.T) {
 	var tris []triangle
 	// The ground everyone should see: one 100x100 quad at height 10.
