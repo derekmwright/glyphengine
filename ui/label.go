@@ -10,9 +10,14 @@ type Label struct {
 	FontSize         float32 // reference pixels
 	Color            [3]float32
 	Alpha            float32
-	Align            Align
-	Hidden           bool
-	bounds           Rect
+
+	// Glow is how much light the text emits on top of its own colour; see
+	// renderer.TextLine.Glow. Zero, the default, is no glow, and it does
+	// nothing unless the engine was built with glyphengine.WithUIGlow.
+	Glow   float32
+	Align  Align
+	Hidden bool
+	bounds Rect
 }
 
 // BuildAt renders the label at an explicit screen position and font size.
@@ -39,6 +44,7 @@ func (l *Label) BuildAt(x, y, fontSize, containerW float32, font *renderer.Font)
 		Scale: fontSize,
 		Color: l.Color,
 		Alpha: l.Alpha,
+		Glow:  l.Glow,
 	}}
 }
 
@@ -58,6 +64,7 @@ func (l *Label) Build(scale, sw, sh float32, font *renderer.Font) []renderer.Tex
 		Scale: fontSize,
 		Color: l.Color,
 		Alpha: l.Alpha,
+		Glow:  l.Glow,
 	}}
 }
 
