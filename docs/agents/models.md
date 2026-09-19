@@ -297,6 +297,19 @@ node, at that node's own placement. `examples/22-level` (`task
 example:22-level`) is the end-to-end pattern; this section is the parts of
 it worth knowing before writing your own.
 
+It opens its built-in level by default, and any glTF on disk with `-level`:
+
+```
+go run ./22-level -level path/to/exported.glb
+```
+
+which makes it the quickest way to see what a file exported from Blender turns
+into. Checked against a real export (Blender 5.0.1, custom properties and
+punctual lights ticked): the extras, the lamp's position and downward aim, its
+cone angles and the two Alt-D duplicates sharing one mesh all arrive as
+authored. Textures are not drawn by this example, and material tiling is not
+read by the loader at all yet (#69).
+
 ### Placing every instance, not just the first
 
 A level reuses meshes — four identical lamp posts, forty identical lamp
