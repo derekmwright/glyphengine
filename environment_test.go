@@ -3,6 +3,8 @@ package glyphengine
 import (
 	"math"
 	"testing"
+
+	"github.com/go-gl/mathgl/mgl32"
 )
 
 // TestNilEnvironmentIsEmpty is the property the split exists for: a game that
@@ -166,6 +168,50 @@ func TestCustomEnvironmentSource(t *testing.T) {
 	// And must not panic.
 	s.SetTimeOfDay(0.5)
 	s.SetDayCycleSpeed(1)
+}
+
+// TestSkyPaletteSurvivesACustomEnvironment is why the palette is Scene state
+// rather than a field on Sky or on EnvironmentState.
+//
+// A game with its own EnvironmentSource returns a struct it wrote before the
+// palette existed. Had the palette been a field on EnvironmentState, that
+// struct would supply it as its zero value -- six black colours -- and the
+// game's sky, its fog and its water reflections would all go black on a
+// dependency bump with nobody choosing it. NewScene owns the value instead, so
+// a source that has never heard of it cannot reach it.
+//
+// Verified to catch a real mistake: dropping skyPalette from NewScene's
+// literal, which is the whole safety property, fails both halves of this.
+func TestSkyPaletteSurvivesACustomEnvironment(t *testing.T) {
+	s := NewScene()
+	if got := s.SkyPalette(); got != DefaultSkyPalette() {
+		t.Errorf("NewScene gave the palette %+v; want DefaultSkyPalette", got)
+	}
+
+	// An environment written before the field existed: it cannot mention the
+	// palette, so resolving a frame through it must leave the scene's alone.
+	s.Env = &fakeEnv{state: EnvironmentState{SunDir: [3]float32{0, 1, 0}, DrawSky: true}}
+	s.Tick(1.0 / 60)
+	_ = s.Environment()
+	if got := s.SkyPalette(); got != DefaultSkyPalette() {
+		t.Errorf("a custom environment moved the palette to %+v; it cannot reach it", got)
+	}
+
+	// And a game that does want an alien sky still gets one, under the same
+	// custom source.
+	alien := SkyPalette{
+		ZenithDay:       mgl32.Vec3{0.30, 0.10, 0.62},
+		HorizonDay:      mgl32.Vec3{0.95, 0.55, 0.22},
+		ZenithTwilight:  mgl32.Vec3{0.18, 0.04, 0.30},
+		HorizonTwilight: mgl32.Vec3{0.95, 0.22, 0.30},
+		ZenithNight:     mgl32.Vec3{0.0040, 0.0012, 0.0060},
+		HorizonNight:    mgl32.Vec3{0.0110, 0.0035, 0.0055},
+	}
+	s.SetSkyPalette(alien)
+	s.Tick(1.0 / 60)
+	if got := s.SkyPalette(); got != alien {
+		t.Errorf("SetSkyPalette then a tick gave %+v; want what was set", got)
+	}
 }
 
 // TestDefaultEnvironmentMatchesOldBehaviour guards the migration: a scene that

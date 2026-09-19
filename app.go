@@ -431,6 +431,10 @@ type Engine struct {
 	// so the per-frame SceneLighting can point at it without allocating.
 	nightGrade renderer.NightGrade
 
+	// skyPalette is Scene.SkyPalette in the renderer's shape, for the same
+	// reason.
+	skyPalette renderer.SkyPalette
+
 	// The draw list is built into drawBuf, then permuted into drawSorted by
 	// the order sortDraws works out in drawOrderBuf. Three buffers rather than
 	// one sort in place: see drawOrder for what sorting 224-byte RenderObjects
@@ -1481,6 +1485,15 @@ func (e *Engine) renderFrame() {
 		Strength: g.Strength,
 		Tint:     [3]float32{g.Tint.X(), g.Tint.Y(), g.Tint.Z()},
 	}
+	p := e.Scene.SkyPalette()
+	e.skyPalette = renderer.SkyPalette{
+		ZenithDay:       p.ZenithDay,
+		HorizonDay:      p.HorizonDay,
+		ZenithTwilight:  p.ZenithTwilight,
+		HorizonTwilight: p.HorizonTwilight,
+		ZenithNight:     p.ZenithNight,
+		HorizonNight:    p.HorizonNight,
+	}
 
 	lighting := renderer.SceneLighting{
 		VP:            vp,
@@ -1502,6 +1515,7 @@ func (e *Engine) renderFrame() {
 		CascadeVPs:    cascadeVPs,
 		ShadowEnabled: shadowEnabled,
 		NightGrade:    &e.nightGrade,
+		SkyPalette:    &e.skyPalette,
 		FogDensity:    env.FogDensity,
 		FogHeight:     env.FogHeight,
 		FogBaseHeight: env.FogBaseHeight,
