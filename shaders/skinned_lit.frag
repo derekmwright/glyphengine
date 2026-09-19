@@ -14,8 +14,10 @@ layout(set = 2, binding = 0) uniform ShadowData {
     mat4 cascadeVP[2];
     // Environment values the fragment shaders grade with, appended
     // because the push constant block is full at 256 bytes. rgb is the
-    // scotopic tint, w the strength (0 disables). All seven ShadowData
-    // declarations and renderer/shadow.go's litUBOSize must agree.
+    // scotopic tint, w the strength (0 disables). Nine shaders declare this
+    // block -- the seven lit ones, plus sky.frag and clouds.frag, which reach
+    // the same buffer through the cloud descriptor set -- and all nine must
+    // agree with renderer/shadow.go's litUBOSize.
     vec4 nightGrade;
     // The sky gradient's six palette endpoints; see atmSkyPalette in
     // atmosphere.inc for the order. They live here rather than as constants

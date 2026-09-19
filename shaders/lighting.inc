@@ -1,8 +1,9 @@
 // Shared lighting functions for lit fragment shaders.
 // Expects shadowMap (sampler2DArrayShadow), pointShadowMap, pc, and
-// shadow (ShadowData UBO with mat4 cascadeVP[2]) to be declared by the
-// including file, and LIGHT_SET #defined before this include -- see
-// lights.inc for lb/cg/li (the clustered light buffers).
+// shadow (the ShadowData UBO: mat4 cascadeVP[2], vec4 nightGrade, vec4
+// skyPalette[6]) to be declared by the including file, and LIGHT_SET #defined
+// before this include -- see lights.inc for lb/cg/li (the clustered light
+// buffers).
 //
 // Light contributions use the "irradiance" pattern (same as three.js):
 // irradiance = saturate(NdotL) * lightColor, then both diffuse and specular
