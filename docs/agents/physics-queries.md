@@ -344,8 +344,8 @@ walk produced.
 - **A custom `Queries` backend only affects some of the engine.** It must be
   set on the `Scene` (`scene.Queries = ...`), and passed to
   `Camera.ResolveCollision` as the `*Scene` itself rather than a narrower
-  `Raycaster`-only value — otherwise the camera keeps using the built-in
-  implementation while everything else uses the replacement.
+  `Raycaster`-only value — otherwise the camera collides against whatever it
+  was handed while everything else uses the replacement.
 - **`MoveCharactersParallel` behaves differently tick to tick with a custom
   `Queries` backend.** The backend is not honouring the collision snapshot —
   see "Swapping the query backend" above.
