@@ -25,6 +25,10 @@ api:
   - glyphengine.DefaultNightGrade
   - glyphengine.Scene.SetNightGrade
   - glyphengine.Scene.NightGrade
+  - glyphengine.SkyPalette
+  - glyphengine.DefaultSkyPalette
+  - glyphengine.Scene.SetSkyPalette
+  - glyphengine.Scene.SkyPalette
   - glyphengine.Engine.SetTimeOfDay
   - glyphengine.Engine.SetDayCycleSpeed
 requires:
@@ -208,10 +212,35 @@ slightly cooler than the shore beside it rather than warmer. See
 
 ## Changing the sky's appearance
 
-The visible sky comes from `shaders/atmosphere.inc` via `sky.frag`;
-`atmSkyPalette` is the place. To replace it wholesale, swap the sky shaders
-through `glyphengine.WithShaders` from `glyph.New`, or `renderer.WithShaders` if
-you drive the renderer directly. See
+If what you want is different **colours**, they are data:
+
+```go
+p := e.Scene.SkyPalette()   // DefaultSkyPalette(): Earth's
+p.ZenithDay = mgl32.Vec3{0.30, 0.10, 0.62}
+p.HorizonDay = mgl32.Vec3{0.95, 0.55, 0.22}
+e.Scene.SetSkyPalette(p)
+```
+
+Six endpoints — zenith and horizon for day, twilight and night — mixed by the
+same two curves as everything else on this page: night toward day on
+`Daylight()`, then toward twilight on `Twilight()`. `examples/09-water -alien`
+sets a violet-and-amber one. See
+[environment](environment.md#a-sky-that-is-not-earths).
+
+They are one value for the whole atmosphere, which is the point: `applyFog`
+fades distant geometry toward the same horizon colour and water reflects the
+dome, so replacing `sky.frag` alone gives a violet sky over a landscape still
+hazing into Earth-blue. The palette rides in the per-frame `ShadowData` block
+that `lighting.inc` already reads the night grade from, and `sky.frag` and
+`clouds.frag` bind that same buffer at binding 1 of the cloud descriptor set —
+the same buffer rather than a second copy, so there is nothing for them to
+drift from. `task skypalette` measures that the sky at the horizon, the fogged
+terrain beside it and the water's reflection all move together.
+
+For anything that is not a colour — a different scattering model, two suns, a
+sky that owes nothing to Rayleigh — swap the sky shaders through
+`glyphengine.WithShaders` from `glyph.New`, or `renderer.WithShaders` if you
+drive the renderer directly. See
 [`game-loop.md`](game-loop.md#replacing-an-engine-shader).
 
 The clear colour behind it is `Environment.ClearColor`, and is only seen when
