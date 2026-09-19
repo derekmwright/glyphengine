@@ -181,7 +181,8 @@ func TestCustomEnvironmentSource(t *testing.T) {
 // a source that has never heard of it cannot reach it.
 //
 // Verified to catch a real mistake: dropping skyPalette from NewScene's
-// literal, which is the whole safety property, fails both halves of this.
+// literal, which is the whole safety property, fails both of the assertions
+// below that ask for the default, reporting six zero endpoints.
 func TestSkyPaletteSurvivesACustomEnvironment(t *testing.T) {
 	s := NewScene()
 	if got := s.SkyPalette(); got != DefaultSkyPalette() {
