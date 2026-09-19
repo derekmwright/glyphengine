@@ -75,7 +75,14 @@ cascades=71e68c… lights=0/e79af2… grass=124/82b4a2… outcome=present render
 | `cascades` | The shadow cascade view-projections |
 | `lights` | Clustered light count and the whole binning |
 | `grass` | Grass tile draw count and the ordered (variant, range, instance count) sequence |
+| `grasslod` | The live `GrassLOD`, which `SetGrassLOD` can move at any time |
+| `post` | Exposure, tonemap curve and white point, and the four bloom knobs |
 | `outcome` | What the iteration did — see below |
+
+`post` and `grasslod` are there because a game — or a stray keypress under
+`WithDebugKeys`, which toggles bloom and cycles the tonemap curve — can change
+them mid-run. Without them, every other field would match while the whole frame
+came out different, which is the worst kind of divergence to be handed.
 
 `outcome` is the field that catches a frame which was simulated but never drawn:
 
@@ -104,6 +111,12 @@ The pairing of fields is the point.
   it. That is a much narrower bug than the other way round.
 - `outcome` differs — one run skipped or rebuilt where the other did not. This
   is the one that needs no further hashing to be a finding.
+
+- **Two traces identical, two captures not.** Everything the CPU handed the GPU
+  matched. The difference is below this instrument: the driver, the GPU, or
+  something the renderer derives inside the command recorder that no field
+  covers. That is a finding, not a dead end — it rules out the whole simulation
+  and every streamed buffer in one step.
 
 Nothing in a line is a pointer or a Vulkan handle, deliberately. Both differ
 between two runs of the same build for reasons that have nothing to do with the
