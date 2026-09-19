@@ -39,8 +39,11 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io/fs"
 	"log"
 	"math"
+	"os"
+	"path/filepath"
 	"runtime"
 
 	"github.com/go-gl/mathgl/mgl32"
@@ -99,13 +102,24 @@ type game struct {
 	camera *glyph.Camera
 
 	camDist, camPitch, camYaw, camLook float32
+
+	// levelPath is a glTF on disk to load instead of the embedded level.glb:
+	// the way to look at a file exported from Blender without rebuilding.
+	levelPath string
 }
 
 func (g *game) Init(e *glyph.Engine) error {
 	r := e.Renderer()
-	model, err := r.LoadGLTF(assetsFS, "assets/level.glb")
+	var levelFS fs.FS = assetsFS
+	name := "assets/level.glb"
+	if g.levelPath != "" {
+		// A .gltf keeps its .bin and its textures beside it, so the file's own
+		// directory is the filesystem it has to be opened from.
+		levelFS, name = os.DirFS(filepath.Dir(g.levelPath)), filepath.Base(g.levelPath)
+	}
+	model, err := r.LoadGLTF(levelFS, name)
 	if err != nil {
-		return fmt.Errorf("load level.glb: %w", err)
+		return fmt.Errorf("load %s: %w", name, err)
 	}
 
 	spawnTarget := spawnLevel(e, model)
@@ -338,6 +352,7 @@ func main() {
 	camPitch := flag.Float64("campitch", 0.45, "camera pitch in radians")
 	camYaw := flag.Float64("camyaw", 3.14159, "camera yaw in radians (pi looks from behind spawn toward the plaza, +Z)")
 	camLook := flag.Float64("camlook", 2.5, "how far above the target the camera looks")
+	level := flag.String("level", "", "a .glb or .gltf on disk to load instead of the built-in level, e.g. one exported from Blender")
 	flag.Parse()
 
 	opts := []glyph.Option{
@@ -361,6 +376,8 @@ func main() {
 		camPitch: float32(*camPitch),
 		camYaw:   float32(*camYaw),
 		camLook:  float32(*camLook),
+
+		levelPath: *level,
 	}
 	e, err := glyph.New(g, opts...)
 	if err != nil {
