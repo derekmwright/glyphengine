@@ -161,6 +161,7 @@ are that pipeline's own real-Blender fixture, in the same spirit as
 | `task smoke` | Renders real frames of every example, exits non-zero on failure |
 | `task validate` | Every example under the Vulkan validation layer; must be completely silent (needs a GPU and the SDK) |
 | `task determinism` | Renders repeat byte for byte under a fixed frame clock, and the recorded draw sequence repeats with them (needs a GPU) |
+| `task reload` | A level swapped for a freshly loaded copy never drops a frame's geometry (needs a GPU) |
 | `task sky` | Celestial bodies are occluded by terrain, not drawn over it (needs a GPU) |
 | `task hud` | Screen-space overlays survive water, bloom and the tonemap (needs a GPU) |
 | `task waterblend` | A blended effect in front of the water is not painted over by it (needs a GPU) |

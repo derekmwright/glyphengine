@@ -144,6 +144,13 @@ type Model struct {
 	// something a single prop needs. See docs/agents/lights.md for the units
 	// caveat and the per-node placement pattern.
 	Lights []ModelLight
+
+	// owned is what this model's upload created on the GPU, recorded as it
+	// created it so DestroyModel can release each resource exactly once (see
+	// modelResources for why recording beats rediscovering). Nil on a Model
+	// from ReadGLTF, which owns nothing, and set back to nil by DestroyModel,
+	// which is what makes a second call a no-op.
+	owned *modelResources
 }
 
 // ModelNode is one node in the glTF scene graph a model was loaded from.
@@ -254,12 +261,18 @@ func (r *Renderer) uploadModel(rd *gltfRead) error {
 	if err != nil {
 		return fmt.Errorf("load gltf images: %w", err)
 	}
+	// Ownership is recorded from the upload's OWN maps, before anything can
+	// be shared onto a ModelMesh -- see modelResources.
+	owned := newModelResources(rd.doc, textures)
+	rd.model.owned = owned
+
 	materialCache := make(map[int]*Material)
 	for i := range rd.model.Meshes {
 		mm := &rd.model.Meshes[i]
 		if err := r.uploadPrimitiveMesh(rd, i); err != nil {
 			return err
 		}
+		owned.meshes = append(owned.meshes, mm.Mesh)
 		if matIdx := rd.prims[i].material; matIdx >= 0 {
 			mm.Texture = r.resolveBaseColorTexture(rd.doc, textures, matIdx)
 			mm.Material, err = r.resolveMaterialMaps(rd.doc, textures, materialCache, matIdx)
@@ -268,6 +281,7 @@ func (r *Renderer) uploadModel(rd *gltfRead) error {
 			}
 		}
 	}
+	owned.addMaterials(rd.doc, materialCache)
 	return nil
 }
 
@@ -794,11 +808,15 @@ func (r *Renderer) uploadSkinnedModel(rd *gltfRead) error {
 	if err != nil {
 		return fmt.Errorf("load gltf images: %w", err)
 	}
+	owned := newModelResources(rd.doc, textures)
+	rd.model.owned = owned
+
 	for i := range rd.model.Meshes {
 		mm := &rd.model.Meshes[i]
 		if err := r.uploadPrimitiveMesh(rd, i); err != nil {
 			return err
 		}
+		owned.meshes = append(owned.meshes, mm.Mesh)
 		if matIdx := rd.prims[i].material; matIdx >= 0 {
 			mm.Texture = r.resolveBaseColorTexture(rd.doc, textures, matIdx)
 		}
