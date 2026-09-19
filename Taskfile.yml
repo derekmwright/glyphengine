@@ -846,6 +846,105 @@ tasks:
         fi
         exit $status
 
+  waterlight:
+    desc: "Check that a lamp beside a lake reaches the water, in the lamp's colour"
+    dir: examples
+    cmds:
+      # Needs a GPU, so it sits with smoke, validate, determinism, lights and
+      # nightlight rather than in `task ci`.
+      #
+      # water.frag included lighting.inc, declared LIGHT_SET, had the light
+      # list bound at set 1 bindings 3-5 on every water fragment -- and never
+      # read it. A lamp beside a lake lit the shore, the piles and the lake bed
+      # and left the surface alone: no reflection at all, and a local-light
+      # share of structurally zero, so lamplit water took the same full night
+      # grade as open water under the moon. Issue #39.
+      #
+      # Nothing saw it and nothing could. `task smoke` renders the frame,
+      # `task validate` is silent, `task determinism` is happy because the
+      # wrong image is wrong the same way every time, and `task lights` needs
+      # two modes to disagree -- which they cannot when neither consults the
+      # grid. The real reason is simpler: no example had water and lights in
+      # the same scene until 09-water grew these flags.
+      #
+      # The pair is the instrument, as in `task waterblend`. -lampsoff builds
+      # every pile and fixture and hands the scene nothing, so the two captures
+      # differ in the lights and in nothing else and the lake subtracts out.
+      #
+      # PROVED, twice, and the second one is the more interesting:
+      #
+      # Ablate the local light entirely -- delete `color += lampGlint *
+      # glintGain` and force lightLocalLum to 0, which is water.frag's state
+      # before this landed. The lamp box goes from R +38.56 G +32.48 B +26.52
+      # to R +0.00 G +0.00 B +0.00 and the spot box from R +105.43 G +78.34
+      # B +52.36 to R +0.02 G +0.02 B +0.02. Both report THE LAMPS DO NOT REACH
+      # THE WATER.
+      #
+      # Ablate only the colour, leaving lightLocalLum set: the surface is
+      # excused the night grade it has not earned, and the lamp box comes back
+      # R -3.50 G +1.06 B +6.20, the spot box R -4.36 G +2.02 B +8.67. Turning
+      # the lights on makes the water BLUER and takes red away. That is the
+      # half of #39 that is not a missing highlight, and the ordering test is
+      # what catches it -- a mean or a luma floor would read those as "the
+      # water changed".
+      #
+      # Restored from a copy immediately after, not with git checkout.
+      #
+      # Both dark boxes are byte-identical in every one of those builds, which
+      # is the point of them: they say the light that appeared went only where
+      # a lamp reaches.
+      #
+      # The lit boxes go to almost exactly zero rather than keeping a residue,
+      # and that is worth knowing before choosing another box: they sit on deep
+      # water, where `absorbed` is 1 and the refracted bed does not show. A box
+      # in the shallows would keep whatever the opaque pass put on the bed
+      # there, and -min would have to clear it.
+      - |
+        status=0
+        d=.waterlight
+        rm -rf $d && mkdir -p $d
+        # `shift` before "$@", or the capture's own name is passed on to the
+        # example as a positional argument -- which ends Go's flag parsing, so
+        # -lampsoff is silently dropped and the control renders WITH the
+        # lights. Both captures then match and both boxes gain exactly 0.00.
+        # Which is how this was found: the gate said the lamps do not reach the
+        # water against a build where they demonstrably do.
+        shot() {
+          name=$1; shift
+          GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./09-water -frames 150 \
+            -time 0.02 -lamps 9 -spots 2 -screenshot $d/$name.png "$@" >/dev/null 2>&1
+        }
+        shot on
+        shot off -lampsoff
+        if [ ! -s $d/on.png ] || [ ! -s $d/off.png ]; then
+          echo "MISSING CAPTURE -- this gate proves nothing"
+          exit 1
+        fi
+        # Two pairs, because a point light and a spot take different routes to
+        # the surface: lightIrradiance's cone factor is a no-op for the first
+        # and the whole question for the second, and a spot that lit water like
+        # a bare bulb would pass the lamp pair on its own.
+        #
+        # The dark box of each pair is far water on that side of the frame,
+        # 50 metres and more out -- past the 14 of a lamp and the 30 of a spot
+        # on a mast 24 out, so every light returns exactly +0.0 there.
+        echo "── the nine lamps on piles ──"
+        go run ../cmd/watercheck -a $d/on.png -b $d/off.png \
+          -lit 620,500,60,50 -dark 240,396,80,40 -min 15 -margin 4 || status=1
+        echo "── the floodlight cone ──"
+        go run ../cmd/watercheck -a $d/on.png -b $d/off.png \
+          -lit 880,540,110,90 -dark 960,396,80,40 -min 30 -margin 10 || status=1
+        # A failure here is a picture: whether the water gained nothing or
+        # gained the wrong colour is the difference between the light loop being
+        # gone and the night grade being wrong, and re-running to get the
+        # captures back wastes the evidence.
+        if [ $status -ne 0 ]; then
+          echo "captures kept in examples/$d"
+        else
+          rm -rf $d
+        fi
+        exit $status
+
   bench:
     desc: Run the benchmark scenes and print CPU/GPU cost per pass
     cmds:
