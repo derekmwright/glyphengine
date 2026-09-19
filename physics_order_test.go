@@ -88,6 +88,19 @@ func TestUnstickResolvesTwoOverlapsDeterministically(t *testing.T) {
 // overlap needing the same 0.3-unit push. The unfixed code produced 3
 // distinct final positions over 500 runs in one process (confirmed below,
 // before applying the fix in this commit); the fix produces exactly 1.
+//
+// Break experiment: with Unstick reverted to reading overlaps[0] (but
+// OverlapAABB still sorted by entity id, so overlaps[0] is now always the
+// lowest id, not the smallest push), this test fails immediately with the
+// wrong golden position — [99.689995 0 100] instead of
+// [100.310005 0 99.689995] — because with three colliders "lowest id" and
+// "smallest push" diverge after the first attempt.
+// TestUnstickResolvesTwoOverlapsDeterministically and
+// TestUnstickTiesBreakOnLowestEntityID kept passing under that same break:
+// their two-wall sandwich is symmetric, so the lowest-id wall and the
+// smallest-push wall are always the same one, and overlaps[0] gets the
+// right answer by coincidence rather than by scanning for it. That is
+// exactly why this three-collider case exists.
 func TestUnstickResolvesThreeOverlapsDeterministically(t *testing.T) {
 	s := NewScene()
 	e := s.Spawn()
@@ -193,6 +206,12 @@ func TestUnstickTiesBreakOnLowestEntityID(t *testing.T) {
 // this produced unsorted results (confirmed below, before applying the fix
 // in this commit); after it, the result is ascending by entity id on every
 // call.
+//
+// Break experiment: reverting OverlapAABB's insertion sort back to a plain
+// append made this fail on run 2 of 500 with an out-of-order result (entity
+// 1 arriving last instead of first). It did not touch the Unstick tests
+// above — Unstick's own fix scans every overlap itself and no longer reads
+// results in whatever order OverlapAABB hands them back.
 func TestOverlapAABBOrderIsAscendingEntityID(t *testing.T) {
 	base := mgl32.Vec3{200, 0, 200}
 	s := NewScene()
@@ -281,6 +300,12 @@ func overlapCountName(n int) string {
 // (confirmed below, before applying the fix in this commit). The fix keeps
 // the lower entity id on every call, in both the grid path (SpatialGrid set)
 // and the no-grid fallback (linear scan), which share the same tie-break.
+//
+// Break experiment: dropping the "dist == best.T && entity < best.Entity"
+// clause back to plain "dist < best.T" made both subtests fail immediately —
+// 2 distinct entities returned across 300 ties in the grid path, 2 in the
+// no-grid fallback — confirming the single shared testEntity closure and
+// its tie-break cover both call sites.
 func TestRaycastBreaksExactTiesOnEntityID(t *testing.T) {
 	base := mgl32.Vec3{400, 0, 400}
 
