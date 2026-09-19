@@ -107,11 +107,13 @@ float lightLum(vec3 c) {
 // mean changing every one of those call sites to carry a value none of them
 // has an opinion about.
 //
-// The zero initialiser is load-bearing rather than tidiness: water.frag
-// includes this file for calcShadow, fogColor and applyFog but shades its own
-// surface, so neither producer ever runs there. Zero is the true answer for it
-// -- the water surface is not in the local-light loop at all -- and it makes
-// applyFog's local share exactly 0.0, which is what keeps water byte-identical.
+// The zero initialiser is load-bearing rather than tidiness, and it is what
+// water.frag builds on. That shader includes this file for calcShadow,
+// fogColor and applyFog but shades its own surface, so neither producer below
+// ever runs there; it sets the two by hand from its own finished terms
+// instead. Where it has no lamp reaching it, its local sum is exactly +0.0 and
+// applyFog's local share is exactly 0.0, which is what keeps a lake with no
+// lights near it byte-identical to before water was lit at all.
 float lightLocalLum = 0.0;
 float lightSkyLum = 0.0;
 
@@ -123,8 +125,9 @@ float lightSkyLum = 0.0;
 // like anything else: at midnight the ramp came back a uniform indigo with
 // the red end indistinguishable from the blue end, which is the one time the
 // view is worth opening. Neither producer below sets this in normal shading,
-// so nothing else changes -- water.frag never calls them at all and keeps
-// exactly the shading it had in every mode.
+// so nothing else changes. water.frag calls neither, and returns the heatmap
+// before it reaches applyFog rather than setting this and being handed its
+// colour back.
 bool lightDebugReadout = false;
 
 // nightLocalShare is the fraction of the light leaving this fragment toward
