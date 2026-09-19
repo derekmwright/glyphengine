@@ -29,11 +29,12 @@ func matDiff(a, b mgl32.Mat4) float32 {
 // they are fed back through ModelMatrix that the box is seen to point somewhere
 // else.
 //
-// Verified to fail: extracting against Rx*Ry*Rz instead (x from r(0,2), the
-// usual textbook order) fails 1989 of the 2000 random cases, the first by 0.98
-// in a matrix whose elements are at most 3; reading the gimbal branch's angle
-// from atan2(r(0,1), r(1,1)) fails both straight-up and straight-down cases;
-// and dropping the reflection handling fails every mirrored case.
+// Verified to fail, each on its own: extracting against Rx*Ry*Rz instead (the
+// usual textbook order) fails all 2000 random cases and the mirrored ones;
+// reading the pole branch's angle from atan2(r(0,1), r(1,1)) fails the
+// straight-up and straight-down cases and nothing else; and dropping the
+// reflection handling fails the three mirrored cases, by about 1.6 in matrices
+// whose elements are at most 3, and nothing else.
 func TestTransformFromMatrixRoundTrips(t *testing.T) {
 	const tol = 2e-5
 
