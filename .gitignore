@@ -21,6 +21,12 @@ Thumbs.db
 
 # NOTE: shaders/*.spv are intentionally NOT ignored -- see .gitattributes.
 
+# Blender leaves these behind running or importing anything under
+# tools/blender/ (build_fixture.py imports export_level.py as a module) and
+# on a real recipe run, an autosave backup of whatever .blend was open.
+tools/blender/__pycache__/
+*.blend1
+
 # task determinism, task hud and task lights write captures here, and remove
 # them on success. task lights leaves its pair behind when it fails, because
 # what failed is a picture.
