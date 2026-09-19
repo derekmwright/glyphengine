@@ -10,6 +10,8 @@ status: stable
 since: v0.4.0
 api:
   - renderer.Renderer.SetTonemap
+  - renderer.Renderer.SetUIExposure
+  - renderer.Renderer.UIExposure
 assets: none
 run: task bench
 verified: 2026-09-19
@@ -176,11 +178,27 @@ is ALU-bound rather than fill-bound.
   tonemapped, so exposure and the curve move the scene without moving the UI.
   See [`overlay-composite.md`](overlay-composite.md).
 
+- **The UI can have a second HDR resolve of its own, and it does NOT use this
+  one.** `renderer.WithUIGlowLayer` gives the screen-space channels their own
+  half-float target and their own fullscreen composite, whose exposure is
+  `SetUIExposure` — fixed, defaulting to 1, and deliberately not this pass's.
+  That separation is the whole reason the layer exists: `SetTonemap`'s exposure
+  moves with the day/night cycle, and a HUD whose white wanders between midday
+  and dusk is the bug the overlays were moved past this pass to fix. Measured,
+  on `13-ui` at 1280x720: the UI's own contribution in linear light differs by
+  at most 0.0095 between midnight and noon and by at most 0.0092 between an
+  identity curve and ACES at exposure 0.45, against a peak contribution of 0.91
+  — and that residue is the 8-bit quantisation of recovering it by subtracting
+  two captures. When the layer is on, the composite step below draws one
+  fullscreen triangle of the finished layer in place of the UI quads.
+
 - **This pass writes two timestamp intervals, not one.** `PassTonemap` covers
   the resolve and `PassComposite` covers the overlays, written adjacent rather
   than nested so the passes still sum to less than the frame. The resolve's
   0.013 ms below is still the resolve alone; the composite is 0.002 ms on
-  `15-kitchen-sink`.
+  `15-kitchen-sink`. With the UI glow layer on, `PassComposite` holds the
+  layer's fullscreen triangle instead, at 0.007 ms on `13-ui`, and the layer's
+  own work is upstream in `PassUILayer` and `PassUIGlow`.
 
 ## Not done
 

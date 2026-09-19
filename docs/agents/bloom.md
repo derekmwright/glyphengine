@@ -10,6 +10,8 @@ status: stable
 since: v0.4.0
 api:
   - renderer.Renderer.SetBloom
+  - renderer.Renderer.SetUIGlow
+  - renderer.Renderer.UIGlow
 assets: none
 example: examples/16-materials
 run: go run ./16-materials
@@ -139,6 +141,29 @@ nothing for the layout: every frame reported
 `SHADER_READ_ONLY_OPTIMAL`. It runs immediately after the command pool is
 created, alongside `initCubeShadowLayout`, which exists for the same reason. It
 also needs `TRANSFER_DST` usage on the images, used only for that one clear.
+
+## The same chain, a second time, over the UI
+
+`createBloomTargets`, `recordBloom` and the three pipelines are parameterized by
+the image they run over, so the screen-space UI's own HDR layer instantiates all
+of them a second time at the same resolution. `SetUIGlow` is `SetBloom` for that
+chain and takes the same four numbers; `renderer.WithUIGlowLayer` is what
+allocates it. See
+[`overlay-composite.md`](overlay-composite.md#giving-the-ui-its-own-hdr-layer).
+
+The one rule that is stricter there: **keep threshold minus knee at or above 1**
+for a stronger reason than the sky gives here. A UI colour is an sRGB value at
+or below 1, so after `srgbToLinear` and the premultiply nothing an ordinary
+element writes can exceed 1.0 — a ramp reaching under that makes every white
+label glow. The default 1.2 / 0.2 puts the foot of the ramp exactly at 1.0, and
+that was measured: `13-ui` with the layer on and nothing asking to glow differs
+from the direct path on 5009 pixels of 921600, none of them by more than 1/255.
+
+The chain runs whenever its strength is positive, whether or not anything in the
+frame clears the threshold — the recorder cannot tell, because MSDF text carries
+its emission per vertex. On a Radeon RX 7900 XTX at 1280x720 that is a fixed
+0.063 ms, against 0.017 ms for the layer alone, so a game that wants the layer
+without the glow should set the strength to 0 and skip recording it.
 
 ## Not done
 
