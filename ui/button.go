@@ -12,6 +12,13 @@ type Button struct {
 	LabelColor       [3]float32
 	OnClickFn        func()
 
+	// Glow is how much light the button emits on top of its own colours, panel
+	// and label alike; see renderer.UIRenderObject.Glow. Zero, the default, is
+	// no glow, and it does nothing unless the engine was built with
+	// glyphengine.WithUIGlow. A disabled button does not glow whatever this
+	// says: glowing is the loudest way a control has of asking to be pressed.
+	Glow float32
+
 	// Disabled greys the button out and takes it out of the keyboard traversal
 	// order. A disabled item the highlight can still land on is a dead end the
 	// player has to arrow back out of.
@@ -59,6 +66,14 @@ func (b *Button) Build(r *renderer.Renderer, scale, sw, sh float32, font *render
 	}
 	b.panel.Layers[0].Color = fc
 
+	glow := b.Glow
+	if b.Disabled {
+		glow = 0
+	}
+	for i := range b.panel.Layers {
+		b.panel.Layers[i].Glow = glow
+	}
+
 	b.panel.X = b.bounds.X
 	b.panel.Y = b.bounds.Y
 	b.panel.Width = b.bounds.W
@@ -76,6 +91,7 @@ func (b *Button) Build(r *renderer.Renderer, scale, sw, sh float32, font *render
 		ty := b.bounds.Y + (b.bounds.H-fontSize)/2
 		text = append(text, renderer.TextLine{
 			Text: b.Label, X: tx, Y: ty, Scale: fontSize, Color: b.LabelColor,
+			Glow: glow,
 		})
 	}
 
