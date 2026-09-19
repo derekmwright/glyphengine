@@ -26,11 +26,22 @@
 // their upper halves on sky; the fourth sits entirely under the surface and has
 // to stay behind it. See `task waterblend` and docs/agents/water.md.
 //
+// Three more flags light the lake at night, which is issue #39's scene:
+//
+//	-lamps N    warm lamps on piles standing in the water and on the shore
+//	-spots N    floodlights on masts in the lake, aimed at their reflections
+//	-lampsoff   build every pile and fixture but hand the scene no lights
+//
+// -lampsoff is the control, and it is what makes `task waterlight` mean
+// anything: the pair differs in the lights and in nothing else, so whatever
+// the water gains between the two captures is the lamps.
+//
 //	go run ./09-water              # windowed
 //	go run ./09-water -frames 200  # render 200 frames, then exit
 //	go run ./09-water -seed 3      # a different basin
 //	go run ./09-water -hud 26      # HUD lines across the waterline; see task hud
 //	go run ./09-water -plume -ghost -marker -submerged
+//	go run ./09-water -lamps 9 -spots 2 -time 0.02   # lamplight on the lake
 //
 // WASD moves, mouse looks, Shift runs, Space jumps, R toggles refraction,
 // Escape releases the cursor.
@@ -73,6 +84,11 @@ const (
 
 	playerHalfHeight = 0.9
 
+	// The camera sits this far above the player's centre; see FPCamera.EyeHeight
+	// below. Named because the lamp placement needs the eye's height over the
+	// still surface to work out where a reflection lands.
+	eyeHeight = 0.7
+
 	// hudLine is what -hud repeats. Mixed case with ascenders, descenders and
 	// digits, so a row of it carries enough ink for a mean to be stable, and
 	// short enough at scale 20 to stay clear of the right edge at 1280.
@@ -112,7 +128,64 @@ const (
 	// One instance buffer holds every emitter, so this is the ceiling for the
 	// flame and the bubbles together.
 	effectParticles = 640
+
+	// ── lamplight on the lake, issue #39 ──
+	//
+	// The lamps sit on a grid over one fixed patch of water in front of the
+	// spawn: the near edge is past the bottom of the frame (see
+	// effectShoreDist for that arithmetic) and the far edge is still well
+	// inside a lake of radius 55. More lamps pack the same patch tighter
+	// rather than reaching further out, which is what lets `-lamps 400` be a
+	// cost measurement of the same piece of water `-lamps 9` is a picture of.
+	//
+	// The width deliberately runs past the shoreline at the near row, because
+	// a lamp BESIDE a lake is as much the reported case as one over it. At
+	// -seed 1 that puts one of the nine on dry ground (the bed under it is
+	// 3.58 against a waterLevel of 3.0) and the other eight in water from
+	// 0.4 to 12 units deep.
+	lampNear      = 12.0
+	lampFar       = 34.0
+	lampHalfWidth = 22.0
+
+	// Above the surface, or above the ground where a pile lands dry. Low
+	// enough that the streak on the water is long -- a lamp directly overhead
+	// makes a dot, and the streak is the thing worth looking at.
+	lampHeight = 2.6
+
+	// Range against height: 14 reaches roughly 13 units out along the surface
+	// from a lamp 2.6 above it, so neighbouring pools on the 9-lamp grid
+	// overlap slightly and the far water is outside every one of them. That
+	// far water is what `task waterlight` requires to be unchanged.
+	lampRange = 14.0
+
+	// The floodlights stand on masts out in the lake and aim back at their own
+	// reflections; see spawnLamps for why that is the only aim that shows a
+	// cone on water at all.
+	spotHeight    = 4.0
+	spotRange     = 30.0
+	spotHalfWidth = 9.0
+	spotOut       = 24.0 // from the spawn, toward the middle of the lake
+	spotInner     = 0.07 // half-angles, radians
+	spotOuter     = 0.14
+
+	// The beam is aimed this fraction of the way from the fixture to its own
+	// reflection rather than all the way onto it, so the cone edge lands
+	// ACROSS the streak and cuts it. Aimed dead on, the whole streak sits
+	// inside the cone and nothing shows the cone at all: widening spotOuter
+	// from 0.34 to 0.60 rad then moves the water by 0.15 of a channel, which
+	// is a spot light drawing a point light.
+	spotAimBias = 1.0
 )
+
+// lampColor is a warm white lamp, the same hue 21-streetlights puts on its
+// ring path, scaled up because water returns a lamp only as a reflection:
+// there is no diffuse pool to carry it, so what does not land in the streak
+// does not land at all. See the measurement in water.frag.
+var lampColor = mgl32.Vec3{1.0, 0.74, 0.50}.Mul(2.0)
+
+// spotColor is 21-streetlights' 2800 K porch bulb at its intensity, unchanged,
+// so the two examples do not disagree about what an incandescent fixture is.
+var spotColor = mgl32.Vec3{1.0, 0.58, 0.28}.Mul(2.8)
 
 type game struct {
 	camera *glyph.FPCamera
@@ -144,6 +217,12 @@ type game struct {
 	ghost     bool
 	marker    bool
 	submerged bool
+
+	// Lamps over the water. Off by default for the same reason.
+	lampCount int
+	spotCount int
+	lampsOff  bool
+	lampPosts bool
 
 	flame   *glyph.ParticleEmitter
 	bubbles *glyph.ParticleEmitter
@@ -252,6 +331,15 @@ func (g *game) Init(e *glyph.Engine) error {
 		return err
 	}
 
+	// ── lamps over the water ──
+	//
+	// Also opt-in: with no -lamps and no -spots the scene hands the engine no
+	// lights at all, which is the state every other capture of this example
+	// was taken in.
+	if err := g.spawnLamps(e, hm, spawnZ, spawnY+playerHalfHeight+eyeHeight); err != nil {
+		return err
+	}
+
 	e.SetDayCycleSpeed(1.0 / 300.0)
 	e.SetTimeOfDay(0.32)
 	if g.tod >= 0 {
@@ -280,7 +368,7 @@ func (g *game) Init(e *glyph.Engine) error {
 	}
 
 	g.camera = glyph.NewFPCamera()
-	g.camera.EyeHeight = 0.7
+	g.camera.EyeHeight = eyeHeight
 	g.camera.Yaw = g.yaw // 0 faces back toward the lake
 	g.camera.Pitch = g.pitch
 
@@ -420,6 +508,165 @@ func (g *game) spawnEffects(e *glyph.Engine, hm *glyph.Heightmap, spawnZ float32
 			-1.2, 1.2, deepZ+1.6, deepZ+2.8, bed, 0.3, waterLevel-0.7-bed)
 	}
 
+	return nil
+}
+
+// spawnLamps puts warm point lamps and shore floodlights over the lake.
+//
+// This is issue #39's scene, and no example had it: water.frag shaded its own
+// surface and never consulted the clustered light list, so a lamp beside a
+// lake lit the bed and the shore and left the water itself untouched -- no
+// streak, no pool, and a surface that took the full night grade in the middle
+// of a lit harbour. Nothing could see that, because the only scene with water
+// in it had no lights and the only scenes with lights in them had no water.
+//
+// Placement is found from the heightmap, like the player spawn and the blended
+// effects, so -seed keeps working: a pile stands on the bed where the bed is
+// under water and on the ground where it is not.
+func (g *game) spawnLamps(e *glyph.Engine, hm *glyph.Heightmap, spawnZ, eyeY float32) error {
+	if g.lampCount <= 0 && g.spotCount <= 0 {
+		return nil
+	}
+	r := e.Renderer()
+
+	// A unit-height cylinder scaled per pile, rather than one mesh per height.
+	// CreateCylinder centres the mesh, so a pile is positioned at its middle.
+	var post *renderer.Mesh
+	var bulb *renderer.Mesh
+	if g.lampPosts {
+		var err error
+		if post, err = r.CreateCylinder(0.09, 1.0, 8); err != nil {
+			return err
+		}
+		if bulb, err = r.CreateCube(1.0); err != nil {
+			return err
+		}
+	}
+
+	// fixture stands a pile from the bed (or the ground) up to head, with an
+	// emissive marker on top, so the light reads as coming from something.
+	// The marker is emissive rather than lit: an emissive surface is its own
+	// colour at night, which is what a bulb is.
+	fixture := func(x, z, head, size float32) {
+		if !g.lampPosts {
+			return
+		}
+		base, ok := hm.HeightAt(x, z)
+		if !ok {
+			base = waterLevel
+		}
+		p := e.Spawn()
+		e.C.Transform.Set(p, &glyph.Transform{
+			Position: mgl32.Vec3{x, (base + head) / 2, z},
+			Scale:    mgl32.Vec3{1, head - base, 1},
+		})
+		e.C.MeshRef.Set(p, &glyph.MeshRef{Mesh: post, Roughness: 0.5, Metallic: 0.3})
+		e.C.Color.Set(p, &glyph.Color{R: 0.20, G: 0.20, B: 0.22})
+		e.C.Static.Set(p, &glyph.Static{})
+
+		b := e.Spawn()
+		e.C.Transform.Set(b, &glyph.Transform{Position: mgl32.Vec3{x, head, z}, Scale: mgl32.Vec3{size, size, size}})
+		e.C.MeshRef.Set(b, &glyph.MeshRef{Mesh: bulb})
+		e.C.Color.Set(b, &glyph.Color{R: 1.0, G: 0.82, B: 0.55})
+		e.C.Emissive.Set(b, &glyph.Emissive{})
+	}
+
+	// ── lamps on a grid over the water in front of the spawn ──
+	lamps := make([]glyph.PointLight, 0, g.lampCount)
+	if g.lampCount > 0 {
+		cols := int(math.Ceil(math.Sqrt(float64(g.lampCount))))
+		rows := (g.lampCount + cols - 1) / cols
+		step := 2 * lampHalfWidth / float32(cols)
+		for i := 0; i < g.lampCount; i++ {
+			col, row := i%cols, i/cols
+			v := float32(0.5)
+			if rows > 1 {
+				v = float32(row) / float32(rows-1)
+			}
+			// Alternate rows are offset half a column, and the NEAR row is the
+			// offset one: a pile dead ahead at the near row is four metres of
+			// black post up the middle of the frame, and the picture this
+			// example exists to show is behind it.
+			x := -lampHalfWidth + step*(float32(col)+0.5)
+			if row%2 == 0 {
+				x += step * 0.5
+			}
+			z := spawnZ - (lampNear + (lampFar-lampNear)*v)
+
+			// A pile in the water carries its lamp lampHeight above the
+			// SURFACE; one that landed on dry ground carries it lampHeight
+			// above the ground. Measuring both from the bed would sink the
+			// ones in the deep water and leave the shore ones on stilts.
+			head := float32(waterLevel + lampHeight)
+			if bed, ok := hm.HeightAt(x, z); ok && bed > waterLevel {
+				head = bed + lampHeight
+			}
+			lamps = append(lamps, glyph.PointLight{
+				Pos:   mgl32.Vec3{x, head, z},
+				Range: lampRange,
+				Color: lampColor,
+			})
+			fixture(x, z, head, 0.22)
+		}
+	}
+
+	// ── floodlights on masts in the lake, aimed at their own reflections ──
+	//
+	// Aiming a cone at its own reflection looks like a trick and is the only
+	// aim that shows a cone on water at all. A specular surface returns a
+	// light to the eye from exactly one place: the point where the half-vector
+	// lines up with the normal, which on a flat lake is on the line between
+	// the eye and the light's mirror image, a fraction
+	// eyeAbove/(eyeAbove+lampAbove) of the way out. Point the beam anywhere
+	// else and it lands on water that cannot reflect it toward the camera, so
+	// the surface shows nothing however bright the fixture is -- the lit lake
+	// BED still shows through the refraction, but that is the terrain shader's
+	// doing and not the water's. Aimed here, the cone edge lands across the
+	// reflection streak and cuts it, which is what makes `lightSpotFactor` on
+	// water something a capture can show.
+	spots := make([]glyph.SpotLight, 0, g.spotCount)
+	for i := 0; i < g.spotCount; i++ {
+		u := float32(0.5)
+		if g.spotCount > 1 {
+			u = float32(i) / float32(g.spotCount-1)
+		}
+		x := -spotHalfWidth + 2*spotHalfWidth*u
+		z := spawnZ - spotOut
+		head := float32(waterLevel + spotHeight)
+		if bed, ok := hm.HeightAt(x, z); ok && bed > waterLevel {
+			head = bed + spotHeight
+		}
+
+		// The reflection point, in the eye's own frame: eyeY is the camera, and
+		// both heights are measured from the still surface.
+		t := (eyeY - waterLevel) / ((eyeY - waterLevel) + (head - waterLevel))
+		glintX := t * x
+		glintZ := spawnZ + t*(z-spawnZ)
+		aimX := x + spotAimBias*(glintX-x)
+		aimZ := z + spotAimBias*(glintZ-z)
+
+		spots = append(spots, glyph.SpotLight{
+			Pos:   mgl32.Vec3{x, head, z},
+			Dir:   mgl32.Vec3{aimX - x, spotAimBias * (waterLevel - head), aimZ - z},
+			Range: spotRange,
+			Color: spotColor,
+			Inner: spotInner,
+			Outer: spotOuter,
+		})
+		fixture(x, z, head, 0.18)
+	}
+
+	// -lampsoff builds every pile and every emissive marker and then hands the
+	// scene nothing, which is the control `task waterlight` differences
+	// against. Clearing the sets here rather than skipping the loops above is
+	// the point: the two runs draw the same geometry, from the same heightmap
+	// probes, in the same order, so the only thing that can move a pixel
+	// between them is the light.
+	if g.lampsOff {
+		return nil
+	}
+	e.Scene.SetPointLights(lamps)
+	e.Scene.SetSpotLights(spots)
 	return nil
 }
 
@@ -737,6 +984,11 @@ func main() {
 	ghost := flag.Bool("ghost", false, "translucent pane at the shoreline, crossing the waterline")
 	marker := flag.Bool("marker", false, "world-space overlay disc over the water")
 	submerged := flag.Bool("submerged", false, "translucent block and bubbles under the surface")
+	lamps := flag.Int("lamps", 0, "warm point lamps on piles over the water and the shore (0 = none)")
+	spots := flag.Int("spots", 0, "shore floodlights throwing cones across the surface (0 = none)")
+	lampsOff := flag.Bool("lampsoff", false, "build the piles and fixtures but hand the scene no lights, as the control for `task waterlight`")
+	lampPosts := flag.Bool("lampposts", true, "draw the piles and bulb markers under the lamps (off measures the light loop against identical geometry)")
+	lightDebug := flag.String("lightdebug", "", "light debug mode: heatmap or bruteforce (default: off)")
 	flag.Parse()
 
 	opts := []glyph.Option{
@@ -759,11 +1011,22 @@ func main() {
 		opts = append(opts, glyph.WithScreenshot(*shot))
 	}
 
-	e, err := glyph.New(&game{seed: *seed, refract: *refract, pitch: float32(*pitch), tod: float32(*tod), clouds: *clouds, stars: *stars, milkyway: *milkyway, band: *band, fogHeight: float32(*fogHeight), yaw: float32(*yaw), shafts: float32(*shafts), pillars: *pillars, pauseAt: *pauseAt, hud: *hud, bloom: float32(*bloom), bloomThres: float32(*bloomThreshold), plume: *plume, ghost: *ghost, marker: *marker, submerged: *submerged}, opts...)
+	e, err := glyph.New(&game{seed: *seed, refract: *refract, pitch: float32(*pitch), tod: float32(*tod), clouds: *clouds, stars: *stars, milkyway: *milkyway, band: *band, fogHeight: float32(*fogHeight), yaw: float32(*yaw), shafts: float32(*shafts), pillars: *pillars, pauseAt: *pauseAt, hud: *hud, bloom: float32(*bloom), bloomThres: float32(*bloomThreshold), plume: *plume, ghost: *ghost, marker: *marker, submerged: *submerged, lampCount: *lamps, spotCount: *spots, lampsOff: *lampsOff, lampPosts: *lampPosts}, opts...)
 	if err != nil {
 		log.Fatalf("create engine: %v", err)
 	}
 	defer e.Destroy()
+
+	switch *lightDebug {
+	case "heatmap":
+		e.SetLightDebugMode(glyph.LightDebugHeatmap)
+	case "bruteforce":
+		e.SetLightDebugMode(glyph.LightDebugBruteForce)
+	case "":
+		// default: off
+	default:
+		log.Fatalf("unknown -lightdebug %q, want heatmap or bruteforce", *lightDebug)
+	}
 
 	e.Run()
 	log.Printf("rendered %d frames", e.FrameCount())
