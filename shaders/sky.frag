@@ -24,6 +24,23 @@ layout(push_constant) uniform PushConstants {
 // target that composites to a no-op rather than a special case here.
 layout(set = 0, binding = 0) uniform sampler2D cloudTex;
 
+// The same per-frame block every lit pipeline binds at binding 0 of its shadow
+// set, bound here at binding 1 of the cloud set. The dome, the fog distant
+// geometry fades into and the water's reflection have to agree on the palette,
+// and reading the SAME BUFFER is the only form of agreement that cannot drift
+// -- a second copy packed from the same Go value still has two places to go
+// wrong. It rides on the cloud descriptor set because that is the set this
+// pass already binds; see createDescriptorSetLayout.
+//
+// cascadeVP and nightGrade are declared solely so skyPalette lands at the
+// offset renderer/shadow.go packs it at, exactly as the push block above
+// declares pointPos through cameraPos to land fog where every shader reads it.
+layout(set = 0, binding = 1) uniform ShadowData {
+    mat4 cascadeVP[2];
+    vec4 nightGrade;
+    vec4 skyPalette[6];
+} shadow;
+
 layout(location = 0) out vec4 outColor;
 
 #include "atmosphere.inc"
@@ -57,7 +74,7 @@ void main() {
     vec3 realSunDir = atmSunDirFrom(sunElevation, pc.fog.zw);
 
     vec3 zenith, horizon;
-    atmSkyPalette(sunElevation, zenith, horizon);
+    atmSkyPalette(sunElevation, shadow.skyPalette, zenith, horizon);
 
     // Rayleigh-ish falloff rather than a linear ramp: most of the colour
     // change happens in the first part of the climb from the horizon, which is

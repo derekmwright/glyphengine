@@ -58,38 +58,67 @@ float atmTwilight(float sunY) {
 // used to sit at this spot had no callers and had already drifted to different
 // constants — a trap for anyone who came here to change the star fade.
 
+// The six palette endpoints, in the order renderer/shadow.go packs them.
+// Only .rgb is read; .a is std140 padding, since an array of vec3 has a
+// 16-byte stride anyway.
+#define ATM_ZENITH_DAY    0
+#define ATM_HORIZON_DAY   1
+#define ATM_ZENITH_TWI    2
+#define ATM_HORIZON_TWI   3
+#define ATM_ZENITH_NIGHT  4
+#define ATM_HORIZON_NIGHT 5
+
 // atmSkyPalette returns the zenith and horizon colours for a sun elevation.
 //
 // Three palettes rather than two. The blue hour is the one that was missing:
 // overhead goes deep indigo while the horizon keeps a last band of warmth, and
 // that separation is what makes dusk read as dusk instead of as the lights
 // being turned down.
-void atmSkyPalette(float sunY, out vec3 zenith, out vec3 horizon) {
-    // The horizon is pale because that is what looking through more atmosphere
-    // does, but not white: distant geometry fades into this colour, so a
-    // washed-out horizon washes out the whole landscape with it.
-    const vec3 zenithDay    = vec3(0.13, 0.30, 0.78);
-    const vec3 horizonDay   = vec3(0.52, 0.70, 0.93);
-
-    const vec3 zenithTwi    = vec3(0.055, 0.085, 0.26);
-    const vec3 horizonTwi   = vec3(0.88, 0.42, 0.22);
-
-    // Night is deliberately dark. These are the endpoints the whole scene
-    // reaches at midnight -- the dome, the fog distant geometry fades into, and
-    // the water's reflection all read from here -- so lifting them to make the
-    // sky legible washes out the entire landscape with it. If night needs to be
-    // brighter, brighten the moon, not the air.
-    const vec3 zenithNight  = vec3(0.0014, 0.0017, 0.0060);
-    const vec3 horizonNight = vec3(0.0034, 0.0050, 0.0130);
-
+//
+// `pal` is the six endpoints, and it is a uniform rather than the constants
+// that used to sit here: what colour a planet's sky is is a property of the
+// planet, and baking it into a file the dome, the fog distant geometry fades
+// into and the water's reflection all include meant a game had to vendor the
+// whole lighting chain -- 430 lines with no version handshake -- to change six
+// vec3s. See renderer.SkyPalette for the defaults, which are exactly the
+// constants this replaced.
+//
+// It arrives as a PARAMETER rather than being read from a uniform inside this
+// function, the same way atmNightShift takes its grade. This file is included
+// by sky.frag and clouds.frag as well as by lighting.inc, and those two reach
+// the block through a different descriptor set from the lit family's -- so a
+// uniform declared here would have to be declared at an address that suits all
+// three, which there is none of. Passing it keeps atmosphere.inc free of
+// bindings while every caller still hands it the same buffer.
+//
+// Reading the endpoints instead of compiling them in costs a handful of last-
+// bit pixels, and it is worth knowing that it is the arithmetic and not a
+// wrong value. The bytes the UBO carries for the default palette are the same
+// bytes glslc put in the old constant table -- checked against spirv-dis of
+// the previous sky.frag.spv, all eighteen -- but the driver folds a mix() of
+// two compile-time constants differently from a mix() of two uniform loads,
+// and the result can land on the other side of the tonemap's rounding. Over
+// the whole `screenshots` set plus 09-water at five hours, dusk and midnight
+// in 15-kitchen-sink, 12-particles and 16-materials -- 30 captures under a
+// fixed clock -- eight move, by 1 to 4 pixels each, every one of them by
+// exactly 1 of 255 in one channel.
+//
+// It is not the way this is written. mix() as below, the explicit
+// `a + t*(b-a)` and the literal `a*(1-t) + b*t` were each captured over those
+// eight scenes: the first two give the identical 1-4 pixels, the third is
+// worse at 1-8. Nor can it be avoided while the palette is data -- the only
+// construction with no drift at all is a constant fast path, which puts the
+// six numbers back in the shader as well as in Go and is the duplication this
+// change exists to delete.
+void atmSkyPalette(float sunY, vec4 pal[6], out vec3 zenith, out vec3 horizon) {
     float day = atmDaylight(sunY);
     float twi = atmTwilight(sunY);
 
-    zenith  = mix(zenithNight, zenithDay, day);
-    horizon = mix(horizonNight, horizonDay, day);
+    zenith  = mix(pal[ATM_ZENITH_NIGHT].rgb,  pal[ATM_ZENITH_DAY].rgb,  day);
+    horizon = mix(pal[ATM_HORIZON_NIGHT].rgb, pal[ATM_HORIZON_DAY].rgb, day);
 
-    zenith  = mix(zenith, zenithTwi, twi);
-    horizon = mix(horizon, horizonTwi, twi);
+    zenith  = mix(zenith,  pal[ATM_ZENITH_TWI].rgb,  twi);
+    horizon = mix(horizon, pal[ATM_HORIZON_TWI].rgb, twi);
 }
 
 // atmSunGlow is the scattering around the sun's direction: a tight halo on top

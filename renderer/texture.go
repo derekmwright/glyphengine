@@ -31,14 +31,37 @@ type Texture struct {
 	destroyed bool
 }
 
-// createDescriptorSetLayout creates a layout with a single combined image sampler
-// at set=0, binding=0, visible to the fragment stage.
+// createDescriptorSetLayout creates the set-0 layout every non-lit pipeline and
+// every lit variant that takes a plain texture shares: a combined image sampler
+// at binding 0 and the per-frame environment block at binding 1, both visible
+// to the fragment stage.
+//
+// Binding 1 is here, on a layout most of whose sets are a single texture,
+// because of where sky.frag and clouds.frag can be reached from. They have no
+// spare push constants -- the block is full at its 256-byte guaranteed minimum
+// -- and set 0 is the only descriptor set either pass binds. Putting the
+// environment block on a set of its own would mean binding it too, and a set at
+// index 1 or above is disturbed by every lit, terrain, material and skinned
+// draw that precedes the sky in the command buffer, so it would have to be
+// rebound at the sky draw itself.
+//
+// Only the cloud target's sets write binding 1 (see createCloudTargets), and
+// only sky.frag and clouds.frag declare it. A descriptor a bound pipeline does
+// not statically use need not be valid, which is why every other set allocated
+// from this layout -- one per texture, per bloom level, per HDR target -- can
+// leave it alone; `task validate` is the check on that.
 func createDescriptorSetLayout(deviceDriver core1_0.DeviceDriver) (core1_0.DescriptorSetLayout, error) {
 	layout, _, err := deviceDriver.CreateDescriptorSetLayout(nil, core1_0.DescriptorSetLayoutCreateInfo{
 		Bindings: []core1_0.DescriptorSetLayoutBinding{
 			{
 				Binding:         0,
 				DescriptorType:  core1_0.DescriptorTypeCombinedImageSampler,
+				DescriptorCount: 1,
+				StageFlags:      core1_0.StageFragment,
+			},
+			{
+				Binding:         1,
+				DescriptorType:  core1_0.DescriptorTypeUniformBuffer,
 				DescriptorCount: 1,
 				StageFlags:      core1_0.StageFragment,
 			},
@@ -151,7 +174,17 @@ func createDescriptorPool(deviceDriver core1_0.DeviceDriver, maxSets int) (core1
 				// add one UBO per frame here; they are storage buffers now
 				// (see the StorageBuffer pool size below), which is why this
 				// no longer carries a maxFramesInFlight term.
-				DescriptorCount: 36 + maxMaterials,
+				//
+				// The first three terms are the sets allocated from
+				// createDescriptorSetLayout, which carries the environment
+				// block at binding 1. A pool charges for every descriptor a
+				// set's layout declares whether or not it is written, and only
+				// the cloud target's sets write that one -- so this is
+				// overwhelmingly headroom for textures that will never use it.
+				// It is counted anyway because allocation fails outright
+				// otherwise, which would be a startup error on the first scene
+				// with enough textures rather than anything visible here.
+				DescriptorCount: maxSets + maxHDRSets + maxBloomSets + 36 + maxMaterials,
 			},
 			{
 				Type: core1_0.DescriptorTypeStorageBuffer,

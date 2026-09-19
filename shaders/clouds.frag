@@ -36,6 +36,18 @@ layout(push_constant) uniform PushConstants {
 // the clear value and the reprojection is rejected anyway.
 layout(set = 0, binding = 0) uniform sampler2D historyTex;
 
+// The per-frame environment block, at binding 1 of the same set, for the sky
+// palette the march fills its ambient with. It is the buffer the lit
+// pipelines read at binding 0 of their shadow set and sky.frag reads here --
+// one buffer, so the fill inside a cloud cannot drift from the dome behind it.
+// cascadeVP and nightGrade are declared only to place skyPalette at the offset
+// renderer/shadow.go packs it at.
+layout(set = 0, binding = 1) uniform ShadowData {
+    mat4 cascadeVP[2];
+    vec4 nightGrade;
+    vec4 skyPalette[6];
+} shadow;
+
 layout(location = 0) out vec4 outColor;
 
 #include "atmosphere.inc"
@@ -322,7 +334,7 @@ void main() {
 
     // The dome's palette, which the march uses for its ambient fill.
     vec3 zenith, horizon;
-    atmSkyPalette(sunElevation, zenith, horizon);
+    atmSkyPalette(sunElevation, shadow.skyPalette, zenith, horizon);
 
     vec3 cloudScatter = vec3(0.0);
     float cloudTransmit = 1.0;

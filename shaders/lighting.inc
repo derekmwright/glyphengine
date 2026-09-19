@@ -86,7 +86,10 @@ vec3 fogColor(vec3 viewDir) {
     float sunY = pc.sunColor.w;
     vec3 sunDir = atmSunDirFrom(sunY, pc.fog.zw);
     vec3 zenith, horizon;
-    atmSkyPalette(sunY, zenith, horizon);
+    // shadow.skyPalette, not a copy of it: the dome reads the same six vec4s
+    // out of the same buffer, so there is no second source for these to drift
+    // from. That is the whole point of sharing this file.
+    atmSkyPalette(sunY, shadow.skyPalette, zenith, horizon);
     return horizon + atmSunGlow(viewDir, sunDir, pc.sunColor.rgb, sunY);
 }
 

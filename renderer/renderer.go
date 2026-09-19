@@ -866,7 +866,13 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	r.onInit(func() { r.deviceDriver.DestroyRenderPass(r.cloudRenderPass, nil) })
 
 	r.clouds, err = createCloudTargets(r.instanceDriver, r.deviceDriver, r.physicalDevice,
-		r.descriptorPool, r.descriptorSetLayout, r.cloudRenderPass, r.sc.extent, cloudBufferCount)
+		r.descriptorPool, r.descriptorSetLayout, r.cloudRenderPass, r.sc.extent, cloudBufferCount,
+		// The lit pipelines' per-frame UBO, bound at binding 1 of the cloud
+		// sets so sky.frag and clouds.frag read the sky palette out of the
+		// very buffer applyFog reads it from. createShadowResources runs well
+		// before this, and a swapchain rebuild remakes these sets while
+		// leaving those buffers alone.
+		r.shadow.lightVPBuffers)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create cloud targets: %w", err)
 	}
@@ -1306,7 +1312,8 @@ func (r *Renderer) recreateSwapchain() error {
 	if r.sc.extent != oldExtent {
 		r.clouds.destroy(r.deviceDriver)
 		r.clouds, err = createCloudTargets(r.instanceDriver, r.deviceDriver, r.physicalDevice,
-			r.descriptorPool, r.descriptorSetLayout, r.cloudRenderPass, r.sc.extent, cloudBufferCount)
+			r.descriptorPool, r.descriptorSetLayout, r.cloudRenderPass, r.sc.extent, cloudBufferCount,
+			r.shadow.lightVPBuffers)
 		if err != nil {
 			return err
 		}
@@ -1517,7 +1524,7 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 	// stale data. When shadows are disabled, the VPs are zero matrices, causing
 	// all fragments to project to the shadow map origin where depth=1.0
 	// (cleared) → fully lit.
-	r.shadow.uploadLitUBO(f, lighting.CascadeVPs, lighting.NightGrade)
+	r.shadow.uploadLitUBO(f, lighting.CascadeVPs, lighting.NightGrade, lighting.SkyPalette)
 	r.shadow.uploadLights(f, lighting.Lights, lighting.Clusters, lighting.LightFlags, r.sc.extent)
 
 	// The water pass is optional: a device without TRANSFER_SRC on its
@@ -1537,8 +1544,8 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 	}
 	recordStart := time.Now()
 	err = recordCommandBuffer(r.deviceDriver, cmdBuf, r.renderPass, r.framebuffers[imageIndex], r.pipeline, r.litDoubleSidedPipeline, r.translucentPipeline, r.translucentDoubleSidedPipeline, r.skinnedTranslucentPipeline, r.instancedPipeline, r.instancedDoubleSidedPipeline, r.overlayPipeline, r.skyPipeline, r.starsPipeline, r.celestialPipeline, r.uiPipeline, r.msdfPipeline, r.skinnedPipeline, r.grassPipeline, r.waterPipeline, r.godRayPipeline, r.waterRenderPass, waterFB, r.sceneColor, r.hdr.images[imageIndex],
-		func(cb core1_0.CommandBuffer) error { return r.recordClouds(cb, lighting) },
-		r.cloudSetFor(),
+		func(cb core1_0.CommandBuffer) error { return r.recordClouds(cb, lighting, f) },
+		r.cloudSetFor(f),
 		r.bloomFor(imageIndex), r.tonemapFor(imageIndex), r.particlePipeline, r.terrainPipeline, r.materialPipelines(), &r.stats, r.pipelineLayout, r.litPipelineLayout, r.skinnedPipelineLayout, r.terrainPipelineLayout, r.sc.extent, draws, overlays, celestials, uiOverlays, msdfOverlays, lighting, split, r.fallbackTexture, r.milkyWayTex, r.shadow, r.grass, r.grassLOD, r.grassImpostor, r.grassImpostorPipeline, r.particles, f, r.msaa != nil, r.gpuTimer, r.trace, &r.cmdScratch)
 	if err != nil {
 		r.trace.Str("outcome", "record-error")
