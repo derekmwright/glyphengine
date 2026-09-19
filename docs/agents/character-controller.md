@@ -173,6 +173,15 @@ Two invariants make it safe, and both are easy to break from the outside:
 
 `controller_race_test.go` covers both under `-race`.
 
+Both `MoveCharacter` and `MoveCharactersParallel` query the world through
+`Scene.Raycast` and `Scene.OverlapAABB`, so a game that sets `Scene.Queries` to
+its own broadphase (see `physics-queries`) replaces ground detection and
+collision here too — for free, since neither this file's code nor
+`controller.go` know `Scene.Queries` exists. A replacement still has to
+honour the collision snapshot for the invariants above to hold; see
+`QueryBackend`'s doc comment for what that means for a backend that is not
+just reading Scene's live components.
+
 ## Failure modes
 
 - **Character falls through the world.** No terrain and no collider under it.
