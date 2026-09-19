@@ -32,6 +32,11 @@ const materialUniformSize = 48
 type Material struct {
 	DescriptorSet core1_0.DescriptorSet
 
+	// id is this material's place in the draw list's grouping order. See
+	// resourceid.go: it stands where the descriptor set's address used to, so
+	// the order is the same in every process.
+	id uint32
+
 	// Per-material constants: which maps exist, and how strongly to apply
 	// them. Written once at creation and never touched again — nothing here
 	// varies per frame, which is the whole reason it can live in a uniform
@@ -220,7 +225,7 @@ func createMaterialDescriptorSetLayout(deviceDriver core1_0.DeviceDriver) (core1
 // Attach the result to an entity with MaterialRef.PBR to route it through the
 // material pipeline.
 func (r *Renderer) CreateMaterial(opts MaterialOptions) (*Material, error) {
-	m := &Material{}
+	m := &Material{id: newResourceID()}
 
 	buf, mem, err := r.createBuffer(materialUniformSize,
 		core1_0.BufferUsageUniformBuffer,

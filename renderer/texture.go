@@ -23,6 +23,11 @@ type Texture struct {
 	sampler       core1_0.Sampler
 	DescriptorSet core1_0.DescriptorSet
 
+	// id is this texture's place in the draw list's grouping order. See
+	// resourceid.go: it stands where the descriptor set's address used to, so
+	// the order is the same in every process.
+	id uint32
+
 	destroyed bool
 }
 
@@ -771,6 +776,7 @@ func (r *Renderer) createTexture(pixels []byte, width, height int, opts textureO
 		view:          view,
 		sampler:       sampler,
 		DescriptorSet: sets[0],
+		id:            newResourceID(),
 	}
 	r.textures = append(r.textures, tex)
 	return tex, nil

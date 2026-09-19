@@ -124,6 +124,19 @@ type RenderObject struct {
 	// plain texture already sat, so joints stay at set 1 and shadow at set 2 --
 	// the layout the skinned pipeline has always used.
 	Material *Material
+
+	// SortID is the scene's own stable identity for this draw -- the entity id,
+	// where the engine builds the list -- and is read by nothing but the sort,
+	// as its final tiebreak.
+	//
+	// Without it the sort has no total order: two draws with the same pipeline
+	// variant and the same set-0 resource compare equal, as do two blended
+	// draws at the same distance from the eye, and slices.SortFunc is not
+	// stable, so which one is recorded first is decided by the order the list
+	// arrived in -- a Go map walk. Zero is fine for a list nothing sorts
+	// (overlays, celestials, MSDF text); those are recorded in the order the
+	// caller gave them.
+	SortID uint64
 }
 
 // WaterParams are the per-surface constants the water shader needs. They
@@ -177,27 +190,42 @@ func (d *RenderObject) ViewDepth(eye [3]float32) float32 {
 }
 
 // SortKey groups draws to minimize state switches in the main pass: pipeline
-// variant (skinned / double-sided / material) first, then the descriptor the
-// draw binds at set 0.
+// variant (skinned / double-sided / material) first, then the resource the draw
+// binds at set 0.
+//
+// The low bits are the resource's creation id, not its descriptor set's
+// address. Both group identically -- equal key exactly when the draws bind the
+// same thing, so the same runs of draws come out contiguous and the recorder
+// does the same number of binds -- but an address is different in every
+// process, so it used to decide the order of the groups, and of anything tied
+// inside them, by where the driver allocated. See resourceid.go and issue #53.
+//
+// This is not a total order on its own: draws binding the same resource in the
+// same variant share a key. buildDrawList breaks that tie on SortID.
+//
+// Bit 63 is deliberately left clear. The engine's sortDraws sets it on blended
+// draws, so "every opaque draw before every blended one, then by state" is one
+// integer compare over a 24-byte key it can sort instead of sorting these
+// 224-byte RenderObjects, which measured three and a half times as expensive.
 func (d *RenderObject) SortKey() uint64 {
 	var key uint64
 	if d.Joints != nil {
-		key |= 1 << 63
-	}
-	if d.DoubleSided {
 		key |= 1 << 62
 	}
+	if d.DoubleSided {
+		key |= 1 << 61
+	}
 	// Material draws use a different pipeline from plain textured ones, so they
-	// have to sort apart from them rather than interleave by descriptor handle.
-	// Skinned material draws included: bit 63 already separates them from static
+	// have to sort apart from them rather than interleave by resource id.
+	// Skinned material draws included: bit 62 already separates them from static
 	// ones, so this bit only has to separate material from plain within each.
 	if d.Material != nil {
-		key |= 1 << 61
-		key |= uint64(uintptr(d.Material.DescriptorSet.Handle())) & (1<<61 - 1)
+		key |= 1 << 60
+		key |= uint64(d.Material.id)
 		return key
 	}
 	if d.Texture != nil {
-		key |= uint64(uintptr(d.Texture.DescriptorSet.Handle())) & (1<<61 - 1)
+		key |= uint64(d.Texture.id)
 	}
 	return key
 }
