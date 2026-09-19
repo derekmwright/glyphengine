@@ -54,13 +54,18 @@ type SceneLighting struct {
 	// CloudSteps is the volumetric cloud sample count; zero draws none.
 	CloudSteps int
 
-	// LightShafts is the god-ray strength; zero disables them. SunScreenPos is
-	// where the sun lands in UV space, which is what the effect radiates from.
+	// LightShafts is the god-ray strength this frame will actually draw with,
+	// and SunScreenPos is where the sun lands in UV space, which is what the
+	// effect radiates from.
 	//
-	// Neither reaches a shader today: nothing packs them into the push constant
-	// block and nothing binds godRayPipeline. A non-zero LightShafts does still
-	// make the frame enter the water pass, so it is not inert -- it costs a
-	// scene copy and an empty pass. See createGodRayPipeline.
+	// "Actually draw with" rather than "what the game set": the screen-edge
+	// fade is folded in before it gets here (shaftEdgeFade, app.go), so zero
+	// means the pass cannot produce a pixel -- sun below the horizon, behind
+	// the camera, past the edge fade, or switched off. That is what lets
+	// recordCommandBuffer decide whether a frame with no water has to pay for
+	// a scene copy and a second render pass at all, which it cannot do from a
+	// strength that has not been faded yet. A caller driving the renderer
+	// directly owns that fade itself.
 	LightShafts  float32
 	SunScreenPos [2]float32
 
@@ -1307,13 +1312,11 @@ func recordCommandBuffer(
 
 	// Water needs the finished scene as a texture, so it runs in a second pass.
 	//
-	// The LightShafts arm of the condition below is dead weight and has been:
-	// godRayPipeline is created, passed down here, and never bound by anything,
-	// and neither LightShafts nor SunScreenPos is packed into any push constant
-	// or uniform. So a shafts-and-no-water frame pays for the scene copy and an
-	// empty render pass and draws nothing. Kept as it is rather than tidied in
-	// passing, because removing it changes which frames resolve twice and that
-	// wants its own before-and-after; see the note on createGodRayPipeline.
+	// The LightShafts arm is why a shafts-and-no-water frame enters it too:
+	// godray.frag samples the same copy the water refracts through, so the copy
+	// is the whole reason the pass exists for it. LightShafts arrives already
+	// faded (see SceneLighting), so a frame that could not draw a shaft pixel
+	// reads zero here and pays for neither the copy nor the pass.
 
 	timer.begin(deviceDriver, cmdBuf, frame, PassWater)
 	if sceneColor != nil && (hasWater(draws) || lighting.LightShafts > 0) {
@@ -1339,6 +1342,8 @@ func recordCommandBuffer(
 		// that is reset and never written is not "not ready", it makes the
 		// whole frame's readback come back NotReady and the timings vanish.
 		timer.end(deviceDriver, cmdBuf, frame, PassWater)
+		timer.begin(deviceDriver, cmdBuf, frame, PassShafts)
+		timer.end(deviceDriver, cmdBuf, frame, PassShafts)
 		timer.begin(deviceDriver, cmdBuf, frame, PassOverWater)
 		timer.end(deviceDriver, cmdBuf, frame, PassOverWater)
 		timer.begin(deviceDriver, cmdBuf, frame, PassWaterResolve)
@@ -1683,6 +1688,25 @@ func recordWaterPass(
 	// nested ones would make the passes sum to more than the frame, which is the
 	// signal this instrument uses to say it is broken.
 	timer.end(deviceDriver, cmdBuf, ow.frame, PassWater)
+
+	// Light shafts go here: after the water surface, before the draws #45 moved
+	// in front of it.
+	//
+	// The smear is built from the scene COPY, which holds the opaque world and
+	// the sky and nothing else. The water surface is part of that world -- haze
+	// over a lake reflecting the sunset is the same haze -- so painting over it
+	// is right. The blended draws after it are not in the copy at all, so the
+	// shafts were computed without them; laying a warm wash over a flame, a
+	// particle or a world overlay would add light the effect never accounted
+	// for, and it would wash out the overlays that exist to stay legible.
+	// Checked against `09-water -plume -ghost -marker -submerged`.
+	timer.begin(deviceDriver, cmdBuf, ow.frame, PassShafts)
+	if lighting.LightShafts > 0 {
+		recordLightShafts(deviceDriver, cmdBuf, godRayPipeline, pipelineLayout,
+			viewport, scissor, extent, lighting, sceneColor, scratch)
+	}
+	timer.end(deviceDriver, cmdBuf, ow.frame, PassShafts)
+
 	timer.begin(deviceDriver, cmdBuf, ow.frame, PassOverWater)
 
 	// Same order the scene pass uses for these three: translucent meshes back
@@ -1716,4 +1740,123 @@ func recordWaterPass(
 	deviceDriver.CmdEndRenderPass(cmdBuf)
 	timer.end(deviceDriver, cmdBuf, ow.frame, PassWaterResolve)
 	return nil
+}
+
+// Light-shaft constants the Go side owns because the shader cannot compute
+// them: the lobe needs the framebuffer's aspect ratio, which nothing in the
+// push block carries otherwise, and the decay belongs beside it because the
+// two together are the shape of the effect.
+//
+// Both were measured on `09-water -time 0.72 -yaw 1.771 -pitch -0.185
+// -pillars` under GLYPHENGINE_FIXED_FRAME_TIME: dusk, the sun peeking over a
+// ridge from behind a row of pillars, which is the scene the effect exists for.
+// Every reading below is mean sRGB luma ADDED against the same frame rendered
+// with -shafts 0, over four boxes:
+//
+//	gap      739,440,80x80   terrain lit through the gap beside pillar 4
+//	shadow   459,440,80x80   terrain in pillar 4's streak, same radius from
+//	                         the sun, so only the occluder separates them
+//	pillar4  585,200,50x180  the occluder itself, against the sun
+//	ground    50,600,300x100 foreground hillside, metres from the eye
+const (
+	// shaftLobeRadius is how far from the sun the shafts reach, measured in
+	// SCREEN HEIGHTS, and it is the constant that decides whether this reads as
+	// light in the air or as a smudge on the lens.
+	//
+	// It stands in for depth. This pass has none (see godray.frag), so it
+	// cannot tell near ground from far sky and left alone it lights both --
+	// which is what #50's spike did. Screen distance from the sun is the one
+	// thing the pass does know, and to within the small-angle error of a
+	// perspective projection that is angular distance from the sun, which is
+	// what a forward-scattering lobe falls off with anyway.
+	//
+	//	radius   gap   shadow  pillar4  ground  frame  pixels changed
+	//	 none   +56.3   +14.8    +48.2    +9.2  +25.3    98.1%
+	//	 0.62   +27.9    +6.5    +41.4    +0.0   +5.0    42.0%
+	//	 0.90   +40.7   +10.0    +44.7    +0.2   +8.9    70.9%
+	//	 1.30   +48.1   +12.2    +46.5    +1.8  +13.8    97.0%
+	//
+	// The "none" row is the lobe turned off -- rule 12's ablation -- and it is
+	// the spike exactly: the ground a few metres from the eye gains as much as
+	// the terrain the shafts are actually falling on, and almost every pixel in
+	// the frame moves. 1.30 has that coming back. 0.62 keeps the shafts inside
+	// a tight disc that stops visibly short of where light should reach. 0.90
+	// is the widest setting that still leaves the near ground alone.
+	shaftLobeRadius = 0.90
+
+	// shaftDecay weights each step of the march, heaviest at the fragment and
+	// lightest at the sun, so it sets how far along its own ray a fragment
+	// still sees. That is what gives an occluder a streak rather than only a
+	// veil: a fragment whose line to the sun crosses a pillar loses the run of
+	// samples the pillar covers, and decay decides what a crossing far up the
+	// ray still costs it.
+	//
+	//	decay    gap   shadow  gap/shadow  pillar4
+	//	 1.00   +75.1   +25.6     2.94      +84.5
+	//	 0.96   +40.7   +10.0     4.06      +44.7
+	//	 0.90   +10.1    +1.4     7.41      +10.4
+	//
+	// Read the ratio, not the absolute numbers: decay moves the brightness by
+	// 7x across that range and brightness is what Sky.LightShafts is for.
+	// Normalised to the same gap reading, pillar4 veils by 42 to 46 whichever
+	// decay is used -- a pillar beside the sun exits into bright sky on its
+	// first step either way -- so decay buys streak definition and nothing
+	// else, and it buys it by shortening the reach. At 0.90 the whole effect
+	// collapses into a glow around the disc; at 1.00 it is a uniform wash with
+	// the streaks half washed out. 0.96 leaves the last sample at 0.14 of the
+	// first, which is far enough to still have the sun in it.
+	shaftDecay = 0.96
+)
+
+// recordLightShafts draws the screen-space light shafts: one fullscreen
+// triangle, additive, sampling the scene copy this pass already made.
+//
+// No stats.addDraw. RenderStats counts scene geometry so a game can see what
+// its own draw list costs, and a post-process triangle is not that; bloom and
+// the tonemap do not count themselves either.
+//
+// The push block is filled by hand rather than through packLightingPC, the way
+// recordTonemap fills its own: godray.frag reads four floats and a vec2, and
+// none of the lighting the other pipelines share means anything to it. What it
+// does read is documented on the struct in shaders/godray.frag.
+func recordLightShafts(
+	deviceDriver core1_0.DeviceDriver,
+	cmdBuf core1_0.CommandBuffer,
+	godRayPipeline core1_0.Pipeline,
+	pipelineLayout core1_0.PipelineLayout,
+	viewport core1_0.Viewport,
+	scissor core1_0.Rect2D,
+	extent core1_0.Extent2D,
+	lighting SceneLighting,
+	sceneColor *sceneColorTarget,
+	scratch *commandScratch,
+) {
+	deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, godRayPipeline)
+	scratch.setViewport(deviceDriver, cmdBuf, viewport)
+	scratch.setScissor(deviceDriver, cmdBuf, scissor)
+
+	// Set 0 is the scene as it stood before this pass: opaque geometry and the
+	// sky, which is where the sun disc lives.
+	scratch.bindDescriptorSets(deviceDriver, cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0,
+		sceneColor.texture.DescriptorSet)
+
+	// The lobe is round in PIXELS, not in UV. A UV step across the frame is
+	// aspect times as many pixels as the same step down it, so the x reciprocal
+	// carries the aspect ratio and the shafts stay circular on a wide window
+	// instead of being stretched with it.
+	aspect := float32(1)
+	if extent.Height > 0 {
+		aspect = float32(extent.Width) / float32(extent.Height)
+	}
+
+	scratch.resetPC()
+	scratch.pc[32] = lighting.SunScreenPos[0]
+	scratch.pc[33] = lighting.SunScreenPos[1]
+	scratch.pc[34] = lighting.LightShafts
+	scratch.pc[35] = shaftDecay
+	scratch.pc[36] = aspect / shaftLobeRadius
+	scratch.pc[37] = 1 / shaftLobeRadius
+	scratch.pushConstants(deviceDriver, cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment)
+
+	deviceDriver.CmdDraw(cmdBuf, 3, 1, 0, 0)
 }

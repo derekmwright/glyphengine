@@ -26,6 +26,7 @@ const (
 	PassTranslucent              // blended world geometry, back to front
 	PassParticles                // billboard particles
 	PassWater                    // scene copy and the refraction surfaces
+	PassShafts                   // screen-space light shafts, radiating from the sun
 	PassOverWater                // blended draws that belong in front of the water
 	PassWaterResolve             // the end of the water pass: its MSAA resolve
 	PassOverlay                  // world-space unlit overlays
@@ -85,6 +86,8 @@ func (p Pass) String() string {
 		return "particles"
 	case PassWater:
 		return "water"
+	case PassShafts:
+		return "shafts"
 	case PassWaterResolve:
 		return "waterresolve"
 	case PassSceneResolve:
