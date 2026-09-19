@@ -1037,6 +1037,114 @@ tasks:
         fi
         exit $status
 
+  uiglow:
+    desc: "Check that UI elements that ask to glow do, onto their neighbours and nowhere else"
+    cmds:
+      # Needs a GPU, so it sits with smoke, validate and determinism rather
+      # than in `task ci`.
+      #
+      # 13-ui carries the scene, because the failure needs a UI element that
+      # asks to emit next to one that does not, and no other example has one.
+      # -glow selects one of four configurations of the SAME geometry, which is
+      # what makes each pair mean one thing:
+      #
+      #   direct  the second panel drawn straight onto the swapchain
+      #   layer   the same panel through the UI glow layer, nothing glowing
+      #   on      the same panel again, three of its elements emitting
+      #
+      # direct against layer is the layer's neutrality. on against layer is the
+      # glow. Neither is a threshold on a single frame: the same frame is under
+      # both captures and subtracts out, the way `task shafts` and
+      # `task waterblend` do it.
+      #
+      # PROVED by breaking the real code three ways, each one committed first,
+      # run through this task, and reverted afterwards:
+      #
+      #   1. the composite unbound -- recordUIResolve's CmdDraw deleted, so the
+      #      layer is rendered every frame and never put on screen. The HUD
+      #      vanishes: the neutrality arm reports PLACEHOLDER1, and lit reports
+      #      "sits at PLACEHOLDER2 before anything glows, under 80" -- the
+      #      element it measures is not in the capture at all. Both arms fail.
+      #   2. the in-layer blend put back to straight alpha -- overlayBlend's
+      #      premultiplied case returning SrcAlpha, while the shaders go on
+      #      premultiplying. Every antialiased edge gains a dark fringe:
+      #      PLACEHOLDER3. The GLOW arm stays green throughout, which is exactly
+      #      why the neutrality arm cannot be dropped.
+      #   3. glow leaked into elements that asked for none -- recordUIComposite
+      #      pushing a fixed emission into pc[44] for every panel draw rather
+      #      than the object's own. PLACEHOLDER4. A build that lights everything
+      #      looks like a HUD someone turned up, which is why lit and near alone
+      #      cannot carry this.
+      - |
+        status=0
+        d=examples/.uiglow
+        rm -rf $d && mkdir -p $d
+        shot() { (cd examples && GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./13-ui -frames 90 -glow $1 -screenshot .uiglow/$1.png) >/dev/null 2>&1; }
+        shot direct
+        shot layer
+        shot on
+        for f in direct layer on; do
+          if [ ! -s $d/$f.png ]; then
+            echo "MISSING CAPTURE $f -- this gate proves nothing"
+            exit 1
+          fi
+        done
+        # Prove the comparators before trusting a word they say.
+        #
+        # diff, never sha256sum: sha256sum is not on the PATH of the shell task
+        # runs under on this machine, both hashes come back empty, and every
+        # pair compares equal. `task determinism` printed a column of
+        # "identical" that meant nothing for weeks that way.
+        printf a > $d/x; printf a > $d/y
+        diff -q $d/x $d/y >/dev/null 2>&1 || { echo "SELF-CHECK: two identical files compared unequal -- this gate proves nothing"; exit 1; }
+        printf b > $d/y
+        if diff -q $d/x $d/y >/dev/null 2>&1; then
+          echo "SELF-CHECK: two different files compared equal -- this gate proves nothing"
+          exit 1
+        fi
+        rm -f $d/x $d/y
+        # The three captures have to be three renders. A shot() that wrote the
+        # same file three times would make every comparison below compare an
+        # image with itself and pass.
+        if diff -q $d/layer.png $d/on.png >/dev/null 2>&1; then
+          echo "SELF-CHECK: the glowing and non-glowing captures are the same file -- this gate proves nothing"
+          exit 1
+        fi
+        # And uiglowcheck itself, on constructed inputs whose answer is known.
+        # A capture differenced against ITSELF has no glow in it anywhere, so
+        # the glow arm must reject it rather than report four zeroes and pass.
+        if go run ./cmd/uiglowcheck -base $d/layer.png -glow $d/layer.png \
+             -lit 450,64,128,22 -near 444,164,150,14 -far 24,50,280,90 -scene 850,300,200,120 >/dev/null 2>&1; then
+          echo "SELF-CHECK: a capture differenced against itself passed the glow arm -- this gate proves nothing"
+          exit 1
+        fi
+        # And the neutrality arm, handed a pair that is obviously not neutral:
+        # the glowing capture in place of the direct one.
+        if go run ./cmd/uiglowcheck -direct $d/on.png -base $d/layer.png -glow $d/on.png \
+             -lit 450,64,128,22 -near 444,164,150,14 -far 24,50,280,90 -scene 850,300,200,120 >/dev/null 2>&1; then
+          echo "SELF-CHECK: the neutrality arm passed a pair that differs by the whole glow -- this gate proves nothing"
+          exit 1
+        fi
+        # lit  is the emitting button (444,60 to 584,90), inset so the box does
+        #      not straddle its antialiased edge.
+        # near is the "coolant nominal" label ten pixels under the emitting one,
+        #      which asks for nothing and is lit anyway. That is the whole
+        #      feature: a game can already halo one element with WithShaders.
+        # far  is the original HUD panel and its bars, clear of the glow's
+        #      measured reach (which stops at x = 320).
+        # scene is sky and terrain with no UI over it at all.
+        go run ./cmd/uiglowcheck -direct $d/direct.png -base $d/layer.png -glow $d/on.png \
+          -lit 450,64,128,22 -near 444,164,150,14 -far 24,50,280,90 -scene 850,300,200,120 || status=1
+        # A failure here is a picture: "no glow at all" and "everything glows"
+        # are the same number apart and nothing alike to look at, so keep the
+        # captures the way `task shafts` and `task waterblend` do.
+        if [ $status -ne 0 ]; then
+          echo "captures kept in $d"
+        else
+          rm -rf $d
+        fi
+        exit $status
+
   nightlight:
     desc: "Check that lamplight still reads as lamplight after the night shift"
     dir: examples
