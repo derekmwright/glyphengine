@@ -204,8 +204,8 @@ type Renderer struct {
 	// is set; nil, and free, otherwise. See StateTrace.
 	trace *StateTrace
 
-	// provokeSkip makes the next DrawFrame draw nothing; see
-	// ProvokeSkipNextFrame. False in every run that did not ask for it.
+	// provokeSkip makes the next DrawFrame treat its acquire as out of date;
+	// see ProvokeSkipNextFrame. False in every run that did not ask for it.
 	provokeSkip bool
 
 	meshes        []*Mesh
