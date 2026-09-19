@@ -525,10 +525,23 @@ tasks:
         # as "the images match". Every call site is an `if`, because the task
         # runner's shell exits on the first failing command otherwise -- which
         # would report the first bad pose and never look at the other three.
+        # diff rather than sha256sum, which the shell task runs on Windows does
+        # not have: both hashes came back empty, every pair compared equal, and
+        # the gate printed a column of "identical" while comparing nothing.
+        # Proved below before any capture is judged, the same way `task
+        # determinism` does it.
         same() {
           [ -s "$d/$1.png" ] && [ -s "$d/$2.png" ] || return 2
-          [ "$(sha256sum < $d/$1.png)" = "$(sha256sum < $d/$2.png)" ]
+          diff -q "$d/$1.png" "$d/$2.png" >/dev/null 2>&1
         }
+        printf a > $d/selfa.png; printf a > $d/selfb.png
+        same selfa selfb || { echo "SELF-CHECK: two identical files compared unequal -- this gate proves nothing"; exit 1; }
+        printf b > $d/selfb.png
+        if same selfa selfb; then
+          echo "SELF-CHECK: two different files compared equal -- this gate proves nothing"
+          exit 1
+        fi
+        rm -f $d/selfa.png $d/selfb.png
         pair() {
           name=$1; w=$2; h=$3; shift 3
           shot ""           $name-clustered $w $h -lamps 400 -spots 32 "$@"
@@ -587,8 +600,13 @@ tasks:
         # Checked against a scene that does drop lights (-count 1024, which
         # overflows 1956 cells and drops 30 over budget): the case below
         # rejects it.
-        stats=$(GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./11-lights -frames 30 \
-          -lamps 400 -spots 32 -lightstats 2>&1 | sed -n 's/.*light stats: //p')
+        # grep and a parameter expansion rather than sed, which the shell task
+        # runs on Windows does not have either -- and a missing sed took the
+        # whole gate down with exit 127 after it had already printed six
+        # meaningless "identical" lines.
+        raw=$(GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./11-lights -frames 30 \
+          -lamps 400 -spots 32 -lightstats 2>&1 | grep 'light stats: ')
+        stats=${raw##*light stats: }
         echo "binner: $stats"
         case "$stats" in
           *DroppedOverBudget:0\ *CellsOverflowed:0\ *CellsTruncated:0\ *) ;;
