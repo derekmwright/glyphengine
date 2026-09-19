@@ -1619,6 +1619,21 @@ func (r *Renderer) traceStreamedBuffers(t *StateTrace) {
 	}
 	t.CountHash("dynmesh", n, contents)
 	t.Hash("dynmeshorder", order)
+
+	// Renderer state a game -- or a stray keypress under WithDebugKeys, which
+	// toggles bloom and cycles the tonemap curve -- can move at any time.
+	// Nothing else in a line would show it: the draw lists and the lighting
+	// would be identical and the whole frame would come out different, which
+	// is the worst kind of divergence to be handed with no field pointing at
+	// it.
+	t.Hash("post", NewHash.
+		Float32(r.exposure).Float32(r.tonemapCurve).Float32(r.tonemapWhite).
+		Float32(r.bloomIntensity).Float32(r.bloomThreshold).
+		Float32(r.bloomKnee).Float32(r.bloomRadius))
+	t.Hash("grasslod", NewHash.
+		Float32(r.grassLOD.ThinNear).Float32(r.grassLOD.ThinFar).
+		Float32(r.grassLOD.ThinMin).Float32(r.grassLOD.MaxDistance).
+		Float32(r.grassLOD.FadeStart).Float32(r.grassLOD.ImpostorDistance))
 }
 
 // traceLighting records the per-frame uniform state: the shadow cascades and
