@@ -21,6 +21,11 @@ The goal is that an agent can answer "how do I do X with this engine?" by
 matching on frontmatter, then reading one focused page — rather than reading the
 whole codebase.
 
+If the task at hand is specifically exporting a level from Blender, skip the
+schema below and start at [`blender-pipeline.md`](blender-pipeline.md) — the
+export recipe, the script that applies it, and the fixture it is checked
+against all live there.
+
 ## Frontmatter schema
 
 ```yaml

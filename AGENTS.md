@@ -133,6 +133,15 @@ without parsing prose. Schema and conventions: `docs/agents/README.md`.
 Query them by the `capability` and `api` frontmatter fields to find the right
 entry point for a task, then read the body for working code.
 
+Blender is the reference world-building and modelling pipeline this engine
+targets (`docs/agents/blender-pipeline.md`) -- the engine still reads only
+the open glTF format, but the recipe, the export script under
+`tools/blender/`, and a fixture a real Blender wrote
+(`renderer/testdata/blender/level.glb`) are checked against what Blender
+actually exports rather than assumed. A change to `renderer/gltf*.go`
+should be checked against that fixture too (`renderer/gltfblender_test.go`),
+not only against the hand-authored one in `examples/22-level/assets`.
+
 ## Verification
 
 | Command | Checks |
