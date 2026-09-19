@@ -1103,14 +1103,7 @@ tasks:
           exit 1
         fi
         rm -f $d/x $d/y
-        # The three captures have to be three renders. A shot() that wrote the
-        # same file three times would make every comparison below compare an
-        # image with itself and pass.
-        if diff -q $d/layer.png $d/on.png >/dev/null 2>&1; then
-          echo "SELF-CHECK: the glowing and non-glowing captures are the same file -- this gate proves nothing"
-          exit 1
-        fi
-        # And uiglowcheck itself, on constructed inputs whose answer is known.
+        # uiglowcheck itself, on constructed inputs whose answer is known.
         # A capture differenced against ITSELF has no glow in it anywhere, so
         # the glow arm must reject it rather than report four zeroes and pass.
         if go run ./cmd/uiglowcheck -base $d/layer.png -glow $d/layer.png \
@@ -1133,6 +1126,22 @@ tasks:
         # far  is the original HUD panel and its bars, clear of the glow's
         #      measured reach (which stops at x = 320).
         # scene is sky and terrain with no UI over it at all.
+        #
+        # First, the coarsest statement there is, and the one a box measurement
+        # cannot make: layer and on differ ONLY by the Glow values, so if they
+        # come out byte identical either nothing is emitting or the finished
+        # layer never reaches the swapchain. Every box below then reads +0.00
+        # and only lit's background floor says why. This is deliberately not
+        # written as a self-check: a harness that rendered the same file twice
+        # and a renderer that composites nothing produce the same picture, and
+        # both are failures of the thing under test rather than of the gate.
+        if diff -q $d/layer.png $d/on.png >/dev/null 2>&1; then
+          echo "FAIL: the glowing and non-glowing captures are byte identical."
+          echo "  Either no element is emitting or the finished layer never reaches the swapchain."
+          echo "  Check that recordUIResolve still draws, that recordBloom runs over the UI layer,"
+          echo "  and that SetUIGlow's threshold is still below what an element can reach."
+          status=1
+        fi
         go run ./cmd/uiglowcheck -direct $d/direct.png -base $d/layer.png -glow $d/on.png \
           -lit 450,64,128,22 -near 444,164,150,14 -far 24,50,280,90 -scene 850,300,200,120 || status=1
         # A failure here is a picture: "no glow at all" and "everything glows"
