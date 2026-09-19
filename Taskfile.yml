@@ -347,6 +347,20 @@ tasks:
       #                 frames to settle onto its authored pose and every
       #                 draw's MVP moves with it; the 20 swaps all happen after
       #                 frame 12.
+      #
+      # BROKEN, to check this is not decoration: stepReload changed back to
+      # releasing the level on one cycle and loading the replacement on the
+      # next, which is the shape that blinked. This FAILED, exit 201, with
+      #
+      #   tracefield: .reload/r.trace: draws changed at loop=4: 1, was 10 at loop=1
+      #   22-level -reload 20 : the frame's draw COUNT moved -- the level went
+      #       missing between a release and the next load
+      #
+      # -- draws=1 being the anchor alone, with the whole level gone. Worth
+      # recording what did NOT fail first: releasing the old model before
+      # loading the new one INSIDE the same tick passes this gate, correctly,
+      # because no frame is drawn in between. Only frames actually drawn
+      # without the level move the count.
       - |
         status=0
         d=.reload

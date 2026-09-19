@@ -56,6 +56,29 @@ diff a.draws b.draws
 cannot pass by comparing two empty files. `task determinism` uses it on
 `draws=` over thirteen scenes.
 
+## Asserting about ONE run
+
+`-constant` asks a different question from determinism: that a field holds the
+same value on every frame of a single run. Two runs that both go wrong in the
+same place diff clean, so `diff` cannot ask it at all.
+
+```
+go run ../cmd/tracefield -key draws -count -constant -in r.trace
+go run ../cmd/tracefield -key draws -constant -skip 12 -in r.trace
+```
+
+`-count` keeps only the count from a `count/hash` field (`draws=8/1a2b…` →
+`8`), which is a much weaker claim than the whole field and exactly the one
+`task reload` wants: a level that vanishes for a frame while it is being
+swapped for a freshly loaded copy is a frame with fewer draws in it, and
+nothing else in this repo would notice. `-skip N` drops the first N lines,
+for a steady state the run takes a few frames to reach — `22-level`'s camera
+settles over about a dozen, and every draw's MVP moves with it. `-skip` that
+would leave nothing to compare is an error rather than a pass.
+
+A gate using `-constant` should prove it can fail first. `task reload` runs it
+against `cam=`, which demonstrably moves over those same first frames.
+
 It is an environment variable rather than an `Option` for the same reason
 `GLYPHENGINE_FIXED_FRAME_TIME` and `GLYPHENGINE_VALIDATION` are: the run that
 needs tracing is usually an example or a game you did not compile, and

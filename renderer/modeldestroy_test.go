@@ -17,10 +17,20 @@ import (
 // anyway (loadGLTFImages has always walked doc.Images), on no ModelMesh, and
 // leaked by anything that rediscovers ownership from the slice.
 //
-// BROKEN: made newModelResources append `textures[i]` for every i in
-// doc.Images without the `ok` check, so an image with no uploaded texture
-// recorded a nil. FAILED with: "textures = [0xc000... <nil> 0xc000...], want
-// exactly the two uploaded ones".
+// BROKEN: made newModelResources record each texture TWICE (`append(...,  t,
+// t)`), which is what a walk of Model.Meshes does to a shared one. FAILED
+// with "textures = [0x319aa90bc1b0 0x319aa90bc1b0 0x319aa90bc240
+// 0x319aa90bc240], want exactly the two uploaded ones ... in doc.Images
+// order" and "recorded 4 textures for a model whose 3 primitives share 1,
+// want 2". Restored with `git checkout -- renderer/modeldestroy.go`.
+//
+// Worth knowing what that break does NOT do, because it is the reason this
+// test exists at all: the same break, run through
+// `examples/22-level -reload 20` under the validation layer, produced ZERO
+// messages and passed every count assertion the loop makes. DestroyTexture's
+// own `if t == nil || t.destroyed` guard turns the second free into a no-op
+// before it ever reaches Vulkan, so the layer has nothing to see. A double
+// free of a model's shared texture is caught here or nowhere.
 func TestModelResourcesRecordsEachResourceOnce(t *testing.T) {
 	doc := &gltf.Document{
 		Images:    []*gltf.Image{{Name: "atlas"}, {Name: "unreferenced"}},
