@@ -18,6 +18,10 @@ api:
   - renderer.LightKindPoint
   - renderer.LightKindSpot
   - renderer.LightKindDirectional
+  - renderer.AlphaMode
+  - renderer.AlphaModeOpaque
+  - renderer.AlphaModeMask
+  - renderer.AlphaModeBlend
   - renderer.Model.Bounds
   - renderer.Model.ReleaseGeometry
   - renderer.Model.Node
@@ -78,6 +82,57 @@ hypothetical — it happened, and the recovery was scanning a stale binary for
 glTF headers.
 
 Set on every primitive, skinned or not.
+
+## Alpha: glass, foliage and cutout materials
+
+`AlphaMode`, `AlphaCutoff` and `BaseAlpha` surface glTF's `material.alphaMode`,
+`alphaCutoff` and the base colour factor's alpha component as data. The engine
+takes no action on any of them:
+
+```go
+for i := range model.Meshes {
+    mm := model.Meshes[i]
+    if mm.AlphaMode == renderer.AlphaModeBlend {
+        e.C.Translucent.Set(ent, &glyph.Translucent{Alpha: mm.BaseAlpha})
+    }
+}
+```
+
+`examples/22-level` does exactly this in `spawnPrimitive`: a `BLEND` material
+gets [`Translucent`](translucency.md), with `BaseAlpha` as its opacity, and
+its `DoubleSided` gets the matching component too -- a glass box that culled
+its back faces would leave nothing where the far wall should be. The built-in
+level's three materials are all plain opaque PBR, so that branch never fires
+for it; it fires on a real Blender export with a glass object (Principled
+BSDF alpha < 1 exports `alphaMode: "BLEND"`), verified against one -- see
+"What this is checked against" below.
+
+Verified with a real Blender 5.0.1 export: an opaque red wall behind a pale
+blue glass box (Principled BSDF alpha 0.3), loaded with `-level` and rendered
+under `GLYPHENGINE_FIXED_FRAME_TIME`. A pixel behind the glass reads
+`R176 G94 B80` with the glass present and `R241 G128 B106` in a control
+render of the identical scene with the glass object removed -- the wall is
+genuinely visible and tinted through the glass (about 27% darker, shifted
+away from red), not merely painted over or left invisible. Two points just
+outside the glass's footprint read byte-identical between the two renders
+(`R244 G130 B108` and `R206 G109 B90` in both), which is what confirms the
+difference at the covered pixel is the glass's blend and not a difference
+between the two scenes or renders.
+
+`BaseColor` stays `[3]float32`: widening it to carry alpha would break every
+existing caller that already treats it as three floats, which is why alpha
+rides on its own field instead. `BaseAlpha` is 1 and `AlphaMode` is
+`AlphaModeOpaque` when a primitive has no material at all, the same defaults
+glTF itself uses for an absent material.
+
+**`AlphaModeMask` is reported but not honoured.** There is no alpha-tested
+(cutout) path in any lit pipeline today -- `lit.frag` and its variants have no
+`discard`, no matter what `AlphaCutoff` says. A `MASK` primitive draws exactly
+like an opaque one; building a cutout pipeline is a separate feature this does
+not attempt. Assigning `Translucent` to a `MASK` mesh would be the wrong
+engine feature for it (cutout wants a hard edge and casts a shadow shaped by
+the cutout, not a blended fade), so a game that needs cutout foliage has
+nothing to reach for here yet.
 
 ## Finding a point on the model
 

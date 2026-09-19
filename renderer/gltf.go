@@ -41,6 +41,21 @@ type ModelMesh struct {
 	Metallic    float32    // 0 = dielectric, 1 = metal (from glTF PBR)
 	Roughness   float32    // 0 = mirror, 1 = matte (from glTF PBR)
 
+	// AlphaMode, AlphaCutoff and BaseAlpha surface glTF's alpha data as-is
+	// (issue #68); the engine takes no action on any of them. AlphaMode is
+	// AlphaModeOpaque and BaseAlpha is 1 when the primitive has no
+	// material, the same defaults glTF itself uses for an absent material.
+	//
+	// BaseAlpha exists because BaseColor above stays [3]float32 -- widening
+	// it to carry alpha would break every existing caller that already
+	// treats it as three floats. See docs/agents/translucency.md for the
+	// engine feature a game opts a BLEND mesh into, and
+	// docs/agents/models.md for why AlphaModeMask is reported but not
+	// honoured by any lit pipeline today.
+	AlphaMode   AlphaMode
+	AlphaCutoff float32 // meaningful only when AlphaMode is AlphaModeMask
+	BaseAlpha   float32 // the base colour factor's alpha component
+
 	// Material is non-nil when the glTF material carried a normal,
 	// metallic-roughness, or occlusion map. Set it on MaterialRef.PBR to get
 	// them; Texture alone ignores them and lights the surface as one uniform
@@ -265,7 +280,9 @@ func (r *Renderer) LoadGLTF(fsys fs.FS, name string) (*Model, error) {
 			var metallic, roughness float32
 			var doubleSided bool
 			roughness = 0.5
+			matIdx := -1
 			if prim.Material != nil {
+				matIdx = int(*prim.Material)
 				tex = r.resolveBaseColorTexture(doc, textures, *prim.Material)
 				baseColor, metallic, roughness = resolveMaterial(doc, int(*prim.Material))
 				doubleSided = doc.Materials[*prim.Material].DoubleSided
@@ -274,6 +291,7 @@ func (r *Renderer) LoadGLTF(fsys fs.FS, name string) (*Model, error) {
 					return nil, err
 				}
 			}
+			alphaMode, alphaCutoff, baseAlpha := resolveAlpha(doc, matIdx)
 
 			model.Meshes = append(model.Meshes, ModelMesh{
 				Name:        materialName(doc, prim.Material),
@@ -284,6 +302,9 @@ func (r *Renderer) LoadGLTF(fsys fs.FS, name string) (*Model, error) {
 				BaseColor:   baseColor,
 				Metallic:    metallic,
 				Roughness:   roughness,
+				AlphaMode:   alphaMode,
+				AlphaCutoff: alphaCutoff,
+				BaseAlpha:   baseAlpha,
 				Verts:       vertices,
 				Idx:         indices,
 				Node:        meshOwners[meshIdx],
@@ -720,11 +741,14 @@ func (r *Renderer) LoadGLTFSkinned(fsys fs.FS, name string) (*SkinnedModel, erro
 			var tex *Texture
 			baseColor := [3]float32{1, 1, 1}
 			var metallic, roughness float32
+			matIdx := -1
 			roughness = 0.5
 			if prim.Material != nil {
+				matIdx = int(*prim.Material)
 				tex = r.resolveBaseColorTexture(doc, textures, *prim.Material)
 				baseColor, metallic, roughness = resolveMaterial(doc, int(*prim.Material))
 			}
+			alphaMode, alphaCutoff, baseAlpha := resolveAlpha(doc, matIdx)
 
 			// Skinned primitives carry the name but not Verts: they decode to
 			// SkinnedVertex, which is a different layout, so there is nothing
@@ -732,15 +756,18 @@ func (r *Renderer) LoadGLTFSkinned(fsys fs.FS, name string) (*SkinnedModel, erro
 			// report "cannot answer" for a purely skinned model rather than
 			// answering from an empty set.
 			model.Meshes = append(model.Meshes, ModelMesh{
-				Name:      materialName(doc, prim.Material),
-				Mesh:      gpuMesh,
-				Texture:   tex,
-				Skinned:   true,
-				BaseColor: baseColor,
-				Metallic:  metallic,
-				Roughness: roughness,
-				Node:      meshOwners[meshIdx],
-				DocMesh:   meshIdx,
+				Name:        materialName(doc, prim.Material),
+				Mesh:        gpuMesh,
+				Texture:     tex,
+				Skinned:     true,
+				BaseColor:   baseColor,
+				Metallic:    metallic,
+				Roughness:   roughness,
+				AlphaMode:   alphaMode,
+				AlphaCutoff: alphaCutoff,
+				BaseAlpha:   baseAlpha,
+				Node:        meshOwners[meshIdx],
+				DocMesh:     meshIdx,
 			})
 		}
 	}
@@ -788,24 +815,30 @@ func (r *Renderer) LoadGLTFSkinned(fsys fs.FS, name string) (*SkinnedModel, erro
 			var tex *Texture
 			baseColor := [3]float32{1, 1, 1}
 			var metallic, roughness float32
+			matIdx := -1
 			roughness = 0.5
 			if prim.Material != nil {
+				matIdx = int(*prim.Material)
 				tex = r.resolveBaseColorTexture(doc, textures, *prim.Material)
 				baseColor, metallic, roughness = resolveMaterial(doc, int(*prim.Material))
 			}
+			alphaMode, alphaCutoff, baseAlpha := resolveAlpha(doc, matIdx)
 
 			model.Meshes = append(model.Meshes, ModelMesh{
-				Name:      materialName(doc, prim.Material),
-				Mesh:      gpuMesh,
-				Texture:   tex,
-				Skinned:   false,
-				BaseColor: baseColor,
-				Metallic:  metallic,
-				Roughness: roughness,
-				Verts:     vertices,
-				Idx:       indices,
-				Node:      meshOwners[meshIdx],
-				DocMesh:   meshIdx,
+				Name:        materialName(doc, prim.Material),
+				Mesh:        gpuMesh,
+				Texture:     tex,
+				Skinned:     false,
+				BaseColor:   baseColor,
+				Metallic:    metallic,
+				Roughness:   roughness,
+				AlphaMode:   alphaMode,
+				AlphaCutoff: alphaCutoff,
+				BaseAlpha:   baseAlpha,
+				Verts:       vertices,
+				Idx:         indices,
+				Node:        meshOwners[meshIdx],
+				DocMesh:     meshIdx,
 			})
 		}
 	}

@@ -245,12 +245,31 @@ func spawnLevel(e *glyph.Engine, model *renderer.Model) mgl32.Vec3 {
 
 // spawnPrimitive sets the render-facing components for one ModelMesh on an
 // already-Transform'd entity: the GPU mesh plus its material factors. No
-// texture or Material maps exist in this level (see gen/main.go), so Color
-// plus MeshRef's own Metallic/Roughness is the whole story -- the same
-// untextured path 21-streetlights' door, roof and fixture use.
+// texture or Material maps exist in the BUILT-IN level (see gen/main.go), so
+// Color plus MeshRef's own Metallic/Roughness carries it there -- the same
+// untextured path 21-streetlights' door, roof and fixture use. A glTF loaded
+// with -level can carry a base colour texture, which this now draws too (see
+// spawnTexture below).
+//
+// AlphaMode/BaseAlpha (issue #68) are surfaced by the engine as pure data --
+// LoadGLTF does not decide what a BLEND primitive becomes, docs/agents/models.md
+// is explicit that whether it becomes Translucent is the game's call, not the
+// engine's -- and this is the level format's own answer: a BLEND material
+// (an artist's glass, water, foliage card) gets glyphengine's Translucent
+// component, with BaseAlpha (the base colour factor's alpha) as its opacity.
+// The built-in level's three materials are all plain opaque PBR (gen/main.go),
+// so this branch never fires for it and its render stays byte-identical;
+// it fires for the first time on a real Blender export with a glass object
+// (see the package comment's -level example).
 func spawnPrimitive(e *glyph.Engine, ent glyph.Entity, mm renderer.ModelMesh) {
 	e.C.MeshRef.Set(ent, &glyph.MeshRef{Mesh: mm.Mesh, Metallic: mm.Metallic, Roughness: mm.Roughness})
 	e.C.Color.Set(ent, &glyph.Color{R: mm.BaseColor[0], G: mm.BaseColor[1], B: mm.BaseColor[2]})
+	if mm.DoubleSided {
+		e.C.DoubleSided.Set(ent, &glyph.DoubleSided{})
+	}
+	if mm.AlphaMode == renderer.AlphaModeBlend {
+		e.C.Translucent.Set(ent, &glyph.Translucent{Alpha: mm.BaseAlpha})
+	}
 }
 
 // meshesLocalHalfExtent returns a box collider's half-extents in the node's
