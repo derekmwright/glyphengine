@@ -151,7 +151,7 @@ entry point for a task, then read the body for working code.
 | `task lights` | Clustered and brute-force light renderers produce byte-identical images (needs a GPU) |
 | `task nightlight` | Warm lamps stay warm on the ground after the night shift (needs a GPU) |
 | `task waterlight` | A lamp beside a lake reaches the water, in the lamp's colour (needs a GPU) |
-| `task skypalette` | The sky palette reaches the fog and the water, not just the dome (needs a GPU) |
+| `task skypalette` | The sky palette reaches the fog, the water and the clouds, not just the dome (needs a GPU) |
 | `task ci` | Lint, build, test, race |
 
 ### Signing off a fix

@@ -235,7 +235,8 @@ that `lighting.inc` already reads the night grade from, and `sky.frag` and
 `clouds.frag` bind that same buffer at binding 1 of the cloud descriptor set —
 the same buffer rather than a second copy, so there is nothing for them to
 drift from. `task skypalette` measures that the sky at the horizon, the fogged
-terrain beside it and the water's reflection all move together.
+terrain beside it, the water's reflection and the shaded core of a cloud all
+move together.
 
 For anything that is not a colour — a different scattering model, two suns, a
 sky that owes nothing to Rayleigh — swap the sky shaders through
