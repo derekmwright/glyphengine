@@ -210,6 +210,7 @@ task example:18-translucent   # blended geometry: placement ghosts and glass
 task example:19-instanced     # 900 props one draw call at a time, or all at once
 task example:20-screens       # main menu, pause menu, scene swapping, keyboard menus
 task example:21-streetlights  # clustered spot and point lights on terrain at night
+task example:22-level         # a level loaded from one glTF: extras, KHR_lights_punctual, per-node placement
 ```
 
 ## Building
