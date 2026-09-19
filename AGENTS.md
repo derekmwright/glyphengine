@@ -142,6 +142,14 @@ actually exports rather than assumed. A change to `renderer/gltf*.go`
 should be checked against that fixture too (`renderer/gltfblender_test.go`),
 not only against the hand-authored one in `examples/22-level/assets`.
 
+Terrain is the one part of that pipeline that does not travel through
+`renderer` at all: `docs/agents/terrain-heightmap.md` and
+`cmd/heightmapconv` are how a sculpted Blender mesh (or a heightmap image)
+becomes the `.heightmap` file `LoadHeightmap` reads, and
+`tools/blender/build_terrain_fixture.py`/`cmd/heightmapconv/testdata/blender_terrain.glb`
+are that pipeline's own real-Blender fixture, in the same spirit as
+`level.glb` above.
+
 ## Verification
 
 | Command | Checks |
