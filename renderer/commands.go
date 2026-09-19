@@ -97,6 +97,12 @@ type SceneLighting struct {
 	// reason NightGrade is a pointer: the zero value is six black colours.
 	SkyPalette *SkyPalette
 
+	// Volumetrics is the in-scattering march's medium and sampling. Nil means
+	// DefaultVolumetrics, for the same reason again: a zero value's Steps is
+	// 0, which marches nothing, so a light that asked to scatter would
+	// silently not.
+	Volumetrics *Volumetrics
+
 	// Lights are the unshadowed point + spot lights for the GPU light buffer
 	// (see shaders/lights.inc), in Clusters.Order: the cell lists in Clusters
 	// index this slice, so the two must come from the same frame's binning.

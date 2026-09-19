@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/go-gl/mathgl/mgl32"
+
+	"github.com/derekmwright/glyphengine/renderer"
 )
 
 // TestNilEnvironmentIsEmpty is the property the split exists for: a game that
@@ -409,5 +411,47 @@ func TestLightShaftShapeReachesTheFrameState(t *testing.T) {
 
 	if d := DefaultLightShaftShape(); d.Radius <= 0 || d.Decay <= 0 || d.Decay > 1 || !(d.Threshold[1] > d.Threshold[0]) {
 		t.Errorf("DefaultLightShaftShape is %+v, which is not a drawable shape", d)
+	}
+}
+
+// TestDefaultsMatchTheRenderers pins the three defaults this package repeats
+// from the renderer against the renderer's own copies.
+//
+// Scene has no renderer dependency on purpose -- that is what lets a headless
+// tool drive one -- so every look default that ends up in a GPU buffer is
+// written down twice: here, where a game reads it, and in the renderer, where
+// the shader's fallback for a nil pointer lives. Nothing checked that the two
+// agreed. They do today, and this is what says so tomorrow: the failure mode
+// is a game asking for Scene.NightGrade() and getting one number while a
+// caller driving the renderer directly gets another, which no capture of
+// either alone would show.
+//
+// Verified to catch a real mistake: changing this package's DefaultVolumetrics
+// anisotropy to 0.5 and leaving the renderer's at 0.4 fails here immediately.
+func TestDefaultsMatchTheRenderers(t *testing.T) {
+	if got, want := DefaultNightGrade(), renderer.DefaultNightGrade(); got.Strength != want.Strength ||
+		got.Tint.X() != want.Tint[0] || got.Tint.Y() != want.Tint[1] || got.Tint.Z() != want.Tint[2] {
+		t.Errorf("DefaultNightGrade() = %+v, renderer.DefaultNightGrade() = %+v", got, want)
+	}
+
+	g, r := DefaultSkyPalette(), renderer.DefaultSkyPalette()
+	for _, tc := range []struct {
+		name string
+		a, b [3]float32
+	}{
+		{"ZenithDay", g.ZenithDay, r.ZenithDay},
+		{"HorizonDay", g.HorizonDay, r.HorizonDay},
+		{"ZenithTwilight", g.ZenithTwilight, r.ZenithTwilight},
+		{"HorizonTwilight", g.HorizonTwilight, r.HorizonTwilight},
+		{"ZenithNight", g.ZenithNight, r.ZenithNight},
+		{"HorizonNight", g.HorizonNight, r.HorizonNight},
+	} {
+		if tc.a != tc.b {
+			t.Errorf("DefaultSkyPalette().%s = %v, renderer's = %v", tc.name, tc.a, tc.b)
+		}
+	}
+
+	if got, want := DefaultVolumetrics(), renderer.DefaultVolumetrics(); got.Anisotropy != want.Anisotropy || got.Steps != want.Steps {
+		t.Errorf("DefaultVolumetrics() = %+v, renderer.DefaultVolumetrics() = %+v", got, want)
 	}
 }

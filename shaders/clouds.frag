@@ -46,6 +46,9 @@ layout(set = 0, binding = 1) uniform ShadowData {
     mat4 cascadeVP[2];
     vec4 nightGrade;
     vec4 skyPalette[6];
+    // Declared so the block's size matches renderer/shadow.go's litUBOSize;
+    // sky.frag reads it, clouds.frag does not.
+    vec4 volumetric;
 } shadow;
 
 layout(location = 0) out vec4 outColor;

@@ -33,6 +33,11 @@ layout(set = 1, binding = 0) uniform ShadowData {
     // in that file so the horizon colour applyFog fades geometry into and the
     // dome sky.frag draws come out of ONE buffer and cannot drift.
     vec4 skyPalette[6];
+    // The in-scattering march's medium and sampling: x = the
+    // Henyey-Greenstein anisotropy, y = the step count, zw spare. See
+    // volInscatter in lighting.inc, and Volumetrics in renderer/shadow.go for
+    // why these are data rather than constants in this file.
+    vec4 volumetric;
 } shadow;
 layout(set = 1, binding = 1) uniform sampler2DArrayShadow shadowMap;
 layout(set = 1, binding = 2) uniform samplerCube pointShadowMap;

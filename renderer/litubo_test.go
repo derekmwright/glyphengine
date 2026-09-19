@@ -35,7 +35,7 @@ func TestPackLitUBOLayout(t *testing.T) {
 		}
 	}
 	grade := NightGrade{Strength: 0.35, Tint: [3]float32{1.5, 0.25, 0.75}}
-	packLitUBO(buf, vps, &grade, nil)
+	packLitUBO(buf, vps, &grade, nil, nil)
 
 	for c := 0; c < ShadowCascades; c++ {
 		for i := 0; i < 16; i++ {
@@ -89,7 +89,7 @@ func TestPackSkyPaletteLayout(t *testing.T) {
 		HorizonNight:    [3]float32{0.61, 0.62, 0.63},
 	}
 	buf := make([]byte, litUBOSize)
-	packLitUBO(buf, vps, nil, &pal)
+	packLitUBO(buf, vps, nil, &pal, nil)
 
 	// Index, name, and the value the shader must find there. The names are the
 	// ATM_* defines; the indices are what atmSkyPalette subscripts pal with.
@@ -117,8 +117,8 @@ func TestPackSkyPaletteLayout(t *testing.T) {
 	// The block must end exactly at the last endpoint's padding word. A
 	// mismatch here is a Vulkan descriptor range that disagrees with the
 	// shader's block size, which the validation layer catches only sometimes.
-	if want := skyPaletteOffset + 6*16; litUBOSize != want {
-		t.Errorf("litUBOSize = %d, want %d", litUBOSize, want)
+	if want := skyPaletteOffset + 6*16; volumetricOffset != want {
+		t.Errorf("volumetricOffset = %d, want %d -- the palette must end where the volumetric block begins", volumetricOffset, want)
 	}
 }
 
@@ -136,7 +136,7 @@ func TestPackSkyPaletteLayout(t *testing.T) {
 func TestPackLitUBOSkyPaletteDefaultsWhenUnset(t *testing.T) {
 	var vps [ShadowCascades]mgl32.Mat4
 	buf := make([]byte, litUBOSize)
-	packLitUBO(buf, vps, nil, nil)
+	packLitUBO(buf, vps, nil, nil, nil)
 
 	for i, want := range DefaultSkyPalette().endpoints() {
 		for c := 0; c < 3; c++ {
@@ -189,7 +189,7 @@ func TestPackLitUBODefaultsWhenUnset(t *testing.T) {
 	def := DefaultNightGrade()
 
 	buf := make([]byte, litUBOSize)
-	packLitUBO(buf, vps, nil, nil)
+	packLitUBO(buf, vps, nil, nil, nil)
 	for i, want := range [4]float32{def.Tint[0], def.Tint[1], def.Tint[2], def.Strength} {
 		if got := f32At(buf, nightGradeOffset+i*4); got != want {
 			t.Errorf("nil grade, component %d = %g, want the default %g", i, got, want)
@@ -199,7 +199,7 @@ func TestPackLitUBODefaultsWhenUnset(t *testing.T) {
 	// And "off" must still be expressible, or the guard above would have
 	// bought upgrade safety by taking away the feature.
 	off := make([]byte, litUBOSize)
-	packLitUBO(off, vps, &NightGrade{}, nil)
+	packLitUBO(off, vps, &NightGrade{}, nil, nil)
 	if got := f32At(off, nightGradeOffset+12); got != 0 {
 		t.Errorf("explicit zero grade strength = %g, want 0", got)
 	}
@@ -215,7 +215,7 @@ func TestPackLitUBOOverwritesEveryFrame(t *testing.T) {
 		buf[i] = 0xAB
 	}
 	var vps [ShadowCascades]mgl32.Mat4
-	packLitUBO(buf, vps, &NightGrade{Strength: 1, Tint: [3]float32{1, 1, 1}}, nil)
+	packLitUBO(buf, vps, &NightGrade{Strength: 1, Tint: [3]float32{1, 1, 1}}, nil, nil)
 	for i, b := range buf {
 		if b == 0xAB {
 			// 0xAB bytes can legitimately appear inside a float, so only a
@@ -223,6 +223,97 @@ func TestPackLitUBOOverwritesEveryFrame(t *testing.T) {
 			if i%4 == 0 && i+4 <= len(buf) && buf[i+1] == 0xAB && buf[i+2] == 0xAB && buf[i+3] == 0xAB {
 				t.Fatalf("word at byte %d was left unwritten", i)
 			}
+		}
+	}
+}
+
+// TestPackVolumetricsLayout pins the volumetric block's offset and contents
+// against the `vec4 volumetric` the nine ShadowData declarations end with.
+//
+// The offset is the half that matters. Everything before it is read by
+// shaders that have shipped, so a block written at the wrong offset does not
+// fail to draw a beam -- it overwrites a sky palette endpoint with an
+// anisotropy, and the symptom is the horizon colour, which nobody would trace
+// back to here.
+//
+// Verified to catch a real mistake: writing the pair at skyPaletteOffset+5*16
+// (one endpoint short, the kind of off-by-one this arithmetic invites) fails
+// on both components here AND leaves TestPackSkyPaletteLayout's last endpoint
+// wrong, which is exactly the pair of failures that says "offset", not
+// "value".
+func TestPackVolumetricsLayout(t *testing.T) {
+	var vps [ShadowCascades]mgl32.Mat4
+	buf := make([]byte, litUBOSize)
+	packLitUBO(buf, vps, nil, nil, &Volumetrics{Anisotropy: 0.55, Steps: 24})
+
+	if got := f32At(buf, volumetricOffset+0); got != 0.55 {
+		t.Errorf("volumetric.x (anisotropy) = %g, want 0.55", got)
+	}
+	if got := f32At(buf, volumetricOffset+4); got != 24 {
+		t.Errorf("volumetric.y (steps) = %g, want 24", got)
+	}
+	if want := volumetricOffset + 16; litUBOSize != want {
+		t.Errorf("litUBOSize = %d, want %d", litUBOSize, want)
+	}
+	// 256 bytes exactly, which is what nine shader declarations and the
+	// descriptor range have to agree on. Spelled as a number because that is
+	// the thing a reader checks against the GLSL.
+	if litUBOSize != 256 {
+		t.Errorf("litUBOSize = %d, want 256", litUBOSize)
+	}
+}
+
+// TestPackVolumetricsDefaultsAndClamps covers the two ways this block can be
+// wrong in a way no capture would explain.
+//
+// Nil is the upgrade-safety case, the same one NightGrade and SkyPalette have:
+// a caller driving this package directly and never having heard of the field
+// would write Steps 0, which marches nothing, so a light that asked to scatter
+// would silently not and the only evidence would be an absence.
+//
+// The clamps are the other end. g at exactly +-1 puts a zero in the
+// Henyey-Greenstein denominator at one scattering angle, so one direction of
+// one pixel's march becomes an infinity and, once multiplied by a zero-length
+// step, a NaN that poisons the whole sum. Clamping on this side costs nothing
+// per frame; clamping in the shader would cost it per step per pixel.
+//
+// Verified to catch a real mistake: dropping the nil guard fails the first
+// pair, and dropping either clamp fails the matching case with the value
+// passed straight through.
+func TestPackVolumetricsDefaultsAndClamps(t *testing.T) {
+	var vps [ShadowCascades]mgl32.Mat4
+	def := DefaultVolumetrics()
+
+	buf := make([]byte, litUBOSize)
+	packLitUBO(buf, vps, nil, nil, nil)
+	if got := f32At(buf, volumetricOffset+0); got != def.Anisotropy {
+		t.Errorf("nil volumetrics anisotropy = %g, want the default %g", got, def.Anisotropy)
+	}
+	if got, want := f32At(buf, volumetricOffset+4), float32(def.Steps); got != want {
+		t.Errorf("nil volumetrics steps = %g, want the default %g", got, want)
+	}
+
+	for _, tc := range []struct {
+		name      string
+		in        Volumetrics
+		wantG     float32
+		wantSteps float32
+	}{
+		{"g above 1", Volumetrics{Anisotropy: 4, Steps: 16}, 0.99, 16},
+		{"g below -1", Volumetrics{Anisotropy: -4, Steps: 16}, -0.99, 16},
+		{"g NaN", Volumetrics{Anisotropy: float32(math.NaN()), Steps: 16}, -0.99, 16},
+		{"steps negative", Volumetrics{Anisotropy: 0, Steps: -5}, 0, 0},
+		{"steps past the cap", Volumetrics{Anisotropy: 0, Steps: 1000}, 0, MaxVolumetricSteps},
+		{"off is expressible", Volumetrics{Anisotropy: 0.4, Steps: 0}, 0.4, 0},
+	} {
+		b := make([]byte, litUBOSize)
+		v := tc.in
+		packLitUBO(b, vps, nil, nil, &v)
+		if got := f32At(b, volumetricOffset+0); got != tc.wantG {
+			t.Errorf("%s: anisotropy = %g, want %g", tc.name, got, tc.wantG)
+		}
+		if got := f32At(b, volumetricOffset+4); got != tc.wantSteps {
+			t.Errorf("%s: steps = %g, want %g", tc.name, got, tc.wantSteps)
 		}
 	}
 }

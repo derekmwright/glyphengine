@@ -456,6 +456,10 @@ type Engine struct {
 	// reason.
 	skyPalette renderer.SkyPalette
 
+	// volumetrics is Scene.Volumetrics in the renderer's shape, for the same
+	// reason again.
+	volumetrics renderer.Volumetrics
+
 	// The draw list is built into drawBuf, then permuted into drawSorted by
 	// the order sortDraws works out in drawOrderBuf. Three buffers rather than
 	// one sort in place: see drawOrder for what sorting 224-byte RenderObjects
@@ -582,10 +586,58 @@ func (e *Engine) lightFlags() uint32 {
 	}
 }
 
+// volumetricFlag returns LightFlagVolumetric when this frame has anything for
+// the in-scattering march to do, and 0 otherwise.
+//
+// Scanning the uploaded lights once on the CPU, rather than letting the
+// shader discover it: the shader's version of this question is the loop the
+// flag exists to skip, and it would ask it per step per pixel. A linear pass
+// over at most MaxLights entries costs microseconds and answers it once.
+//
+// The lights scanned are the UPLOADED ones, after binning. A volumetric light
+// the binner culled or dropped over budget cannot reach a froxel, so a frame
+// where every volumetric light was culled correctly reports nothing to do.
+//
+// Steps == 0 short-circuits it: a scene that turned the march off entirely
+// must not pay the scan either, and must not set a flag that promises the
+// shader work it will then do with a zero-iteration loop.
+func volumetricFlag(lights []renderer.GpuLight, v Volumetrics) uint32 {
+	if v.Steps <= 0 {
+		return 0
+	}
+	for i := range lights {
+		if lights[i].Params[0] > 0 {
+			return renderer.LightFlagVolumetric
+		}
+	}
+	return 0
+}
+
 // gatherLights combines the scene's point and spot lights into one list for
 // the GPU light buffer: points first, then spots, in submission order. A
 // scene written before spot lights existed therefore lights exactly as it
 // did before, in the same order.
+// volumetricIntensity sanitizes a light's Volumetric field on its way to the
+// GPU.
+//
+// Negative would subtract light from the air, driving a fragment's colour
+// below zero on its way into the tonemap. NaN is worse, and worse in a way
+// that points at the wrong file: it survives every add in the march, so the
+// whole pixel goes to NaN and comes out of the tonemap black -- a hole in the
+// geometry, which nobody would trace back to a light's intensity field. Both
+// become 0, the value that means "this light does not scatter", so a bad
+// number is a light that quietly does not glow.
+//
+// The shader tests `> 0.0` to skip a light, so exactly +0.0 here is what buys
+// the early-out; clamping to a small epsilon instead would cost the march on
+// every light in the scene.
+func volumetricIntensity(v float32) float32 {
+	if !(v > 0) { // also catches NaN
+		return 0
+	}
+	return v
+}
+
 func (e *Engine) gatherLights() []renderer.GpuLight {
 	pls := e.Scene.pointLights
 	spls := e.Scene.spotLights
@@ -598,6 +650,7 @@ func (e *Engine) gatherLights() []renderer.GpuLight {
 			// DirCone stays zero: lightSpotFactor in shaders/lights.inc reads
 			// that as "omnidirectional", which is the value a plain point
 			// light has to reach the GPU with.
+			Params: [4]float32{volumetricIntensity(pl.Volumetric), 0, 0, 0},
 		})
 	}
 
@@ -721,6 +774,7 @@ func spotLightGpuLight(sl SpotLight) renderer.GpuLight {
 	g := renderer.GpuLight{
 		PosRange: [4]float32{sl.Pos.X(), sl.Pos.Y(), sl.Pos.Z(), sl.Range},
 		Color:    [4]float32{sl.Color.X(), sl.Color.Y(), sl.Color.Z(), 0},
+		Params:   [4]float32{volumetricIntensity(sl.Volumetric), 0, 0, 0},
 	}
 
 	dir := sl.Dir
@@ -1514,6 +1568,8 @@ func (e *Engine) renderFrame() {
 		Strength: g.Strength,
 		Tint:     [3]float32{g.Tint.X(), g.Tint.Y(), g.Tint.Z()},
 	}
+	v := e.Scene.Volumetrics()
+	e.volumetrics = renderer.Volumetrics{Anisotropy: v.Anisotropy, Steps: v.Steps}
 	p := e.Scene.SkyPalette()
 	e.skyPalette = renderer.SkyPalette{
 		ZenithDay:       p.ZenithDay,
@@ -1545,6 +1601,7 @@ func (e *Engine) renderFrame() {
 		ShadowEnabled: shadowEnabled,
 		NightGrade:    &e.nightGrade,
 		SkyPalette:    &e.skyPalette,
+		Volumetrics:   &e.volumetrics,
 		FogDensity:    env.FogDensity,
 		FogHeight:     env.FogHeight,
 		FogBaseHeight: env.FogBaseHeight,
@@ -1578,7 +1635,7 @@ func (e *Engine) renderFrame() {
 	e.cpu.begin(CPUCluster)
 	fbWidth, fbHeight := e.renderer.Extent()
 	lighting.Lights, lighting.Clusters = e.clusterFrameLights(view, proj, fbWidth, fbHeight)
-	lighting.LightFlags = e.lightFlags()
+	lighting.LightFlags = e.lightFlags() | volumetricFlag(lighting.Lights, e.Scene.volumetrics)
 
 	e.cpu.begin(CPUSubmit)
 	// Debug text rides in its own channel, appended rather than merged, so a

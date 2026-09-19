@@ -52,12 +52,71 @@ const (
 	// vec4 skyPalette[6]. vec4 rather than vec3 because std140 gives an array
 	// of either a 16-byte stride, so the padding is there whichever is
 	// written and a vec4 says so.
-	litUBOSize = skyPaletteOffset + skyPaletteCount*16
+	volumetricOffset = skyPaletteOffset + skyPaletteCount*16 // vec4 volumetric
+	litUBOSize       = volumetricOffset + 16
 )
 
 // skyPaletteCount is how many endpoints atmSkyPalette blends between: zenith
 // and horizon for day, twilight and night.
 const skyPaletteCount = 6
+
+// Volumetrics is the scattering medium's look and its sampling: how
+// forward-scattering the air is, and how many steps the in-scattering march
+// spends crossing it. See volInscatter in shaders/lighting.inc.
+//
+// It is not the medium's density -- that is the scene's fog
+// (SceneLighting.FogDensity and the height profile beside it), because the
+// air that hazes the hills is the air a lamp lights. What is here is the one
+// thing the fog does not already say and the one thing the march costs.
+//
+// SceneLighting carries it as a pointer for the reason NightGrade and
+// SkyPalette are pointers: the zero value is a different feature, not a
+// weaker one. Steps 0 marches nothing, so a caller driving this package
+// directly who has never heard of the field would get no beams at all from
+// lights that asked for them, with nothing to say why. Nil means
+// DefaultVolumetrics.
+type Volumetrics struct {
+	// Anisotropy is the Henyey-Greenstein g. 0 scatters equally in every
+	// direction; positive scatters forward, so a beam coming toward the eye
+	// is brighter than the same beam crossing it; negative scatters back.
+	// Clamped to (-1, 1), because the phase function divides by zero at
+	// either end.
+	Anisotropy float32
+
+	// Steps is how many samples each pixel's march takes. It is a cost knob
+	// and a banding knob at once, and it is data for the same reason
+	// Sky.CloudSteps is: the right number depends on how deep the scene is
+	// and how big a fraction of the frame the beams cover, which the engine
+	// cannot know. Zero disables the march entirely.
+	Steps int
+}
+
+// DefaultVolumetrics is the medium a scene gets by saying nothing.
+//
+// Anisotropy 0.4 rather than something more dramatic. The forward lobe is
+// what makes a beam brighten as the camera swings into it, and at g = 0.7 it
+// does that too well: the phase function is 67x stronger straight down the
+// beam than across it, so a lamp viewed from the side -- which is most views
+// of most street lamps -- almost disappears. At 0.4 the ratio is 5.8x, which
+// still reads as a beam that has a direction while leaving the side-on view
+// clearly visible. Both numbers are the phase function evaluated at
+// cos(theta) = 1 and 0; PLACEHOLDER-MEASURE records what it does to the
+// capture.
+//
+// Steps 16: PLACEHOLDER-MEASURE.
+func DefaultVolumetrics() Volumetrics {
+	return Volumetrics{Anisotropy: 0.4, Steps: 16}
+}
+
+// MaxVolumetricSteps caps Volumetrics.Steps.
+//
+// The march runs per pixel inside shaders every lit surface and the sky go
+// through, so the step count multiplies the whole frame's fragment cost. The
+// cap is not a measurement of where quality stops improving -- 32 is already
+// past that; see the sweep in docs/agents/lights.md -- it is a bound on what
+// one mistyped number can do to a frame, in the same spirit as
+// lightcluster.MaxLightsPerCell bounding one fragment's light loop.
+const MaxVolumetricSteps = 64
 
 // NightGrade is the scotopic colour grade the lit shaders apply as daylight
 // goes -- see atmNightShift in shaders/atmosphere.inc. Strength 0 turns it off
@@ -931,18 +990,19 @@ func createShadowPipelineWithInput(deviceDriver core1_0.DeviceDriver, sh ShaderS
 
 // uploadLitUBO writes this frame's cascade matrices and environment values to
 // the per-frame UBO (persistently mapped).
-func (s *shadowResources) uploadLitUBO(frame int, vps [ShadowCascades]mgl32.Mat4, grade *NightGrade, palette *SkyPalette) {
-	packLitUBO(s.lightVPMapped[frame], vps, grade, palette)
+func (s *shadowResources) uploadLitUBO(frame int, vps [ShadowCascades]mgl32.Mat4, grade *NightGrade, palette *SkyPalette, vol *Volumetrics) {
+	packLitUBO(s.lightVPMapped[frame], vps, grade, palette, vol)
 }
 
 // packLitUBO writes the whole block, every frame. Partial writes would leave
 // whatever the last frame using this buffer put there, and with two frames in
 // flight that is not even the previous frame's value.
 //
-// grade nil means DefaultNightGrade and palette nil means DefaultSkyPalette --
-// see NightGrade and SkyPalette for why a caller's zero value must not be read
-// as "no shift" or as "six black colours".
-func packLitUBO(dst []byte, vps [ShadowCascades]mgl32.Mat4, grade *NightGrade, palette *SkyPalette) {
+// grade nil means DefaultNightGrade, palette nil means DefaultSkyPalette and
+// vol nil means DefaultVolumetrics -- see NightGrade, SkyPalette and
+// Volumetrics for why a caller's zero value must not be read as "no shift",
+// "six black colours" or "march nothing".
+func packLitUBO(dst []byte, vps [ShadowCascades]mgl32.Mat4, grade *NightGrade, palette *SkyPalette, vol *Volumetrics) {
 	src := unsafe.Slice((*byte)(unsafe.Pointer(&vps[0][0])), cascadeUBOSize)
 	copy(dst[:cascadeUBOSize], src)
 
@@ -968,6 +1028,38 @@ func packLitUBO(dst []byte, vps [ShadowCascades]mgl32.Mat4, grade *NightGrade, p
 		for j, v := range [4]float32{c[0], c[1], c[2], 0} {
 			binary.LittleEndian.PutUint32(dst[o+j*4:], math.Float32bits(v))
 		}
+	}
+
+	v := DefaultVolumetrics()
+	if vol != nil {
+		v = *vol
+	}
+	// Clamped here rather than in the shader, which would pay for it on every
+	// step of every pixel. g at exactly +-1 makes the Henyey-Greenstein
+	// denominator zero at one scattering angle, which is an infinity in the
+	// middle of a sum -- and a NaN after it meets a zero-length step. 0.99 is
+	// far past any value that reads as a look.
+	hg := v.Anisotropy
+	if !(hg > -0.99) { // also catches NaN
+		hg = -0.99
+	} else if hg > 0.99 {
+		hg = 0.99
+	}
+	steps := v.Steps
+	if steps < 0 {
+		steps = 0
+	} else if steps > MaxVolumetricSteps {
+		steps = MaxVolumetricSteps
+	}
+	// The step count is sent as a float because it shares a vec4 with the
+	// anisotropy and std140 would pad an int to the same four bytes anyway.
+	// The shader converts it back with int(), exact for every count this
+	// clamp allows. Clamping on this side rather than in the shader is what
+	// keeps the loop bound something a reader can look up: a caller that
+	// passes a million gets MaxVolumetricSteps, not a frame that never
+	// finishes.
+	for i, f := range [4]float32{hg, float32(steps), 0, 0} {
+		binary.LittleEndian.PutUint32(dst[volumetricOffset+i*4:], math.Float32bits(f))
 	}
 }
 
