@@ -127,12 +127,18 @@ sequence once forward and once replayed, which does put two different map walks
 against each other -- `UpdateSpatialGrid` rebuilds the grid's cell lists from a
 `map[Entity]*Transform` on every tick of both passes, and Go randomises that per
 range statement -- but it is one sample of that, not fifty, and the claim was
-never true. Read it as "map order has not been seen to matter here", not as
-"map order has been ruled out". `MoveCharacter` is order-independent by
-construction where it matters: its blocked test is an OR over every overlapping
-collider, so which one came first cannot change the answer. `Scene.Raycast` is
-the exception -- it keeps the first of two hits at exactly equal distance, and
-first is grid order.
+never true. It is enough for what this test asks, because on this path order
+cannot change the answer: `MoveCharacter` reads `OverlapAABB` only to ask
+whether anything blocks the move, an OR over every overlapping collider, and
+this geometry never puts two colliders at an exactly tied ray distance.
+
+The queries themselves used to depend on that order and no longer do.
+`OverlapAABB` returns its results in ascending entity id, `Scene.Raycast`
+breaks an exact-distance tie on the lower entity id instead of on whichever the
+grid listed first, and `Scene.Unstick` resolves against the overlap needing the
+smallest push rather than `overlaps[0]`. That is the part which needs many
+repetitions to see, since one map walk rarely reshuffles on its own, and it is
+covered hundreds of times over in `physics_order_test.go`.
 
 `reconcile_test.go` goes further and runs the whole loop: two Scenes, one
 authoritative and one predicting, with simulated latency between them. With
