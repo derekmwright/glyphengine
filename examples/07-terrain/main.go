@@ -19,6 +19,8 @@
 //	go run ./07-terrain              # windowed
 //	go run ./07-terrain -frames 120  # render 120 frames, then exit
 //	go run ./07-terrain -seed 7      # a different island
+//	go run ./07-terrain -heightmap assets/blender_terrain.heightmap
+//	                                  # load a .heightmap from disk instead
 //
 // WASD moves, mouse looks, Shift runs, Space jumps, Escape releases the
 // cursor (press again to quit).
@@ -26,8 +28,11 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"math"
+	"os"
+	"path/filepath"
 	"runtime"
 
 	"github.com/go-gl/mathgl/mgl32"
@@ -51,9 +56,10 @@ const (
 )
 
 type game struct {
-	camera *glyph.FPCamera
-	player ecs.Entity
-	seed   int64
+	camera        *glyph.FPCamera
+	player        ecs.Entity
+	seed          int64
+	heightmapPath string
 
 	// Sampled in Update, consumed in FixedUpdate. jumpQueued latches the
 	// edge-triggered jump across frames that run no tick.
@@ -63,15 +69,36 @@ type game struct {
 
 func (g *game) Init(e *glyph.Engine) error {
 	// ── terrain ──
-	heights := generateHeights(gridSize, gridSize, g.seed)
-	hm, err := glyph.NewHeightmap(
-		gridSize, gridSize,
-		worldSize, worldSize,
-		-worldSize/2, -worldSize/2,
-		heights,
-	)
-	if err != nil {
-		return err
+	//
+	// heightmapPath is empty on every default run (including every existing
+	// caller of this example): the procedurally-generated branch below is
+	// byte-for-byte what ran before -heightmap existed, unreached and
+	// untouched when the flag is not passed. -heightmap loads a .heightmap
+	// from disk instead -- cmd/heightmapconv's own output, or anything else
+	// LoadHeightmap accepts -- so a converted Blender terrain can be looked
+	// at without writing a second example.
+	var hm *glyph.Heightmap
+	var err error
+	if g.heightmapPath != "" {
+		dir, base := filepath.Split(g.heightmapPath)
+		if dir == "" {
+			dir = "."
+		}
+		hm, err = glyph.LoadHeightmap(os.DirFS(dir), base)
+		if err != nil {
+			return fmt.Errorf("load heightmap %q: %w", g.heightmapPath, err)
+		}
+	} else {
+		heights := generateHeights(gridSize, gridSize, g.seed)
+		hm, err = glyph.NewHeightmap(
+			gridSize, gridSize,
+			worldSize, worldSize,
+			-worldSize/2, -worldSize/2,
+			heights,
+		)
+		if err != nil {
+			return err
+		}
 	}
 	e.SetTerrain(hm)
 
@@ -84,7 +111,21 @@ func (g *game) Init(e *glyph.Engine) error {
 	e.C.MeshRef.Set(terrainEnt, &glyph.MeshRef{Mesh: mesh, Roughness: 0.95})
 
 	// ── player ──
+	//
+	// The procedural terrain is always centered on the world origin, so
+	// (0,0) is always on it. A loaded heightmap need not be -- the Blender
+	// terrain fixture cmd/heightmapconv converts for docs/agents/terrain-heightmap.md
+	// sits at world X~190-200 -- so -heightmap spawns inside the loaded
+	// grid's own bounds instead of the hardcoded origin. 20% in from the
+	// flat (minX, minZ) corner rather than dead centre: that fixture's peak
+	// is tall enough relative to its 10x10 footprint that spawning at the
+	// centre puts the camera nose-against its slope: see
+	// docs/agents/terrain-heightmap.md's "Through the example" section.
 	spawnX, spawnZ := float32(0), float32(0)
+	if g.heightmapPath != "" {
+		minX, minZ, maxX, maxZ := hm.Bounds()
+		spawnX, spawnZ = minX+0.2*(maxX-minX), minZ+0.2*(maxZ-minZ)
+	}
 	spawnY, _ := hm.HeightAt(spawnX, spawnZ)
 
 	g.player = e.Spawn()
@@ -102,15 +143,42 @@ func (g *game) Init(e *glyph.Engine) error {
 	e.SetDayCycleSpeed(1.0 / 300.0)
 	e.SetTimeOfDay(0.30)
 	// Terrain wants to fade into the sky rather than end in a hard edge.
-	e.SetFogDensity(0.006)
+	// 0.006 is tuned for the procedural terrain's 200-unit world; a loaded
+	// heightmap can be any size (the Blender fixture is 10 units), so scale
+	// density inversely with WorldW rather than fogging a small terrain
+	// into the ground within a couple of metres of the camera.
+	fogDensity := float32(0.006)
+	if g.heightmapPath != "" {
+		fogDensity = 0.006 * hm.WorldW / worldSize
+	}
+	e.SetFogDensity(fogDensity)
 
 	g.camera = glyph.NewFPCamera()
 	g.camera.EyeHeight = 0.7
+	if g.heightmapPath != "" {
+		// Look toward the loaded terrain's own centre from the spawn point,
+		// rather than the procedural terrain's implicit default (yaw 0,
+		// which happens to face into that terrain because it is centred on
+		// the spawn at the world origin) -- a loaded heightmap is not
+		// necessarily centred on its spawn point at all. Yaw 0 is "look
+		// along -Z" (FPCamera.Forward's own doc); atan2 solves
+		// Forward=(dx,dz) normalized for the yaw that produces it.
+		minX, minZ, maxX, maxZ := hm.Bounds()
+		cx, cz := (minX+maxX)/2, (minZ+maxZ)/2
+		dx, dz := cx-spawnX, cz-spawnZ
+		g.camera.Yaw = float32(math.Atan2(float64(-dx), float64(-dz)))
+		// A modest downward pitch: this fixture's footprint (10x10 units)
+		// is small enough relative to FPCamera's default 1.6-unit eye
+		// height and the level horizon that a level gaze reads mostly as
+		// sky/fog above a thin strip of ground -- pitching down brings the
+		// terrain itself into more of the frame.
+		g.camera.Pitch = 0.35
+	}
 
 	e.Input().SetCursorLocked(true)
 
 	log.Printf("07-terrain running: %dx%d heightmap over %.0fx%.0f units. Escape releases the cursor.",
-		gridSize, gridSize, worldSize, worldSize)
+		hm.GridW, hm.GridH, hm.WorldW, hm.WorldD)
 	return nil
 }
 
@@ -277,6 +345,7 @@ func main() {
 	frames := flag.Int("frames", 0, "render N frames then exit (0 = run until closed)")
 	seed := flag.Int64("seed", 1, "terrain generation seed")
 	shot := flag.String("screenshot", "", "write a PNG of the last frame to this path")
+	heightmap := flag.String("heightmap", "", "load a .heightmap from disk instead of generating one procedurally")
 	flag.Parse()
 
 	opts := []glyph.Option{
@@ -297,7 +366,7 @@ func main() {
 		opts = append(opts, glyph.WithScreenshot(*shot))
 	}
 
-	e, err := glyph.New(&game{seed: *seed}, opts...)
+	e, err := glyph.New(&game{seed: *seed, heightmapPath: *heightmap}, opts...)
 	if err != nil {
 		log.Fatalf("create engine: %v", err)
 	}
