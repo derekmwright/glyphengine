@@ -106,17 +106,6 @@ func textureTransform(ext gltf.Extensions) (t texturetransform.TextureTranform, 
 	return *tt, true
 }
 
-// sameUVTransform reports whether two decoded KHR_texture_transform values
-// describe the same matrix -- Offset, Rotation and Scale only. TexCoord is
-// deliberately excluded: it decides whether a candidate is USABLE at all
-// (see materialUVTransform's texCoord handling below), not whether two
-// usable transforms agree, and *int is comparable by address rather than
-// value, which would make two separately-decoded "texCoord: 0"s compare
-// unequal for a reason that has nothing to do with the baked matrix.
-func sameUVTransform(a, b texturetransform.TextureTranform) bool {
-	return a.Offset == b.Offset && a.Rotation == b.Rotation && a.Scale == b.Scale
-}
-
 // uvTransformCandidate is one texture slot on a material considered for the
 // baked UV transform, named for the log line materialUVTransform's caller
 // prints when candidates disagree.
@@ -174,13 +163,15 @@ func materialUVCandidates(mat *gltf.Material) []uvTransformCandidate {
 //     tiling is only correct on one map rather than silently wrong on the
 //     rest.
 //
-// found is false when no surviving candidate carries the extension at all --
-// the overwhelmingly common case (see G1: no shipped asset uses this
-// extension), meaning "leave the UVs alone" (m is identityUV).
+// The FIRST map present decides, in materialUVCandidates' order -- base colour
+// when there is one -- whether or not it carries the extension; see the loop
+// for why a map without it still counts. found reports whether that deciding
+// map carried the extension, and is false in the overwhelmingly common case,
+// where m is identityUV and the UVs are left alone.
 //
 // A pure function of the document, no GPU needed, per issue #69's "pure
-// functions" list. chosenName is which candidate won (for the caller's
-// "differs" log line to name it), "" when found is false.
+// functions" list. chosenName is the deciding map, for the caller's "differs"
+// log line to name, and "" only when the material has no usable map at all.
 func materialUVTransform(doc *gltf.Document, materialIdx int) (m uvAffine, found bool, chosenName string, skippedTexCoord, differing []string) {
 	if materialIdx < 0 || materialIdx >= len(doc.Materials) {
 		return identityUV, false, "", nil, nil
@@ -190,23 +181,33 @@ func materialUVTransform(doc *gltf.Document, materialIdx int) (m uvAffine, found
 		return identityUV, false, "", nil, nil
 	}
 
-	var chosenT texturetransform.TextureTranform
+	// Every map that is present has a transform, whether or not it carries the
+	// extension: a map without one is at the identity. Skipping those was wrong
+	// twice over -- an untiled base colour under a tiled normal map was tiled by
+	// the normal's transform, the only one "found", and a tiled base colour
+	// over an untiled normal map tiled the normal with it and said nothing.
+	//
+	// They are compared as MATRICES, not as the fields that were written: glTF
+	// lets `scale` be omitted to mean (1,1), so one transform can be spelled two
+	// ways on two maps of one material.
+	var chosen uvAffine
 	haveChosen := false
 
 	for _, c := range materialUVCandidates(mat) {
 		t, ok := textureTransform(c.ext)
-		if !ok {
-			continue
-		}
-		if t.TexCoord != nil && *t.TexCoord != 0 {
+		if ok && t.TexCoord != nil && *t.TexCoord != 0 {
 			skippedTexCoord = append(skippedTexCoord, c.name)
 			continue
 		}
+		m := identityUV
+		if ok {
+			m = composeUVTransform(t)
+		}
 		if !haveChosen {
-			chosenName, chosenT, haveChosen = c.name, t, true
+			chosenName, chosen, haveChosen, found = c.name, m, true, ok
 			continue
 		}
-		if !sameUVTransform(t, chosenT) {
+		if m != chosen {
 			differing = append(differing, c.name)
 		}
 	}
@@ -214,7 +215,7 @@ func materialUVTransform(doc *gltf.Document, materialIdx int) (m uvAffine, found
 	if !haveChosen {
 		return identityUV, false, "", skippedTexCoord, nil
 	}
-	return composeUVTransform(chosenT), true, chosenName, skippedTexCoord, differing
+	return chosen, found, chosenName, skippedTexCoord, differing
 }
 
 // resolveUVTransform resolves materialIdx's baked UV transform through
