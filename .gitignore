@@ -28,3 +28,6 @@ examples/.determinism/
 examples/.hud/
 examples/.sky/
 examples/.lights/
+examples/.waterlight/
+examples/.waterblend/
+examples/.nightlight/
