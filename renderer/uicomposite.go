@@ -99,7 +99,13 @@ func recordUIComposite(
 	// path exists to keep: that a UI colour is the literal sRGB value a game
 	// wrote. There is nowhere above 1 to put emission without an HDR layer, so
 	// without one it does nothing at all. TestGlowIsZeroOnTheDirectPath holds
-	// that, and UIRenderObject.Glow says it.
+	// that for panels; text carries its emission per vertex, where the recorder
+	// cannot filter it, so msdf.frag gates on the same flag instead.
+	//
+	// Checked on the GPU rather than only in the recorder: 13-ui in its
+	// layer-less `direct` mode, with the button, the warning and the label all
+	// asking for the emission they ask for in `on`, renders a byte-identical
+	// frame to the same mode with none of them asking.
 	//
 	// On the direct path both stay at the zero resetPC already put there, so
 	// the shaders take the branch they always took and every pushed byte is
