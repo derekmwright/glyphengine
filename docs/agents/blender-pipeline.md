@@ -280,9 +280,10 @@ material sets `Alpha` to `0.3` on the socket directly (and also sets
 `use_backface_culling` and, defensively, `blend_method` where the property
 exists, since older exporter versions could not be checked on this
 machine -- see "Verified against" below) and the real export carries
-`alphaMode: "BLEND"` with `baseColorFactor`'s alpha at `0.3` -- issue #68's
-ground truth, asserted in `renderer/gltfblender_test.go`'s
-`AlphaAndDoubleSided` check.
+`alphaMode: "BLEND"` with `baseColorFactor`'s alpha at `0.3`, asserted on the
+raw document in `renderer/gltfblender_test.go`'s `AlphaAndDoubleSided` check
+and on what the loader reports (`ModelMesh.AlphaMode`, `BaseAlpha`) in
+`LoadedTilingAndAlpha`.
 
 ## Light units
 
@@ -365,30 +366,42 @@ None of the following survive a glTF export, and nothing on this page or in
   does.
 - **Modifiers, unless applied.** Covered above under `export_apply` -- an
   unapplied modifier exports its cage.
-- **Material tiling (a Mapping node's Scale), until issue #69.** The
-  exporter writes it correctly as `KHR_texture_transform` (see below); the
-  engine does not read the extension yet, so a tiled Blender material draws
-  as if `scale (1,1)` today -- `examples/22-level` does not sample textures
-  at all, so this specific fixture's ground draws flat-coloured regardless
-  (see "Through the example" below).
-- **`alphaMode`/`alphaCutoff`, until issue #68.** The exporter writes it
-  correctly (see "Backface culling -> doubleSided" above); `renderer.LoadGLTF`
-  does not read `AlphaMode` yet, so a glass material draws fully opaque
-  today.
+- **Cutout (`MASK`) materials.** The exporter writes `alphaMode: MASK` and the
+  loader reports it (`ModelMesh.AlphaMode`, `AlphaCutoff`), but the lit
+  pipelines have no alpha-tested path, so the engine cannot honour it today.
+- **Different tiling on different maps of one material.** See below: one
+  transform is baked per primitive, and base colour's wins.
 
-`KHR_texture_transform` **is** written correctly today, as ground truth for
-#69: `renderer/testdata/blender/level.glb`'s `Ground` material has a Mapping
-node scaled `(8, 8)` feeding its Image Texture
-(`tools/blender/build_fixture.py`'s `build_ground()`), and the real export's
-`baseColorTexture` carries `KHR_texture_transform` with `scale: [8, 8]` --
-asserted in `renderer/gltfblender_test.go`'s `TextureTransform` check. One
-thing that was **not** anticipated going in and only found by reading the
-file's actual bytes: `offset` comes out `[0, -7]`, not `[0, 0]`. The reason
-is glTF's V axis running the opposite way from Blender's UV V (textures are
-sampled top-down in glTF, bottom-up in Blender) -- the exporter's V-flip
-composes with an 8x scale as `offset_v = 1 - scale_v = 1 - 8 = -7`. A future
-#69 implementation that reads `scale` and ignores `offset` will get the
-tiling FREQUENCY right and the tiling POSITION wrong.
+Two things that used to be on this list now travel.
+
+**Material tiling.** A Mapping node's scale, rotation and location arrive as
+`KHR_texture_transform`, and `LoadGLTF` bakes it into the primitive's UVs at
+load (there is no room for a per-material UV matrix in the push-constant
+block). `renderer/testdata/blender/level.glb`'s `Ground` is the case:
+`tools/blender/build_fixture.py`'s `build_ground()` scales the Mapping node
+`(8, 8)`, the export carries `scale: [8, 8]` **and `offset: [0, -7]`**, and
+after loading the ground's UVs span exactly `0..8` by `-7..1` -- eight tiles
+each way. The offset is not decoration: glTF's V runs the opposite way from
+Blender's, and the exporter's flip composes with the scale as `offset_v = 1 -
+scale_v`. A reader that drops it gets the tiling frequency right and its
+position wrong, which is invisible at a whole-number scale and wrong at any
+other. `renderer/gltfblender_test.go` asserts both the raw extension
+(`TextureTransform`) and the loaded UV range (`LoadedTilingAndAlpha`).
+
+The base colour map decides the transform for the whole primitive, whether or
+not it carries the extension -- a map without it is at the identity -- and any
+map that disagrees is named in one log line, because its tiling will be wrong.
+Blender writes the same transform on every map that shares a Mapping node
+(measured with base colour and a normal map through one node), so this only
+bites a material that deliberately tiles its maps differently. Image Texture
+"Extension" modes arrive as sampler wrap modes and are honoured: EXTEND is
+clamp-to-edge, MIRROR is mirrored repeat. Details in
+[`material-maps.md`](material-maps.md).
+
+**Alpha.** `ModelMesh.AlphaMode`, `AlphaCutoff` and `BaseAlpha` carry what the
+exporter wrote, as data: the engine does not decide that `BLEND` means
+`Translucent`, the game does, and `examples/22-level` shows it. The fixture's
+`GlassPane` (Principled alpha 0.3) loads as `BLEND` with `BaseAlpha` 0.3.
 
 ## Instancing (issue #71's ground truth)
 
@@ -466,15 +479,15 @@ The first line is expected and not a bug -- see "Loading a level" in
 purpose. The `ShearChild` line is exactly the shear case described above
 firing as designed. The Mirrored node draws (visible as an ordinary-looking
 box in a screenshot -- a mirrored cube looks identical to an unmirrored one
-without a texture to reveal the flip, which this fixture's untextured
-render cannot show either way; its geometry is present and correctly
+without a texture on it to reveal the flip, and this one has none; its
+geometry is present and correctly
 placed, which is what `renderer/gltfblender_test.go`'s determinant check
 and this run together confirm).
 
-A rendered frame shows: the ground plane, flat grey (`22-level` does not
-sample textures at all -- see "What does NOT travel" above, so the tiled
-checker pattern this fixture's `Ground` material carries does not show up
-here; that is a property of the example, not of the export); several boxy
+A rendered frame shows: the ground plane carrying its checker tiled eight
+times each way, as the Mapping node asked (it drew as one flat stretch before
+the loader read `KHR_texture_transform`); the glass pane blended rather than
+opaque; several boxy
 buildings and panels; small cones where the collection-instance and
 geometry-nodes-scatter props landed; and a warm, bloomed pool of light on
 the ground directly under `SpotLamp`. Two renders under the same fixed
