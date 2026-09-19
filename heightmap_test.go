@@ -14,10 +14,10 @@ import (
 // negative origin on purpose: a square grid with an origin at zero would not
 // catch a writer that swapped GridW/GridH or dropped the origin's sign.
 //
-// Verified to fail: swapping the header's GridW/GridH order in WriteTo (write
-// GridH then GridW) made LoadHeightmap read the file back as a 3x5 grid
-// instead of 5x3 and the test failed with "GridW = 3, want 5" before the
-// write order was corrected back.
+// Verified to fail: swapping which value WriteTo puts in the header's
+// GridW/GridH slots (writing h.GridH into the GridW slot and vice versa)
+// made LoadHeightmap read the 5x3 grid back as 3x5, and the test printed
+// "grid = 3x5, want 5x3" before the swap was reverted.
 func TestHeightmapRoundTrips(t *testing.T) {
 	want := &Heightmap{
 		GridW: 5, GridH: 3,
@@ -75,6 +75,9 @@ func TestHeightmapRoundTrips(t *testing.T) {
 // heights must not silently write a file whose body does not match its own
 // header -- LoadHeightmap would then either read garbage into the last rows
 // or fail with an opaque EOF far from the actual mistake.
+//
+// Verified to fail: with the length check removed, this printed "WriteTo
+// with 3 heights for a 4x4 grid succeeded, want an error".
 func TestHeightmapWriteToRejectsMismatchedHeights(t *testing.T) {
 	h := &Heightmap{GridW: 4, GridH: 4, WorldW: 10, WorldD: 10, Heights: make([]float32, 3)}
 	if _, err := h.WriteTo(&bytes.Buffer{}); err == nil {
@@ -86,6 +89,10 @@ func TestHeightmapWriteToRejectsMismatchedHeights(t *testing.T) {
 // hazard on the write side that LoadHeightmap's header validation covers on
 // the read side: a zero, negative, or non-finite world size is not something
 // HeightAt can divide by.
+//
+// Verified to fail: with WriteTo's validWorldSize check removed, all four
+// subtests printed "WriteTo with world size ... succeeded, want an error"
+// (e.g. "WriteTo with world size 0x10 succeeded" for the zero-width case).
 func TestHeightmapWriteToRejectsBadWorldSize(t *testing.T) {
 	base := Heightmap{GridW: 2, GridH: 2, OriginX: 0, OriginZ: 0, Heights: make([]float32, 4)}
 	cases := []struct {
@@ -115,11 +122,11 @@ func TestHeightmapWriteToRejectsBadWorldSize(t *testing.T) {
 // or silently flattens terrain the first time something indexes past the
 // short slice.
 //
-// Verified to fail: before this test existed, binary.Read into the
-// heights slice already returned io.ErrUnexpectedEOF here (this specific
-// case was not the bug), but the assertion below is what proves it stays
-// that way -- see the grid-size and world-size tests for the cases that were
-// actually silent.
+// Verified to fail: ignoring binary.Read's error on the heights slice (a
+// bare `binary.Read(f, binary.LittleEndian, heights)` with no err check)
+// made LoadHeightmap return a Heightmap with the trailing heights left at
+// their zero value instead of an error, and this test printed "LoadHeightmap
+// on a truncated file succeeded, want an error".
 func TestLoadHeightmapRejectsTruncatedFile(t *testing.T) {
 	full := &Heightmap{
 		GridW: 4, GridH: 4, WorldW: 10, WorldD: 10,
@@ -142,6 +149,17 @@ func TestLoadHeightmapRejectsTruncatedFile(t *testing.T) {
 
 // TestLoadHeightmapRejectsTruncatedHeader: fewer than the 24 header bytes
 // (e.g. an empty or near-empty file) must fail cleanly.
+//
+// This case turns out to be over-determined: binary.Read on a short header
+// already returns an error, and even ignoring THAT error leaves header at
+// its zero value, which the GridW/GridH floor and the WorldW/WorldD
+// validity check both separately reject. Verified to fail only when all
+// three guards were removed at once (the header read's own error check, the
+// 2x2 floor, and validWorldSize) -- with any one of them still in place this
+// test kept passing on the zero header alone, which is why the grid-size and
+// world-size tests above exist as their own, independently-verified checks
+// rather than this test standing in for them. With all three gone, this
+// printed "LoadHeightmap on a 3-byte file succeeded, want an error".
 func TestLoadHeightmapRejectsTruncatedHeader(t *testing.T) {
 	fsys := fstest.MapFS{"t.heightmap": {Data: []byte{1, 2, 3}}}
 	if _, err := LoadHeightmap(fsys, "t.heightmap"); err == nil {
@@ -178,12 +196,15 @@ func TestLoadHeightmapRejectsUndersizedGrid(t *testing.T) {
 // directly: a corrupt or misaligned header whose GridW/GridH land near
 // 0xFFFFFFFF must not make LoadHeightmap try to allocate the resulting grid.
 //
-// Verified to fail: with the maxHeightmapGridDim check removed, this either
-// panicked with "runtime: makeslice: len out of range" (GridW*GridH as int64
-// overflowing back negative) or, for the specific pair below, attempted to
-// allocate a slice around 68 GiB (70368735608832 * 4 bytes) and the test
-// process was killed by the OS rather than failing cleanly -- neither is
-// something a caller loading a game asset can recover from.
+// Verified to fail: with the maxHeightmapGridDim check removed, LoadHeightmap
+// panicked with "runtime error: makeslice: len out of range" -- GridW*GridH
+// as int64 (18446744065119617025) overflows back to -8589934591, and
+// make([]float32, count) panics on the negative length rather than the
+// header being rejected here where the bad data actually is. A GridW/GridH
+// pair that stayed positive after overflow would instead attempt a
+// multi-gigabyte allocation, which is the case maxHeightmapGridDim's own
+// comment describes; this pair panics instead, which is not something a
+// caller loading a game asset can recover from either.
 func TestLoadHeightmapRejectsAbsurdGrid(t *testing.T) {
 	header := struct {
 		GridW, GridH     uint32
@@ -200,6 +221,10 @@ func TestLoadHeightmapRejectsAbsurdGrid(t *testing.T) {
 	}
 }
 
+// Verified to fail (LoadHeightmap side): with the validWorldSize check
+// removed, this printed "LoadHeightmap with WorldW=0 succeeded, want an
+// error".
+//
 // TestLoadHeightmapRejectsBadWorldSize is LoadHeightmap's side of
 // TestHeightmapWriteToRejectsBadWorldSize: even if a file was not produced by
 // WriteTo (hand-crafted, or written by a future tool with a bug), a zero,
