@@ -119,13 +119,13 @@ vec3 bright(vec3 c) {
 // GLYPHENGINE_FIXED_FRAME_TIME, which have to repeat byte for byte.
 //
 // Measured on the hillside the shafts fall on in `09-water -time 0.72 -yaw
-// 1.771 -pitch -0.185 -pillars`, box 670,480,170x160, as the Laplacian of the
-// added light after an 8x8 box blur — the blur is what tells a step apart from
-// dither: with the jitter 0.28 mean / 1.03 max, without it 0.70 / 3.31. The
-// picture is plainer than the number. Amplified 4x, the unjittered difference
-// is a set of concentric arcs and the jittered one is a smooth gradient with a
-// fine grain. A per-column profile sees neither, because the bands are arcs
-// that cross a column and average out inside it.
+// 1.771 -pitch -0.185 -pillars -shafts 0.35`, box 670,480,170x160, as the
+// Laplacian of the added light after an 8x8 box blur — the blur tells a step
+// apart from dither: with the jitter 0.28 mean / 1.03 max, without it 0.70 /
+// 3.31. The picture is plainer than the number: amplified 4x, the unjittered
+// difference is a set of concentric arcs and the jittered one is a smooth
+// gradient with a fine grain. A per-column profile sees neither, because the
+// bands are arcs that cross a column and average out inside it.
 float startJitter(vec2 px) {
     return fract(52.9829189 * fract(dot(px, vec2(0.06711056, 0.00583715))));
 }

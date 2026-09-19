@@ -12,7 +12,7 @@ api:
   - renderer.Renderer.SetTonemap
 assets: none
 run: task bench
-verified: 2026-09-16
+verified: 2026-09-19
 ---
 
 # HDR rendering and the tonemap resolve
@@ -154,6 +154,15 @@ is ALU-bound rather than fill-bound.
   `smoothstep(0.62, 0.88, l)` window assumes `l` tops out near 1, and once
   anything in the engine emits above that, the window admits everything instead
   of selecting the sun.
+
+  Two things this bullet used to imply are worth correcting now that the pass
+  actually runs (#50). The ceiling is **already** exceeded, by the sun itself:
+  `DayNight.SunDiscColor` multiplies the disc by 5. That is fine, because the
+  disc is exactly what the window is selecting for — the warning is about
+  something *else* reaching past 1, such as an emissive material in shot. And
+  the window was never verified against a render until #50, because nothing bound
+  the pipeline; measured now, plain sky tops out at 0.566 and cloud starts at
+  0.85, so 0.62–0.88 lands in the gap by measurement rather than by luck.
 
 - **Screenshots are unaffected.** `capture.go` reads the swapchain image, which
   is the tonemapped result.

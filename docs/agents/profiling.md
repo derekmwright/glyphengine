@@ -119,6 +119,20 @@ to a fifth of a 2.2 ms frame, and it spent a long time filed under "overlay".
 Anyone comparing MSAA settings should read these two lines, not the passes
 around them.
 
+`PassShafts` (`shafts`) is the screen-space light shafts: one fullscreen
+triangle of 48 texture taps, drawn inside the water render pass between the
+water surface and the blended draws in front of it. It reads zero whenever the
+shafts cannot contribute — sun below the horizon, behind the camera, or past the
+screen-edge fade — and in those frames with no water the whole water pass is
+skipped too, so `water`, `overwater` and `waterresolve` read zero with it.
+Measured on this machine at 1280x720, MSAA 4x, 200 frames, five runs of each
+pose interleaved with the others: 0.163 ms (0.144–0.169) with the sun in the
+middle of the frame (`09-water -time 0.72 -yaw 1.771 -pitch -0.185 -pillars`),
+0.095 ms (0.089–0.097) with it at the frame edge (`-yaw 2.4 -pitch 0.05`), and
+0.000 with it off screen (`-yaw 2.70`). Those are far tighter than the
+whole-frame numbers from the same runs, which spanned 2.97 to 4.60 ms — read
+the pass, not the total.
+
 `PassShadow` is the shadow *map render*, not shadow sampling. The PCF lookup
 happens inside the grass, terrain and lit fragment shaders, so it lands in those
 passes. A cheap `shadow` number does not mean shadows are cheap: switching the
