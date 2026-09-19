@@ -88,6 +88,13 @@ func TestReadPNGHeights8BitWarnsAndSpreads(t *testing.T) {
 	}
 }
 
+// Verified to fail: hardcoding order to binary.LittleEndian in
+// readRawHeights (dropping the "if bigEndian" branch, keeping -bigendian as
+// an unused parameter) made the BE case print
+// "BE samples = [65280 255], want [0x00FF 0xFF00]" -- the bytes read
+// correctly, just byte-swapped, which is the silent-scramble failure mode
+// named above.
+//
 // TestReadRawHeightsEndianness covers both byte orders for the headerless
 // .r16 format -- a mismatch here silently scrambles every sample rather than
 // failing to load, so both directions are checked against a value picked to
@@ -146,8 +153,11 @@ func TestReadRawHeightsRejectsWrongSize(t *testing.T) {
 // missing flip produce a visibly different grid rather than a
 // coincidentally correct one.
 //
-// Verified to fail: see raster.go's heightsFromSamples for the break/restore
-// record of removing the "h-1-row" flip.
+// Verified to fail: replacing heightsFromSamples' "iz := h - 1 - row" with
+// "iz := row" (no flip) made this print all four grid points swapped
+// top-for-bottom: "grid(ix=0,iz=0) = 10, want 30", "grid(ix=1,iz=0) = 20,
+// want 40", "grid(ix=0,iz=1) = 30, want 10", "grid(ix=1,iz=1) = 40, want 20"
+// -- exactly the near/far edges trading places, columns untouched.
 func TestHeightsFromSamplesOrientation(t *testing.T) {
 	// samples row-major, row 0 first: (0,0)=TL=10 (0,1)=TR=20
 	//                                  (1,0)=BL=30 (1,1)=BR=40

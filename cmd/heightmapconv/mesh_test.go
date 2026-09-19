@@ -33,6 +33,21 @@ import (
 // so the rasteriser output grid's (ix, iz), built by OriginX/OriginZ
 // ascending, ends up as ix = lz, iz = 2 - lx. The spike (lx=2, lz=2) lands
 // at grid (ix=2, iz=0), world (102, 20, 48).
+//
+// Verified to fail: dropping the parent's rotation in nodeLocalTransform
+// (the same break TestNodeWorldThroughParentChain uses) made the mesh
+// bounds check fail first, printing "mesh bounds = 100,50..102,52, want
+// 100,48..102,50" -- without the 90 degree turn, world X tracks local X
+// (not local Z) and world Z simply adds instead of subtracting, so the
+// bounding box comes out shifted rather than merely mislabeled, which is
+// exactly the kind of bug a translate-only parent could hide.
+//
+// Also verified to fail: off-by-one'ing rasterizeMesh's stepX/stepZ to
+// divide by gridW/gridH instead of gridW-1/gridH-1 (so the last row/column
+// samples short of the true max edge) made 7 of the 9 grid cells print a
+// wrong height, e.g. "heights[ix=2,iz=0] = 8, want 20" -- the spike sample
+// landed short of the actual spike vertex and read the ramp's interpolated
+// value instead.
 func TestLoadMeshTrianglesPutsAnAsymmetricTerrainInWorldSpace(t *testing.T) {
 	height := func(lx, lz int) float64 {
 		if lx == 2 && lz == 2 {

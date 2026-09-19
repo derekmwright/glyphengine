@@ -20,6 +20,18 @@ import (
 // hit count. Vertices are [3]float64{x,y,z}: A=(0,0,0), B=(2,2,0),
 // C=(2,2,2), D=(0,0,2), split into {A,C,D} and {A,B,C} -- the diagonal from
 // (0,0) to (2,2) in XZ.
+//
+// Verified to fail two ways:
+//   - Flipping baryEdgeEps to -1e-7 (excluding boundary points instead of
+//     including them) made every one of the 7 cases print "found 0
+//     surfaces [], want exactly 1" -- the false-hole failure mode.
+//   - Disabling dedupeHeights' merge (sorting and reversing but never
+//     collapsing near-equal hits) made the 5 cases actually covered by BOTH
+//     triangles (the two corners (0,0)/(2,2) that both triangles share, and
+//     the 3 diagonal points) print "found 2 surfaces [... ...], want exactly
+//     1" -- the false-overhang failure mode. The other two corners, each
+//     covered by only one triangle, correctly stayed at 1, which is why this
+//     needed its own break rather than trusting the first one covered it.
 func TestBarycentricHeightOnSharedEdgesAndVertices(t *testing.T) {
 	a := [3]float64{0, 0, 0}
 	b := [3]float64{2, 2, 0}
@@ -56,6 +68,20 @@ func TestBarycentricHeightOnSharedEdgesAndVertices(t *testing.T) {
 	}
 }
 
+// Verified to fail: changing rasterizeMesh's overhang branch to
+// surfaces[len(surfaces)-1] (lowest) instead of surfaces[0] (highest, since
+// dedupeHeights returns descending) made this print "overhang column height
+// = 1, want 9 (the topmost surface)" twice (once per z row).
+//
+// Also verified to fail: off-by-one'ing rasterizeMesh's stepX/stepZ
+// (dividing by gridW/gridH instead of gridW-1/gridH-1, the same break
+// TestLoadMeshTrianglesPutsAnAsymmetricTerrainInWorldSpace uses) shifted
+// every sample short of its intended column and printed "holes = 4, want 2"
+// -- the last column's samples no longer reached x=4.5's geometry at all,
+// turning a real hole test into a different, wrong shape of failure, which
+// is exactly why the grid extent has its own dedicated coverage here rather
+// than relying on this test alone.
+//
 // TestRasterizeMeshReportsHolesAndOverhangs builds a mesh with three
 // columns: one covered by a single flat triangle pair (normal), one with NO
 // geometry at all (a hole), and one covered by two triangle pairs at
@@ -115,6 +141,16 @@ func TestRasterizeMeshReportsHolesAndOverhangs(t *testing.T) {
 
 // TestApplyFillModes covers all three -fill modes against the same set of
 // holes.
+//
+// Verified to fail two ways:
+//   - Flipping the min-fill scan's comparison (v > min instead of v < min,
+//     leaving min seeded at +Inf so the flipped condition never assigns)
+//     made the min subtest print "min fill = 0, want 10" -- the +Inf-stays-
+//     +Inf fallback path fired instead of the real minimum.
+//   - Passing nil instead of holes to fillNearest (so its BFS has nothing
+//     queued to spread from that hole) made the nearest subtest print
+//     "nearest fill = 0, want 10" -- the hole cell was left at its
+//     zero-value placeholder instead of being reached.
 func TestApplyFillModes(t *testing.T) {
 	// 3x1 grid: valid, hole, valid (heights 10 and 30 either side).
 	base := func() []float32 { return []float32{10, 0, 30} }
