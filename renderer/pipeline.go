@@ -197,6 +197,46 @@ func createNonLitPipelineLayout(deviceDriver core1_0.DeviceDriver, texSetLayout 
 	return layout, nil
 }
 
+// createSkyPipelineLayout is the non-lit layout plus the shadow/light set at
+// set 1, for the one non-lit pipeline that needs the clustered light data.
+//
+// sky.frag marches the froxel grid for in-scattering, so it needs lights.inc's
+// three storage buffers -- which live at bindings 3, 4 and 5 of the set the
+// shadow data owns, and only there. Three ways to give it those, and this is
+// the least invasive of them:
+//
+//   - Add the bindings to the shared texture set layout at set 0. That layout
+//     backs EVERY texture in the engine, so it would put three storage-buffer
+//     bindings on every material a game ever uploads, and every one of those
+//     descriptor sets would have to be written with the light buffers or be
+//     incomplete.
+//   - Give the sky its own second set with copies of the buffers. A second
+//     descriptor naming the same buffers is a second thing to update on a
+//     resize and a second place for a frame in flight to read the wrong one.
+//   - Bind the set that already holds them, at the index the lit pipelines do
+//     not use for the sky's set 0. That is this.
+//
+// Set 0 stays the texture layout and the push constant range is unchanged, so
+// this layout is COMPATIBLE with the non-lit one for set 0 and for push
+// constants: the stars and celestial draws that follow the sky rebind set 0
+// with the non-lit layout and are unaffected.
+func createSkyPipelineLayout(deviceDriver core1_0.DeviceDriver, texSetLayout, shadowSetLayout core1_0.DescriptorSetLayout) (core1_0.PipelineLayout, error) {
+	layout, _, err := deviceDriver.CreatePipelineLayout(nil, core1_0.PipelineLayoutCreateInfo{
+		SetLayouts: []core1_0.DescriptorSetLayout{texSetLayout, shadowSetLayout},
+		PushConstantRanges: []core1_0.PushConstantRange{
+			{
+				StageFlags: core1_0.StageVertex | core1_0.StageFragment,
+				Offset:     0,
+				Size:       pushConstantSize,
+			},
+		},
+	})
+	if err != nil {
+		return core1_0.PipelineLayout{}, err
+	}
+	return layout, nil
+}
+
 // createLitVariantPipeline builds one of the pipelines that share lit.vert: the
 // same vertex format, depth state, blend state, and shadow set, differing only
 // in the fragment stage and in what set 0 binds.

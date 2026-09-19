@@ -24,7 +24,7 @@ func (fx *frame) record(d core1_0.DeviceDriver, frameIndex int) error {
 		fx.starsPipeline, fx.celestialPipeline, fx.uiPipeline, fx.msdfPipeline, fx.skinnedPipeline,
 		fx.grassPipeline, fx.waterPipeline, fx.godRayPipeline, fx.waterRenderPass, fx.waterFramebuffer,
 		fx.sceneColor, fx.sceneImage, noClouds, fx.cloudSet, fx.bloom, fx.tonemap, fx.particlePipeline,
-		fx.terrainPipeline, fx.mat, &fx.stats, fx.pipelineLayout, fx.litPipelineLayout,
+		fx.terrainPipeline, fx.mat, &fx.stats, fx.pipelineLayout, fx.skyPipelineLayout, fx.litPipelineLayout,
 		fx.skinnedPipelineLayout, fx.terrainPipeLayout, fx.extent, fx.draws, fx.overlays, fx.celestials,
 		fx.uiOverlays, fx.msdfOverlays, fx.lighting, fx.split, fx.fallbackTexture, fx.milkyWayTex,
 		fx.shadow, fx.grass, fx.grassLOD, fx.impostor, fx.grassImpostorPipeline, fx.particles,
@@ -153,7 +153,45 @@ func benchName(n int) string {
 // calls. Verified by leaving pc[38] and pc[39] unpacked and re-running this
 // test -- 0x08525eb349c579bc, the value above exactly -- so those two floats
 // are the whole of the difference.
-const goldenStreamHash = Hasher(0x7f81990a07a357c6)
+//
+// Recomputed a fourth time, for #47: the sky draw now reads the clustered
+// light buffers, because a beam aimed at the night sky has to show against
+// it. NO DRIVER CALL WAS ADDED -- 3299 before and 3299 after, the same count
+// this constant has pinned since the shaft draw landed. THREE things changed
+// arguments, and each was measured on its own rather than assumed:
+//
+//	(a) buildFrame's lighting gained FogDensity/FogHeight/FogBaseHeight. That
+//	    is not the sky: fog rides in pc.cameraPos.w and pc.fog.xy for EVERY
+//	    lit draw, so it moves most of the push blocks in the frame. It is here
+//	    because the sky now pushes the fog too, and a value the fixture leaves
+//	    at zero is a push-constant word this hash cannot pin.
+//	(b) The sky's CmdBindDescriptorSets binds two sets (cloud, shadow)
+//	    instead of one, against skyPipelineLayout instead of pipelineLayout.
+//	(c) The sky's CmdPushConstants carries the eye and the fog in six words
+//	    that were zero (pc[56..61]), and goes to skyPipelineLayout.
+//
+// Built up one at a time, each re-running this test:
+//
+//	nothing (fixture fog off, (b) and (c) reverted)   3299 calls, 0x7f81990a07a357c6
+//	(a) alone                                         3299 calls, 0x58d24cfbaf980c5d
+//	(a) + (c)                                         3299 calls, 0xb7ca58e2efca8dde
+//	(a) + (b)                                         3299 calls, 0xbb26bbcb5be1ea70
+//	(a) + (b) + (c), as shipped                       3299 calls, 0xb532df1b50aa9c73
+//
+// The first line is the one that matters, and it is exact: with the fixture's
+// fog off and the sky's two calls put back the way they were, the recorded
+// frame is bit-for-bit the frame this constant pinned before -- 0x7f81..., to
+// the digit. So nothing else in the volumetrics change reaches the driver at
+// all, which is the claim the G1 captures make about pixels and this makes
+// about calls.
+//
+// One trap worth recording, because it cost an hour and would cost it again.
+// fakeHandles hands out a monotonic counter, so the first attempt -- which
+// allocated fx.skyPipelineLayout in the middle of buildFrame's struct literal
+// -- renumbered every handle after it and moved this hash by itself, with the
+// sky's calls already reverted. It now allocates after the literal, and that
+// is why.
+const goldenStreamHash = Hasher(0xb532df1b50aa9c73)
 
 // TestRecordCommandBufferStreamIsUnchanged is the GPU-free half of "nothing
 // changed": every driver call the recorder makes, folded in order with its

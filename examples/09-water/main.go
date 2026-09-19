@@ -233,7 +233,11 @@ type game struct {
 	lampCount int
 	spotCount int
 	lampsOff  bool
-	lampPosts bool
+	// volumetric is SpotLight.Volumetric and PointLight.Volumetric for every
+	// light this scene places. 0 is the default, so the stock frame is the one
+	// this example has always rendered.
+	volumetric float32
+	lampPosts  bool
 
 	// An atmosphere that is not Earth's. Off by default, again so nothing
 	// else moves.
@@ -645,6 +649,9 @@ func (g *game) spawnLamps(e *glyph.Engine, hm *glyph.Heightmap, spawnZ, eyeY flo
 				Pos:   mgl32.Vec3{x, head, z},
 				Range: lampRange,
 				Color: lampColor,
+				// 0 unless -volumetric asked for it, so every capture this
+				// example has ever taken is unchanged.
+				Volumetric: g.volumetric,
 			})
 			fixture(x, z, head, 0.22)
 		}
@@ -686,12 +693,13 @@ func (g *game) spawnLamps(e *glyph.Engine, hm *glyph.Heightmap, spawnZ, eyeY flo
 		aimZ := z + spotAimBias*(glintZ-z)
 
 		spots = append(spots, glyph.SpotLight{
-			Pos:   mgl32.Vec3{x, head, z},
-			Dir:   mgl32.Vec3{aimX - x, spotAimBias * (waterLevel - head), aimZ - z},
-			Range: spotRange,
-			Color: spotColor,
-			Inner: spotInner,
-			Outer: spotOuter,
+			Pos:        mgl32.Vec3{x, head, z},
+			Dir:        mgl32.Vec3{aimX - x, spotAimBias * (waterLevel - head), aimZ - z},
+			Range:      spotRange,
+			Color:      spotColor,
+			Inner:      spotInner,
+			Outer:      spotOuter,
+			Volumetric: g.volumetric,
 		})
 		fixture(x, z, head, 0.18)
 	}
@@ -1031,6 +1039,7 @@ func main() {
 	lamps := flag.Int("lamps", 0, "warm point lamps on piles over the water and the shore (0 = none)")
 	spots := flag.Int("spots", 0, "shore floodlights throwing cones across the surface (0 = none)")
 	lampsOff := flag.Bool("lampsoff", false, "build the piles and fixtures but hand the scene no lights, as the control for `task waterlight`")
+	volumetric := flag.Float64("volumetric", 0, "volumetric scattering intensity on every lamp and floodlight, so the air over the lake carries their light (0 = off, the default)")
 	lampPosts := flag.Bool("lampposts", true, "draw the piles and bulb markers under the lamps (off measures the light loop against identical geometry)")
 	alien := flag.Bool("alien", false, "a violet-and-amber sky palette instead of Earth's, through Scene.SetSkyPalette")
 	lightDebug := flag.String("lightdebug", "", "light debug mode: heatmap or bruteforce (default: off)")
@@ -1064,7 +1073,7 @@ func main() {
 		opts = append(opts, glyph.WithUIGlow())
 	}
 
-	e, err := glyph.New(&game{seed: *seed, refract: *refract, pitch: float32(*pitch), tod: float32(*tod), clouds: *clouds, stars: *stars, milkyway: *milkyway, band: *band, fogHeight: float32(*fogHeight), yaw: float32(*yaw), shafts: float32(*shafts), shaftShape: glyph.LightShaftShape{Radius: float32(*shaftRadius), Decay: float32(*shaftDecay), Threshold: [2]float32{float32(*shaftLow), float32(*shaftHigh)}}, pillars: *pillars, pauseAt: *pauseAt, hud: *hud, bloom: float32(*bloom), bloomThres: float32(*bloomThreshold), plume: *plume, ghost: *ghost, marker: *marker, submerged: *submerged, lampCount: *lamps, spotCount: *spots, lampsOff: *lampsOff, lampPosts: *lampPosts, alien: *alien}, opts...)
+	e, err := glyph.New(&game{seed: *seed, refract: *refract, pitch: float32(*pitch), tod: float32(*tod), clouds: *clouds, stars: *stars, milkyway: *milkyway, band: *band, fogHeight: float32(*fogHeight), yaw: float32(*yaw), shafts: float32(*shafts), shaftShape: glyph.LightShaftShape{Radius: float32(*shaftRadius), Decay: float32(*shaftDecay), Threshold: [2]float32{float32(*shaftLow), float32(*shaftHigh)}}, pillars: *pillars, pauseAt: *pauseAt, hud: *hud, bloom: float32(*bloom), bloomThres: float32(*bloomThreshold), plume: *plume, ghost: *ghost, marker: *marker, submerged: *submerged, lampCount: *lamps, spotCount: *spots, lampsOff: *lampsOff, volumetric: float32(*volumetric), lampPosts: *lampPosts, alien: *alien}, opts...)
 	if err != nil {
 		log.Fatalf("create engine: %v", err)
 	}

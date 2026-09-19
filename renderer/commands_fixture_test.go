@@ -32,38 +32,38 @@ func fixtureReverseZProjection(fovDegrees, aspect, near, far float32) mgl32.Mat4
 // a small and a large n is what TestRecordCommandBufferAllocsAreConstant needs
 // to tell "zero per draw" apart from "zero because there were only a few".
 type frame struct {
-	cmdBuf                                                                       core1_0.CommandBuffer
-	renderPass, waterRenderPass                                                  core1_0.RenderPass
-	framebuffer, waterFramebuffer                                                core1_0.Framebuffer
-	pipeline, litDoubleSidedPipeline                                             core1_0.Pipeline
-	translucentPipeline, translucentDoubleSidedPipeline, skinnedTranslucentPipel core1_0.Pipeline
-	instancedPipeline, instancedDoubleSidedPipeline                              core1_0.Pipeline
-	overlayPipeline, skyPipeline, starsPipeline, celestialPipeline               core1_0.Pipeline
-	uiPipeline, msdfPipeline, skinnedPipeline                                    core1_0.Pipeline
-	grassPipeline, waterPipeline, godRayPipeline                                 core1_0.Pipeline
-	particlePipeline, terrainPipeline, grassImpostorPipeline                     core1_0.Pipeline
-	cloudSet                                                                     core1_0.DescriptorSet
-	sceneColor                                                                   *sceneColorTarget
-	sceneImage                                                                   core1_0.Image
-	bloom                                                                        bloomPass
-	tonemap                                                                      tonemapPass
-	mat                                                                          materialPipelines
-	stats                                                                        RenderStats
-	pipelineLayout, litPipelineLayout, skinnedPipelineLayout, terrainPipeLayout  core1_0.PipelineLayout
-	extent                                                                       core1_0.Extent2D
-	draws                                                                        []RenderObject
-	overlays, celestials, msdfOverlays                                           []RenderObject
-	uiOverlays                                                                   []UIRenderObject
-	lighting                                                                     SceneLighting
-	split                                                                        blendSplit
-	fallbackTexture, milkyWayTex                                                 *Texture
-	shadow                                                                       *shadowResources
-	grass                                                                        *GrassSystem
-	grassLOD                                                                     GrassLOD
-	impostor                                                                     *grassImpostor
-	particles                                                                    *ParticleSystem
-	timer                                                                        *gpuTimer
-	scratch                                                                      commandScratch
+	cmdBuf                                                                                         core1_0.CommandBuffer
+	renderPass, waterRenderPass                                                                    core1_0.RenderPass
+	framebuffer, waterFramebuffer                                                                  core1_0.Framebuffer
+	pipeline, litDoubleSidedPipeline                                                               core1_0.Pipeline
+	translucentPipeline, translucentDoubleSidedPipeline, skinnedTranslucentPipel                   core1_0.Pipeline
+	instancedPipeline, instancedDoubleSidedPipeline                                                core1_0.Pipeline
+	overlayPipeline, skyPipeline, starsPipeline, celestialPipeline                                 core1_0.Pipeline
+	uiPipeline, msdfPipeline, skinnedPipeline                                                      core1_0.Pipeline
+	grassPipeline, waterPipeline, godRayPipeline                                                   core1_0.Pipeline
+	particlePipeline, terrainPipeline, grassImpostorPipeline                                       core1_0.Pipeline
+	cloudSet                                                                                       core1_0.DescriptorSet
+	sceneColor                                                                                     *sceneColorTarget
+	sceneImage                                                                                     core1_0.Image
+	bloom                                                                                          bloomPass
+	tonemap                                                                                        tonemapPass
+	mat                                                                                            materialPipelines
+	stats                                                                                          RenderStats
+	pipelineLayout, skyPipelineLayout, litPipelineLayout, skinnedPipelineLayout, terrainPipeLayout core1_0.PipelineLayout
+	extent                                                                                         core1_0.Extent2D
+	draws                                                                                          []RenderObject
+	overlays, celestials, msdfOverlays                                                             []RenderObject
+	uiOverlays                                                                                     []UIRenderObject
+	lighting                                                                                       SceneLighting
+	split                                                                                          blendSplit
+	fallbackTexture, milkyWayTex                                                                   *Texture
+	shadow                                                                                         *shadowResources
+	grass                                                                                          *GrassSystem
+	grassLOD                                                                                       GrassLOD
+	impostor                                                                                       *grassImpostor
+	particles                                                                                      *ParticleSystem
+	timer                                                                                          *gpuTimer
+	scratch                                                                                        commandScratch
 }
 
 // identityMat is a 4x4 identity with a per-draw wobble folded into the
@@ -357,6 +357,11 @@ func buildFrame(n int) *frame {
 			// point of pinning the stream is that a draw that stops happening
 			// shows up, and a draw the fixture never asks for cannot.
 			LightShafts: 0.35, SunScreenPos: [2]float32{0.62, 0.71},
+			FogDensity: 0.006, FogHeight: 6, FogBaseHeight: 0.5,
+			// Height fog, for the same reason the shafts are on: the sky draw
+			// pushes the fog to the fragment shader now (it is the medium the
+			// in-scattering march scatters off), and a value the fixture
+			// leaves at zero is a push-constant word this hash cannot pin.
 		},
 		split:           blendSplit{}, // inactive: everything records in the main pass
 		fallbackTexture: fakeTexture(h),
@@ -368,5 +373,13 @@ func buildFrame(n int) *frame {
 		particles:       particles,
 		timer:           &gpuTimer{}, // supported=false: every method is a no-op
 	}
+	// Allocated after the literal rather than inside it, and that is
+	// load-bearing: fakeHandles hands out a monotonic counter, so a new
+	// h.layout() call inserted among the others renumbers every handle after
+	// it and moves goldenStreamHash for a reason that has nothing to do with
+	// the recorder. Appending keeps every existing fixture handle at the
+	// value it has always had, which is what let the sky change below be
+	// isolated to the two calls it really touched.
+	fx.skyPipelineLayout = h.layout()
 	return fx
 }

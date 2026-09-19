@@ -123,7 +123,15 @@ func withUILayer(fx *frame, glow bool) *frame {
 // Captured once by logging d.h from the test below. Reproduce it the same way
 // if a deliberate change to the layer's recording moves it -- and if an
 // UNINTENDED change moves it, that is what this is for.
-const goldenUILayerStreamHash = Hasher(0xab0f60e975b26193)
+//
+// Recomputed once, for #47, and not because the layer changed: this fixture
+// is buildFrame's, so it inherits both of that frame's changes -- the sky
+// draw reading the clustered light buffers, and the fixture's lighting
+// gaining fog. Same 3379 driver calls as before, against 3299 with the layer
+// off, so the layer is recording exactly what it was. goldenStreamHash's
+// comment carries the call-level attribution; there is nothing here that is
+// not there.
+const goldenUILayerStreamHash = Hasher(0x108fffc226b325a0)
 
 // TestUILayerStreamIsPinned is the layer-on half of "nothing changed": the
 // extra render pass, the two overlay pipelines bound inside it, the bloom chain
