@@ -77,7 +77,18 @@ func roundTrip(t *testing.T, doc *gltf.Document) *gltf.Document {
 // doc.Extensions["KHR_lights_punctual"].(lightspunctual.Lights) and
 // gn.Extensions["KHR_lights_punctual"].(lightspunctual.LightIndex) both
 // type-assert cleanly after a real decode, which is the fact the rest of
-// this file and gltflights.go depend on.
+// this file and gltflights.go depend on. Also verified by making
+// modelLightKind always return LightKindPoint: reported "Spot.Kind = point,
+// want LightKindSpot" plus InnerCone/OuterCone both 0 instead of 0.3/0.6 (the
+// spot-only fields modelLightFrom skips for a non-spot kind). Reverted after.
+//
+// The world pos/dir assertions at the end have teeth of their own, checked
+// the same way: aiming lightWorldPosDir's direction vector down +Z instead
+// of -Z reported "Bulb world dir = [0 -1 ...], want [0 1 0]" and "Spot world
+// dir = [0 0 1], want [0 0 -1]"; reading nodes[light.Node].Local instead of
+// .World (dropping the parent chain) reported both lights' world pos as
+// [0 0 0] instead of [2 3 4], since Root's translation never gets composed
+// in. Both introduced and reverted to confirm.
 func TestExtractLightsRoundTrip(t *testing.T) {
 	doc := &gltf.Document{
 		Asset:              gltf.Asset{Version: "2.0"},
