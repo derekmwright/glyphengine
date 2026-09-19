@@ -27,6 +27,11 @@ import (
 // randomisation can repeat: with a handful of entities the map walk lands on
 // the same order often enough that a two-run test passes on the broken code
 // perhaps one time in ten.
+//
+// Verified by breaking it: with sortDraws' final tiebreak replaced by
+// `return 0` -- which is the comparison this engine shipped before issue #53 --
+// TestDrawListOrderDoesNotDependOnInsertionOrder fails on assembly 1 and
+// TestReversedInputSortsToTheSameSequence on draw 0.
 const drawOrderAssemblies = 200
 
 // drawObject is one entity's worth of scene, held outside the world so the same
