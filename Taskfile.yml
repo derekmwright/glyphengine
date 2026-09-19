@@ -234,6 +234,14 @@ tasks:
         check 09-water -lamps 9 -spots 2 -time 0.02 -lampsoff
         check 09-water -lamps 9 -spots 2 -time 0.02 -lightdebug heatmap
         check 09-water -lamps 9 -spots 2 -time 0.02 -lightdebug bruteforce
+        # A non-default sky palette. The values reach the GPU through the same
+        # uniform block either way, so the layer sees nothing new here -- but
+        # this is the run in which sky.frag and clouds.frag read binding 1 of
+        # the cloud descriptor set with something other than the engine's own
+        # numbers in it, and a descriptor range that disagreed with the block
+        # would surface here and nowhere else.
+        check 09-water -alien -time 0.35
+        check 09-water -alien -time 0.0
         exit $status
 
   sky:
@@ -999,6 +1007,94 @@ tasks:
         # gained the wrong colour is the difference between the light loop being
         # gone and the night grade being wrong, and re-running to get the
         # captures back wastes the evidence.
+        if [ $status -ne 0 ]; then
+          echo "captures kept in examples/$d"
+        else
+          rm -rf $d
+        fi
+        exit $status
+
+  skypalette:
+    desc: "Check that the sky palette reaches the fog and the water, not just the dome"
+    dir: examples
+    cmds:
+      # Needs a GPU, so it sits with smoke, validate, determinism, lights,
+      # nightlight and waterlight rather than in `task ci`.
+      #
+      # The six colours the sky blends between were compile-time constants in
+      # atmSkyPalette, and that function is not only the sky's: applyFog fades
+      # distant geometry toward the same horizon colour and water reflects the
+      # dome. So a game replacing sky.frag through WithShaders -- which is what
+      # the docs pointed it at -- got a violet dome over a landscape still
+      # hazing into Earth-blue, with a lake reflecting the wrong one of the
+      # two. Issue #12. The palette is data now, in the one uniform block all
+      # three read, and this is the gate on "all three".
+      #
+      # Nothing else here can see it. `task smoke` renders the frame, `task
+      # validate` is silent, `task determinism` is happy because the wrong
+      # image is wrong the same way every time, and `task sky` only asks
+      # whether the sun is occluded. The failure is a colour relationship
+      # between three parts of one frame, and no single-value metric holds it.
+      #
+      # The pair is the instrument, as in `task waterlight` and `task
+      # waterblend`: -alien against the stock palette, same scene, same clock.
+      # The terrain has an albedo and the water has a body colour, so the three
+      # boxes' absolute colours cannot be compared -- but everything that did
+      # not change subtracts out, and what is left in each box is its own share
+      # of the same change to the horizon colour. See cmd/palettecheck for why
+      # the DIRECTION of that change is the invariant and its size is not.
+      #
+      # What it reads on the shipped build, in 8-bit steps: the sky box moves
+      # 122.32, the fog box 40.05 and the water box 105.15, and the fog and the
+      # water are 3.4 and 1.6 degrees off the sky's direction. They differ in
+      # size by a factor of two and a half and that is expected -- see
+      # cmd/palettecheck -- so the floor is set at 6, well under the smallest
+      # of them and far above what the failure below leaves.
+      #
+      # PROVED: with lighting.inc's fogColor reading the compiled-in constants
+      # while sky.frag reads the uniform -- exactly the drift this issue exists
+      # to prevent, and a build in which `task ci`, `task validate`, `task
+      # determinism`, `task sky`, `task hud`, `task lights`, `task nightlight`,
+      # `task waterlight` and `task waterblend` are all still green -- the fog
+      # box collapses from 40.05 to 0.49 and the water box from 105.15 to
+      # exactly 0.00, and both report THE PALETTE DID NOT REACH. The sky box is
+      # unmoved at 122.32, which is the point: the dome on its own looks
+      # completely correct, and the capture kept from that run is the violet
+      # sky over the Earth-blue lake from the issue.
+      #
+      # The water going to 0.00 rather than merely shrinking is worth knowing:
+      # water.frag's Fresnel reflection is fogColor() too, so breaking the fog
+      # breaks the reflection with it, and the two boxes are not as independent
+      # as they look. A change that fed the palette to the fog but not to
+      # water.frag would still be caught, by the angle rather than the floor.
+      #
+      # Restored from a copy, not with git checkout.
+      - |
+        status=0
+        d=.skypalette
+        rm -rf $d && mkdir -p $d
+        shot() {
+          name=$1; shift
+          GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./09-water -frames 150 \
+            -width 1280 -height 720 -time 0.35 -screenshot $d/$name.png "$@" >/dev/null 2>&1
+        }
+        shot alien -alien
+        shot earth
+        if [ ! -s $d/alien.png ] || [ ! -s $d/earth.png ]; then
+          echo "MISSING CAPTURE -- this gate proves nothing"
+          exit 1
+        fi
+        # The boxes, read off the capture at 1280x720 with -time 0.35. The
+        # skyline in this pose sits at y 366; sky is clear dome above it, fog is
+        # the far shore below it, and water is the first band of lake, where the
+        # view is grazing enough that Fresnel is near one and the surface is
+        # mostly the dome reflected.
+        go run ../cmd/palettecheck -a $d/alien.png -b $d/earth.png \
+          -sky 200,346,200,18 -fog 200,370,200,16 -water 200,408,200,16 \
+          -min 6 -tol 12 || status=1
+        # A failure here is a picture -- whether the fog stayed Earth-blue or
+        # merely moved less is the difference between a missing uniform and a
+        # tuning question -- so keep the pair, the way `task lights` does.
         if [ $status -ne 0 ]; then
           echo "captures kept in examples/$d"
         else
