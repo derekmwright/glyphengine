@@ -1034,6 +1034,7 @@ func main() {
 	lampPosts := flag.Bool("lampposts", true, "draw the piles and bulb markers under the lamps (off measures the light loop against identical geometry)")
 	alien := flag.Bool("alien", false, "a violet-and-amber sky palette instead of Earth's, through Scene.SetSkyPalette")
 	lightDebug := flag.String("lightdebug", "", "light debug mode: heatmap or bruteforce (default: off)")
+	uiGlow := flag.Bool("uiglow", false, "route the screen-space UI through its own HDR layer; nothing here asks to glow, so `task hud` uses it as the second path the HUD has to survive")
 	flag.Parse()
 
 	opts := []glyph.Option{
@@ -1054,6 +1055,13 @@ func main() {
 	}
 	if *shot != "" {
 		opts = append(opts, glyph.WithScreenshot(*shot))
+	}
+	if *uiGlow {
+		// Nothing in this example emits, so the layer changes no colour here --
+		// which is the point. `task hud` runs every one of its configurations
+		// twice, because "the HUD survives water, bloom and the tonemap" is a
+		// statement about a path, and there are two of them now.
+		opts = append(opts, glyph.WithUIGlow())
 	}
 
 	e, err := glyph.New(&game{seed: *seed, refract: *refract, pitch: float32(*pitch), tod: float32(*tod), clouds: *clouds, stars: *stars, milkyway: *milkyway, band: *band, fogHeight: float32(*fogHeight), yaw: float32(*yaw), shafts: float32(*shafts), shaftShape: glyph.LightShaftShape{Radius: float32(*shaftRadius), Decay: float32(*shaftDecay), Threshold: [2]float32{float32(*shaftLow), float32(*shaftHigh)}}, pillars: *pillars, pauseAt: *pauseAt, hud: *hud, bloom: float32(*bloom), bloomThres: float32(*bloomThreshold), plume: *plume, ghost: *ghost, marker: *marker, submerged: *submerged, lampCount: *lamps, spotCount: *spots, lampsOff: *lampsOff, lampPosts: *lampPosts, alien: *alien}, opts...)
