@@ -21,6 +21,7 @@ api:
   - glyphengine.Scene.UpdateSpatialGrid
   - glyphengine.Scene.RebuildStatics
   - glyphengine.IntegrateBodies
+  - glyphengine.Scene.Integrator
   - glyphengine.Engine.PickEntity
   - glyphengine.Engine.ScreenRay
   - glyphengine.ComputeConvexHull
@@ -156,8 +157,9 @@ with 50 entities crawls at 5,000.
 
 ## Body integration
 
-`Scene.Tick` runs `IntegrateBodies`, which applies gravity and integrates
-velocity for every entity with `Transform` + `Velocity`:
+`Scene.Tick` runs `Scene.Integrator`, which defaults to `IntegrateBodies`:
+gravity and velocity integration for every entity with `Transform` +
+`Velocity`:
 
 - With a `Collider`, it also snaps to the ground — the terrain heightmap when
   there is one, a downward raycast otherwise.
@@ -173,6 +175,38 @@ Set `Scene.Gravity` to change the rate (`DefaultGravity` is 20 units/s²), or to
 **This is not a rigid-body solver.** Bodies resolve against the world, not
 against each other. There is no stacking, no restitution, no angular velocity.
 Body-to-body response is the character controller's job or a game-side system's.
+
+### Replacing the integrator
+
+`Scene.Integrator` is called in `IntegrateBodies`'s place, every `Tick`. A game
+whose bodies need different dynamics — a real rigid-body solver, buoyancy,
+whatever `IntegrateBodies`'s single ground-snap model does not cover —
+replaces it:
+
+```go
+scene.Integrator = func(s *glyphengine.Scene, dt float32) {
+	myPhysics.Step(s, dt)
+	// Delegate anything myPhysics does not want to own to the built-in
+	// integrator — it stays exported for exactly this.
+	glyphengine.IntegrateBodies(s, dt)
+}
+```
+
+`NewScene` sets `Integrator` to `IntegrateBodies`, so the default path is
+unaffected. **Nil does not mean "skip integration."** Unlike `Env`, `Terrain`,
+`PathFinder`, and `SpatialGrid` — where nil is a supported "off" — `Tick` falls
+back to `IntegrateBodies` whenever `Integrator` is nil, including for a Scene
+built some way other than `NewScene`. A game that wants no built-in
+integration at all sets a real no-op instead of relying on the zero value:
+
+```go
+scene.Integrator = func(*glyphengine.Scene, float32) {}
+```
+
+The character-controller split is unchanged: whatever runs in `Integrator`'s
+place still should not touch `CharacterController` entities — those are
+`MoveCharacter`'s job, and integrating them twice applies gravity twice per
+tick.
 
 ## Getting unstuck
 
@@ -213,3 +247,6 @@ walk produced.
   colliders.** Check which collider actually needed the smallest push — it
   resolves the shallowest overlap first, not necessarily the one that looks
   most "in the way" visually.
+- **A custom `Integrator` silently stopped physics.** Assigning `nil` does
+  not do this — `Tick` falls back to `IntegrateBodies`. Assigning a function
+  that does nothing does; that is the only way integration turns off.
