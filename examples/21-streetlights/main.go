@@ -133,6 +133,19 @@ type game struct {
 	sweep     bool // -sweep
 	spotsOn   bool // toggled by -off at startup and by L at runtime
 
+	// volumetric and lampVolumetric are SpotLight.Volumetric and
+	// PointLight.Volumetric. Zero -- the default, and what every capture of
+	// this example took before beams existed -- means the lights scatter
+	// nothing and the frame is byte for byte what it always was.
+	volumetric     float32 // -volumetric
+	lampVolumetric float32 // -lampvolumetric
+
+	// skyLamp adds a spot aimed at the sky. Nothing else in this scene points
+	// a cone at anything but the ground, so without it there is no way to see
+	// whether the sky -- which is not a lit surface and reaches the light
+	// buffer by a different route entirely -- shows a beam at all.
+	skyLamp bool // -skylamp
+
 	t float32
 
 	// Camera pose flags, in the same spirit as 11-lights': the default is a
@@ -145,6 +158,12 @@ type game struct {
 	// flags existing.
 	nightShift float32
 	nightTint  *mgl32.Vec3
+
+	// volSteps below zero and volG below -1 mean the same: leave
+	// Scene.Volumetrics as NewScene set it. They exist so the sweep in
+	// docs/agents/lights.md can be re-run without editing the engine.
+	volSteps int
+	volG     float32
 }
 
 func (g *game) Init(e *glyph.Engine) error {
@@ -262,7 +281,7 @@ func (g *game) Init(e *glyph.Engine) error {
 	}
 
 	// ── street lamps ──
-	g.lamps = buildLamps(hm, g.lampCount)
+	g.lamps = buildLamps(hm, g.lampCount, g.lampVolumetric)
 	for _, l := range g.lamps {
 		poleEnt := e.Spawn()
 		e.C.Transform.Set(poleEnt, &glyph.Transform{
@@ -303,6 +322,15 @@ func (g *game) Init(e *glyph.Engine) error {
 	// the grade touches and what it does not are both on screen at once.
 	// -nightshift 0 is also the quickest way to see what the shift is for --
 	// the ground stops being blue and the whole scene reads as a dim day.
+	v := e.Scene.Volumetrics()
+	if g.volSteps >= 0 {
+		v.Steps = g.volSteps
+	}
+	if g.volG >= -1 {
+		v.Anisotropy = g.volG
+	}
+	e.Scene.SetVolumetrics(v)
+
 	grade := e.Scene.NightGrade()
 	if g.nightShift >= 0 {
 		grade.Strength = g.nightShift
@@ -348,11 +376,45 @@ func (g *game) Update(e *glyph.Engine, dt float32) {
 		e.Scene.SetSpotLights(nil)
 		return
 	}
-	spots := make([]glyph.SpotLight, buildingCount)
+	n := buildingCount
+	if g.skyLamp {
+		n++
+	}
+	spots := make([]glyph.SpotLight, 0, n)
 	for i, b := range g.buildings {
-		spots[i] = g.buildingSpot(i, b)
+		spots = append(spots, g.buildingSpot(i, b))
+	}
+	if g.skyLamp {
+		spots = append(spots, g.upwardSpot())
 	}
 	e.Scene.SetSpotLights(spots)
+}
+
+// upwardSpot is the -skylamp fixture: a spot in the middle of the plaza aimed
+// straight up.
+//
+// Every other cone in this scene ends on the ground within a few metres, so
+// every beam in it is seen against terrain or a wall. This one has nothing in
+// front of it but sky, which is the case that separates marching the froxel
+// grid from every screen-space approach -- there is no bright pixel up there
+// to smear, and no surface for a cone mesh to be clipped against. It is also
+// the shot the consumer game wants, a lamp on a pole throwing a shaft into a
+// dark moon's dust.
+//
+// Its range is much longer than a doorway light's and its cone much narrower:
+// a wide short cone aimed up is a haze, and what is worth looking at is a
+// column with an edge. The colour is the doorway bulb's, so nothing new has
+// to be explained about what colour a beam comes out.
+func (g *game) upwardSpot() glyph.SpotLight {
+	return glyph.SpotLight{
+		Pos:        mgl32.Vec3{0, 1.2, 0},
+		Dir:        mgl32.Vec3{0, 1, 0},
+		Range:      45,
+		Color:      spotColor,
+		Inner:      6 * math.Pi / 180,
+		Outer:      11 * math.Pi / 180,
+		Volumetric: g.volumetric,
+	}
 }
 
 // spotColor is a 2800 K incandescent bulb -- the ordinary warm porch light --
@@ -392,6 +454,10 @@ func (g *game) buildingSpot(i int, b building) glyph.SpotLight {
 		Color: spotColor,
 		Inner: spotInner,
 		Outer: spotOuter,
+		// 0 unless -volumetric asked for it, which is the whole of what makes
+		// this example's stock frame identical to the one it rendered before
+		// beams existed.
+		Volumetric: g.volumetric,
 	}
 }
 
@@ -411,7 +477,7 @@ func rotateY(yaw float32, v mgl32.Vec3) mgl32.Vec3 {
 // each at the top of a post, sampling the actual terrain height at every
 // post so lamps on the sloped ground outside the flattened plaza do not end
 // up floating or buried.
-func buildLamps(hm *glyph.Heightmap, n int) []glyph.PointLight {
+func buildLamps(hm *glyph.Heightmap, n int, vol float32) []glyph.PointLight {
 	lamps := make([]glyph.PointLight, 0, n)
 	for i := 0; i < n; i++ {
 		angle := float64(i) / float64(n) * 2 * math.Pi
@@ -425,7 +491,8 @@ func buildLamps(hm *glyph.Heightmap, n int) []glyph.PointLight {
 			// lighting is not the same fixture as a porch light, and the
 			// difference in temperature is what makes the ring read as a path
 			// of small lights rather than as a second set of doorways.
-			Color: mgl32.Vec3{1.0, 0.74, 0.50}.Mul(0.6),
+			Color:      mgl32.Vec3{1.0, 0.74, 0.50}.Mul(0.6),
+			Volumetric: vol,
 		})
 	}
 	return lamps
@@ -642,6 +709,11 @@ func main() {
 	off := flag.Bool("off", false, "start with the spotlight set cleared (SetSpotLights(nil))")
 	lightDebug := flag.String("lightdebug", "", "light debug mode: heatmap or bruteforce (default: off)")
 	lightStats := flag.Bool("lightstats", false, "log the light binner's stats for the last frame on exit")
+	volumetric := flag.Float64("volumetric", 0, "volumetric scattering intensity on every doorway spot, so the cones become visible beams (0 = off, the default)")
+	lampVolumetric := flag.Float64("lampvolumetric", 0, "volumetric scattering intensity on every street lamp, so each bulb gets a glow (0 = off, the default)")
+	skyLamp := flag.Bool("skylamp", false, "add a seventh spot in the middle of the plaza aimed straight up at the night sky")
+	volSteps := flag.Int("volsteps", -1, "samples per pixel in the in-scattering march (<0 keeps the engine default); this is the knob the cost table in docs/agents/lights.md sweeps")
+	volG := flag.Float64("volg", -2, "Henyey-Greenstein anisotropy of the scattering medium, -1..1 (<-1 keeps the engine default)")
 	nightShift := flag.Float64("nightshift", -1, "night grade strength 0..1 (0 turns the scotopic shift off; <0 keeps the engine default)")
 	nightTint := flag.String("nighttint", "", "night grade tint as r,g,b in linear RGB (empty keeps the engine default 0.72,0.86,1.30)")
 	camDist := flag.Float64("camdist", 42, "camera orbit distance")
@@ -670,17 +742,22 @@ func main() {
 	}
 
 	g := &game{
-		lampCount:  *lamps,
-		sweep:      *sweep,
-		spotsOn:    !*off,
-		camDist:    float32(*camDist),
-		camPitch:   float32(*camPitch),
-		camYaw:     float32(*camYaw),
-		camTargetX: float32(*camTargetX),
-		camTargetY: float32(*camTargetY),
-		camTargetZ: float32(*camTargetZ),
-		camLook:    float32(*camLook),
-		nightShift: float32(*nightShift),
+		lampCount:      *lamps,
+		sweep:          *sweep,
+		spotsOn:        !*off,
+		volSteps:       *volSteps,
+		volG:           float32(*volG),
+		volumetric:     float32(*volumetric),
+		lampVolumetric: float32(*lampVolumetric),
+		skyLamp:        *skyLamp,
+		camDist:        float32(*camDist),
+		camPitch:       float32(*camPitch),
+		camYaw:         float32(*camYaw),
+		camTargetX:     float32(*camTargetX),
+		camTargetY:     float32(*camTargetY),
+		camTargetZ:     float32(*camTargetZ),
+		camLook:        float32(*camLook),
+		nightShift:     float32(*nightShift),
 	}
 	if *nightTint != "" {
 		var t mgl32.Vec3

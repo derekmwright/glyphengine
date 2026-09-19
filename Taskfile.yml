@@ -264,6 +264,39 @@ tasks:
         # cover both sides of it with a uniform the layer can object to.
         check 21-streetlights -nightshift 0
         check 21-streetlights -nighttint 1.30,0.86,0.72
+        # Volumetric in-scattering, which nothing above turns on: every light
+        # ships with Volumetric 0, so all the runs before this take the march's
+        # uniform early-out and never issue a load from the light buffers
+        # inside it.
+        #
+        # -skylamp is the one that matters, and it is the reason this block
+        # exists rather than one line. It is the only run in the whole gate
+        # where sky.frag reads the three light storage buffers at set 1 --
+        # bindings the sky pipeline had no access to at all until this change,
+        # and which it reaches through a SECOND pipeline layout built for it.
+        # A pipeline layout that disagreed with the set actually bound, or a
+        # set layout the sky pipeline was not created against, is a validation
+        # error at DRAW time and nothing else: the frame still presents, the
+        # example still exits zero, and `task smoke` and `task determinism`
+        # both stay green. That is the same trap documented in
+        # docs/agents/overlay-composite.md, arriving by a different route.
+        check 21-streetlights -volumetric 1 -skylamp
+        check 21-streetlights -volumetric 1 -lampvolumetric 1 -lamps 300
+        # Both debug paths through the march: brute force walks every uploaded
+        # light at every step, the heatmap returns before applyFog is reached
+        # at all.
+        check 21-streetlights -volumetric 1 -lightdebug bruteforce
+        check 21-streetlights -volumetric 1 -lightdebug heatmap
+        # Volumetrics with the march turned off scene-wide but lights still
+        # asking for it, and with a step count at the cap: the two ends of
+        # packLitUBO's clamp, so a loop bound the shader cannot satisfy would
+        # surface here.
+        check 21-streetlights -volumetric 1 -volsteps 0
+        check 21-streetlights -volumetric 1 -volsteps 64 -skylamp
+        # And over water, where the march runs inside the WATER render pass on
+        # a surface that shades itself. Same reasoning as the -lamps 9 runs
+        # above: a second pass, a second pipeline, the same buffers.
+        check 09-water -lamps 9 -spots 2 -time 0.02 -volumetric 1
         # Blended draws on both sides of the water surface. This is the one run
         # that records the translucent, particle and overlay pipelines inside
         # the WATER render pass, which no stock run reaches -- and render pass
