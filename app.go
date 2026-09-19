@@ -1030,6 +1030,16 @@ func (e *Engine) InterpolatedTransform(entity ecs.Entity) (Transform, bool) {
 // frameDelta is real time; the scaling to simulation time happens here, and
 // the tick step comes from e.tickDuration rather than the caller.
 func (e *Engine) advanceSimulation(frameDelta time.Duration) {
+	// The clock the shaders read -- grass wind, water waves, the cloud march --
+	// advances HERE, with the ticks, and not further down the frame loop where
+	// it used to sit. That was below the minimized-window check, which
+	// `continue`s: a minimized game went on ticking while its waves stood
+	// still, so the two clocks separated by however long the window was down
+	// and the sun had moved on a lake that had not. Nothing reads it between
+	// here and the render, so where in the frame it moves is unobservable;
+	// what matters is that nothing can skip it without skipping the ticks too.
+	e.elapsed += float32(frameDelta.Seconds()) * e.timeScale
+
 	// The simulation clock is the real one scaled. Scaling what goes into the
 	// accumulator rather than the tick delta is the whole design: a fixed
 	// timestep is only fixed if tickDt never moves, and slow motion that
@@ -1352,7 +1362,6 @@ func (e *Engine) Run() {
 		//
 		// The sun needs no handling here: time of day advances inside
 		// Scene.Tick, so it stops when the ticks do.
-		e.elapsed += float32(frameDelta.Seconds()) * e.timeScale
 		e.renderFrame()
 
 		// The fence wait happens inside the renderer, so it is folded in rather

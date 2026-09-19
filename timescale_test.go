@@ -161,3 +161,46 @@ func TestDefaultTimeScaleIsRealTime(t *testing.T) {
 		t.Error("a fresh engine reports paused")
 	}
 }
+
+// TestShaderClockAdvancesWithTheTicks: the elapsed clock (grass wind, water
+// waves, the cloud march) and the tick clock must move together. They used not
+// to: elapsed was advanced further down the frame loop, below the
+// minimized-window check, which `continue`s -- so a minimized game kept ticking
+// while its waves stood still, and the clocks came back apart by however long
+// the window had been down.
+//
+// The advance now lives in advanceSimulation, which is the one thing the loop
+// cannot skip without skipping the ticks too, so driving that function is
+// driving the behaviour. Verified to fail with the advance moved back out: the
+// clock then reads 0 after a second of frames.
+func TestShaderClockAdvancesWithTheTicks(t *testing.T) {
+	e, _ := testEngine()
+	frame := time.Second / 60
+
+	run(e, 60, frame)
+	if got := e.Elapsed(); got < 0.99 || got > 1.01 {
+		t.Fatalf("after one second of frames the shader clock reads %v, want about 1", got)
+	}
+	if e.tickCount == 0 {
+		t.Fatal("no ticks ran, so agreeing with the tick clock means nothing")
+	}
+
+	// Paused: neither clock moves.
+	e.SetTimeScale(0)
+	before, ticks := e.Elapsed(), e.tickCount
+	run(e, 60, frame)
+	if e.Elapsed() != before || e.tickCount != ticks {
+		t.Fatalf("paused, the clocks moved: elapsed %v -> %v, ticks %d -> %d", before, e.Elapsed(), ticks, e.tickCount)
+	}
+
+	// Half speed: both clocks run at half rate, together.
+	e.SetTimeScale(0.5)
+	before, ticks = e.Elapsed(), e.tickCount
+	run(e, 120, frame)
+	if got := e.Elapsed() - before; got < 0.99 || got > 1.01 {
+		t.Fatalf("two seconds at half speed advanced the shader clock by %v, want about 1", got)
+	}
+	if got := e.tickCount - ticks; got < 59 || got > 61 {
+		t.Fatalf("two seconds at half speed ran %d ticks, want about 60", got)
+	}
+}
