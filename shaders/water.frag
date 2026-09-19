@@ -115,9 +115,15 @@ const float glintGain = 1.4;
 // The exponent is the sun's 220 and stays there for lamps. It is what turns
 // one light into a streak over the wavelets, and a second exponent would give
 // a lamp a differently shaped reflection from the moon hanging beside it in
-// the same frame. A lamp is a wider source than the sun and could argue for a
-// broader lobe; the ripple normals already spread the reflection far more than
-// the source size would.
+// the same frame.
+//
+// A lamp is the wider source of the two and could argue for a broader lobe --
+// a 0.22 m bulb at 15 m subtends 0.84 degrees against the sun's 0.53 -- but
+// the surface spreads the reflection an order of magnitude further than that
+// on its own. rippleNormal alone tilts by up to atan(1.85/6) = 17 degrees
+// before it is mixed in at 0.35, so about 6, and the Gerstner normal moves
+// under it. Matching the lobe to the source size would be tuning the smaller
+// of the two terms.
 float waterGlint(vec3 L, vec3 V, vec3 N) {
     vec3 H = normalize(L + V);
     return pow(max(dot(N, H), 0.0), 220.0);
