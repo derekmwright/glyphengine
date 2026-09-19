@@ -85,6 +85,30 @@ type Scene struct {
 	// MoveCharacter. Defaults to DefaultGravity.
 	Gravity float32
 
+	// Integrator advances rigid bodies — everything with a Transform and a
+	// Velocity, minus character controllers — once per Tick, in
+	// IntegrateBodies's place. NewScene sets it to IntegrateBodies, and a
+	// custom one is free to call IntegrateBodies itself for the bodies it
+	// does not want to handle differently.
+	//
+	// nil does NOT mean "integrate nothing." Unlike Env, Terrain, PathFinder,
+	// and SpatialGrid — where nil is a real, supported "off" — Tick treats a
+	// nil Integrator as "use IntegrateBodies," and only that function decides
+	// per-entity whether there is anything to do. The reason is the failure
+	// mode: an empty sky or a missing pathfinder is obviously absent, but a
+	// Scene built some way other than NewScene (a struct literal, an
+	// embedding game type that forgot to call it) that quietly stopped
+	// applying gravity would look like nothing was wrong until something
+	// floated. A game that wants no built-in integration says so with a real
+	// function value instead of leaving the zero value in place:
+	//
+	//	scene.Integrator = func(*glyphengine.Scene, float32) {}
+	//
+	// That is "off," deliberately, the same way an EnvironmentSource that
+	// returns an empty EnvironmentState is deliberately no sky rather than an
+	// oversight.
+	Integrator func(s *Scene, dt float32)
+
 	// Interpolate makes Tick record each non-Static entity's transform before
 	// simulating, so a renderer can blend between ticks instead of showing
 	// 60Hz steps on a faster display.
@@ -148,6 +172,7 @@ func NewScene() *Scene {
 		C:          NewComponents(w),
 		Env:        DefaultEnvironment(),
 		Gravity:    DefaultGravity,
+		Integrator: IntegrateBodies,
 		nightGrade: DefaultNightGrade(),
 		skyPalette: DefaultSkyPalette(),
 	}
@@ -200,7 +225,14 @@ func (s *Scene) Tick(dt float32) {
 	if s.Env != nil {
 		s.Env.Advance(dt)
 	}
-	IntegrateBodies(s, dt)
+	// nil means "use IntegrateBodies," not "skip integration" — see the
+	// Integrator field comment for why a Scene built without NewScene must
+	// not silently lose physics.
+	if s.Integrator != nil {
+		s.Integrator(s, dt)
+	} else {
+		IntegrateBodies(s, dt)
+	}
 	if s.PathFinder != nil {
 		s.PathFinder.Tick()
 	}
