@@ -75,12 +75,21 @@ func TestPackLightHeaderLayout(t *testing.T) {
 }
 
 // TestPackLightsRoundTrip packs GpuLights and decodes them back byte for
-// byte, pinning field order (posRange, color, dirCone) and the 48-byte
-// stride the shader's std430 array indexing assumes.
+// byte, pinning field order (posRange, color, dirCone, params) and the
+// 64-byte stride the shader's std430 array indexing assumes.
+//
+// The stride is the half of this worth having. A field-order mistake shows up
+// as a light in the wrong place or the wrong colour, which is visible in the
+// first capture anyone takes. A stride mistake does not: light 0 reads
+// correctly and every later light reads a window sliding further into its
+// neighbour, so a one-light scene is perfect and a scene full of lamps
+// flickers as the binner reorders them. Verified to catch it: leaving
+// gpuLightSize at 48 while packLights writes four vec4s fails here on light
+// 1's posRange, at byte 48, before any capture is taken.
 func TestPackLightsRoundTrip(t *testing.T) {
 	lights := []GpuLight{
 		{PosRange: [4]float32{1, 2, 3, 4}, Color: [4]float32{0.1, 0.2, 0.3, 0.4}, DirCone: [4]float32{0, 0, 0, 0}},
-		{PosRange: [4]float32{-5, 6, -7, 8}, Color: [4]float32{0.5, 0.6, 0.7, 0.94}, DirCone: [4]float32{0, -1, 0, 0.87}},
+		{PosRange: [4]float32{-5, 6, -7, 8}, Color: [4]float32{0.5, 0.6, 0.7, 0.94}, DirCone: [4]float32{0, -1, 0, 0.87}, Params: [4]float32{1.5, 0, 0, 0}},
 	}
 	buf := make([]byte, len(lights)*gpuLightSize)
 	if n := packLights(buf, lights); n != len(lights) {
@@ -100,7 +109,18 @@ func TestPackLightsRoundTrip(t *testing.T) {
 			if got := f32(base + 32 + c*4); got != want.DirCone[c] {
 				t.Errorf("light %d dirCone[%d] = %g, want %g", i, c, got, want.DirCone[c])
 			}
+			if got := f32(base + 48 + c*4); got != want.Params[c] {
+				t.Errorf("light %d params[%d] = %g, want %g", i, c, got, want.Params[c])
+			}
 		}
+	}
+
+	// The stride the shader indexes with, asserted as a number rather than
+	// inferred from the offsets above: those are all written relative to
+	// gpuLightSize, so a wrong stride moves the expectations with it and the
+	// loop keeps passing.
+	if gpuLightSize != 64 {
+		t.Errorf("gpuLightSize = %d, want 64 -- shaders/lights.inc's GpuLight is four vec4s", gpuLightSize)
 	}
 
 	// Overrun: a buffer too small for every light must truncate rather than

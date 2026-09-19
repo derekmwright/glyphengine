@@ -42,8 +42,18 @@ const (
 // pushConstantSize.
 const lightStorageBuffersPerSet = 3
 
-// gpuLightSize is the size in bytes of one GpuLight entry: three vec4s.
-const gpuLightSize = 48
+// gpuLightSize is the size in bytes of one GpuLight entry: four vec4s.
+//
+// It was three until volumetric scattering needed a per-light intensity (see
+// GpuLight.Params). A fourth vec4 rather than a bit stolen out of one of the
+// three: every float already there is a coordinate, a colour or a cosine, and
+// packing an intensity into the spare bits of one of those would have made
+// the shader unpack a value on every light of every fragment -- for eight
+// bytes of a buffer that is 64 KB at the full MaxLights budget. The stride is
+// what the shader's std430 array indexing assumes, so it has to agree in four
+// places at once: here, lights.inc's struct, packLights, and
+// TestPackLightsRoundTrip.
+const gpuLightSize = 64
 
 // lightHeaderSize is the size in bytes of the fixed header at the front of
 // the LightBuffer SSBO, before the lights[] array: grid, zParams, screen and
@@ -72,16 +82,27 @@ var (
 	lightIndexBufferSize  = lightcluster.MaxLightIndices * 4
 )
 
-// GpuLight is one light's 48-byte entry in the LightBuffer SSBO (the GpuLight
+// GpuLight is one light's 64-byte entry in the LightBuffer SSBO (the GpuLight
 // struct in shaders/lights.inc). It replaces the old 32-byte PointLightData
 // now that a light can also be a spot: DirCone is the zero vector for a point
 // light, which is why a GpuLight's zero value already means what
 // PointLightData's zero value meant -- no cone, and (with PosRange.w <= 0) no
 // light at all.
+//
+// Params.x continues that property to volumetrics: zero is "this light does
+// not scatter", which is what every light written before the field existed
+// packs as, and what makes those scenes render byte-identically and pay
+// nothing.
 type GpuLight struct {
 	PosRange [4]float32 // xyz world position, w range (<=0 = disabled)
 	Color    [4]float32 // rgb linear colour*intensity, a = cos(inner half-angle)
 	DirCone  [4]float32 // xyz unit direction the light points, w = cos(outer half-angle)
+	// Params.x is the volumetric scattering intensity -- how much of this
+	// light the air between the eye and a surface sends back toward the eye.
+	// 0 (the default) means the march skips this light entirely. yzw are
+	// spare; they are packed as zero rather than left alone, because this
+	// buffer is host-visible memory a frame in flight reuses.
+	Params [4]float32
 }
 
 // LightGridCell is one cell's 8-byte entry in the ClusterGrid SSBO: an offset
@@ -146,6 +167,7 @@ func packLights(dst []byte, lights []GpuLight) int {
 			binary.LittleEndian.PutUint32(dst[off+c*4:], math.Float32bits(l.PosRange[c]))
 			binary.LittleEndian.PutUint32(dst[off+16+c*4:], math.Float32bits(l.Color[c]))
 			binary.LittleEndian.PutUint32(dst[off+32+c*4:], math.Float32bits(l.DirCone[c]))
+			binary.LittleEndian.PutUint32(dst[off+48+c*4:], math.Float32bits(l.Params[c]))
 		}
 	}
 	return n

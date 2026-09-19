@@ -14,10 +14,11 @@
 // declaration, and replaces their fixed 32-light cap with a runtime light
 // count -- see MaxLights in renderer/lights.go.
 
-struct GpuLight {            // 48 bytes, std430
+struct GpuLight {            // 64 bytes, std430
     vec4 posRange;            // xyz world position, w range (<=0 = disabled)
     vec4 color;               // rgb linear colour*intensity, a = cos(inner half-angle)
     vec4 dirCone;             // xyz unit direction the light points, w = cos(outer half-angle)
+    vec4 params;              // x = volumetric scattering intensity (0 = none); yzw spare
 };                            // dirCone.xyz == 0 => point light, cone ignored
 
 layout(std430, set = LIGHT_SET, binding = 3) readonly buffer LightBuffer {
