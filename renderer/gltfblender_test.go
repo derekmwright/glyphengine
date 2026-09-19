@@ -200,8 +200,8 @@ func checkNodesAndExtras(t *testing.T, doc *gltf.Document) {
 //
 // BROKEN: changed nodeMeshes to `return []int{0, 1, 2}` unconditionally
 // (ignoring which node was asked for). FAILED with: "Building NodeMeshes =
-// [0 1 2], want a single-element slice naming the shared Building mesh".
-// Restored.
+// [0 1 2], Building_Linked NodeMeshes = [0 1 2], want equal single-element
+// slices". Restored.
 func checkSharedMeshAndDuplicate(t *testing.T, doc *gltf.Document) {
 	nodes := extractNodes(doc)
 	meshes := make([]ModelMesh, len(doc.Meshes))
@@ -253,7 +253,8 @@ func checkSharedMeshAndDuplicate(t *testing.T, doc *gltf.Document) {
 //
 // BROKEN: flipped the sign in lightWorldPosDir's direction (`{0, 0, 1}`
 // instead of `{0, 0, -1}` as the local aim axis). FAILED with:
-// "SpotLamp world dir = [0 1 0], want [0 -1 0]". Restored.
+// "SpotLamp world dir = [0 1 -1.19209275e-07], want [0 -1 0] (straight
+// down)". Restored.
 func checkLights(t *testing.T, doc *gltf.Document) {
 	nodes := extractNodes(doc)
 	lights := extractLights(doc, nodes)
@@ -436,10 +437,12 @@ func checkAlphaAndDoubleSided(t *testing.T, doc *gltf.Document) {
 // function re-decomposes the matrix its OWN way and always puts the mirror
 // on Scale.X, regardless of how the source file encoded it.
 //
-// BROKEN: changed the determinant check to `> 0` instead of `< 0`. FAILED
-// with: "Mirrored.World determinant = -1, want > 0" (i.e., correctly
-// negative, so the inverted assertion is what failed -- confirming the
-// check is live). Restored.
+// BROKEN: inverted the determinant check (`det <= 0` / "want positive"
+// instead of `det >= 0` / "want negative"). FAILED with: "Mirrored.World
+// determinant = -1, want positive (a mirror)" -- i.e. the determinant IS
+// correctly negative, so only the deliberately-inverted assertion failed,
+// confirming the check is live rather than vacuously true either way.
+// Restored.
 func checkMirrored(t *testing.T, doc *gltf.Document) {
 	nodes := extractNodes(doc)
 	idx := nodeIndexByName(doc, "Mirrored")
