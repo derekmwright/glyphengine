@@ -36,12 +36,22 @@
 // anything: the pair differs in the lights and in nothing else, so whatever
 // the water gains between the two captures is the lamps.
 //
+// One more flag moves the whole atmosphere to another planet:
+//
+//	-alien      a violet-and-amber sky palette instead of Earth's
+//
+// This scene is the one worth doing it in, because the sky, the fogged
+// distance and the lake reflecting both are in one frame -- which is the set
+// that used to disagree when a game replaced sky.frag to get a sky of its own.
+// See `task skypalette` and docs/agents/environment.md.
+//
 //	go run ./09-water              # windowed
 //	go run ./09-water -frames 200  # render 200 frames, then exit
 //	go run ./09-water -seed 3      # a different basin
 //	go run ./09-water -hud 26      # HUD lines across the waterline; see task hud
 //	go run ./09-water -plume -ghost -marker -submerged
 //	go run ./09-water -lamps 9 -spots 2 -time 0.02   # lamplight on the lake
+//	go run ./09-water -alien -time 0.35              # not Earth's sky
 //
 // WASD moves, mouse looks, Shift runs, Space jumps, R toggles refraction,
 // Escape releases the cursor.
@@ -224,6 +234,10 @@ type game struct {
 	lampsOff  bool
 	lampPosts bool
 
+	// An atmosphere that is not Earth's. Off by default, again so nothing
+	// else moves.
+	alien bool
+
 	flame   *glyph.ParticleEmitter
 	bubbles *glyph.ParticleEmitter
 
@@ -365,6 +379,28 @@ func (g *game) Init(e *glyph.Engine) error {
 			env.Fog.Height = g.fogHeight
 			env.Fog.BaseHeight = waterLevel
 		}
+	}
+
+	// A colony on an alien moon, which is what issue #12 was written from.
+	// Opt-in, so every other capture of this scene is byte for byte what it
+	// was, and set through Scene rather than through the sky shader because
+	// these six colours are the whole atmosphere's: the dome overhead, the
+	// haze the far shore fades into, and the lake reflecting both. Replacing
+	// sky.frag would move only the first of the three.
+	//
+	// The night pair is kept nearly as dark as the engine's. They are what
+	// the fog and the water reach at midnight as well as what the sky does,
+	// so a legible night sky bought here is a washed-out landscape --
+	// brighten the moon instead. See DefaultSkyPalette.
+	if g.alien {
+		e.Scene.SetSkyPalette(glyph.SkyPalette{
+			ZenithDay:       mgl32.Vec3{0.30, 0.10, 0.62},
+			HorizonDay:      mgl32.Vec3{0.95, 0.55, 0.22},
+			ZenithTwilight:  mgl32.Vec3{0.18, 0.04, 0.30},
+			HorizonTwilight: mgl32.Vec3{0.95, 0.22, 0.30},
+			ZenithNight:     mgl32.Vec3{0.0040, 0.0012, 0.0060},
+			HorizonNight:    mgl32.Vec3{0.0110, 0.0035, 0.0055},
+		})
 	}
 
 	g.camera = glyph.NewFPCamera()
@@ -988,6 +1024,7 @@ func main() {
 	spots := flag.Int("spots", 0, "shore floodlights throwing cones across the surface (0 = none)")
 	lampsOff := flag.Bool("lampsoff", false, "build the piles and fixtures but hand the scene no lights, as the control for `task waterlight`")
 	lampPosts := flag.Bool("lampposts", true, "draw the piles and bulb markers under the lamps (off measures the light loop against identical geometry)")
+	alien := flag.Bool("alien", false, "a violet-and-amber sky palette instead of Earth's, through Scene.SetSkyPalette")
 	lightDebug := flag.String("lightdebug", "", "light debug mode: heatmap or bruteforce (default: off)")
 	flag.Parse()
 
@@ -1011,7 +1048,7 @@ func main() {
 		opts = append(opts, glyph.WithScreenshot(*shot))
 	}
 
-	e, err := glyph.New(&game{seed: *seed, refract: *refract, pitch: float32(*pitch), tod: float32(*tod), clouds: *clouds, stars: *stars, milkyway: *milkyway, band: *band, fogHeight: float32(*fogHeight), yaw: float32(*yaw), shafts: float32(*shafts), pillars: *pillars, pauseAt: *pauseAt, hud: *hud, bloom: float32(*bloom), bloomThres: float32(*bloomThreshold), plume: *plume, ghost: *ghost, marker: *marker, submerged: *submerged, lampCount: *lamps, spotCount: *spots, lampsOff: *lampsOff, lampPosts: *lampPosts}, opts...)
+	e, err := glyph.New(&game{seed: *seed, refract: *refract, pitch: float32(*pitch), tod: float32(*tod), clouds: *clouds, stars: *stars, milkyway: *milkyway, band: *band, fogHeight: float32(*fogHeight), yaw: float32(*yaw), shafts: float32(*shafts), pillars: *pillars, pauseAt: *pauseAt, hud: *hud, bloom: float32(*bloom), bloomThres: float32(*bloomThreshold), plume: *plume, ghost: *ghost, marker: *marker, submerged: *submerged, lampCount: *lamps, spotCount: *spots, lampsOff: *lampsOff, lampPosts: *lampPosts, alien: *alien}, opts...)
 	if err != nil {
 		log.Fatalf("create engine: %v", err)
 	}
