@@ -688,6 +688,56 @@ tasks:
         }
         spair default
         spair lamps300 -lamps 300
+        # 09-water is the third scene and the only one with a water surface.
+        # It has to be here rather than be assumed covered: water.frag is not
+        # one of the shaders that call evalLighting*, it runs its own copy of
+        # the light loop over the same resolveLightRange/lightAt, so it is a
+        # second place the two modes can be made to disagree and the first two
+        # scenes do not touch it at all. The surface also reaches the grid
+        # differently from anything else here -- it is drawn in the water pass,
+        # from the same camera but after the depth buffer is final, and a
+        # near-horizontal lake spans almost every depth slice in one draw.
+        wshot() {
+          mode=$1; out=$2; w=$3; h=$4; shift 4
+          GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./09-water -frames 150 \
+            -width $w -height $h -lightdebug "$mode" "$@" \
+            -screenshot $d/$out.png >/dev/null 2>&1
+        }
+        wpair() {
+          name=$1; w=$2; h=$3; shift 3
+          wshot ""         water-$name-clustered $w $h "$@"
+          wshot bruteforce water-$name-brute     $w $h "$@"
+          if same water-$name-clustered water-$name-brute; then
+            echo "09-water $name ${w}x${h}: identical"
+          elif [ $? -eq 1 ]; then
+            echo "09-water $name ${w}x${h}: CLUSTERED AND BRUTE FORCE DIFFER"
+            status=1
+          else
+            echo "09-water $name ${w}x${h}: MISSING CAPTURE -- this gate proves nothing"
+            status=1
+          fi
+        }
+        wpair reflections 1280 720  -time 0.02 -lamps 9 -spots 2
+        wpair reflections 1920 1080 -time 0.02 -lamps 9 -spots 2
+        # Enough lights over the lake that a froxel holds several of them, with
+        # the piles off so the surface is not occluded by its own fixtures.
+        wpair dense 1280 720 -time 0.02 -lamps 120 -spots 4 -lampposts=false
+        # PROVED again on these three, with the same 0.8*radius sphere test in
+        # lightcluster's Builder.bin: all three report CLUSTERED AND BRUTE
+        # FORCE DIFFER. Restored from a copy immediately after.
+        #
+        # And water fails LOUDER than the rest of this gate, which is worth
+        # knowing. The argument above says a lost light is the dim tail of a
+        # falloff, one step of 255, invisible to any tolerance. That is true of
+        # a diffuse surface. On water a lamp arrives only as a specular lobe of
+        # exponent 220, so a light missing from a froxel does not dim a
+        # gradient -- it deletes a whole glint. The dense pose differs on 4.45%
+        # of the frame with a largest channel difference of 42 of 255, and
+        # every one of those pixels is in the water band: 41035 of 41035, or
+        # 11.4% of it. The 1920x1080 reflections pose differs on 0.79% with a
+        # largest difference of 17. The exact comparison is still the right
+        # instrument -- it is free and it catches both -- but a reader
+        # measuring a water failure should not expect the 1/255 recorded above.
         # The two modes are only required to agree while nothing is being
         # dropped. A cell over its light cap, a spent index buffer or a light
         # over the frame budget all make clustered differ from brute force for
