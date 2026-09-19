@@ -22,6 +22,14 @@
 // instead of as a shorter file that diff reports in a way nobody reads. A file
 // in which the field is absent from EVERY line is an error: that is the shape a
 // vacuous gate has, and it has happened here before.
+//
+// -constant asserts about ONE run instead of two: that the field holds the
+// same value on every frame of it. That is a different question from
+// determinism and diff cannot ask it -- `task reload` needs it, because a
+// level being swapped for a freshly loaded copy must not change what is drawn
+// on any frame, and the failure it is looking for (the level blinking out
+// between a release and the next load) is invisible to a comparison of two
+// runs that both blink in the same place.
 package main
 
 import (
@@ -36,6 +44,9 @@ func main() {
 	in := flag.String("in", "", "state trace to read")
 	out := flag.String("out", "", "file to write (default stdout)")
 	key := flag.String("key", "draws", "field to extract")
+	constant := flag.Bool("constant", false, "assert the field holds one value on every line; exit non-zero naming the first line that differs")
+	count := flag.Bool("count", false, "keep only the count from a count/hash field such as draws=8/1a2b…, dropping the hash")
+	skip := flag.Int("skip", 0, "drop the first N lines before comparing; for a -constant assertion about a steady state that the run takes a few frames to reach")
 	flag.Parse()
 
 	if *in == "" {
@@ -57,6 +68,41 @@ func main() {
 		os.Exit(1)
 	}
 
+	if *skip > 0 {
+		// Skipping is only ever right for a -constant assertion about a state
+		// the run has to reach -- 22-level's camera takes a dozen frames to
+		// settle onto its authored pose, and every draw's MVP moves with it.
+		// It is a flag rather than a hardcoded number so the gate that needs
+		// it has to say how many frames it is not looking at, and refusing to
+		// skip the file away keeps "constant over 0 lines" from passing.
+		if *skip >= len(lines) {
+			fmt.Fprintf(os.Stderr, "tracefield: -skip %d leaves nothing of %s's %d lines to compare\n", *skip, *in, len(lines))
+			os.Exit(1)
+		}
+		lines = lines[*skip:]
+	}
+
+	if *count {
+		// A CountHash field is "<n>/<hash>": how many of the thing there were
+		// and what they were. Keeping only the count asks a much weaker
+		// question than the whole field does, and there is exactly one gate
+		// that wants it -- `task reload`, where the hash legitimately changes
+		// while the camera settles and the COUNT must not move at all,
+		// because a level blinking out between a release and the next load is
+		// precisely a frame or two with fewer draws in it.
+		for i, l := range lines {
+			v := fieldOf(l, *key)
+			if n, _, ok := strings.Cut(v, "/"); ok {
+				lines[i] = loopOf(l) + " " + *key + "=" + n
+			}
+		}
+	}
+
+	if *constant {
+		checkConstant(*in, *key, lines)
+		return
+	}
+
 	w := os.Stdout
 	if *out != "" {
 		f, err := os.Create(*out)
@@ -75,6 +121,38 @@ func main() {
 		fmt.Fprintf(os.Stderr, "tracefield: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// checkConstant asserts every extracted line carries the same field value, and
+// exits non-zero naming the first that does not.
+//
+// It reports the line count on success on purpose: a gate that passed over
+// three frames has not looked at a reload loop, and "constant over 3 lines" is
+// the only way that is visible from the outside.
+func checkConstant(path, key string, lines []string) {
+	first := fieldOf(lines[0], key)
+	for i, l := range lines[1:] {
+		if v := fieldOf(l, key); v != first {
+			fmt.Fprintf(os.Stderr, "tracefield: %s: %s changed at %s: %s, was %s at %s\n",
+				path, key, loopOf(l), v, first, loopOf(lines[0]))
+			fmt.Fprintf(os.Stderr, "tracefield: that is line %d of %d\n", i+2, len(lines))
+			os.Exit(1)
+		}
+	}
+	fmt.Printf("%s: %s constant over %d lines (%s)\n", path, key, len(lines), first)
+}
+
+func fieldOf(line, key string) string {
+	v, _ := field(line, key)
+	return v
+}
+
+func loopOf(line string) string {
+	v, ok := field(line, "loop")
+	if !ok {
+		return "loop=?"
+	}
+	return "loop=" + v
 }
 
 // extract returns one "loop=<n> <key>=<value>" line per trace line, and how

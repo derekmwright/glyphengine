@@ -30,6 +30,18 @@
 //	go run ./22-level                    # windowed, drag-orbit camera
 //	go run ./22-level -frames 200         # render 200 frames, then exit
 //	go run ./22-level -screenshot out.png # capture the last frame
+//	go run ./22-level -reload 20          # swap the level for a fresh load, 20 times
+//
+// -reload is the Blender iteration story with the file changing underneath it
+// taken out: it loads a SECOND copy of the level, spawns it, and only then
+// gives the first one back with Renderer.DestroyModel -- the swap happening
+// inside one tick, so no frame is ever drawn without a level. That is both the
+// only reload a game would ship and the harder case for DestroyModel: at the
+// moment of the swap, frames still in flight reference the buffers being
+// released. A never-destroyed second model sits beside it as the control.
+// Run it under the validation layer (task validate does) -- the layer is what
+// would notice a resource freed while a frame still referenced it, and the
+// resource counts this asserts on are what notice one never freed at all.
 //
 // Left-drag orbits, scroll zooms, Escape quits.
 package main
@@ -106,28 +118,46 @@ type game struct {
 	// levelPath is a glTF on disk to load instead of the embedded level.glb:
 	// the way to look at a file exported from Blender without rebuilding.
 	levelPath string
+
+	// model and levelEntities are what the current load of the level
+	// produced. Nothing reads them after Init with -reload 0; they exist
+	// because -reload has to give them back.
+	model         *renderer.Model
+	levelEntities []glyph.Entity
+
+	// anchor is a SECOND model, loaded once under -reload and never
+	// destroyed. It is the control: it must keep drawing exactly the same
+	// before, during and after every reload of the model beside it. See
+	// loadAnchor.
+	anchor *renderer.Model
+
+	// -reload state. See stepReload.
+	reloadCycles int
+	cyclesLeft   int
+	phaseFrame   int
+	haveSteady   bool
+	steadyCounts renderer.ResourceCounts
+	oneLevel     renderer.ResourceCounts
 }
 
+// reloadCycleFrames is how many frames -reload draws between swaps.
+//
+// It has to exceed the frames in flight (two) that a deferred destroy waits
+// out, because stepReload's checks are only meaningful once the previous
+// cycle release has actually run. Four leaves slack without making the loop
+// slow.
+const reloadCycleFrames = 4
+
 func (g *game) Init(e *glyph.Engine) error {
-	r := e.Renderer()
-	var levelFS fs.FS = assetsFS
-	name := "assets/level.glb"
-	if g.levelPath != "" {
-		// A .gltf keeps its .bin and its textures beside it, so the file's own
-		// directory is the filesystem it has to be opened from.
-		levelFS, name = os.DirFS(filepath.Dir(g.levelPath)), filepath.Base(g.levelPath)
+	if g.reloadCycles > 0 {
+		if err := g.loadAnchor(e); err != nil {
+			return err
+		}
 	}
-	model, err := r.LoadGLTF(levelFS, name)
+	spawnTarget, err := g.loadLevel(e)
 	if err != nil {
-		return fmt.Errorf("load %s: %w", name, err)
+		return err
 	}
-
-	spawnTarget := spawnLevel(e, model)
-	e.RebuildStatics()
-
-	spots, points := lightsFromModel(model)
-	e.Scene.SetSpotLights(spots)
-	e.Scene.SetPointLights(points)
 
 	// Night, so the lamps are the light -- the same setup 21-streetlights
 	// uses, for the same reason: a warm pool under each fixture reads
@@ -146,9 +176,196 @@ func (g *game) Init(e *glyph.Engine) error {
 	g.camera.LookOffset = g.camLook
 	g.camera.Target = spawnTarget
 
+	spots, points := lightsFromModel(g.model)
 	log.Printf("22-level running: %d nodes, %d meshes, %d spot lights, %d point lights",
-		len(model.Nodes), len(model.Meshes), len(spots), len(points))
+		len(g.model.Nodes), len(g.model.Meshes), len(spots), len(points))
 	return nil
+}
+
+// openLevel opens the level file this run was pointed at.
+func (g *game) openLevel(r *renderer.Renderer) (*renderer.Model, error) {
+	var levelFS fs.FS = assetsFS
+	name := "assets/level.glb"
+	if g.levelPath != "" {
+		// A .gltf keeps its .bin and its textures beside it, so the file's own
+		// directory is the filesystem it has to be opened from.
+		levelFS, name = os.DirFS(filepath.Dir(g.levelPath)), filepath.Base(g.levelPath)
+	}
+	model, err := r.LoadGLTF(levelFS, name)
+	if err != nil {
+		return nil, fmt.Errorf("load %s: %w", name, err)
+	}
+	return model, nil
+}
+
+// loadLevel is Init's level half, split out so -reload can run it again. With
+// -reload 0 it runs exactly once and nothing about this example changed.
+func (g *game) loadLevel(e *glyph.Engine) (mgl32.Vec3, error) {
+	model, err := g.openLevel(e.Renderer())
+	if err != nil {
+		return mgl32.Vec3{}, err
+	}
+	g.model = model
+
+	spawnTarget, entities := spawnLevel(e, model)
+	g.levelEntities = entities
+	e.RebuildStatics()
+
+	spots, points := lightsFromModel(model)
+	e.Scene.SetSpotLights(spots)
+	e.Scene.SetPointLights(points)
+
+	return spawnTarget, nil
+}
+
+// loadAnchor loads the -reload control: a second Model from the same file, one
+// of whose primitives is drawn for the whole run and never destroyed.
+//
+// It exists to answer the one question the reloading model cannot answer about
+// itself -- does releasing one model disturb another? DestroyModel goes
+// through DestroyMesh and DestroyTexture, which deregister from the renderer's
+// own r.meshes/r.textures tracking lists by SCANNING them for a pointer match,
+// and a bug there (removing the wrong entry, leaving a stale one behind for
+// Renderer.Destroy to free a second time) shows up as some OTHER model's
+// buffers going missing, not as the destroyed one's.
+//
+// It has to be DRAWN to be a control, which is not automatic. The first
+// version of this spawned a whole second copy of the level 34 units to one
+// side, and the state trace showed the frame's draw count unchanged at 7 --
+// every entity of it was frustum-culled, so it proved nothing. One primitive,
+// parked above the spawn point the camera is already aimed at, is in frame on
+// every run, and `task reload` asserts the count went UP for exactly this
+// reason.
+func (g *game) loadAnchor(e *glyph.Engine) error {
+	model, err := g.openLevel(e.Renderer())
+	if err != nil {
+		return fmt.Errorf("anchor: %w", err)
+	}
+	g.anchor = model
+	if len(model.Meshes) == 0 {
+		return fmt.Errorf("anchor: the level carries no primitives to use as one")
+	}
+
+	// The last primitive: a prop or a light fixture in both level files this
+	// example is run against, rather than the ground slab primitive 0 is.
+	ent := e.Spawn()
+	tr := glyph.Transform{Position: mgl32.Vec3{0, 9, 8}, Scale: mgl32.Vec3{1, 1, 1}}
+	e.C.Transform.Set(ent, &tr)
+	spawnPrimitive(e, ent, model.Meshes[len(model.Meshes)-1])
+	return nil
+}
+
+// releaseLevel gives one load of the level back: the entities that draw it
+// first, then the model.
+//
+// That order is the contract, not a preference. DestroyModel nils every
+// ModelMesh's Mesh, Texture and Material, so an entity still holding a MeshRef
+// to one of them would be drawing a handle nothing owns; see
+// docs/agents/models.md for what that actually costs. Despawning first is how
+// a game avoids it. The model's own release is then safe against the frames
+// already submitted, because DestroyModel defers it rather than freeing now.
+func (g *game) releaseLevel(e *glyph.Engine, model *renderer.Model, entities []glyph.Entity) {
+	for _, ent := range entities {
+		e.Scene.Despawn(ent)
+	}
+	e.RebuildStatics()
+	e.Renderer().DestroyModel(model)
+}
+
+// stepReload drives the -reload loop, and the SHAPE of it is the point: load
+// the new level, spawn it, and only then release the old one, all inside one
+// tick.
+//
+// Doing it the other way round -- release, then load on a later frame -- was
+// the first version of this, and watching it run is what condemned it: the
+// level vanishes for a few frames every cycle. That is not cosmetic. This loop
+// stands in for the real use, an artist re-exporting from Blender and the game
+// picking the file up, and a reload that blinks the world out is not a
+// reload anyone would ship. Swapping inside one tick is also the harder case
+// for DestroyModel, not the easier one: at the moment of the swap the frames
+// still in flight reference the OLD buffers, which is exactly what its
+// deferral exists for, and what DestroyMesh's and DestroyTexture's immediacy
+// would turn into a use-after-free.
+//
+// The counts are what make this more than a smoke test. CLAUDE.md records a
+// teardown check that reported zero leaks because teardown never ran, so
+// nothing here is assumed:
+//
+//   - Deferred must be 0 at the top of each cycle: the PREVIOUS cycle's
+//     release actually ran.
+//   - Every cycle must start from the same steady counts. This is the one that
+//     catches a DestroyModel that does nothing: each cycle loads a whole extra
+//     level, so if the old one were never released the counts would climb by
+//     one level per cycle and this fires on cycle two.
+//   - The counts must not drop in the tick the swap happens: DestroyModel must
+//     defer, not free now.
+//   - The release has to be worth something at all -- one level's worth of
+//     meshes has to be non-zero, or none of the above proves anything.
+//
+// The loop deliberately ends with the level LOADED rather than tearing it down
+// first. A final teardown would make the last few frames draw no level, which
+// is the one thing `task reload` asserts never happens, and it would prove
+// nothing the per-cycle steady check has not already proved twenty times over.
+// Renderer.Destroy takes the live model at shutdown, which is the other path
+// worth having under the layer anyway.
+func (g *game) stepReload(e *glyph.Engine) {
+	r := e.Renderer()
+	g.phaseFrame++
+	if g.phaseFrame < reloadCycleFrames {
+		return
+	}
+	g.phaseFrame = 0
+
+	steady := r.ResourceCounts()
+	if steady.Deferred != 0 {
+		log.Fatalf("-reload: %d deferred destroys still queued %d frames after the last swap; the previous release never ran", steady.Deferred, reloadCycleFrames)
+	}
+	if g.haveSteady && !sameResources(steady, g.steadyCounts) {
+		log.Fatalf("-reload: the renderer tracks %+v at the top of this cycle, want %+v -- a reload is accumulating or losing resources", steady, g.steadyCounts)
+	}
+	g.steadyCounts, g.haveSteady = steady, true
+
+	if g.cyclesLeft == 0 {
+		log.Printf("-reload: %d swaps done; one level is %d meshes, %d textures, %d materials, and the renderer tracked the same %d/%d/%d at the top of every cycle",
+			g.reloadCycles, g.oneLevel.Meshes, g.oneLevel.Textures, g.oneLevel.Materials,
+			steady.Meshes, steady.Textures, steady.Materials)
+		e.Close()
+		return
+	}
+	g.cyclesLeft--
+
+	oldModel, oldEntities := g.model, g.levelEntities
+
+	// The swap. New first.
+	if _, err := g.loadLevel(e); err != nil {
+		log.Fatalf("-reload: reloading the level: %v", err)
+	}
+	both := r.ResourceCounts()
+	if g.oneLevel.Meshes == 0 {
+		g.oneLevel = subResources(both, steady)
+		if g.oneLevel.Meshes <= 0 {
+			log.Fatalf("-reload: loading a second copy of the level added %d meshes; this check proves nothing unless it adds some", g.oneLevel.Meshes)
+		}
+	}
+
+	// Old second, in the same tick, so no frame is ever drawn without a level.
+	g.releaseLevel(e, oldModel, oldEntities)
+
+	if after := r.ResourceCounts(); !sameResources(after, both) {
+		log.Fatalf("-reload: DestroyModel freed immediately -- the renderer tracked %+v before it and %+v after, in the same tick that frames in flight still reference those buffers", both, after)
+	}
+}
+
+func sameResources(a, b renderer.ResourceCounts) bool {
+	return a.Meshes == b.Meshes && a.Textures == b.Textures && a.Materials == b.Materials
+}
+
+func sumResources(a, b renderer.ResourceCounts) renderer.ResourceCounts {
+	return renderer.ResourceCounts{Meshes: a.Meshes + b.Meshes, Textures: a.Textures + b.Textures, Materials: a.Materials + b.Materials}
+}
+
+func subResources(a, b renderer.ResourceCounts) renderer.ResourceCounts {
+	return renderer.ResourceCounts{Meshes: a.Meshes - b.Meshes, Textures: a.Textures - b.Textures, Materials: a.Materials - b.Materials}
 }
 
 func (g *game) Update(e *glyph.Engine, dt float32) {
@@ -159,6 +376,10 @@ func (g *game) Update(e *glyph.Engine, dt float32) {
 	g.camera.Update(in)
 	g.camera.ResolveCollision(e.Scene, 0, dt)
 	e.SetCamera(g.camera.ViewVectors())
+
+	if g.reloadCycles > 0 {
+		g.stepReload(e)
+	}
 }
 
 // spawnLevel is the per-node placement pattern this example exists to show:
@@ -166,10 +387,17 @@ func (g *game) Update(e *glyph.Engine, dt float32) {
 // transform, decoded through the node's own extras rather than a naming
 // convention. It returns the world position of the node tagged
 // {"spawn": "player"} in its extras, 1.6m up (eye height) for the camera to
-// target -- falling back to the origin, logged, if the level carries none.
-func spawnLevel(e *glyph.Engine, model *renderer.Model) mgl32.Vec3 {
+// target -- falling back to the origin, logged, if the level carries none --
+// and every entity it spawned.
+//
+// The entity list is what -reload despawns before handing the model back.
+// Tracking it is the level loader's job, not the engine's: nothing in the ECS
+// records which entities came from which file, and a game that reloads a level
+// has to know which of its entities were the level.
+func spawnLevel(e *glyph.Engine, model *renderer.Model) (mgl32.Vec3, []glyph.Entity) {
 	spawnTarget := mgl32.Vec3{0, 1.6, 0}
 	foundSpawn := false
+	var entities []glyph.Entity
 
 	for i := range model.Nodes {
 		node := model.Nodes[i]
@@ -201,8 +429,8 @@ func spawnLevel(e *glyph.Engine, model *renderer.Model) mgl32.Vec3 {
 		if !exact {
 			log.Printf("level: node %q is sheared or has a zero scale; it is drawn without that part of its transform", node.Name)
 		}
-
 		ent := e.Spawn()
+		entities = append(entities, ent)
 		e.C.Transform.Set(ent, &transform)
 		spawnPrimitive(e, ent, model.Meshes[meshIdxs[0]])
 
@@ -217,6 +445,7 @@ func spawnLevel(e *glyph.Engine, model *renderer.Model) mgl32.Vec3 {
 		// as far as anything that moves or interpolates them is concerned.
 		for _, mi := range meshIdxs[1:] {
 			extra := e.Spawn()
+			entities = append(entities, extra)
 			own := transform
 			e.C.Transform.Set(extra, &own)
 			spawnPrimitive(e, extra, model.Meshes[mi])
@@ -240,7 +469,7 @@ func spawnLevel(e *glyph.Engine, model *renderer.Model) mgl32.Vec3 {
 	if !foundSpawn {
 		log.Printf("level: no node with extras {\"spawn\":\"player\"} found; camera targets the origin")
 	}
-	return spawnTarget
+	return spawnTarget, entities
 }
 
 // spawnPrimitive sets the render-facing components for one ModelMesh on an
@@ -381,6 +610,7 @@ func main() {
 	camYaw := flag.Float64("camyaw", 3.14159, "camera yaw in radians (pi looks from behind spawn toward the plaza, +Z)")
 	camLook := flag.Float64("camlook", 2.5, "how far above the target the camera looks")
 	level := flag.String("level", "", "a .glb or .gltf on disk to load instead of the built-in level, e.g. one exported from Blender")
+	reload := flag.Int("reload", 0, "load, draw, destroy and reload the level N times, then exit; asserts the renderer's live resource counts return to their baseline (exercises Renderer.DestroyModel)")
 	flag.Parse()
 
 	opts := []glyph.Option{
@@ -392,7 +622,20 @@ func main() {
 	if *fullscreen {
 		opts = append(opts, glyph.WithFullscreen())
 	}
-	if *frames > 0 {
+	// -reload closes the window itself when its last cycle finishes, and each
+	// cycle takes reloadCycleFrames frames, so a -frames
+	// cap smaller than that would end the run mid-loop with every check still
+	// unmade -- looking exactly like a pass. `task validate` runs every
+	// example with -frames 30, so this is not hypothetical. A cap is still
+	// applied as a backstop in case the loop itself never terminates.
+	switch {
+	case *reload > 0:
+		needed := (*reload + 3) * reloadCycleFrames
+		if *frames > 0 && *frames < needed {
+			log.Printf("-reload %d needs about %d frames; ignoring -frames %d, which would cut the loop short", *reload, needed, *frames)
+		}
+		opts = append(opts, glyph.WithMaxFrames(needed))
+	case *frames > 0:
 		opts = append(opts, glyph.WithMaxFrames(*frames))
 	}
 	if *shot != "" {
@@ -405,7 +648,9 @@ func main() {
 		camYaw:   float32(*camYaw),
 		camLook:  float32(*camLook),
 
-		levelPath: *level,
+		levelPath:    *level,
+		reloadCycles: *reload,
+		cyclesLeft:   *reload,
 	}
 	e, err := glyph.New(g, opts...)
 	if err != nil {

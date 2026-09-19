@@ -222,6 +222,18 @@ tasks:
         # instance -- that a hand-authored fixture never exercises. See
         # renderer/testdata/blender/README.md and docs/agents/blender-pipeline.md.
         check 22-level -level ../renderer/testdata/blender/level.glb
+        # Renderer.DestroyModel, which no stock run reaches: 22-level swaps the
+        # level for a freshly loaded copy twenty times over, releasing each old
+        # model while frames that drew it are still in flight. That is the case
+        # DestroyMesh's and DestroyTexture's immediacy would make a
+        # use-after-free, and the layer is the only thing that sees it. Both
+        # level files, because only the Blender one carries a texture, and a
+        # texture is the resource a model SHARES across its primitives -- the
+        # one a naive release frees twice. The run asserts its own live
+        # resource counts and exits non-zero if they move; see `task reload`
+        # for the frame-by-frame half of the same check.
+        check 22-level -reload 20
+        check 22-level -reload 20 -level ../renderer/testdata/blender/level.glb
         # A heightmap converted from a real Blender terrain (issue #70),
         # not the procedurally-generated one the stock 07-terrain run above
         # uses -- CreateTerrainMesh/CreateIndexedMesh32 run against real
@@ -303,6 +315,76 @@ tasks:
         check 13-ui -glow on
         check 13-ui
         unset GLYPHENGINE_PROVOKE_RECREATE_FRAMES
+        exit $status
+
+  reload:
+    desc: "Check that swapping a level for a freshly loaded copy never drops a frame's geometry"
+    dir: examples
+    cmds:
+      # Needs a GPU, so it sits with smoke, validate and determinism rather
+      # than in `task ci`.
+      #
+      # `task validate` already runs the same -reload loop under the layer and
+      # would catch a buffer freed while a frame still read it. This asks the
+      # other question, which the layer cannot: did the picture stay whole?
+      #
+      # The first version of 22-level's -reload released the level and loaded
+      # the replacement several frames later, and it passed validation in
+      # silence while the whole world blinked out twenty times -- found by
+      # someone watching the window, not by any gate. The loop swaps inside one
+      # tick now, and this is what holds it there.
+      #
+      # Two fields, because they fail differently:
+      #
+      #   draws -count  the number of draws in the frame, over the WHOLE run.
+      #                 A level that vanishes for a frame is a frame with fewer
+      #                 draws in it, and nothing else in this repo would say so.
+      #   draws         the ordered hash of the draw list, which also covers
+      #                 every draw's model matrix and material constants -- so
+      #                 the geometry is not merely present but in the same
+      #                 place, including the anchor model the loop never
+      #                 destroys. -skip 12 because the camera takes that many
+      #                 frames to settle onto its authored pose and every
+      #                 draw's MVP moves with it; the 20 swaps all happen after
+      #                 frame 12.
+      - |
+        status=0
+        d=.reload
+        rm -rf $d && mkdir -p $d
+        # Prove the assertion can fail before trusting it, the same rule
+        # task determinism follows for its comparator. cam= is the camera,
+        # which demonstrably moves over the first dozen frames of this very
+        # trace, so -constant on it MUST report a difference. If it does not,
+        # -constant is reporting everything as constant and the two real
+        # checks below mean nothing.
+        GLYPHENGINE_FIXED_FRAME_TIME=16.667ms GLYPHENGINE_STATE_TRACE=$d/self.trace go run ./22-level -reload 2 >/dev/null 2>&1
+        if [ ! -s $d/self.trace ]; then echo "MISSING TRACE -- this gate proves nothing"; exit 1; fi
+        if go run ../cmd/tracefield -key cam -constant -in $d/self.trace >/dev/null 2>&1; then
+          echo "SELF-CHECK: -constant called a field that moves every frame constant -- this gate proves nothing"
+          exit 1
+        fi
+        if go run ../cmd/tracefield -key notafield -constant -in $d/self.trace >/dev/null 2>&1; then
+          echo "SELF-CHECK: tracefield accepted a field that is not there -- this gate proves nothing"
+          exit 1
+        fi
+        run() {
+          label="22-level -reload 20 $*"
+          GLYPHENGINE_FIXED_FRAME_TIME=16.667ms GLYPHENGINE_STATE_TRACE=$d/r.trace go run ./22-level -reload 20 "$@" >$d/r.log 2>&1 || {
+            echo "$label: FAILED TO RUN"; tail -5 $d/r.log; status=1; return
+          }
+          if [ ! -s $d/r.trace ]; then echo "$label: MISSING TRACE -- this gate proves nothing"; status=1; return; fi
+          if ! go run ../cmd/tracefield -key draws -count -constant -in $d/r.trace; then
+            echo "$label: the frame's draw COUNT moved -- the level went missing between a release and the next load"
+            status=1
+          fi
+          if ! go run ../cmd/tracefield -key draws -constant -skip 12 -in $d/r.trace; then
+            echo "$label: the draw list changed across a swap -- reloaded geometry, or the model that was never destroyed, is not landing where it did"
+            status=1
+          fi
+        }
+        run
+        run -level ../renderer/testdata/blender/level.glb
+        rm -rf $d
         exit $status
 
   sky:

@@ -89,6 +89,12 @@ func dirFS(t *testing.T, dir, name string) (fs.FS, string) {
 	return os.DirFS(dir), name
 }
 
+// dirFSOnly is dirFS for a caller that names the file itself.
+func dirFSOnly(t *testing.T, dir string) fs.FS {
+	t.Helper()
+	return os.DirFS(dir)
+}
+
 // TestReadGLTFMatchesGoldenGeometry is the evidence that splitting LoadGLTF
 // into ReadGLTF + upload (issue #75) did not move a single decoded byte.
 //

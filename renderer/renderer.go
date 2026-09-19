@@ -1299,18 +1299,34 @@ func (r *Renderer) DeferDestroy(fn func()) {
 
 // flushDeferredDestroys ticks down pending destructions and executes any that
 // have waited long enough for all in-flight frames to complete.
+//
+// The queue is detached before the loop so a callback can queue a destroy of
+// its own. That is not hypothetical: DestroyModel's callback calls
+// DestroyMaterial, which defers the material's uniform buffer in turn. This
+// used to compact in place and then truncate to the surviving count, which
+// discarded -- not delayed -- anything appended while it ran, and since
+// DestroyMaterial has already dropped the material from r.materials by then,
+// Renderer.Destroy's shutdown sweep could not find it either. The only symptom
+// was a leaked VkBuffer at vkDestroyDevice.
+// TestDeferredDestroyQueuedFromInsideAFlushSurvives is that behaviour pinned.
+//
+// What a callback queues here waits out its own full countdown from the next
+// flush, rather than running inside this one.
 func (r *Renderer) flushDeferredDestroys() {
+	pending := r.deferredDestroys
+	r.deferredDestroys = nil
+
 	n := 0
-	for i := range r.deferredDestroys {
-		r.deferredDestroys[i].framesLeft--
-		if r.deferredDestroys[i].framesLeft <= 0 {
-			r.deferredDestroys[i].fn()
+	for i := range pending {
+		pending[i].framesLeft--
+		if pending[i].framesLeft <= 0 {
+			pending[i].fn()
 		} else {
-			r.deferredDestroys[n] = r.deferredDestroys[i]
+			pending[n] = pending[i]
 			n++
 		}
 	}
-	r.deferredDestroys = r.deferredDestroys[:n]
+	r.deferredDestroys = append(pending[:n], r.deferredDestroys...)
 }
 
 // Minimized returns true when the framebuffer is zero-sized (window minimized).
@@ -1868,9 +1884,19 @@ func (r *Renderer) Destroy() {
 
 // flushAllDeferred runs every pending deferred destroy immediately, ignoring
 // the frame countdown. Only valid once the GPU is known to be idle.
+//
+// It drains until the queue is empty rather than making one pass, for the same
+// reason flushDeferredDestroys detaches: a callback can queue another (see
+// DestroyModel), and a single pass leaves that one behind for the validation
+// layer to report as a leak at vkDestroyDevice. Destroy calls this twice, which
+// covered exactly one level of nesting by accident; this covers any depth on
+// purpose.
 func (r *Renderer) flushAllDeferred() {
-	for _, dd := range r.deferredDestroys {
-		dd.fn()
+	for len(r.deferredDestroys) > 0 {
+		pending := r.deferredDestroys
+		r.deferredDestroys = nil
+		for _, dd := range pending {
+			dd.fn()
+		}
 	}
-	r.deferredDestroys = nil
 }

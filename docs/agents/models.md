@@ -33,6 +33,10 @@ api:
   - renderer.Renderer.LoadGLTFSkinned
   - renderer.ReadGLTF
   - renderer.ReadGLTFSkinned
+  - renderer.Renderer.DestroyModel
+  - renderer.Renderer.DestroySkinnedModel
+  - renderer.ResourceCounts
+  - renderer.Renderer.ResourceCounts
 example: examples/08-grass
 run: task example:08-grass
 requires:
