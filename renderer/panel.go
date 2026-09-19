@@ -78,11 +78,13 @@ type UIRenderObject struct {
 	// behaviour that happens to produce a number. Emission is linear by nature,
 	// and this is the multiplier applied after the decode.
 	//
-	// It does nothing without the UI glow layer (renderer.WithUIGlowLayer): the
-	// swapchain is 8-bit, so on the direct path there is nothing above 1 to
-	// hold. That is why zero is the default and why an existing game is
-	// untouched -- and why a game that sets this and sees no glow should check
-	// UIGlowLayer first.
+	// It does nothing without the UI glow layer (renderer.WithUIGlowLayer), and
+	// that is enforced rather than merely likely: the recorder does not push it
+	// on the direct path at all. The swapchain is 8 bits per channel, so there
+	// is nowhere above 1 for emission to live, and honouring it anyway would
+	// clamp -- turning a mid-grey panel that asked for glow into a white one,
+	// which is not "no glow", it is a different colour. A game that sets this
+	// and sees nothing should check UIGlowLayer first.
 	Glow float32
 
 	// Fill overrides the panel interior; nil derives it from the tint. Panels

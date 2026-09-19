@@ -341,11 +341,21 @@ func recordUIResolve(
 // Keep threshold - knee at or above 1, and for a stronger reason than the scene
 // bloom has. Below 1 is where ordinary UI lives: a UI colour is an sRGB value at
 // or below 1, so after srgbToLinear and the premultiply nothing an ordinary
-// element writes can exceed 1.0, and a ramp that reaches under that would make
-// every white label glow. The default 1.2 / 0.2 puts the foot of the ramp
-// exactly at 1.0, which is where it was measured to leave a HUD alone: with the
-// layer on and nothing asking for glow, 13-ui differs from the direct path by
-// 1/255 on 2 pixels of the whole frame.
+// element writes can exceed 1.0, and a ramp reaching under that would make every
+// white label glow. The default 1.2 / 0.2 puts the foot of the ramp exactly at
+// 1.0, and that was measured rather than reasoned: 13-ui with the layer on and
+// nothing asking to glow differs from the same geometry on the direct path on
+// 5009 pixels of 921600, every one of them a blended UI pixel, NONE of them by
+// more than 1/255 -- which is the 8-bit rounding step that blending in a float
+// layer and encoding once costs, not the glow leaking in. `task uiglow` holds
+// that number.
+//
+// A strength of zero or less switches the chain off and skips recording it. That
+// is worth knowing because the chain runs whether or not anything in the frame
+// actually clears the threshold -- the recorder cannot tell, since text carries
+// its emission per vertex -- so it is a fixed cost a game that wants no glow
+// should not pay. Measured on a Radeon RX 7900 XTX at 1280x720, 200-frame means:
+// the layer alone is 0.017 ms and its chain another 0.063 ms.
 //
 // Defaults: SetUIGlow(0.7, 1.2, 0.2, 1.0), the scene bloom's own starting point.
 func (r *Renderer) SetUIGlow(strength, threshold, knee, radius float32) {

@@ -9,7 +9,8 @@ layout(push_constant) uniform PushConstants {
     vec4 tint;
     vec4 params; // x = textureMode (0=panel, 1=straight texture)
     vec4 fill;   // rgb = panel interior colour, w = its opacity; w < 0 = derive
-    // x = linear emission multiplier, y = premultiply alpha before writing.
+    // x = linear emission multiplier, y = 1 when drawing INTO the UI glow
+    // layer (premultiply, and the signal that emission means anything).
     //
     // Offset 176, which is where the lit block's pointPos sits -- the UI
     // pipelines read none of the lit members past tint, so everything from
@@ -104,7 +105,10 @@ void main() {
     //
     // Multiplying by exactly 1.0 is exact in IEEE754, so a draw that asks for
     // no glow writes the same bits it wrote before this line existed. That is
-    // what keeps the direct-to-swapchain path byte-identical.
+    // what keeps the direct-to-swapchain path byte-identical -- and on that
+    // path glow.x is always 0, because recordUIComposite does not push an
+    // element's emission when there is no layer to hold it. See there for why
+    // "it does nothing" beats "it clamps".
     outColor.rgb *= 1.0 + pc.glow.x;
 
     // Premultiply, for the UI layer only.

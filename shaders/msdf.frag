@@ -18,7 +18,7 @@ layout(push_constant) uniform PushConstants {
     vec4 tint;
     vec4 params;
     vec4 fill;
-    vec4 glow; // y = premultiply alpha before writing
+    vec4 glow; // y = 1 when drawing INTO the UI glow layer
 } pc;
 
 layout(set = 0, binding = 0) uniform sampler2D msdfAtlas;
@@ -40,10 +40,17 @@ void main() {
     //
     // The emission multiplier lands after the decode, not before: it is linear
     // light added to a colour, and folding it into the sRGB value would push
-    // the argument of srgbToLinear past 1 where that curve means nothing. Zero
-    // is no glow, and multiplying by exactly 1.0 is exact, so a line that asks
-    // for none writes the bits it wrote before this existed.
-    outColor = vec4(srgbToLinear(fragTint.rgb) * (1.0 + fragGlow), opacity * fragAlpha);
+    // the argument of srgbToLinear past 1 where that curve means nothing.
+    //
+    // glow.y gates it as well as selecting the premultiply, and that is the
+    // same decision recordUIComposite makes for panels by simply not pushing
+    // their emission on the direct path: there is nowhere above 1 for emission
+    // to live without an HDR layer, so honouring it against an 8-bit target
+    // would clamp and hand back a different colour rather than no glow. Zero
+    // times anything is zero and multiplying by exactly 1.0 is exact, so a line
+    // drawn on the direct path writes the bits it wrote before this existed
+    // whatever its Glow is.
+    outColor = vec4(srgbToLinear(fragTint.rgb) * (1.0 + fragGlow * pc.glow.y), opacity * fragAlpha);
 
     // Premultiply, for the UI layer only. See ui.frag for the whole argument;
     // the two pipelines draw into the same layer and have to agree about what

@@ -86,6 +86,20 @@ var scenes = []scene{
 	{"waterlights32", "09-water", []string{"-time", "0.02", "-lamps", "32", "-spots", "0", "-lampposts=false", "-frames", "200"}, "32 lamps over a lake"},
 	{"waterlights400", "09-water", []string{"-time", "0.02", "-lamps", "400", "-spots", "0", "-lampposts=false", "-frames", "200"}, "400 lamps over the same lake"},
 
+	// The screen-space UI, three ways over one scene. Paired for the same
+	// reason the instanced and clustered rows are: the only honest way to say
+	// what a second layer costs is to render the same frame with and without
+	// it, and the only honest way to separate the layer from the glow is a row
+	// where the layer is on and nothing is asking to emit.
+	//
+	// gpu_composite is where the difference shows up twice over: with the
+	// layer on it stops holding the UI quads and holds one fullscreen triangle
+	// instead, because the composite REPLACES the direct draw. gpu_uilayer and
+	// gpu_uiglow are the added cost.
+	{"ui", "13-ui", []string{"-frames", "200"}, "HUD drawn straight onto the swapchain"},
+	{"ui-layer", "13-ui", []string{"-glow", "layer", "-frames", "200"}, "the same HUD through its own HDR layer, nothing glowing"},
+	{"ui-glow", "13-ui", []string{"-glow", "on", "-frames", "200"}, "the same HUD again, three elements emitting"},
+
 	{"kitchensink", "15-kitchen-sink", []string{"-demo", "-frames", "240"}, "everything at once"},
 }
 
