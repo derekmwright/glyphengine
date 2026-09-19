@@ -204,6 +204,14 @@ tasks:
         # character carries a generated normal map, which routes it through the
         # skinned material pipeline instead.
         check 06-skinned -demo -plain -fade 0.4
+        # A real Blender export, not the Go-written level.glb the stock
+        # 22-level run above loads. Blender is the reference world-building
+        # pipeline (issue #67) and its exporter takes paths -- KHR_texture_transform,
+        # a mirrored node's negative-determinant matrix, several nodes sharing
+        # one doc mesh from ordinary object duplication AND from a collection
+        # instance -- that a hand-authored fixture never exercises. See
+        # renderer/testdata/blender/README.md and docs/agents/blender-pipeline.md.
+        check 22-level -level ../renderer/testdata/blender/level.glb
         # 21-streetlights' non-default paths: the moving sweep, the cleared
         # spotlight set, a lamp count well past the default, and the debug
         # heatmap. None of these run under stock settings above.
