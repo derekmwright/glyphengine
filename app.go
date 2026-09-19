@@ -1534,6 +1534,11 @@ func (e *Engine) renderFrame() {
 		CloudSteps:    env.CloudSteps,
 		LightShafts:   shaftStrength,
 		SunScreenPos:  sunScreen,
+		ShaftShape: renderer.LightShaftShape{
+			Radius:    env.LightShaftShape.Radius,
+			Decay:     env.LightShaftShape.Decay,
+			Threshold: env.LightShaftShape.Threshold,
+		},
 	}
 
 	// Bin the lights for THIS frame's camera and framebuffer. proj came from

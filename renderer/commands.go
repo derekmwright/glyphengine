@@ -69,6 +69,11 @@ type SceneLighting struct {
 	LightShafts  float32
 	SunScreenPos [2]float32
 
+	// ShaftShape is how the shafts look rather than how strong they are. The
+	// zero value is DefaultLightShaftShape, field by field, so a caller that
+	// has never heard of it draws what it drew before the shape was tunable.
+	ShaftShape LightShaftShape
+
 	// FogHeight is the altitude over which fog density falls to 1/e. Zero
 	// selects the uniform-density falloff instead.
 	FogHeight float32
@@ -1754,10 +1759,13 @@ func recordWaterPass(
 	return nil
 }
 
-// Light-shaft constants the Go side owns because the shader cannot compute
-// them: the lobe needs the framebuffer's aspect ratio, which nothing in the
-// push block carries otherwise, and the decay belongs beside it because the
-// two together are the shape of the effect.
+// The light shafts' default shape. These were compile-time constants when the
+// pass was first drawn, and they are a look rather than a fact: how far light
+// reaches through the air, how hard a pillar's streak is, and what counts as
+// bright enough to be a source all depend on the sky a game has -- and since
+// #12 that sky is the game's to choose. So they are the defaults of
+// LightShaftShape now, and the measurements below are what the defaults were
+// chosen on, not a claim that they suit every scene.
 //
 // Both were measured on `09-water -time 0.72 -yaw 1.771 -pitch -0.185
 // -pillars` under GLYPHENGINE_FIXED_FRAME_TIME: dusk, the sun peeking over a
@@ -1821,7 +1829,84 @@ const (
 	// the streaks half washed out. 0.96 leaves the last sample at 0.14 of the
 	// first, which is far enough to still have the sun in it.
 	shaftDecay = 0.96
+
+	// shaftThresholdLow and shaftThresholdHigh are the linear-luminance window
+	// a pixel has to clear to count as a source; godray.frag's bright() is a
+	// smoothstep across it and carries the measurements the window was placed
+	// by. They are the two numbers most tied to Earth's sky: a palette whose
+	// plain daytime sky clears the lower edge smears the whole dome into
+	// itself, and one whose sunset never reaches it draws nothing at all.
+	shaftThresholdLow  = 0.62
+	shaftThresholdHigh = 0.88
 )
+
+// LightShaftShape is how the light shafts look, as opposed to how strong they
+// are, which is SceneLighting.LightShafts.
+//
+// Every field's zero value means "the default", separately, so a game changes
+// the one it cares about and keeps the rest: a Radius of 0 is a lobe with
+// nothing in it and a Decay of 0 is a march of one sample, so neither zero was
+// a setting anyone could have wanted.
+type LightShaftShape struct {
+	// Radius is how far from the sun the shafts reach, in screen heights. See
+	// shaftLobeRadius for what it trades: wider reaches further and starts
+	// lighting ground a few metres from the eye, because this pass has no
+	// depth to tell the two apart.
+	Radius float32
+
+	// Decay is the weight each step of the march toward the sun keeps from the
+	// one before it, in (0, 1]. Lower gives an occluder a harder streak and the
+	// shafts less reach; 1 is a uniform wash. See shaftDecay.
+	Decay float32
+
+	// Threshold is the linear-luminance window a pixel has to clear to count as
+	// a light source, as {low, high}: nothing below low contributes, everything
+	// above high contributes fully. It is what makes terrain an occluder. A sky
+	// palette much brighter or dimmer than the default wants this moved with
+	// it. {0, 0} is the default; for a window that really starts at zero, give
+	// high a value.
+	Threshold [2]float32
+}
+
+// DefaultLightShaftShape is the shape every scene had before it was tunable.
+func DefaultLightShaftShape() LightShaftShape {
+	return LightShaftShape{
+		Radius:    shaftLobeRadius,
+		Decay:     shaftDecay,
+		Threshold: [2]float32{shaftThresholdLow, shaftThresholdHigh},
+	}
+}
+
+// resolve returns the shape the pass will draw with: defaults where a field
+// was left at zero, and something drawable where it was set to a value that is
+// not. It never rejects, the same way the light cone angles are clamped rather
+// than refused -- a shape arrives every frame from game code, and a frame is
+// the wrong place to find out about a typo by losing the sky.
+func (s LightShaftShape) resolve() LightShaftShape {
+	d := DefaultLightShaftShape()
+	// The comparisons are written so that NaN fails them and takes the default.
+	if !(s.Radius > 0) || math.IsInf(float64(s.Radius), 0) {
+		s.Radius = d.Radius
+	}
+	if !(s.Decay > 0) {
+		s.Decay = d.Decay
+	}
+	if s.Decay > 1 {
+		// Above one the far end of the march outweighs the near end and the
+		// weights grow without bound over 48 steps.
+		s.Decay = 1
+	}
+	lo, hi := s.Threshold[0], s.Threshold[1]
+	if (lo == 0 && hi == 0) || !(lo >= 0) || !(hi >= 0) {
+		s.Threshold = d.Threshold
+	} else if !(hi > lo) {
+		// GLSL leaves smoothstep undefined when the edges meet or cross. A hard
+		// cut at lo is what was asked for, so give it the narrowest window that
+		// is still one.
+		s.Threshold[1] = lo + 1e-4
+	}
+	return s
+}
 
 // recordLightShafts draws the screen-space light shafts: one fullscreen
 // triangle, additive, sampling the scene copy this pass already made.
@@ -1864,13 +1949,17 @@ func recordLightShafts(
 		aspect = float32(extent.Width) / float32(extent.Height)
 	}
 
+	shape := lighting.ShaftShape.resolve()
+
 	scratch.resetPC()
 	scratch.pc[32] = lighting.SunScreenPos[0]
 	scratch.pc[33] = lighting.SunScreenPos[1]
 	scratch.pc[34] = lighting.LightShafts
-	scratch.pc[35] = shaftDecay
-	scratch.pc[36] = aspect / shaftLobeRadius
-	scratch.pc[37] = 1 / shaftLobeRadius
+	scratch.pc[35] = shape.Decay
+	scratch.pc[36] = aspect / shape.Radius
+	scratch.pc[37] = 1 / shape.Radius
+	scratch.pc[38] = shape.Threshold[0]
+	scratch.pc[39] = shape.Threshold[1]
 	scratch.pushConstants(deviceDriver, cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment)
 
 	deviceDriver.CmdDraw(cmdBuf, 3, 1, 0, 0)

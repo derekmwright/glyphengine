@@ -41,6 +41,7 @@ layout(push_constant) uniform PushConstants {
     mat4 model;
     vec4 tint;      // xy = sun position in UV space, z = strength, w = decay
     vec4 sunDir;    // xy = 1 / lobe radius, per axis, in UV space
+                    // zw = the brightness window, low and high, linear luminance
     vec4 sunColor;
     vec4 pointPos;
     vec4 pointColor;
@@ -88,8 +89,12 @@ const int SAMPLES = 48;
 //	the sunset glow around the disc          0.85 – above 1
 //	the disc itself                          5.0 (SunDiscColor's boost)
 //
-// So 0.62 to 0.88 admits cloud, the sunset glow and the disc, and rejects every
-// plain sky measured and everything on the ground. Dropping the lower edge to
+// So 0.62 to 0.88 -- the default, renderer.LightShaftShape.Threshold, which
+// arrives in pc.sunDir.zw -- admits cloud, the sunset glow and the disc, and
+// rejects every plain sky measured and everything on the ground. Those are
+// measurements of the DEFAULT sky palette; a game that changes the palette
+// (#12) is changing the numbers in the table above, which is why the window
+// is data and not a constant here. Dropping the lower edge to
 // 0.5 would admit the whole midday sky — 85 % of the frame in `09-water -time
 // 0.5` sits at 0.45 to 0.50 — and smear the image into itself.
 //
@@ -106,7 +111,7 @@ const int SAMPLES = 48;
 // Whoever raises a light past 1 has to revisit these two constants.
 vec3 bright(vec3 c) {
     float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
-    float m = smoothstep(0.62, 0.88, l);
+    float m = smoothstep(pc.sunDir.z, pc.sunDir.w, l);
     return c * m;
 }
 

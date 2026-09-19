@@ -146,7 +146,14 @@ func benchName(n int) string {
 // and the value below. Nothing else in the stream moved, and in particular the
 // PassShafts timestamps did not, because the fixture's gpuTimer is unsupported
 // and writes none.
-const goldenStreamHash = Hasher(0x08525eb349c579bc)
+//
+// And a third time in the same change, when the shafts' shape became data
+// (LightShaftShape): the brightness window moved out of godray.frag and into
+// two floats of the shaft draw's push block that used to be zero. Same 3299
+// calls. Verified by leaving pc[38] and pc[39] unpacked and re-running this
+// test -- 0x08525eb349c579bc, the value above exactly -- so those two floats
+// are the whole of the difference.
+const goldenStreamHash = Hasher(0x7f81990a07a357c6)
 
 // TestRecordCommandBufferStreamIsUnchanged is the GPU-free half of "nothing
 // changed": every driver call the recorder makes, folded in order with its

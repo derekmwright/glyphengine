@@ -215,6 +215,7 @@ type game struct {
 	fogHeight  float32
 	yaw        float32
 	shafts     float32
+	shaftShape glyph.LightShaftShape
 	pillars    bool
 	pauseAt    int
 	hud        int
@@ -369,6 +370,9 @@ func (g *game) Init(e *glyph.Engine) error {
 			env.Sky.CloudSteps = g.clouds
 			env.Sky.StarDensity = float32(g.stars)
 			env.Sky.MilkyWay = float32(g.band)
+			// Zero fields keep the engine's defaults, so passing the struct
+			// through whole is the same as not touching it.
+			env.Sky.LightShaftShape = g.shaftShape
 			if g.shafts >= 0 {
 				env.Sky.LightShafts = g.shafts
 			}
@@ -1009,6 +1013,10 @@ func main() {
 	fogHeight := flag.Float64("fogheight", 0, "height fog falloff in world units (0 = uniform density)")
 	yaw := flag.Float64("yaw", 0, "initial camera yaw in radians")
 	shafts := flag.Float64("shafts", -1, "light shaft strength (0 disables; -1 keeps the default)")
+	shaftRadius := flag.Float64("shaftradius", 0, "light shaft reach in screen heights (0 keeps the default, 0.90)")
+	shaftDecay := flag.Float64("shaftdecay", 0, "light shaft per-step decay in (0,1] (0 keeps the default, 0.96)")
+	shaftLow := flag.Float64("shaftlow", 0, "lower edge of the shafts' brightness window, linear luminance (with -shafthigh; both 0 keeps the default 0.62..0.88)")
+	shaftHigh := flag.Float64("shafthigh", 0, "upper edge of the shafts' brightness window")
 	pillars := flag.Bool("pillars", false, "spawn pillars between the spawn point and the setting sun")
 	pauseAt := flag.Int("pauseat", 0, "pause the simulation at frame N (0 = never); the world should stop dead")
 	hud := flag.Int("hud", 0, "draw N identical HUD lines down the frame, for the `task hud` legibility check")
@@ -1048,7 +1056,7 @@ func main() {
 		opts = append(opts, glyph.WithScreenshot(*shot))
 	}
 
-	e, err := glyph.New(&game{seed: *seed, refract: *refract, pitch: float32(*pitch), tod: float32(*tod), clouds: *clouds, stars: *stars, milkyway: *milkyway, band: *band, fogHeight: float32(*fogHeight), yaw: float32(*yaw), shafts: float32(*shafts), pillars: *pillars, pauseAt: *pauseAt, hud: *hud, bloom: float32(*bloom), bloomThres: float32(*bloomThreshold), plume: *plume, ghost: *ghost, marker: *marker, submerged: *submerged, lampCount: *lamps, spotCount: *spots, lampsOff: *lampsOff, lampPosts: *lampPosts, alien: *alien}, opts...)
+	e, err := glyph.New(&game{seed: *seed, refract: *refract, pitch: float32(*pitch), tod: float32(*tod), clouds: *clouds, stars: *stars, milkyway: *milkyway, band: *band, fogHeight: float32(*fogHeight), yaw: float32(*yaw), shafts: float32(*shafts), shaftShape: glyph.LightShaftShape{Radius: float32(*shaftRadius), Decay: float32(*shaftDecay), Threshold: [2]float32{float32(*shaftLow), float32(*shaftHigh)}}, pillars: *pillars, pauseAt: *pauseAt, hud: *hud, bloom: float32(*bloom), bloomThres: float32(*bloomThreshold), plume: *plume, ghost: *ghost, marker: *marker, submerged: *submerged, lampCount: *lamps, spotCount: *spots, lampsOff: *lampsOff, lampPosts: *lampPosts, alien: *alien}, opts...)
 	if err != nil {
 		log.Fatalf("create engine: %v", err)
 	}

@@ -1,5 +1,7 @@
 package glyphengine
 
+import "github.com/derekmwright/glyphengine/renderer"
+
 // EnvironmentSource supplies the sky, the light, and the air for a frame.
 //
 // The engine holds one of these on the Scene and asks it for state each frame.
@@ -106,6 +108,10 @@ type EnvironmentState struct {
 	// fade with the sun disc's elevation already applied, so a sun on its way
 	// down arrives here weaker rather than being cut off at the horizon.
 	LightShafts float32
+
+	// LightShaftShape is Sky.LightShaftShape, passed through untouched. Zero
+	// fields mean the engine's defaults; see LightShaftShape.
+	LightShaftShape LightShaftShape
 
 	// CastShadows enables the shadow pass. Turning it off when the only light
 	// is a dim moon saves the cascades for shadows nobody can see.
@@ -259,6 +265,52 @@ type Sky struct {
 	// pass also drags in a copy of the scene colour and a second render pass;
 	// see docs/agents/environment.md.
 	LightShafts float32
+
+	// LightShaftShape is how the shafts look, where LightShafts is how strong
+	// they are. The zero value is the engine's default shape, so a Sky built
+	// by hand gets it without asking.
+	LightShaftShape LightShaftShape
+}
+
+// LightShaftShape tunes the look of the light shafts: how far they reach, how
+// hard a streak an occluder casts, and what counts as bright enough to be a
+// source. Each field's zero value keeps the engine's default for that field,
+// so a game sets the one it cares about:
+//
+//	sky.LightShaftShape.Radius = 1.2 // reach further across the frame
+//
+// The defaults were measured on the default sky at dusk (the tables are beside
+// the constants in renderer/commands.go). They are defaults and not constants
+// because they are a look, and because Threshold in particular is a statement
+// about how bright the sky is -- which, since SetSkyPalette, is the game's to
+// decide.
+type LightShaftShape struct {
+	// Radius is how far from the sun the shafts reach, in screen heights.
+	// Default 0.90. Wider reaches further and starts to haze ground a few
+	// metres from the eye: the pass has no depth buffer, and distance from the
+	// sun on screen is what stands in for it.
+	Radius float32
+
+	// Decay is the weight each of the 48 steps toward the sun keeps from the
+	// one before, in (0, 1]. Default 0.96. Lower gives an occluder a harder
+	// streak and the shafts less reach; 1 is an even wash.
+	Decay float32
+
+	// Threshold is the linear-luminance window a pixel has to clear to count as
+	// a source, as {low, high}. Default {0.62, 0.88}: on the default palette
+	// that admits cloud, the sunset glow and the disc, and rejects plain sky
+	// and everything on the ground. A palette with a much brighter sky wants it
+	// raised, or the whole dome smears into itself; a much dimmer one wants it
+	// lowered, or nothing clears it and the pass draws nothing. {0, 0} is the
+	// default -- for a window that really starts at zero, give high a value.
+	Threshold [2]float32
+}
+
+// DefaultLightShaftShape is the shape a zero LightShaftShape resolves to,
+// spelled out for a game that wants to start from the numbers.
+func DefaultLightShaftShape() LightShaftShape {
+	d := renderer.DefaultLightShaftShape()
+	return LightShaftShape{Radius: d.Radius, Decay: d.Decay, Threshold: d.Threshold}
 }
 
 // Cloud quality presets for Sky.CloudSteps.
@@ -412,6 +464,7 @@ func (env *Environment) State() EnvironmentState {
 		// to stay continuous as the cycle wraps past midnight, and a shaft
 		// radiating from a disc nobody is drawing is a different mistake.
 		s.LightShafts = env.Sky.LightShafts * smoothstep(-0.15, -0.02, s.SunElevation)
+		s.LightShaftShape = env.Sky.LightShaftShape
 		s.DrawStars = env.Sky.Stars && s.StarFade > 0
 		s.StarDensity = env.Sky.StarDensity
 		if s.StarDensity < 0 {
