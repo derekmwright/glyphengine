@@ -27,6 +27,9 @@ api:
   - lightcluster.MaxLightsPerCell
   - lightcluster.MaxLightIndices
   - lightcluster.Stats
+  - renderer.Model.Lights
+  - renderer.ModelLight
+  - renderer.Model.LightWorldPosDir
 example: examples/21-streetlights
 run: task example:21-streetlights
 requires:
@@ -201,6 +204,30 @@ gives you yours; the CPU cost is the `cluster` phase of the engine's CPU timer
   grew from 128 to 144 bytes — a `vec4 nightGrade` after `mat4 cascadeVP[2]`.
   A stale shader declares the wrong descriptor type at binding 3; run it under
   `task validate`, which will say so.
+
+## Lights from a glTF level
+
+A level authored in an editor can carry its own point and spot lights via
+`KHR_lights_punctual`, and `renderer.LoadGLTF`/`LoadGLTFSkinned` read them
+into `Model.Lights` — see the "Loading a level" section of
+[`models.md`](models.md) for the full pattern and `examples/22-level` for a
+worked example. The short version, specific to this page:
+
+- **`ModelLight.Intensity` is candela (point/spot) or lux (directional) —
+  glTF's units, not this engine's.** `PointLight`/`SpotLight` above carry no
+  photometric unit at all; intensity is folded entirely into `Color`, the
+  same as it always has been for a hand-placed light. A glTF light's raw
+  intensity has to be scaled into that `Color` by the game — `Model.Lights`
+  does not do this conversion, and there is no universal factor to convert
+  by, only a look that reads right in the scene.
+- **`ModelLight.Range == 0` means the document said "unbounded", which this
+  engine's lights cannot represent.** A game supplies a finite `Range`
+  itself. This is not a rare case: Blender's glTF exporter never writes
+  `range` at all, so every light from a Blender-authored level needs one.
+- **`InnerCone`/`OuterCone` use the exact same half-angle convention as
+  `Inner`/`Outer` above** — verified against this page, not assumed — so a
+  glTF spot's cone angles carry straight into a `SpotLight` with no
+  conversion.
 
 ## Debug views
 
