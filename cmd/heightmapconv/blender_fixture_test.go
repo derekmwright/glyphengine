@@ -25,6 +25,20 @@ import "testing"
 // mesh near the origin (every earlier synthetic test in this package) was
 // too tight. See raster.go's baryEdgeEpsRel doc for the fix and the
 // numbers; this test is what caught it.
+//
+// Also verified to fail two more ways, both against this real file rather
+// than a synthetic one:
+//   - Reverting baryEdgeEpsRel's fix (a fixed eps := 1e-7 instead of
+//     scaling by coordinate magnitude) reproduced the exact 17-hole failure
+//     the fix above was written for: "17 hole(s) in a fully-covered mesh",
+//     listing each one's grid and world coordinates.
+//   - Dropping nodeLocalTransform's rotation (the same break
+//     TestNodeWorldThroughParentChain and
+//     TestLoadMeshTrianglesPutsAnAsymmetricTerrainInWorldSpace use) failed
+//     even earlier, at the bounds check: "mesh bounds = 200,-10..210,0,
+//     want ~190,-10..200,0" -- confirming a converter that ignores the
+//     node's transform fails visibly on a REAL Blender export, not only on
+//     a hand-built one.
 func TestBlenderFixturePeakAndRidgeLandWhereHandComputationSays(t *testing.T) {
 	tris, nodeName, err := loadMeshTriangles("testdata/blender_terrain.glb", "")
 	if err != nil {
