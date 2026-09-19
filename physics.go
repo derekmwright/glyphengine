@@ -201,9 +201,38 @@ func (s *Scene) colliderAABB(entity ecs.Entity) (wb AABB, ok bool) {
 // calls — compare SpatialGrid.QueryRadius, which reuses a buffer and is NOT
 // safe for this, against QueryRadiusAlloc, which the built-in implementation
 // uses instead. Each call must be independent or internally synchronized.
+//
+// A replacement must never call Scene.Raycast or Scene.OverlapAABB on the scene
+// it is installed in: with Queries set those ARE the replacement, and the call
+// recurses until the stack runs out. The built-in implementation is reached
+// through Scene.BuiltinQueries instead.
 type QueryBackend interface {
 	Raycaster
 	OverlapAABB(box AABB, exclude ecs.Entity) []OverlapResult
+}
+
+// BuiltinQueries returns the spatial-grid implementation as a QueryBackend,
+// whatever Scene.Queries is set to. It is to Queries what the exported
+// IntegrateBodies is to Integrator: a replacement that only wants to change
+// part of the answer -- its own BVH for the static buildings and the engine's
+// grid for everything that moves, a filter, a counter -- delegates the rest
+// here rather than reimplementing the terrain fast path and the hull narrow
+// phase, and it cannot delegate to Scene.Raycast, which is itself.
+//
+// It inherits the collision snapshot, so a backend built on it is safe in
+// MoveCharactersParallel without a freeze of its own.
+func (s *Scene) BuiltinQueries() QueryBackend {
+	return builtinQueries{s}
+}
+
+type builtinQueries struct{ s *Scene }
+
+func (b builtinQueries) Raycast(origin, dir mgl32.Vec3, maxDist float32, exclude ecs.Entity) (RayHit, bool) {
+	return b.s.raycastBuiltin(origin, dir, maxDist, exclude)
+}
+
+func (b builtinQueries) OverlapAABB(box AABB, exclude ecs.Entity) []OverlapResult {
+	return b.s.overlapAABBBuiltin(box, exclude)
 }
 
 // OverlapAABB queries the world for all collider entities whose AABB overlaps
