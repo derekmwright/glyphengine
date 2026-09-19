@@ -84,6 +84,7 @@ func runBlenderFixtureChecks(t *testing.T, path string) {
 	t.Run("AlphaAndDoubleSided", func(t *testing.T) { checkAlphaAndDoubleSided(t, doc) })
 	t.Run("Mirrored", func(t *testing.T) { checkMirrored(t, doc) })
 	t.Run("ParentChain", func(t *testing.T) { checkParentChain(t, doc) })
+	t.Run("LoadedTilingAndAlpha", func(t *testing.T) { checkLoadedTilingAndAlpha(t, doc) })
 	t.Run("Instancing", func(t *testing.T) { checkInstancing(t, doc) })
 }
 
@@ -530,6 +531,72 @@ func checkParentChain(t *testing.T, doc *gltf.Document) {
 		if !found {
 			t.Errorf("%s has no child node; Blender wrote its instance as one", name)
 		}
+	}
+}
+
+// checkLoadedTilingAndAlpha is what checkTextureTransform and
+// checkAlphaAndDoubleSided were written to become. Those two assert on the raw
+// document, because when #67 committed this file the loader read neither; this
+// asserts on what the loader makes of the same bytes now that it does (#68,
+// #69).
+//
+// Tiling: the ground is a plane with UVs 0..1 and a Mapping node scaled 8x,
+// which Blender writes as scale (8,8), offset (0,-7). Baked, u' = 8u and
+// v' = 8v - 7, so the primitive's UVs must span exactly 0..8 and -7..1 -- eight
+// tiles each way. The -7 is not decoration: a reader that drops the offset
+// spans 0..8 on V and draws the same eight tiles shifted by a whole number of
+// them, which is invisible here and wrong the moment the scale is not an
+// integer. So V's RANGE is asserted, not just its width.
+//
+// Alpha: the pane Blender was given Principled alpha 0.3 for reports blend and
+// 0.3, and a plain building reports opaque, 1, and glTF's default cutoff.
+//
+// Verified to fail: with applyUVTransform ignoring the offset (c and f), V
+// spans 0..8 and this reports "Ground V spans 0..8, want -7..1"; with
+// resolveAlpha returning before it reads the material, GlassPane reports
+// "opaque alpha 1, want blend 0.3".
+func checkLoadedTilingAndAlpha(t *testing.T, doc *gltf.Document) {
+	meshOf := func(node string) (*gltf.Mesh, int) {
+		idx := nodeIndexByName(doc, node)
+		if idx < 0 || doc.Nodes[idx].Mesh == nil {
+			t.Fatalf("%s: no such mesh node", node)
+		}
+		m := doc.Meshes[*doc.Nodes[idx].Mesh]
+		if len(m.Primitives) == 0 || m.Primitives[0].Material == nil {
+			t.Fatalf("%s: mesh has no primitive with a material", node)
+		}
+		return m, int(*m.Primitives[0].Material)
+	}
+
+	ground, groundMat := meshOf("Ground")
+	uv := resolveUVTransform("level.glb", doc, map[int]uvAffine{}, groundMat)
+	// extractPrimitive never touches its receiver; see
+	// TestExtractPrimitiveBakesUVPerCopy.
+	var r *Renderer
+	verts, _, err := r.extractPrimitive(doc, ground.Primitives[0], uv)
+	if err != nil {
+		t.Fatalf("extract Ground: %v", err)
+	}
+	minU, maxU := verts[0].UV[0], verts[0].UV[0]
+	minV, maxV := verts[0].UV[1], verts[0].UV[1]
+	for _, v := range verts {
+		minU, maxU = min(minU, v.UV[0]), max(maxU, v.UV[0])
+		minV, maxV = min(minV, v.UV[1]), max(maxV, v.UV[1])
+	}
+	if !closeF(minU, 0, 1e-4) || !closeF(maxU, 8, 1e-4) {
+		t.Errorf("Ground U spans %v..%v, want 0..8", minU, maxU)
+	}
+	if !closeF(minV, -7, 1e-4) || !closeF(maxV, 1, 1e-4) {
+		t.Errorf("Ground V spans %v..%v, want -7..1", minV, maxV)
+	}
+
+	_, glassMat := meshOf("GlassPane")
+	if mode, _, alpha := resolveAlpha(doc, glassMat); mode != AlphaModeBlend || !closeF(alpha, 0.3, 1e-3) {
+		t.Errorf("GlassPane loads as %v alpha %v, want blend 0.3", mode, alpha)
+	}
+	_, wallMat := meshOf("Building")
+	if mode, cutoff, alpha := resolveAlpha(doc, wallMat); mode != AlphaModeOpaque || alpha != 1 || cutoff != 0.5 {
+		t.Errorf("Building loads as %v alpha %v cutoff %v, want opaque 1 0.5", mode, alpha, cutoff)
 	}
 }
 
