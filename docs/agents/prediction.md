@@ -17,7 +17,7 @@ api:
 requires:
   - cgo
 assets: none
-verified: 2026-07-28
+verified: 2026-09-19
 ---
 
 # Snapshot and replay a character for client-side prediction
@@ -120,8 +120,19 @@ unacknowledged input buffer.
 the static world. Given a fixed `dt` — which is what `FixedUpdate` guarantees —
 replaying the same intents from the same state produces bit-identical results.
 `prediction_test.go` asserts exactly that over 180 ticks against real collision
-geometry, including a mid-stream rewind, and re-runs it 50 times to rule out
-map-iteration order mattering.
+geometry, including a mid-stream rewind.
+
+It does **not** re-run 50 times, whatever this page used to say. It runs the
+sequence once forward and once replayed, which does put two different map walks
+against each other -- `UpdateSpatialGrid` rebuilds the grid's cell lists from a
+`map[Entity]*Transform` on every tick of both passes, and Go randomises that per
+range statement -- but it is one sample of that, not fifty, and the claim was
+never true. Read it as "map order has not been seen to matter here", not as
+"map order has been ruled out". `MoveCharacter` is order-independent by
+construction where it matters: its blocked test is an OR over every overlapping
+collider, so which one came first cannot change the answer. `Scene.Raycast` is
+the exception -- it keeps the first of two hits at exactly equal distance, and
+first is grid order.
 
 `reconcile_test.go` goes further and runs the whole loop: two Scenes, one
 authoritative and one predicting, with simulated latency between them. With
