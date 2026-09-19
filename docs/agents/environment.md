@@ -14,6 +14,8 @@ api:
   - glyphengine.DefaultEnvironment
   - glyphengine.Sky
   - glyphengine.DefaultSky
+  - glyphengine.LightShaftShape
+  - glyphengine.DefaultLightShaftShape
   - glyphengine.DirectionalLight
   - glyphengine.AmbientLight
   - glyphengine.Fog
@@ -148,7 +150,8 @@ as a shaft. That is the whole mechanism, and its limits follow from it:
   for shafts from other lights.
 - **No depth.** The pass cannot tell air in front of a distant hill from the
   ground two metres away, so what keeps it off the foreground is distance from
-  the sun *on screen* — a lobe about 0.9 screen heights wide. Point the camera
+  the sun *on screen* — a lobe 0.9 screen heights wide by default
+  (`LightShaftShape.Radius`). Point the camera
   so that the sun is directly over near ground and that ground will haze, because
   from the pass's point of view it is exactly where the air should be.
 - **A `Sky` without a `Cycle` gets none.** The shafts radiate from the sun
@@ -188,6 +191,54 @@ At midday the same setting is a soft halo around the disc and little else, which
 is what a midday sun does: the plain sky measures 0.566 in linear right beside
 the disc and the pass's threshold starts at 0.62, so only the disc and the
 clouds contribute.
+
+### Tuning the shape
+
+Strength is one number; how the shafts *look* is three more, on
+`Sky.LightShaftShape`. Each field's zero value keeps the engine's default for
+that field, so a game sets only the one it cares about:
+
+```go
+sky.LightShaftShape.Radius = 1.3 // reach further across the frame
+```
+
+| Field | Default | What it does |
+|---|---|---|
+| `Radius` | 0.90 | How far from the sun the shafts reach, in screen heights. It stands in for the depth this pass does not have, so widening it is what brings the haze on near ground back. |
+| `Decay` | 0.96 | The weight each of the 48 steps toward the sun keeps from the one before, in (0, 1]. Lower gives an occluder a harder streak and the shafts less reach; 1 is an even wash. |
+| `Threshold` | {0.62, 0.88} | The linear-luminance window a pixel has to clear to count as a source. It is what makes terrain an occluder. |
+
+Measured on the same dusk scene at the default strength, as light added through
+the gap, in the pillar's streak, and their ratio:
+
+| Shape | Gap | Streak | Ratio |
+|---|---|---|---|
+| default | +31.2 | +7.4 | 4.23 |
+| `Radius: 1.3` | +37.2 | +9.1 | 4.11 |
+| `Decay: 0.90` | +7.4 | +1.1 | 6.93 |
+| `Threshold: {0.30, 0.50}` | +31.4 | +7.4 | 4.25 |
+
+`Threshold` barely moves that scene, because at dusk every source -- the disc at
+5.0, the glow and the cloud above 0.85 -- clears either window. Where it matters
+is a sky whose *plain* blue sits near the window. At midday
+(`-time 0.5 -yaw 3.14159 -pitch -1.371`) the sky beside the sun gains +8.0 with
+the default window and +21.3 with `{0.30, 0.50}`, which admits the plain sky and
+starts smearing the dome into itself. That is the reason the window is data:
+its defaults are measurements of the **default sky palette**, and a game that
+calls `SetSkyPalette` is changing what they measured. A much brighter sky wants
+the window raised, or it floods; a much dimmer one wants it lowered, or nothing
+clears it and the pass draws nothing while still being paid for. The alien
+palette `09-water -alien` ships with needs no change -- the dusk gate reads
++30.5 / +7.3 under it, against +31.2 / +7.4 -- but that is a property of that
+palette, not a guarantee.
+
+Values that cannot be drawn with are replaced rather than rejected: a radius or
+decay that is zero, negative or NaN takes the default, a decay above 1 is 1, and
+a window whose edges meet or cross becomes a hard cut at the lower edge. A
+default render is byte-identical to the build in which these were constants.
+
+The defaults themselves, and the ablations they were chosen on, are beside the
+constants in `renderer/commands.go`.
 
 ### Cost
 
