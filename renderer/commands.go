@@ -479,6 +479,7 @@ func recordCommandBuffer(
 	frame int,
 	msaaEnabled bool,
 	timer *gpuTimer,
+	trace *StateTrace,
 ) error {
 	_, err := deviceDriver.BeginCommandBuffer(cmdBuf, core1_0.CommandBufferBeginInfo{})
 	if err != nil {
@@ -949,6 +950,13 @@ func recordCommandBuffer(
 
 	timer.end(deviceDriver, cmdBuf, frame, PassOpaque)
 	timer.begin(deviceDriver, cmdBuf, frame, PassGrass)
+	// grassOrder accumulates the tile draw sequence for the state trace: which
+	// variant, which instance-buffer range, and how many of it survived
+	// thinning, in the order recorded. Grass is one of the two systems issue
+	// #40 was sighted in, and a per-tile instance COUNT that moves by one --
+	// which a camera a hair further away does -- changes the silhouette without
+	// changing anything the simulation hash would notice.
+	grassOrder, grassDraws := NewHash, 0
 	// Draw instanced grass variants (two-sided, depth tested, lit)
 	if grass != nil && len(grass.Variants) > 0 {
 		deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, grassPipeline)
@@ -1078,6 +1086,10 @@ func recordCommandBuffer(
 
 				stats.GrassTilesDrawn++
 				stats.addDraw(count, v.Mesh.IndexCount, v.Mesh.VertexCount)
+				if trace != nil {
+					grassOrder = grassOrder.Int(i).Int(tile.FirstInstance).Int(count)
+					grassDraws++
+				}
 				deviceDriver.CmdDrawIndexed(cmdBuf, v.Mesh.IndexCount, count, 0, 0, uint32(tile.FirstInstance))
 			}
 		}
@@ -1121,6 +1133,10 @@ func recordCommandBuffer(
 					stats.GrassTilesDrawn++
 					// Six vertices, two triangles, against a mesh's few hundred.
 					stats.addDraw(count, 6, 6)
+					if trace != nil {
+						grassOrder = grassOrder.Int(vt.variant).Int(tile.FirstInstance).Int(count).Byte('i')
+						grassDraws++
+					}
 					deviceDriver.CmdDraw(cmdBuf, 6, count, 0, uint32(tile.FirstInstance))
 				}
 			}
@@ -1129,6 +1145,7 @@ func recordCommandBuffer(
 		grass.impostorScratch = impostorScratch
 		grass.impostorVariants = impostorTiles
 	}
+	trace.CountHash("grass", grassDraws, grassOrder)
 
 	timer.end(deviceDriver, cmdBuf, frame, PassGrass)
 	timer.begin(deviceDriver, cmdBuf, frame, PassSky)

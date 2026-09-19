@@ -433,6 +433,19 @@ type Engine struct {
 	maxFrames    int
 	frameCount   int
 
+	// loopCount counts iterations of Run's loop, including the ones that
+	// render nothing, and tickCount counts fixed ticks. frameCount counts only
+	// rendered frames, so on its own it cannot show a run that simulated more
+	// times than it drew -- which is the divergence issue #40 is about. Both
+	// are unconditional: an increment is cheaper than the branch that would
+	// skip it, and the state trace needs them to mean something.
+	loopCount int
+	tickCount int
+
+	// trace is the per-frame state trace; nil unless GLYPHENGINE_STATE_TRACE
+	// is set. See statetrace.go.
+	trace *renderer.StateTrace
+
 	// fixedFrameTime replaces the measured frame delta when non-zero; see
 	// WithFixedFrameTime.
 	fixedFrameTime time.Duration
@@ -827,6 +840,11 @@ func New(g Game, opts ...Option) (*Engine, error) {
 		lightCluster:   lightcluster.New(),
 	}
 
+	// Opened before Init so a game that draws during it is already traced.
+	if e.trace = openStateTrace(); e.trace != nil {
+		r.SetStateTrace(e.trace)
+	}
+
 	// A fixed clock is only half of a repeatable run: particle spawns draw from
 	// a source that is reseeded at every process start, so pin that too.
 	if e.fixedFrameTime > 0 {
@@ -1020,6 +1038,7 @@ func (e *Engine) advanceSimulation(frameDelta time.Duration) {
 			e.fixedUpdate.FixedUpdate(e, step)
 		}
 		e.accumulator -= e.tickDuration
+		e.tickCount++
 	}
 
 	// Whatever is left over is how far this frame sits past the last tick, in
@@ -1215,6 +1234,9 @@ func (e *Engine) Run() {
 	}
 
 	for !e.window.ShouldClose() {
+		e.loopCount++
+		e.trace.Begin(e.loopCount)
+
 		frameStart := time.Now()
 		frameDelta := frameStart.Sub(prev)
 		prev = frameStart
@@ -1295,6 +1317,12 @@ func (e *Engine) Run() {
 		// Skip rendering while minimized; game logic and networking continue.
 		if e.renderer.Minimized() {
 			e.cpu.stop()
+			if t := e.trace; t != nil {
+				t.Int("ticks", e.tickCount)
+				t.Int("rendered", e.frameCount)
+				t.Str("outcome", "skip-minimized")
+				t.End()
+			}
 			time.Sleep(50 * time.Millisecond)
 			continue
 		}
@@ -1328,6 +1356,10 @@ func (e *Engine) Run() {
 		e.cpu.endFrame(time.Since(frameStart))
 
 		e.frameCount++
+		if t := e.trace; t != nil {
+			t.Int("rendered", e.frameCount)
+			t.End()
+		}
 		if e.maxFrames > 0 && e.frameCount >= e.maxFrames {
 			return
 		}
@@ -1473,6 +1505,16 @@ func (e *Engine) renderFrame() {
 	msdf := e.msdfOverlays
 	if dbg := e.debugOverlay(); len(dbg) > 0 {
 		msdf = append(append([]renderer.RenderObject(nil), msdf...), dbg...)
+	}
+	// Recorded here rather than earlier so the draw list is the one the
+	// recorder is about to walk, sort and all.
+	if t := e.trace; t != nil {
+		e.traceSimulation(t, view, proj, vp, env)
+		traceDrawList(t, "draws", draws)
+		traceDrawList(t, "overlays", e.overlays)
+		traceDrawList(t, "celestials", celestials)
+		traceDrawList(t, "msdf", msdf)
+		t.Int("uioverlays", len(e.uiOverlays))
 	}
 	if err := e.renderer.DrawFrame(draws, e.overlays, celestials, e.uiOverlays, msdf, lighting); err != nil {
 		log.Printf("glyphengine: draw error: %v", err)
@@ -1857,6 +1899,17 @@ func (e *Engine) Destroy() {
 // teardown releases whatever has been created so far. Safe to call from a
 // partially constructed Engine.
 func (e *Engine) teardown() {
+	// Closed before the renderer, which holds the same pointer: writing to a
+	// closed file is the one way a diagnostic could take a clean shutdown down.
+	if e.trace != nil {
+		if e.renderer != nil {
+			e.renderer.SetStateTrace(nil)
+		}
+		if err := e.trace.Close(); err != nil {
+			log.Printf("glyphengine: %s: %v", stateTraceEnv, err)
+		}
+		e.trace = nil
+	}
 	if e.renderer != nil {
 		e.renderer.Destroy()
 		e.renderer = nil

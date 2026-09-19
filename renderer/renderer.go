@@ -199,10 +199,14 @@ type Renderer struct {
 	currentFrame       int
 	lastPresented      int // swapchain index of the most recent present; see CaptureFrame
 	framebufferResized bool
-	meshes             []*Mesh
-	jointBuffers       []*JointBuffer
-	dynamicMeshes      map[*Mesh]*dynamicMesh
-	maxAnisotropy      float32 // 0 = anisotropic filtering unavailable
+
+	// trace records what each frame fed the GPU when GLYPHENGINE_STATE_TRACE
+	// is set; nil, and free, otherwise. See StateTrace.
+	trace         *StateTrace
+	meshes        []*Mesh
+	jointBuffers  []*JointBuffer
+	dynamicMeshes map[*Mesh]*dynamicMesh
+	maxAnisotropy float32 // 0 = anisotropic filtering unavailable
 
 	// Reported to Vulkan at instance creation; see WithApplicationName.
 	appName    string
@@ -1133,6 +1137,11 @@ func (r *Renderer) NotifyResize() {
 	r.framebufferResized = true
 }
 
+// SetStateTrace attaches the per-frame state trace DrawFrame writes its half of.
+// The engine opens it from GLYPHENGINE_STATE_TRACE and owns closing it; nil
+// disables tracing, which is the default. See StateTrace.
+func (r *Renderer) SetStateTrace(t *StateTrace) { r.trace = t }
+
 // DeferDestroy queues a destruction callback that will execute after all
 // in-flight frames have finished referencing the resource.
 func (r *Renderer) DeferDestroy(fn func()) {
@@ -1305,11 +1314,19 @@ func (r *Renderer) recreateSwapchain() error {
 func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, celestials []RenderObject, uiOverlays []UIRenderObject, msdfOverlays []RenderObject, lighting SceneLighting) error {
 	f := r.currentFrame
 
+	if t := r.trace; t != nil {
+		t.Int("slot", f)
+		t.Int("w", r.sc.extent.Width)
+		t.Int("h", r.sc.extent.Height)
+		t.Int("cloudframe", r.cloudFrame)
+	}
+
 	waitStart := time.Now()
 
 	// Wait for this in-flight frame's previous submission to finish
 	_, err := r.deviceDriver.WaitForFences(true, common.NoTimeout, r.sync.inFlight[f])
 	if err != nil {
+		r.trace.Str("outcome", "fence-error")
 		return err
 	}
 
@@ -1326,10 +1343,17 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 	imageIndex, result, err := r.swapchainExt.AcquireNextImage(r.sc.swapchain, common.NoTimeout, &r.sync.imageAvailable[f], nil)
 	if err != nil {
 		if result == khr_swapchain.VKErrorOutOfDate {
+			// Nothing is recorded, submitted or presented on this path, so the
+			// frame the engine simulated is never drawn. Naming it in the trace
+			// is the point: an iteration that ends here and one that ends in a
+			// present look identical from outside.
+			r.trace.Str("outcome", "skip-acquire-out-of-date")
 			return r.recreateSwapchain()
 		}
+		r.trace.Str("outcome", "acquire-error")
 		return err
 	}
+	r.trace.Int("image", imageIndex)
 
 	// Both the fence and the acquire are waits on the presentation pipeline, so
 	// they count together: with vsync on it is the acquire that blocks.
@@ -1366,6 +1390,15 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 	}
 	r.flushDynamicMeshes(f)
 
+	// Hashed after the flushes, so what is recorded is what this frame's slot
+	// actually holds rather than what was staged -- a dirty flag that failed to
+	// fire is precisely the kind of drift worth catching, and hashing the
+	// staging copy instead would hide it.
+	if t := r.trace; t != nil {
+		r.traceStreamedBuffers(t)
+		traceLighting(t, lighting)
+	}
+
 	// Always upload the cascade VP matrices so the fragment shader never reads
 	// stale data. When shadows are disabled, the VPs are zero matrices, causing
 	// all fragments to project to the shadow map origin where depth=1.0
@@ -1385,14 +1418,16 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 	cmdBuf := r.commandBuffers[f]
 	_, err = r.deviceDriver.ResetCommandBuffer(cmdBuf, 0)
 	if err != nil {
+		r.trace.Str("outcome", "reset-error")
 		return err
 	}
 	recordStart := time.Now()
 	err = recordCommandBuffer(r.deviceDriver, cmdBuf, r.renderPass, r.framebuffers[imageIndex], r.pipeline, r.litDoubleSidedPipeline, r.translucentPipeline, r.translucentDoubleSidedPipeline, r.skinnedTranslucentPipeline, r.instancedPipeline, r.instancedDoubleSidedPipeline, r.overlayPipeline, r.skyPipeline, r.starsPipeline, r.celestialPipeline, r.uiPipeline, r.msdfPipeline, r.skinnedPipeline, r.grassPipeline, r.waterPipeline, r.godRayPipeline, r.waterRenderPass, waterFB, r.sceneColor, r.hdr.images[imageIndex],
 		func(cb core1_0.CommandBuffer) error { return r.recordClouds(cb, lighting) },
 		r.cloudSetFor(),
-		r.bloomFor(imageIndex), r.tonemapFor(imageIndex), r.particlePipeline, r.terrainPipeline, r.materialPipelines(), &r.stats, r.pipelineLayout, r.litPipelineLayout, r.skinnedPipelineLayout, r.terrainPipelineLayout, r.sc.extent, draws, overlays, celestials, uiOverlays, msdfOverlays, lighting, split, r.fallbackTexture, r.milkyWayTex, r.shadow, r.grass, r.grassLOD, r.grassImpostor, r.grassImpostorPipeline, r.particles, f, r.msaa != nil, r.gpuTimer)
+		r.bloomFor(imageIndex), r.tonemapFor(imageIndex), r.particlePipeline, r.terrainPipeline, r.materialPipelines(), &r.stats, r.pipelineLayout, r.litPipelineLayout, r.skinnedPipelineLayout, r.terrainPipelineLayout, r.sc.extent, draws, overlays, celestials, uiOverlays, msdfOverlays, lighting, split, r.fallbackTexture, r.milkyWayTex, r.shadow, r.grass, r.grassLOD, r.grassImpostor, r.grassImpostorPipeline, r.particles, f, r.msaa != nil, r.gpuTimer, r.trace)
 	if err != nil {
+		r.trace.Str("outcome", "record-error")
 		return err
 	}
 
@@ -1407,6 +1442,7 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 		SignalSemaphores: []core1_0.Semaphore{r.sync.renderFinished[f]},
 	})
 	if err != nil {
+		r.trace.Str("outcome", "submit-error")
 		return err
 	}
 
@@ -1420,9 +1456,14 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 	})
 	r.lastPresent = time.Since(presentStart)
 	if err != nil && presentResult != khr_swapchain.VKErrorOutOfDate {
+		r.trace.Str("outcome", "present-error")
 		return err
 	}
 	if presentResult == khr_swapchain.VKErrorOutOfDate || presentResult == khr_swapchain.VKSuboptimal || r.framebufferResized {
+		// The frame WAS drawn and presented here, unlike the acquire path, but
+		// the per-frame bookkeeping below is skipped -- so the trace
+		// distinguishes the two rather than calling both "recreate".
+		r.trace.Str("outcome", "present-recreate")
 		r.framebufferResized = false
 		return r.recreateSwapchain()
 	}
@@ -1433,7 +1474,65 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 	r.prevVP = lighting.VP
 
 	r.currentFrame = (f + 1) % maxFramesInFlight
+	r.trace.Str("outcome", "present")
 	return nil
+}
+
+// traceStreamedBuffers records what this frame's slot holds in each buffer the
+// renderer streams: the particle instances, the dynamic meshes, and the order
+// the dynamic-mesh map was walked in.
+//
+// The map order is traced as a field of its own rather than folded into the
+// contents hash. Go randomises map iteration per range, so if that order ever
+// reached the image the contents hash alone would say the data matched while
+// the picture did not -- which is the exact shape of bug this is hunting.
+func (r *Renderer) traceStreamedBuffers(t *StateTrace) {
+	if r.particles != nil {
+		t.CountHash("particles", len(r.particles.staging), HashPOD(NewHash, r.particles.staging))
+		t.Int("particlesbehind", r.particles.behind)
+	}
+	// Contents combined with XOR so it does not depend on the walk order, and
+	// the walk order hashed separately so it is visible either way.
+	var contents Hasher
+	order := NewHash
+	n := 0
+	for m, dm := range r.dynamicMeshes {
+		h := HashPOD(HashPOD(NewHash, dm.stagingV), dm.stagingI)
+		h = h.Int(m.VertexCount).Int(m.IndexCount)
+		contents ^= h
+		order = order.Uint64(uint64(h))
+		n++
+	}
+	t.CountHash("dynmesh", n, contents)
+	t.Hash("dynmeshorder", order)
+}
+
+// traceLighting records the per-frame uniform state: the shadow cascades and
+// the clustered-light binning.
+//
+// Both are derived from the camera and the sun, which the engine already
+// hashes, so a divergence here with an identical cam= and sky= means the
+// derivation itself moved -- a binner reading a different extent, a cascade
+// fit that saw a different centre. Worth a field of its own for that reason:
+// it is the difference between "the simulation moved" and "the same simulation
+// produced different GPU state".
+func traceLighting(t *StateTrace, l SceneLighting) {
+	h := NewHash.Bool(l.ShadowEnabled)
+	for c := range l.CascadeVPs {
+		h = h.Float32s(l.CascadeVPs[c][:])
+	}
+	t.Hash("cascades", h)
+
+	lh := NewHash.Uint64(uint64(l.LightFlags))
+	lh = HashPOD(lh, l.Lights)
+	n := 0
+	if l.Clusters != nil {
+		lh = HashPOD(lh, l.Clusters.Order)
+		lh = HashPOD(lh, l.Clusters.Cells)
+		lh = HashPOD(lh, l.Clusters.Indices)
+		n = len(l.Clusters.Order)
+	}
+	t.CountHash("lights", n, lh)
 }
 
 // Destroy waits for the GPU to idle, releases everything the application
