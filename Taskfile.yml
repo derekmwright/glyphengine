@@ -937,6 +937,13 @@ tasks:
       # the run fails the ratio floor. The real pair reads +40.7 and +10.0,
       # ratio 4.06.
       #
+      # And broken twice on a real build, after the fix was committed. Reverting
+      # the draw commit -- main exactly as it stood for seven weeks -- reads
+      # +0.0 through the gap and fails. So does keeping every other part of the
+      # fix and turning off only the recordLightShafts call. In both, the second
+      # arm below stayed green, which is precisely why it cannot be the only
+      # arm: "nothing is drawn anywhere" passes a byte-identity test.
+      #
       # The second arm is the cheap half and catches the opposite mistake. At
       # yaw 2.70 the sun lands at u = 1.275, a quarter of a frame past the right
       # edge, where shaftEdgeFade has reached zero -- so the pass must not run
