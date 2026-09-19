@@ -29,7 +29,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-09-16
+verified: 2026-09-19
 ---
 
 # Build a scene from entities and components
@@ -127,6 +127,34 @@ ecs.Query3(s.C.Transform, s.C.Velocity, s.C.Collider,
 
 The pointers handed to the callback are **live** — write through them to mutate
 the component.
+
+### Iteration order is undefined, and Go makes sure you notice
+
+A `Store[T]` is a `map[Entity]*T`, so a query ranges a Go map: the order is
+randomised per range statement, on every frame of every run. Nothing in the
+engine promises otherwise, and nothing plans to — an insertion-ordered index on
+every store would cost every query in the engine.
+
+That is fine for anything that computes a per-entity result independently, which
+is almost everything. It is **not** fine for anything whose outcome depends on
+the order it visited entities in, and those need to impose their own order:
+
+- **Sort with a total order, not a partial one.** `Engine.sortDraws` orders the
+  draw list by pipeline state, then view depth for blended draws, then entity
+  id. The entity id is what makes it total: without it, two draws with the same
+  state compared equal, `slices.SortFunc` is not stable, and the recorded
+  sequence came out differently on every frame of every run. Issue #53, latent
+  for months because no scene in the repo composites order-dependently.
+- **Never sort on an address or a handle.** They are different in every process,
+  so they turn an ordering into a per-run coin toss that no test on one machine
+  will catch. `RenderObject.SortKey` used to carry a descriptor set address for
+  batching; it carries a creation id now.
+- **Accumulate commutatively, or collect and sort first.** Summing float32
+  contributions in map order gives a slightly different total every frame,
+  because float addition is not associative.
+
+`Scene.AddSystem` callbacks run in registration order, which is a real order —
+it is only the entities *inside* each system that arrive arbitrarily.
 
 ## Lifecycle
 

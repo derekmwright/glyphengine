@@ -12,13 +12,14 @@ api:
   - renderer.RenderObject.Alpha
   - renderer.RenderObject.IsTranslucent
   - renderer.RenderObject.ViewDepth
+  - renderer.RenderObject.SortID
 example: examples/18-translucent
 run: task example:18-translucent
 requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-09-18
+verified: 2026-09-19
 ---
 
 # Draw translucent world geometry
@@ -59,6 +60,18 @@ and within themselves by distance from the eye, farthest first. It happens every
 frame because the answer depends on where the camera is, not on what the scene
 contains. `18-translucent` has three overlapping panes at different depths for
 exactly this reason — orbit past them and the order has to invert.
+
+**Equal depths break on entity id**, not on whichever the query reached first.
+Two panes at the same distance from the eye — coplanar decals, two faces of the
+same prop, an effect and the marker it sits on — used to compare equal, and
+since the draw list arrives in Go map order and `slices.SortFunc` is not
+stable, which one went first was decided per frame. That is a flicker, not a
+difference between runs, and nothing in the repo rendered it: issue #53 was
+found by the state trace rather than by looking. `sortDraws` now falls through
+to the entity id, so a scene that does have two equal-depth blended draws
+composites them the same way on every frame of every run. Which of the two is
+in front is still arbitrary — it is the *stability* that is guaranteed, and a
+game that cares has to separate them in depth.
 
 **A game driving `renderer.DrawFrame` directly sorts its own.** The renderer
 records the translucent subset in the order it is given, the same way the opaque
