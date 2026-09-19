@@ -901,6 +901,85 @@ tasks:
         fi
         exit $status
 
+  shafts:
+    desc: "Check that light shafts reach through the gaps between occluders"
+    dir: examples
+    cmds:
+      # Needs a GPU, so it sits with smoke, validate and determinism rather
+      # than in `task ci`.
+      #
+      # This gate exists because the feature it tests did not, for seven weeks.
+      # godray.frag was compiled and shipped, createGodRayPipeline built a
+      # pipeline, recordWaterPass was handed it -- and nothing bound it, so
+      # -shafts 0, 1 and 3 rendered byte-identical frames from 2026-07-29 until
+      # #50. Every other gate was green throughout: smoke renders the frame,
+      # validate is silent, determinism is happy because the same wrong image
+      # comes out every time, and `task sky` passes -shafts 0 on purpose.
+      #
+      # The pair is the whole trick, the same way it is in `task waterblend`.
+      # A single frame cannot say what should have been there, so the shafts
+      # are toggled and the difference is the light they ADDED: a bright sunset
+      # cannot fake that, because the same sky is under both captures.
+      #
+      # Two boxes on the terrain below the sun, chosen so that the only thing
+      # between them is a pillar. The sun peeks over the ridge at the right-hand
+      # edge of pillar 4, so ground to its right has an unobstructed line to the
+      # disc and ground the same distance to its left has the pillar across it.
+      # Terrain, not sky: the sunset sky beside the disc is already at 255 and
+      # added light there is invisible to a measurement as well as to the eye.
+      #
+      # PROVED, on constructed files before it was believed on a render: with
+      # the capture replaced by a copy of the shafts-off frame -- "nothing is
+      # drawn", which is exactly today's main -- the gap gains +0.0 and the run
+      # fails the absolute floor. With it replaced by the same frame plus a flat
+      # +30 everywhere -- "a uniform wash", which is what this shader does with
+      # no bright() threshold -- both boxes gain +30.0, the ratio is 1.000 and
+      # the run fails the ratio floor. The real pair reads +40.7 and +10.0,
+      # ratio 4.06.
+      #
+      # The second arm is the cheap half and catches the opposite mistake. At
+      # yaw 2.70 the sun lands at u = 1.275, a quarter of a frame past the right
+      # edge, where shaftEdgeFade has reached zero -- so the pass must not run
+      # at all -- and a frame with no water enters
+      # the water pass only for the shafts, so "must not run" is also "must not
+      # copy the scene". On and off have to be byte for byte the same file.
+      - |
+        status=0
+        d=.shafts
+        rm -rf $d && mkdir -p $d
+        shot() { GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./09-water -frames 150 "$@" >/dev/null 2>&1; }
+        # Dusk, the sun rising over the ridge from behind a row of pillars.
+        shot -time 0.72 -yaw 1.771 -pitch -0.185 -pillars -screenshot $d/on.png
+        shot -time 0.72 -yaw 1.771 -pitch -0.185 -pillars -shafts 0 -screenshot $d/off.png
+        # The same evening with the sun well off the right edge.
+        shot -time 0.72 -yaw 2.70 -pitch -0.185 -pillars -screenshot $d/gone-on.png
+        shot -time 0.72 -yaw 2.70 -pitch -0.185 -pillars -shafts 0 -screenshot $d/gone-off.png
+        for f in on off gone-on gone-off; do
+          if [ ! -s $d/$f.png ]; then
+            echo "MISSING CAPTURE $f -- this gate proves nothing"
+            exit 1
+          fi
+        done
+        go run ../cmd/shaftcheck -a $d/on.png -b $d/off.png \
+          -gap 739,440,80,80 -shadow 459,440,80,80 -min 12 -ratio 2.0 || status=1
+        if diff -q $d/gone-on.png $d/gone-off.png >/dev/null 2>&1; then
+          echo "sun off screen: on and off are byte identical"
+        else
+          echo "  FAIL: with the sun off screen the shaft pass still changed the frame."
+          echo "  shaftEdgeFade should have taken the strength to zero, and a zero strength"
+          echo "  should have kept the frame out of the water pass entirely"
+          status=1
+        fi
+        # A failure here is a picture: "no shafts at all" and "a wash over
+        # everything" are the same number away from each other and nothing
+        # alike to look at, so keep the pair the way `task waterblend` does.
+        if [ $status -ne 0 ]; then
+          echo "captures kept in examples/$d"
+        else
+          rm -rf $d
+        fi
+        exit $status
+
   nightlight:
     desc: "Check that lamplight still reads as lamplight after the night shift"
     dir: examples
