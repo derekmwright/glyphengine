@@ -998,6 +998,28 @@ tasks:
         }
         spair default
         spair lamps300 -lamps 300
+        # And the same scene with every light asking for volumetric
+        # in-scattering. This is not a spare pair: the march walks the froxel
+        # lists a SECOND time, at up to 32 sample points per pixel rather than
+        # once at the fragment, so it reads cells the surface shading never
+        # touches -- every cell along the ray instead of the one the surface
+        # is in. A binner that is wrong about a cell no surface happens to sit
+        # in is invisible to every pair above and visible here.
+        #
+        # It stays an exact comparison for the same reason they do. Brute
+        # force marches every uploaded light at every step; clustered marches
+        # the cell's list. A light not in a cell cannot reach any point of it,
+        # so it contributes exactly +0.0 at a sample inside that cell -- the
+        # range test and the cone smoothstep both return exact zeros -- and
+        # the two sums are the same adds in the same order.
+        #
+        # -skylamp is in here because the SKY takes this path too now, and by
+        # a different route: sky.frag reads the light buffers through its own
+        # pipeline layout and its own march, so a sky pixel is a second
+        # implementation of the same walk. No other pair in this gate covers
+        # it at all.
+        spair volumetric -volumetric 1 -lampvolumetric 1 -skylamp
+        spair volumetric-dense -volumetric 1 -lampvolumetric 1 -lamps 300
         # 09-water is the third scene and the only one with a water surface.
         # It has to be here rather than be assumed covered: water.frag is not
         # one of the shaders that call evalLighting*, it runs its own copy of
@@ -1631,6 +1653,167 @@ tasks:
         # A failure here is a picture -- whether the fog stayed Earth-blue or
         # merely moved less is the difference between a missing uniform and a
         # tuning question -- so keep the pair, the way `task lights` does.
+        if [ $status -ne 0 ]; then
+          echo "captures kept in examples/$d"
+        else
+          rm -rf $d
+        fi
+        exit $status
+
+  volumetric:
+    desc: "Check that a light's beam is in the air inside its cone and nowhere else"
+    dir: examples
+    cmds:
+      # Needs a GPU, so it sits with smoke, validate, determinism, lights,
+      # nightlight and waterlight rather than in `task ci`.
+      #
+      # This gate is one measurement, inverted. Issue #47's first proposal was
+      # to radiate the existing screen-space god-ray pass from a lamp instead
+      # of from the sun. Pointed at a doorway spotlight in this exact scene and
+      # differenced against the same frame with the pass off, it added +21.3
+      # mean luma to a box in the cone's path and +32.5 and +34.0 to boxes the
+      # same distance from the bulb but straight up and to the side, where no
+      # beam could be. The air a beam should fill gained two thirds of what the
+      # air it must not fill gained, because that technique smears pixels that
+      # are already bright and has no idea which way a light points. Every
+      # arm below is that comparison the right way round, and a build that
+      # produces a halo instead of a cone fails them the way the spike did.
+      #
+      # Differencing a pair is what makes any of it measurable: one frame
+      # cannot say what should have been there. Both captures are the same
+      # scene at the same fixed clock with only SpotLight.Volumetric changed,
+      # so the night sky, the warm pools and the moonlit ground are identical
+      # in both and subtract out.
+      - |
+        status=0
+        d=.volumetric
+        rm -rf $d && mkdir -p $d
+        shot() {
+          out=$1; shift
+          GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./21-streetlights -frames 60 \
+            -width 1280 -height 720 "$@" -screenshot $d/$out.png >/dev/null 2>&1
+        }
+        pair() {
+          name=$1; shift
+          shot $name-on  -volumetric 1 "$@"
+          shot $name-off "$@"
+          if [ ! -s $d/$name-on.png ] || [ ! -s $d/$name-off.png ]; then
+            echo "$name: MISSING CAPTURE -- this gate proves nothing"
+            status=1
+            return 1
+          fi
+        }
+        check() {
+          name=$1; shift
+          echo "-- $name"
+          go run ../cmd/volumetriccheck -a $d/$name-on.png -b $d/$name-off.png "$@" || status=1
+        }
+
+        # ── the cone, seen from the side ──
+        #
+        # A door spot on the near building, its fixture at about (634,250) in
+        # frame. The four boxes are placed AROUND that bulb deliberately: the
+        # beam box 75 px below it, on the line between the bulb and the pool
+        # its cone lands in, and the outside boxes 75 px above it and 105 px to
+        # either side. Equidistant-ish and symmetric, because "more light in
+        # the cone than out of it" is only worth stating if the boxes are not
+        # chosen to flatter it.
+        #
+        # The ceilings are 0.50 and the arms read +0.00. They are not zero
+        # because a ceiling that a rounding error trips is a gate people learn
+        # to ignore, and `far` below is where the exact-zero claim is made.
+        pair cone -camtargetx 21 -camtargety 1.5 -camtargetz 0 \
+          -camyaw 0 -campitch 0.1 -camdist 9 -camlook 0.6
+        check cone \
+          -region "beam:604,295,60,60:min=3.0" \
+          -region "above:604,145,60,60:max=0.50" \
+          -region "beside-r:704,220,60,60:max=0.50" \
+          -region "beside-l:504,220,60,60:max=0.50" \
+          -region "far:1100,640,60,60:max=0.00"
+
+        # ── the bulb outside the frame ──
+        #
+        # The same building from closer and tilted down, so its fixture is off
+        # the TOP of the frame while the cone it throws crosses the view. This
+        # is the arm that separates the two routes: a screen-space smear needs
+        # a bright pixel to smear and there is none, so it can produce nothing
+        # here by construction, while the froxel walk neither knows nor cares
+        # whether the light is on screen.
+        #
+        # The floor is 8.0 against a measured +27.5, which is loose on purpose
+        # -- what is being asserted is "the beam is still there at all", and a
+        # tight floor on a number this large would fail on a retune of the
+        # bulb rather than on the thing this arm is for.
+        pair offscreen -camtargetx 21 -camtargety 0.9 -camtargetz 0 \
+          -camyaw 0 -campitch 0.02 -camdist 6.5 -camlook -1.25
+        check offscreen \
+          -region "beam:560,100,60,60:min=8.0" \
+          -region "open:900,500,60,60:max=0.50" \
+          -region "far:400,620,80,80:max=0.00"
+
+        # ── a beam against the night sky ──
+        #
+        # -skylamp puts a narrow spot in the middle of the plaza aimed straight
+        # up; the camera stands level with the column 12 m away and 18 m up, so
+        # the light itself is 54 degrees below the bottom edge and the column
+        # runs vertically through the middle of the frame with nothing but sky
+        # behind it.
+        #
+        # The sky is not a lit surface and does not go through applyFog at all.
+        # It reaches the light buffers through a pipeline layout built for it
+        # alone, so this is the one arm that can fail while every other one
+        # passes -- and it did, before that layout existed: the first capture
+        # of this feature showed a column that crossed the dark hills and
+        # stopped dead at the skyline.
+        pair sky -skylamp -camdist 12 -campitch 0 -camyaw 0.4 \
+          -camtargetx 0 -camtargety 18 -camtargetz 0 -camlook 0
+        check sky \
+          -region "column:600,320,80,80:min=1.5" \
+          -region "beside-l:200,320,80,80:max=0.50" \
+          -region "beside-r:1000,320,80,80:max=0.50"
+
+        # ── consecutive frames ──
+        #
+        # Nothing in this scene moves: the day cycle is stopped, the lamps are
+        # a fixed slice and the march's jitter is a function of gl_FragCoord
+        # and nothing else. So under a fixed clock frame N and frame N+1 must
+        # be the same bytes, and if they are not, something in the march is a
+        # function of the frame -- a uniform that moved, a buffer read while
+        # another frame wrote it. That is invisible in a still and obvious to
+        # anyone watching the window, which is the worst combination a gate can
+        # leave.
+        #
+        # `task determinism` runs two whole runs against each other and would
+        # not see it: a cause that repeats run to run repeats identically.
+        shot consec-a -volumetric 1 -skylamp
+        GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./21-streetlights -frames 61 \
+          -width 1280 -height 720 -volumetric 1 -skylamp \
+          -screenshot $d/consec-b.png >/dev/null 2>&1
+        if [ ! -s $d/consec-a.png ] || [ ! -s $d/consec-b.png ]; then
+          echo "-- consecutive frames: MISSING CAPTURE -- this gate proves nothing"
+          status=1
+        elif diff -q $d/consec-a.png $d/consec-b.png >/dev/null 2>&1; then
+          echo "-- consecutive frames: frame 60 and frame 61 are identical, as a still scene must be"
+        else
+          echo "-- consecutive frames: FRAME 60 AND FRAME 61 DIFFER -- the march is a function of the frame"
+          status=1
+        fi
+
+        # Prove the comparison can say no, the way `task lights` does. The
+        # volumetrics-on capture of the cone pose must differ from the
+        # volumetrics-off one somewhere; volumetriccheck asserts that itself,
+        # but only on the pairs it is handed, and this says it once in the
+        # gate's own voice.
+        if diff -q $d/cone-on.png $d/cone-off.png >/dev/null 2>&1; then
+          echo "control: -volumetric 1 and -volumetric 0 rendered the same bytes -- this gate proves nothing"
+          status=1
+        else
+          echo "control: asking for volumetrics changes the capture, as it must"
+        fi
+
+        # A failure here is a picture. Keep the pair that failed, the way
+        # `task lights` does: whether the light is in the wrong place or simply
+        # absent is not something the numbers say on their own.
         if [ $status -ne 0 ]; then
           echo "captures kept in examples/$d"
         else
