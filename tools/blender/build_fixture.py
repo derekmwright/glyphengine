@@ -195,6 +195,15 @@ def build_material_probes():
     glass_p.inputs["Alpha"].default_value = 0.3
     glass_p.inputs["Base Color"].default_value = (0.6, 0.8, 0.9, 1.0)
     glass_mat.use_backface_culling = False
+    if hasattr(glass_mat, "blend_method"):
+        # Belt and suspenders: Blender 5.0's exporter reads alphaMode off the
+        # Alpha socket value alone (confirmed by reading its source -- see
+        # the comment above), but this property still exists on the
+        # Material for viewport display, and an older exporter version this
+        # recipe could not test against (see docs/agents/blender-pipeline.md's
+        # "Verified against" section) is not guaranteed to have made the
+        # same switch.
+        glass_mat.blend_method = 'BLEND'
     glass_obj.data.materials.append(glass_mat)
 
     bpy.ops.mesh.primitive_plane_add(size=2, location=(-4, 6, 1), rotation=(math.radians(90), 0, 0))
