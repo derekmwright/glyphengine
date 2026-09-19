@@ -342,6 +342,15 @@ func (b *goodCustomQueryBackend) OverlapAABB(box AABB, exclude ecs.Entity) []Ove
 // about it changes just because Scene.Queries is set — this only proves that
 // routing every character's query through a *different* Go value under
 // concurrent load does not itself introduce a race.
+//
+// This test is not vacuous: a backend that reuses one shared []OverlapResult
+// across calls instead of allocating fresh (the mistake the "must not keep
+// scratch state shared across calls" contract on QueryBackend forbids) was
+// run in its place as a manual, one-off check and -race caught it
+// immediately — a read/write race inside OverlapAABB, reported from two
+// goroutines both inside Scene.MoveCharacter by way of
+// MoveCharactersParallel's worker goroutines. That backend was never
+// committed; goodCustomQueryBackend below is what a compliant one looks like.
 func TestMoveCharactersParallelRaceWithCustomQueryBackend(t *testing.T) {
 	s := NewScene()
 	s.SetTerrain(flatTerrain(t, 0))
