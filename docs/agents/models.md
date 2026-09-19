@@ -309,7 +309,7 @@ has, node by node:
 for i, node := range model.Nodes {
     for _, mi := range model.NodeMeshes(i) {
         mm := model.Meshes[mi]
-        // spawn one entity: mm.Mesh at node.World, decomposed (see below)
+        // spawn one entity: mm.Mesh at glyphengine.TransformFromMatrix(node.World)
     }
 }
 ```
@@ -317,20 +317,40 @@ for i, node := range model.Nodes {
 A node with no mesh (`NodeMeshes` returns nothing) is an empty node — a
 light socket, a spawn marker — not an error.
 
-### Decomposing `World` into a `Transform`
+### Turning `World` into a `Transform`
 
 `glyphengine.Transform` is Position, Euler `Rotation` (radians) and `Scale`,
 and `Transform.ModelMatrix` composes them as `Translate * RotY * RotX * RotZ
-* Scale` — a specific order. Recovering that same (rotation, scale) pair
-from a node's `World` matrix needs to remove the scale from the rotation
-part FIRST and then extract the Euler angles against that SAME Y-X-Z
-product, or a node with both a rotation and a non-uniform scale comes out
-visibly skewed — correct position, wrong shape. This is the classic bug in a
-per-node spawn loop, and it is exactly why `examples/22-level`'s level.glb
-carries a building with a real rotation and a `(1, 1.5, 2)` scale together:
-see `decomposeWorld` in `examples/22-level/main.go` for a worked
-decomposition, checked by round-tripping it back through
-`Transform.ModelMatrix` and comparing against the original `World`.
+* Scale` — this engine's own order. A node's `World` is a matrix, so it has to
+be taken apart against that same product, and
+`glyphengine.TransformFromMatrix` is the engine doing it:
+
+```go
+tr, exact := glyphengine.TransformFromMatrix(node.World)
+if !exact {
+    log.Printf("node %q is sheared; drawn without that part of its transform", node.Name)
+}
+scene.C.Transform.Set(ent, &tr)
+```
+
+Do not write this by hand in a game. The textbook extraction assumes `Rx * Ry *
+Rz` and returns perfectly plausible angles that point the object somewhere
+else — against this engine's order it fails every one of 2000 random
+transforms — and a private copy does not find out if `ModelMatrix` ever
+changes. `TestTransformFromMatrixRoundTrips` ties the two together by comparing
+matrices, not angles.
+
+`exact` is false when no `Transform` can hold the matrix: **shear**, which is
+what a rotated object inside a non-uniformly scaled parent becomes in world
+space, or a zero scale on an axis. In Blender the fix is Object > Apply > Scale
+on the parent before exporting; the node's name is how you find it. A
+**mirrored** object (negative scale, or a mirror that was applied as one) is
+representable and comes back exact, with the mirror on `Scale.X`.
+
+Give every entity its **own** `Transform`. The component store keeps the
+pointer it is handed, so two entities given the same `&tr` are one object to
+anything that moves or interpolates them. `examples/22-level` copies it per
+primitive for that reason.
 
 ### `KHR_lights_punctual`
 

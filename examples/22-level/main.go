@@ -10,10 +10,10 @@
 //   - Geometry and placement: Model.NodeMeshes(i) for which primitives a
 //     node instances (several nodes here share ONE doc mesh -- the four
 //     buildings, the four lamp posts -- which is exactly the case
-//     ModelMesh.Node cannot answer), and the node's World, decomposed into
-//     the engine's Transform. Building 1 carries a real rotation together
-//     with a non-uniform scale (1, 1.5, 2) on purpose: get the decomposition
-//     order wrong and it is the one node in the scene that visibly skews.
+//     ModelMesh.Node cannot answer), and the node's World, which
+//     glyph.TransformFromMatrix turns into the engine's Transform. Building 1
+//     carries a real rotation together with a non-uniform scale (1, 1.5, 2)
+//     on purpose: it is the node that visibly skews if that goes wrong.
 //   - extras: `{"static": true, "collider": "box", "floors": N}` on the
 //     ground and buildings, `{"spawn": "player"}` on an otherwise-empty
 //     node. The engine never looks inside Model.Nodes[i].Extras -- this file
@@ -177,11 +177,19 @@ func spawnLevel(e *glyph.Engine, model *renderer.Model) mgl32.Vec3 {
 			continue // an empty node: a light socket, or the spawn marker above
 		}
 
-		pos, rot, scale := decomposeWorld(node.World)
-		transform := &glyph.Transform{Position: pos, Rotation: rot, Scale: scale}
+		// The node's World is a matrix and an entity's Transform is position,
+		// Euler angles and scale in the engine's own rotation order, so the
+		// engine takes it apart. It says so when it cannot: a rotated object
+		// inside a non-uniformly scaled parent is sheared in world space, and
+		// no Transform can hold that. Applying the parent's scale in the editor
+		// before exporting is the fix, and the node's name is what finds it.
+		transform, exact := glyph.TransformFromMatrix(node.World)
+		if !exact {
+			log.Printf("level: node %q is sheared or has a zero scale; it is drawn without that part of its transform", node.Name)
+		}
 
 		ent := e.Spawn()
-		e.C.Transform.Set(ent, transform)
+		e.C.Transform.Set(ent, &transform)
 		spawnPrimitive(e, ent, model.Meshes[meshIdxs[0]])
 
 		// A doc mesh CAN split into more than one primitive (one per
@@ -189,9 +197,14 @@ func spawnLevel(e *glyph.Engine, model *renderer.Model) mgl32.Vec3 {
 		// might, and spawning every one of them at the same node transform
 		// keeps this correct rather than silently dropping geometry. They
 		// ride as their own entities since MeshRef only ever holds one mesh.
+		//
+		// Each gets its OWN Transform. The component store keeps the pointer it
+		// is handed, so giving two entities the same one makes them one object
+		// as far as anything that moves or interpolates them is concerned.
 		for _, mi := range meshIdxs[1:] {
 			extra := e.Spawn()
-			e.C.Transform.Set(extra, transform)
+			own := transform
+			e.C.Transform.Set(extra, &own)
 			spawnPrimitive(e, extra, model.Meshes[mi])
 		}
 
@@ -268,72 +281,6 @@ func meshesLocalHalfExtent(model *renderer.Model, meshIdxs []int) (mgl32.Vec3, b
 		maxf(absf(min[1]), absf(max[1])),
 		maxf(absf(min[2]), absf(max[2])),
 	}, true
-}
-
-// decomposeWorld splits a glTF node's World matrix into the position, Euler
-// rotation and scale glyphengine.Transform expects.
-//
-// This is the classic bug in a per-node spawn loop, which is why
-// level.glb's Building1 exists: Transform.ModelMatrix composes
-// Translate * RotY(y) * RotX(x) * RotZ(z) * Scale (see its own doc comment)
-// -- a specific order -- so reading (rotation, scale) back out of a World
-// matrix that carries a rotation TOGETHER WITH a non-uniform scale has to
-// remove the scale from the rotation part first, and then extract the Euler
-// angles against that SAME Y-X-Z product, or the two disagree and the mesh
-// comes out visibly skewed. Building1's scale is (1, 1.5, 2), not uniform,
-// specifically so a wrong decomposition here is not academic.
-func decomposeWorld(w mgl32.Mat4) (pos, eulerXYZ, scale mgl32.Vec3) {
-	pos = mgl32.Vec3{w[12], w[13], w[14]}
-
-	sx, sy, sz := mgl32.Extract3DScale(w)
-	scale = mgl32.Vec3{sx, sy, sz}
-
-	// Divide the scale back out of each basis column to leave a pure
-	// rotation matrix. r[row][col], matching the hand-derived Y-X-Z product
-	// below.
-	var r [3][3]float32
-	if sx != 0 {
-		r[0][0], r[1][0], r[2][0] = w[0]/sx, w[1]/sx, w[2]/sx
-	}
-	if sy != 0 {
-		r[0][1], r[1][1], r[2][1] = w[4]/sy, w[5]/sy, w[6]/sy
-	}
-	if sz != 0 {
-		r[0][2], r[1][2], r[2][2] = w[8]/sz, w[9]/sz, w[10]/sz
-	}
-
-	// Ry(y) * Rx(x) * Rz(z), worked out by hand (not borrowed from a
-	// library that might assume a different order) so it matches
-	// ModelMatrix's own composition exactly:
-	//   r[1][2] = -sin(x)
-	//   r[1][0] =  cos(x)*sin(z),  r[1][1] = cos(x)*cos(z)
-	//   r[0][2] =  cos(x)*sin(y),  r[2][2] = cos(x)*cos(y)
-	x := float32(math.Asin(float64(clamp32(-r[1][2], -1, 1))))
-	cx := float32(math.Cos(float64(x)))
-	var y, z float32
-	if cx > 1e-6 {
-		z = float32(math.Atan2(float64(r[1][0]), float64(r[1][1])))
-		y = float32(math.Atan2(float64(r[0][2]), float64(r[2][2])))
-	} else {
-		// Gimbal lock (x at +/-90deg): y and z rotate about the same world
-		// axis there, so only their sum/difference is determined. None of
-		// this level's nodes hit this branch -- it exists so a future one
-		// that does gets a defined answer instead of atan2(0,0)'s NaN-ish
-		// noise.
-		y = float32(math.Atan2(float64(-r[2][0]), float64(r[0][0])))
-		z = 0
-	}
-	return pos, mgl32.Vec3{x, y, z}, scale
-}
-
-func clamp32(v, lo, hi float32) float32 {
-	if v < lo {
-		return lo
-	}
-	if v > hi {
-		return hi
-	}
-	return v
 }
 
 func absf(v float32) float32 {

@@ -17,6 +17,7 @@ api:
   - glyphengine.Components
   - glyphengine.NewComponents
   - glyphengine.Transform
+  - glyphengine.TransformFromMatrix
   - glyphengine.MeshRef
   - glyphengine.Color
   - glyphengine.Static
@@ -52,6 +53,13 @@ scene.C.Color.Set(ent, &glyphengine.Color{R: 0.8, G: 0.4, B: 0.2})
 
 scene.Tick(1.0 / 60.0)
 ```
+
+`Transform.Rotation` is Euler angles in radians, composed as `Translate * RotY *
+RotX * RotZ * Scale`. When what you have is a matrix -- a glTF node's `World`, a
+parent's matrix times a child's -- `glyphengine.TransformFromMatrix(m)` is that
+product run backwards, and its second result is false when the matrix carries
+shear or a zero scale that no `Transform` can hold. See "Turning `World` into a
+`Transform`" in [models.md](models.md).
 
 Under `Engine`, `New` builds a scene for you (or takes yours with
 `WithScene`) and `Run` calls `Tick`. You only call `Tick` yourself when driving
