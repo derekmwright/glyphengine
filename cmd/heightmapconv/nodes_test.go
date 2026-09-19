@@ -15,6 +15,13 @@ import (
 // mgl32's Mat4.Mul4, and this recomputes the product independently with
 // plain trigonometry so a bug in composition ORDER (parent*child vs
 // child*parent) would not cancel itself out.
+//
+// Verified to fail: replacing nodeLocalTransform's rot with mgl32.Ident4()
+// (dropping the node's rotation, keeping translation and scale) made this
+// print "leaf.World * (3,4,5) = [16 4 10 1], want [15 4 -1]" -- the
+// translation-only component survives, so the bug would be invisible on a
+// terrain fixture that only translates its parent, which is exactly why the
+// Blender fixture (build_terrain_fixture.py) rotates its parent empty too.
 func TestNodeWorldThroughParentChain(t *testing.T) {
 	doc := &gltf.Document{
 		Nodes: []*gltf.Node{

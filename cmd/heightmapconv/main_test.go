@@ -99,6 +99,13 @@ func TestRunMeshEndToEnd(t *testing.T) {
 // TestRunMeshHoleFailsByDefaultAndFillSucceeds is the CLI-level check for
 // the issue's explicit ask: a hole fails the run by default (with a count
 // and coordinates), and -fill opts in to filling it instead.
+//
+// Verified to fail: making convertMesh always fill with -fill nearest
+// regardless of whether a.fill was set (ignoring mode.kind == "") made this
+// print "run with a hole and no -fill succeeded, want a non-zero exit",
+// with the stdout showing a heightmap was written and a misleading "filled
+// 2 hole(s) with -fill " line (the empty flag value leaking through, which
+// is itself a symptom that -fill was never checked).
 func TestRunMeshHoleFailsByDefaultAndFillSucceeds(t *testing.T) {
 	dir := t.TempDir()
 	meshPath := filepath.Join(dir, "hole.glb")
