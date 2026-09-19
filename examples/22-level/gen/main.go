@@ -164,10 +164,14 @@ func main() {
 
 	// Ground -- identity transform, so this one node does NOT trip the
 	// untransformed-mesh-node warning; every mesh node below it does, on
-	// purpose (see docs/agents/models.md's "Loading a level" section).
+	// purpose (see docs/agents/models.md's "Loading a level" section). Still
+	// carries "static"/"collider" extras like the buildings, so the level
+	// has a walkable floor rather than every collider belonging to something
+	// standing on empty air.
 	roots = append(roots, addNode(doc, &gltf.Node{
-		Name: "Ground",
-		Mesh: gltf.Index(groundMesh),
+		Name:   "Ground",
+		Mesh:   gltf.Index(groundMesh),
+		Extras: map[string]any{"static": true, "collider": "box"},
 	}))
 
 	// Buildings: four nodes instancing the SAME doc mesh with different TRS,
