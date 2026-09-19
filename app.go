@@ -446,6 +446,10 @@ type Engine struct {
 	// is set. See statetrace.go.
 	trace *renderer.StateTrace
 
+	// provoke injects, on chosen frames, the things a run normally suffers by
+	// accident. Inert unless asked for; see provoke.go.
+	provoke provocations
+
 	// fixedFrameTime replaces the measured frame delta when non-zero; see
 	// WithFixedFrameTime.
 	fixedFrameTime time.Duration
@@ -844,6 +848,7 @@ func New(g Game, opts ...Option) (*Engine, error) {
 	if e.trace = openStateTrace(); e.trace != nil {
 		r.SetStateTrace(e.trace)
 	}
+	e.provoke = readProvocations()
 
 	// A fixed clock is only half of a repeatable run: particle spawns draw from
 	// a source that is reseeded at every process start, so pin that too.
@@ -1233,9 +1238,14 @@ func (e *Engine) Run() {
 		defer e.LogTimingsTSV(label)
 	}
 
+	if e.provoke.active() {
+		log.Printf("glyphengine: determinism provocations are ON; this run's capture is not a reference")
+	}
+
 	for !e.window.ShouldClose() {
 		e.loopCount++
 		e.trace.Begin(e.loopCount)
+		e.provoke.apply(e.loopCount, e.renderer)
 
 		frameStart := time.Now()
 		frameDelta := frameStart.Sub(prev)
@@ -1725,6 +1735,13 @@ func (e *Engine) buildDrawList(vp mgl32.Mat4, shadowEnabled bool, lightVP mgl32.
 	// parallel slice. The translucent subset is the handful of ghosts,
 	// indicators and panes a frame has, so the sort is short; precompute it if
 	// that ever stops being true.
+	// A permutation the query could have produced on its own, forced. See
+	// provoke.go: the list arrives in Go map order, so anything the sort below
+	// leaves tied is already decided by chance on every frame of every run.
+	if e.provoke.reverse {
+		slices.Reverse(draws)
+	}
+
 	eye := [3]float32{e.cameraEye.X(), e.cameraEye.Y(), e.cameraEye.Z()}
 	slices.SortFunc(draws, func(a, b renderer.RenderObject) int {
 		at, bt := a.IsTranslucent(), b.IsTranslucent()

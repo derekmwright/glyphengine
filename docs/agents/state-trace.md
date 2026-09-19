@@ -121,3 +121,42 @@ the instrument present and disabled.
 
 With it on, every streamed buffer is hashed on the frame path once per frame.
 That is a diagnostic cost, not a shipping one; do not leave it set.
+
+## Provoking a divergence
+
+Waiting for an intermittent bug is not a method. These variables inject, on a
+frame you name, the things a run normally suffers by accident. A capture taken
+under any of them must be byte-identical to one taken without, under a fixed
+clock — anything else is a determinism bug whether or not it is the one that
+was sighted.
+
+| Variable | What it does |
+|---|---|
+| `GLYPHENGINE_PROVOKE_SKIP_FRAMES=3,40` | Makes `DrawFrame` take the out-of-date-acquire path on those loop frames |
+| `GLYPHENGINE_PROVOKE_RECREATE_FRAMES=149` | Forces a swapchain rebuild after the present on those loop frames |
+| `GLYPHENGINE_PROVOKE_DRAW_ORDER=reverse` | Reverses the draw list before it is sorted — a permutation the ECS map walk could legally have produced |
+| `GLYPHENGINE_PROVOKE_STALL=20:40ms` | Sleeps inside the first N loop frames: a cold GPU, a compile finishing, another process on the machine |
+
+Frame numbers are 1-based and count every iteration, so they line up with the
+state trace's `loop=` field.
+
+What they found, measured on this repo before the fixes that followed
+(1280x720, `GLYPHENGINE_FIXED_FRAME_TIME=16.667ms`):
+
+| Provocation | Scene | Pixels changed | Max delta |
+|---|---|---|---|
+| `SKIP_FRAMES=3,40,97` | `08-grass -timeofday 0.0 -frames 150` | 55 (0.01 %) | 1 |
+| `SKIP_FRAMES=149` | `08-grass -timeofday 0.28 -frames 150` | 12986 (1.41 %) | 2 |
+| `RECREATE_FRAMES=40` | `08-grass -timeofday 0.0 -frames 150` | 1685 (0.18 %) | 1 |
+| `RECREATE_FRAMES=149` | `08-grass -timeofday 0.28 -frames 150` | 257601 (27.95 %) | 104 |
+| `RECREATE_FRAMES=89` | `09-water -frames 90` | 234723 (25.47 %) | 114 |
+| `STALL=20:40ms` | `08-grass -timeofday 0.0 -frames 150` | none | — |
+| `DRAW_ORDER=reverse` | `18-translucent`, `15-kitchen-sink -demo`, `09-water -plume -ghost -marker -submerged` | none | — |
+
+Read that table as three findings. A wall-clock stall changes nothing, which is
+what a fixed clock is for. Reversing the draw list changes `draws=` and not the
+image, so the ECS map walk's randomness is latent rather than live — worth
+knowing, not worth a fix. And a frame the renderer did not draw, or a swapchain
+rebuilt underneath one it did, changes the picture by an amount that depends
+entirely on how late it happened: a rebuild on the last frame of `08-grass`
+moved 28 % of the pixels.

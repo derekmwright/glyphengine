@@ -202,7 +202,12 @@ type Renderer struct {
 
 	// trace records what each frame fed the GPU when GLYPHENGINE_STATE_TRACE
 	// is set; nil, and free, otherwise. See StateTrace.
-	trace         *StateTrace
+	trace *StateTrace
+
+	// provokeSkip makes the next DrawFrame draw nothing; see
+	// ProvokeSkipNextFrame. False in every run that did not ask for it.
+	provokeSkip bool
+
 	meshes        []*Mesh
 	jointBuffers  []*JointBuffer
 	dynamicMeshes map[*Mesh]*dynamicMesh
@@ -1142,6 +1147,22 @@ func (r *Renderer) NotifyResize() {
 // disables tracing, which is the default. See StateTrace.
 func (r *Renderer) SetStateTrace(t *StateTrace) { r.trace = t }
 
+// ProvokeSkipNextFrame makes the next DrawFrame return having recorded,
+// submitted and presented nothing, leaving the frame-in-flight slot, the cloud
+// history and prevVP exactly where they were.
+//
+// That is what an out-of-date acquire does, and a window being shown, moved to
+// another monitor or DPI-scaled produces one at a time nobody controls. A frame
+// the simulation advanced and the renderer never drew is one of the few shapes
+// issue #40 could have, and waiting for the window system to hand one over is
+// not a way to test it. Drive it instead, from the engine's
+// GLYPHENGINE_PROVOKE_SKIP_FRAMES.
+//
+// The skip is taken before the acquire rather than after a failed one, so no
+// semaphore is left signalled with nothing waiting on it. Everything the two
+// paths do differently afterwards -- which is to say nothing -- is the same.
+func (r *Renderer) ProvokeSkipNextFrame() { r.provokeSkip = true }
+
 // DeferDestroy queues a destruction callback that will execute after all
 // in-flight frames have finished referencing the resource.
 func (r *Renderer) DeferDestroy(fn func()) {
@@ -1338,6 +1359,15 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 	// Safe to destroy resources queued for deferred destruction now that
 	// a fence has been waited on.
 	r.flushDeferredDestroys()
+
+	// A provoked skip stands in for an out-of-date acquire; see
+	// ProvokeSkipNextFrame. Taken here so nothing downstream of the acquire
+	// runs, which is what the real thing does.
+	if r.provokeSkip {
+		r.provokeSkip = false
+		r.trace.Str("outcome", "skip-provoked")
+		return nil
+	}
 
 	// Acquire the next swapchain image
 	imageIndex, result, err := r.swapchainExt.AcquireNextImage(r.sc.swapchain, common.NoTimeout, &r.sync.imageAvailable[f], nil)
