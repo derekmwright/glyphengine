@@ -31,10 +31,9 @@ Also importable as a module -- `from export_level import export_level` --
 which is how build_fixture.py drives it without shelling back out to a
 second Blender process.
 
-The exporter's keyword arguments are not identical across Blender versions
-(4.2, 4.3, 4.4 and 5.0 are the ones this recipe is checked against -- see
-docs/agents/blender-pipeline.md's per-version table). Rather than guess with
-try/except, this asks the operator's own RNA for the properties that exist
+The exporter's keyword arguments are not identical across Blender versions,
+and this recipe has only been RUN on 5.0.1 (see "Verified against" in
+docs/agents/blender-pipeline.md). Rather than guess with try/except, this asks the operator's own RNA for the properties that exist
 on the Blender actually running (`bpy.ops.export_scene.gltf.get_rna_type()
 .properties`) and applies only those that do, printing what it applied and
 what it could not find. That turns "exported with an older version's
@@ -137,10 +136,10 @@ def _export_format_for(filepath):
 
     export_format's ENUM items are populated dynamically by the operator
     (bpy.ops.export_scene.gltf.get_rna_type().properties["export_format"]
-    .enum_items comes back empty outside of an active invocation on every
-    version checked here), so this is not introspected the way the other
+    .enum_items comes back empty outside of an active invocation on 5.0.1,
+    the one version checked), so this is not introspected the way the other
     options are -- GLB/GLTF_SEPARATE/GLTF_EMBEDDED are the exporter's own
-    documented identifiers and have been stable across 4.2-5.0.
+    documented identifiers.
     """
     ext = os.path.splitext(filepath)[1].lower()
     if ext == ".glb":

@@ -482,22 +482,15 @@ clock are byte-identical (`cmp`), confirmed 2026-09-19.
 
 ## Verified against
 
-| Blender version | Runs on this machine | Options RNA-detected | Fixture built | Notes |
+| Blender version | Checked | Options RNA-detected | Fixture built | Notes |
 |---|---|---|---|---|
 | 5.0.1 | Yes | All 6 present | Yes -- this is the committed `level.glb` | Every number on this page was measured against this version. |
-| 4.2, 4.3, 4.4 | **No** | Not checked | Not checked | See below. |
+| 4.2 LTS, 4.3, 4.4 | -- | Not checked | Not checked | No working install was available. |
 
-**This machine's Blender 4.2/4.3/4.4 installs are not runnable.**
-`C:\Program Files\Blender Foundation\Blender 4.2\` (and 4.3, 4.4) contain
-only each version's per-version data folder (`4.2\python`, `4.2\scripts`,
-mostly `__pycache__` with no `.py` source left) and no `blender.exe` --
-confirmed by direct `Test-Path` and a machine-wide search that found exactly
-one working `blender.exe`, under `Blender 5.0\`. The Windows uninstall
-registry and Start Menu shortcuts agree: only Blender 5.0 is an installed,
-launchable application here. This is an environment limitation of THIS
-machine, not a finding about those Blender versions -- issue #67 asked for
-this table across 4.2-5.0, and it could not be produced beyond 5.0.1 without
-a working install of the others.
+Everything on this page is a measurement of **5.0.1 and nothing else**. Issue
+#67 asked for this table across 4.2-5.0 and it could not be produced: the only
+launchable Blender where this was written was 5.0.1. Treat every number here as
+unverified on any other version until someone fills the table in.
 
 `tools/blender/export_level.py`'s RNA-introspection approach
 (`level_export_kwargs`) exists specifically so it does not need per-version
