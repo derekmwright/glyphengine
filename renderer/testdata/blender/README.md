@@ -16,8 +16,8 @@ Windows). `tools/blender/build_fixture.py` builds the scene procedurally in
 an empty file -- no committed `.blend`, so the fixture's entire source of
 truth is that script -- and exports it through `tools/blender/export_level.py`.
 
-- **Blender version used for the committed file:** 5.0.1 (the newest of the
-  four installed on the machine this was built on: 4.2, 4.3, 4.4, 5.0).
+- **Blender version used for the committed file:** 5.0.1, which is also the
+  only version any of this has been run against.
 - **Date:** 2026-09-19.
 - **Exact command run:**
   `"C:\Program Files\Blender Foundation\Blender 5.0\blender.exe" -b --factory-startup --python tools/blender/build_fixture.py -- renderer/testdata/blender/level.glb`
@@ -30,8 +30,7 @@ truth is that script -- and exports it through `tools/blender/export_level.py`.
 See `docs/agents/blender-pipeline.md` for what every object in the scene
 probes, the exact numbers this file's nodes carry (computed by hand from
 `build_fixture.py`'s own inputs and cross-checked against this exact
-export), and the per-Blender-version table from running the same script on
-4.2/4.3/4.4/5.0.
+export), and which Blender versions it has and has not been checked against.
 
 If `tools/blender/build_fixture.py` or `tools/blender/export_level.py`
 changes in a way that moves a number this file carries (a translation, a

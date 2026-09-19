@@ -54,9 +54,9 @@ func TestBlenderFixture(t *testing.T) {
 // Skips cleanly when unset, which is the normal case: the committed fixture
 // (TestBlenderFixture above) always runs, this one only runs when someone
 // is deliberately cross-checking a second Blender install, per issue #67's
-// "verify across versions" step. See docs/agents/blender-pipeline.md's
-// per-version table for what running this against 4.2/4.3/4.4 actually
-// found.
+// "verify across versions" step. Nobody has yet: only 5.0.1 was available
+// when this was written, and docs/agents/blender-pipeline.md's "Verified
+// against" says so.
 func TestBlenderFixtureAltVersion(t *testing.T) {
 	path := os.Getenv("BLENDER_FIXTURE")
 	if path == "" {
