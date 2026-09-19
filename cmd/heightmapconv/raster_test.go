@@ -275,3 +275,79 @@ func gridMesh(wantTris int) (tris []triangle, verticesPerSide int, worldW, world
 	}
 	return tris, n, worldW, worldD
 }
+
+// TestIndexFindsATriangleInEveryCellItCovers compares the binned rasteriser
+// with a brute-force pass over every triangle, on a mesh built to make the
+// index do real work: two large triangles over a dense cluster of tiny ones.
+// The cluster drives the cell count up, so the large triangles each span
+// hundreds of cells and are found from a given sample only if the index put
+// them in THAT cell.
+//
+// It exists because the index had no test that could see it wrong. Binning a
+// triangle into the cell of its minimum corner alone -- the obvious way to get
+// the insertion loop wrong -- passed every synthetic test here, including the
+// 100,000-triangle one: that mesh's triangles are all one cell in size and its
+// cells line up with its quads, so nothing ever spans two cells and the loop's
+// upper bound never matters. Only the real Blender terrain caught it, by
+// accident of being a coarse mesh on a fine grid.
+//
+// Verified to fail that way: "sample (12,3) = hole, brute force says 10", and
+// 3810 of 4096 samples disagree.
+func TestIndexFindsATriangleInEveryCellItCovers(t *testing.T) {
+	var tris []triangle
+	// The ground everyone should see: one 100x100 quad at height 10.
+	tris = append(tris,
+		newTriangle([3]float64{0, 10, 0}, [3]float64{100, 10, 0}, [3]float64{100, 10, 100}),
+		newTriangle([3]float64{0, 10, 0}, [3]float64{100, 10, 100}, [3]float64{0, 10, 100}),
+	)
+	// 5000 slivers under one corner of it, lower, so they never win a sample
+	// but do decide how finely the index divides the plane.
+	for i := 0; i < 5000; i++ {
+		x := float64(i%100) * 0.05
+		z := float64(i/100) * 0.05
+		tris = append(tris, newTriangle(
+			[3]float64{x, 0, z}, [3]float64{x + 0.04, 0, z}, [3]float64{x, 0, z + 0.04}))
+	}
+
+	const grid = 64
+	res := rasterizeMesh(tris, grid, grid, 0, 0, 100, 100)
+
+	brute := func(x, z float64) (float64, bool) {
+		best, found := math.Inf(-1), false
+		for _, tri := range tris {
+			if y, ok := barycentricHeight(tri, x, z); ok && y > best {
+				best, found = y, true
+			}
+		}
+		return best, found
+	}
+
+	isHole := map[[2]int]bool{}
+	for _, h := range res.holes {
+		isHole[[2]int{h.ix, h.iz}] = true
+	}
+	step := 100.0 / float64(grid-1)
+	wrong := 0
+	for iz := 0; iz < grid; iz++ {
+		for ix := 0; ix < grid; ix++ {
+			want, ok := brute(float64(ix)*step, float64(iz)*step)
+			if !ok {
+				t.Fatalf("brute force found nothing at (%d,%d); the test mesh is wrong", ix, iz)
+			}
+			got := float64(res.heights[iz*grid+ix])
+			if isHole[[2]int{ix, iz}] || math.Abs(got-want) > 1e-4 {
+				if wrong == 0 {
+					if isHole[[2]int{ix, iz}] {
+						t.Errorf("sample (%d,%d) = hole, brute force says %g", ix, iz, want)
+					} else {
+						t.Errorf("sample (%d,%d) = %g, brute force says %g", ix, iz, got, want)
+					}
+				}
+				wrong++
+			}
+		}
+	}
+	if wrong > 0 {
+		t.Errorf("%d of %d samples disagree with brute force", wrong, grid*grid)
+	}
+}
