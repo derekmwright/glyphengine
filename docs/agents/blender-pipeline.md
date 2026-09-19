@@ -344,7 +344,17 @@ None of the following survive a glTF export, and nothing on this page or in
 - **Terrain as a sculpted mesh.** glTF has no heightmap concept; a sculpted
   landscape exports as an ordinary (likely large) mesh, not something
   `glyphengine`'s heightmap terrain (`docs/agents/terrain-heightmap.md`) can
-  load. A heightmap writer is issue #70, not this one.
+  load directly. The recipe: sculpt the terrain as a mesh in the same file as
+  everything that stands on it (units and placement stay in sync for free),
+  export it through this page's own recipe like anything else, then convert
+  it with `cmd/heightmapconv -mesh level.glb -node Terrain -grid 129x129 -out
+  terrain.heightmap` -- it reads the node's full world transform itself, so
+  the terrain object can be translated, parented, rotated, same as any other
+  object in the file. See `docs/agents/terrain-heightmap.md`'s "Converting a
+  Blender terrain or a heightmap image" section for the full flag reference
+  and the orientation convention, and `cmd/heightmapconv/testdata/README.md`
+  for a real Blender export (translated mesh, rotated parent Empty) checked
+  against hand-computed world coordinates.
 - **Particle systems.** Not part of glTF; a Blender particle system exports
   nothing (or, if it is the kind the exporter recognises as an instancer,
   see "Instancing" below for what THAT turns into, which is not the
