@@ -444,18 +444,43 @@ tasks:
         # And verified by breaking the fix: with sortDraws' final tiebreak
         # replaced by `return 0`, this reports 18-translucent, 21-streetlights
         # and 12-particles as differing on all 90 lines and exits 1.
+        #
+        # Each case writes its own pair of traces, and a failure keeps them. It
+        # used to reuse s1/s2 and the gate ended in an unconditional rm -rf, so
+        # when "08-grass" differed on all 90 lines once -- and then matched on
+        # twelve reruns, six on the branch under test and six on main -- there
+        # was nothing left to say which kind of failure it had been. The two
+        # kinds are told apart by `cam=`: the same camera handed different
+        # draws is an ordering bug, which is what this case exists to catch,
+        # while a camera that itself differs means something other than the
+        # clock reached the scene. Window input is the obvious candidate --
+        # the fixed clock does not suppress it, and 08-grass is a mouse-look
+        # scene with the cursor locked -- but that is a suspect and not a
+        # finding, which is the reason for keeping the evidence.
+        seq=0
         drawseq() {
           set -- $1
           name=$1; shift
-          GLYPHENGINE_FIXED_FRAME_TIME=16.667ms GLYPHENGINE_STATE_TRACE=$d/s1.trace go run ./$name -frames 90 $* >/dev/null 2>&1
-          GLYPHENGINE_FIXED_FRAME_TIME=16.667ms GLYPHENGINE_STATE_TRACE=$d/s2.trace go run ./$name -frames 90 $* >/dev/null 2>&1
-          go run ../cmd/tracefield -key draws -in $d/s1.trace -out $d/s1.draws || { status=1; return; }
-          go run ../cmd/tracefield -key draws -in $d/s2.trace -out $d/s2.draws || { status=1; return; }
+          seq=$((seq+1))
+          t1=$d/seq$seq.1.trace; t2=$d/seq$seq.2.trace
+          GLYPHENGINE_FIXED_FRAME_TIME=16.667ms GLYPHENGINE_STATE_TRACE=$t1 go run ./$name -frames 90 $* >/dev/null 2>&1
+          GLYPHENGINE_FIXED_FRAME_TIME=16.667ms GLYPHENGINE_STATE_TRACE=$t2 go run ./$name -frames 90 $* >/dev/null 2>&1
+          go run ../cmd/tracefield -key draws -in $t1 -out $d/s1.draws || { status=1; return; }
+          go run ../cmd/tracefield -key draws -in $t2 -out $d/s2.draws || { status=1; return; }
           if samefile $d/s1.draws $d/s2.draws; then
             echo "$name $*: draw sequence identical"
           else
             echo "$name $*: THE DRAW SEQUENCE DIFFERS between two runs"
             diff $d/s1.draws $d/s2.draws | head -6
+            go run ../cmd/tracefield -key cam -in $t1 -out $d/s1.cam || { status=1; return; }
+            go run ../cmd/tracefield -key cam -in $t2 -out $d/s2.cam || { status=1; return; }
+            if samefile $d/s1.cam $d/s2.cam; then
+              echo "  cam= agrees on every frame: one camera, two draw orders -- an ordering bug"
+            else
+              echo "  cam= differs too: the camera moved, so something other than the clock reached the scene"
+              diff $d/s1.cam $d/s2.cam | head -4
+            fi
+            echo "  traces: examples/$t1 and examples/$t2"
             status=1
           fi
         }
@@ -502,7 +527,11 @@ tasks:
         else
           echo "control: differs without the fixed clock, as it must"
         fi
-        rm -rf $d
+        if [ $status -ne 0 ]; then
+          echo "evidence kept in examples/$d"
+        else
+          rm -rf $d
+        fi
         exit $status
 
   screenshots:
