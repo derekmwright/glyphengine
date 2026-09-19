@@ -1,8 +1,6 @@
 package renderer
 
 import (
-	"unsafe"
-
 	"github.com/vkngwrapper/core/v3/core1_0"
 )
 
@@ -64,6 +62,7 @@ func recordUIComposite(
 	uiOverlays []UIRenderObject,
 	msdfOverlays []RenderObject,
 	fallbackTexture *Texture,
+	scratch *commandScratch,
 ) {
 	if len(uiOverlays) == 0 && len(msdfOverlays) == 0 {
 		return
@@ -77,8 +76,8 @@ func recordUIComposite(
 		Width: float32(extent.Width), Height: float32(extent.Height), MinDepth: 0, MaxDepth: 1,
 	}
 	scissor := core1_0.Rect2D{Offset: core1_0.Offset2D{X: 0, Y: 0}, Extent: extent}
-	deviceDriver.CmdSetViewport(cmdBuf, viewport)
-	deviceDriver.CmdSetScissor(cmdBuf, scissor)
+	scratch.setViewport(deviceDriver, cmdBuf, viewport)
+	scratch.setScissor(deviceDriver, cmdBuf, scissor)
 
 	// Draw UI panels (alpha blended, textured, 9-slice)
 	if len(uiOverlays) > 0 {
@@ -94,28 +93,27 @@ func recordUIComposite(
 			if tex == nil {
 				tex = fallbackTexture
 			}
-			deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, []core1_0.DescriptorSet{tex.DescriptorSet}, nil)
-			deviceDriver.CmdBindVertexBuffers(cmdBuf, 0, []core1_0.Buffer{d.Mesh.vertexBuffer}, []int{0})
+			scratch.bindDescriptorSets(deviceDriver, cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, tex.DescriptorSet)
+			scratch.bindVertexBuffers(deviceDriver, cmdBuf, 0, d.Mesh.vertexBuffer)
 
-			var pc [64]float32
-			copy(pc[:16], d.MVP[:])
+			scratch.resetPC()
+			copy(scratch.pc[:16], d.MVP[:])
 			// model = identity
-			pc[16] = 1
-			pc[21] = 1
-			pc[26] = 1
-			pc[31] = 1
+			scratch.pc[16] = 1
+			scratch.pc[21] = 1
+			scratch.pc[26] = 1
+			scratch.pc[31] = 1
 			// tint.rgb = 1 (vertex color already tinted), tint.a = opacity
-			pc[32] = 1.0
-			pc[33] = 1.0
-			pc[34] = 1.0
-			pc[35] = d.Opacity
+			scratch.pc[32] = 1.0
+			scratch.pc[33] = 1.0
+			scratch.pc[34] = 1.0
+			scratch.pc[35] = d.Opacity
 			// sunDir.x reused as texture mode flag (0=panel 9-slice, 1=straight texture)
 			if d.TextureMode {
-				pc[36] = 1.0
+				scratch.pc[36] = 1.0
 			}
-			packUIFill(&pc, d.Fill)
-			pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
-			deviceDriver.CmdPushConstants(cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
+			packUIFill(&scratch.pc, d.Fill)
+			scratch.pushConstants(deviceDriver, cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment)
 
 			stats.addDraw(1, d.Mesh.IndexCount, d.Mesh.VertexCount)
 			if d.Mesh.IndexCount > 0 {
@@ -142,24 +140,23 @@ func recordUIComposite(
 			if tex == nil {
 				tex = fallbackTexture
 			}
-			deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, []core1_0.DescriptorSet{tex.DescriptorSet}, nil)
-			deviceDriver.CmdBindVertexBuffers(cmdBuf, 0, []core1_0.Buffer{d.Mesh.vertexBuffer}, []int{0})
+			scratch.bindDescriptorSets(deviceDriver, cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, tex.DescriptorSet)
+			scratch.bindVertexBuffers(deviceDriver, cmdBuf, 0, d.Mesh.vertexBuffer)
 
 			// Push constants: MVP + identity model + tint(rgb=color, w=screenPxRange)
-			var pc [64]float32
-			copy(pc[:16], d.MVP[:])
+			scratch.resetPC()
+			copy(scratch.pc[:16], d.MVP[:])
 			// model = identity
-			pc[16] = 1
-			pc[21] = 1
-			pc[26] = 1
-			pc[31] = 1
+			scratch.pc[16] = 1
+			scratch.pc[21] = 1
+			scratch.pc[26] = 1
+			scratch.pc[31] = 1
 			// tint.rgb = 1 (per-vertex color handles text color), tint.w = screenPxRange
-			pc[32] = 1.0
-			pc[33] = 1.0
-			pc[34] = 1.0
-			pc[35] = d.Color[0] // screenPxRange
-			pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
-			deviceDriver.CmdPushConstants(cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
+			scratch.pc[32] = 1.0
+			scratch.pc[33] = 1.0
+			scratch.pc[34] = 1.0
+			scratch.pc[35] = d.Color[0] // screenPxRange
+			scratch.pushConstants(deviceDriver, cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment)
 
 			stats.addDraw(1, d.Mesh.IndexCount, d.Mesh.VertexCount)
 			if d.Mesh.IndexCount > 0 {

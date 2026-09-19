@@ -1,8 +1,6 @@
 package renderer
 
 import (
-	"unsafe"
-
 	"github.com/vkngwrapper/core/v3/core1_0"
 )
 
@@ -59,6 +57,7 @@ func recordTranslucent(
 	frame int,
 	split blendSplit,
 	over bool,
+	scratch *commandScratch,
 ) {
 	var lastTex *Texture
 	var lastJoints *JointBuffer
@@ -94,8 +93,8 @@ func recordTranslucent(
 				p = translucentPipeline
 			}
 			deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, p)
-			deviceDriver.CmdSetViewport(cmdBuf, viewport)
-			deviceDriver.CmdSetScissor(cmdBuf, scissor)
+			scratch.setViewport(deviceDriver, cmdBuf, viewport)
+			scratch.setScissor(deviceDriver, cmdBuf, scissor)
 			currentDoubleSided = d.DoubleSided
 			currentSkinned = skinned
 			// The pipeline bind invalidates nothing about descriptors, but the
@@ -115,40 +114,39 @@ func recordTranslucent(
 			// the opaque skinned path has always used.
 			activeLayout = skinnedPipelineLayout
 			if tex != lastTex || d.Joints != lastJoints {
-				deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, activeLayout, 0,
-					[]core1_0.DescriptorSet{tex.DescriptorSet, d.Joints.descriptorSets[frame], shadowDS}, nil)
+				scratch.bindDescriptorSets(deviceDriver, cmdBuf, core1_0.PipelineBindPointGraphics, activeLayout, 0,
+					tex.DescriptorSet, d.Joints.descriptorSets[frame], shadowDS)
 				lastTex, lastJoints = tex, d.Joints
 			}
 		} else if tex != lastTex {
-			deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, litPipelineLayout, 0,
-				[]core1_0.DescriptorSet{tex.DescriptorSet, shadowDS}, nil)
+			scratch.bindDescriptorSets(deviceDriver, cmdBuf, core1_0.PipelineBindPointGraphics, litPipelineLayout, 0,
+				tex.DescriptorSet, shadowDS)
 			lastTex = tex
 		}
 
-		deviceDriver.CmdBindVertexBuffers(cmdBuf, 0, []core1_0.Buffer{d.Mesh.vertexBuffer}, []int{0})
+		scratch.bindVertexBuffers(deviceDriver, cmdBuf, 0, d.Mesh.vertexBuffer)
 
-		var pc [64]float32
-		copy(pc[:16], d.MVP[:])
-		copy(pc[16:32], d.Model[:])
-		pc[32] = d.Color[0]
-		pc[33] = d.Color[1]
-		pc[34] = d.Color[2]
-		pc[35] = 0.0
+		scratch.resetPC()
+		copy(scratch.pc[:16], d.MVP[:])
+		copy(scratch.pc[16:32], d.Model[:])
+		scratch.pc[32] = d.Color[0]
+		scratch.pc[33] = d.Color[1]
+		scratch.pc[34] = d.Color[2]
+		scratch.pc[35] = 0.0
 		if d.Emissive {
-			pc[35] = 1.0
+			scratch.pc[35] = 1.0
 		} else if d.DoubleSided && !skinned {
-			pc[35] = -1.0 // flat shading, same as the opaque path
+			scratch.pc[35] = -1.0 // flat shading, same as the opaque path
 		}
-		packLightingPC(&pc, lighting)
-		pc[39] = d.Alpha // sunDir.w — packLightingPC leaves it as padding
+		packLightingPC(&scratch.pc, lighting)
+		scratch.pc[39] = d.Alpha // sunDir.w — packLightingPC leaves it as padding
 		roughness := d.Roughness
 		if roughness == 0 {
 			roughness = 0.5
 		}
-		pc[51] = roughness
-		pc[55] = d.Metallic
-		pcBytes := unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize)
-		deviceDriver.CmdPushConstants(cmdBuf, activeLayout, core1_0.StageVertex|core1_0.StageFragment, 0, pcBytes)
+		scratch.pc[51] = roughness
+		scratch.pc[55] = d.Metallic
+		scratch.pushConstants(deviceDriver, cmdBuf, activeLayout, core1_0.StageVertex|core1_0.StageFragment)
 
 		stats.addDraw(1, d.Mesh.IndexCount, d.Mesh.VertexCount)
 		if d.Mesh.IndexCount > 0 {

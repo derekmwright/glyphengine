@@ -3,7 +3,6 @@ package renderer
 import (
 	"fmt"
 	"log"
-	"unsafe"
 
 	"github.com/vkngwrapper/core/v3/core1_0"
 )
@@ -509,7 +508,7 @@ type bloomPass struct {
 //
 // Nothing here is recorded when bloom is off, so a scene that does not use it
 // pays only the tonemap's uniform branch.
-func recordBloom(deviceDriver core1_0.DeviceDriver, cmdBuf core1_0.CommandBuffer, b bloomPass) error {
+func recordBloom(deviceDriver core1_0.DeviceDriver, cmdBuf core1_0.CommandBuffer, b bloomPass, scratch *commandScratch) error {
 	if !b.enabled {
 		return nil
 	}
@@ -523,25 +522,20 @@ func recordBloom(deviceDriver core1_0.DeviceDriver, cmdBuf core1_0.CommandBuffer
 
 	stage := func(pass core1_0.RenderPass, fb core1_0.Framebuffer, dst core1_0.Extent2D,
 		pipeline core1_0.Pipeline, src core1_0.DescriptorSet, pc [4]float32) error {
-		if err := deviceDriver.CmdBeginRenderPass(cmdBuf, core1_0.SubpassContentsInline, core1_0.RenderPassBeginInfo{
-			RenderPass:  pass,
-			Framebuffer: fb,
-			RenderArea:  core1_0.Rect2D{Offset: core1_0.Offset2D{X: 0, Y: 0}, Extent: dst},
-		}); err != nil {
+		if err := scratch.beginRenderPass(deviceDriver, cmdBuf, core1_0.SubpassContentsInline, pass, fb,
+			core1_0.Rect2D{Offset: core1_0.Offset2D{X: 0, Y: 0}, Extent: dst}); err != nil {
 			return err
 		}
 		deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, pipeline)
-		deviceDriver.CmdSetViewport(cmdBuf, core1_0.Viewport{
+		scratch.setViewport(deviceDriver, cmdBuf, core1_0.Viewport{
 			Width: float32(dst.Width), Height: float32(dst.Height), MinDepth: 0, MaxDepth: 1,
 		})
-		deviceDriver.CmdSetScissor(cmdBuf, core1_0.Rect2D{Offset: core1_0.Offset2D{X: 0, Y: 0}, Extent: dst})
-		deviceDriver.CmdBindDescriptorSets(cmdBuf, core1_0.PipelineBindPointGraphics, b.layout, 0,
-			[]core1_0.DescriptorSet{src}, nil)
+		scratch.setScissor(deviceDriver, cmdBuf, core1_0.Rect2D{Offset: core1_0.Offset2D{X: 0, Y: 0}, Extent: dst})
+		scratch.bindDescriptorSets(deviceDriver, cmdBuf, core1_0.PipelineBindPointGraphics, b.layout, 0, src)
 
-		var push [pushConstantSize / 4]float32
-		copy(push[32:36], pc[:])
-		deviceDriver.CmdPushConstants(cmdBuf, b.layout, core1_0.StageVertex|core1_0.StageFragment, 0,
-			unsafe.Slice((*byte)(unsafe.Pointer(&push[0])), pushConstantSize))
+		scratch.resetPC()
+		copy(scratch.pc[32:36], pc[:])
+		scratch.pushConstants(deviceDriver, cmdBuf, b.layout, core1_0.StageVertex|core1_0.StageFragment)
 
 		deviceDriver.CmdDraw(cmdBuf, 3, 1, 0, 0)
 		deviceDriver.CmdEndRenderPass(cmdBuf)
