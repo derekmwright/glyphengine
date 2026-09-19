@@ -88,11 +88,19 @@ came out different, which is the worst kind of divergence to be handed.
 
 | Value | Meaning |
 |---|---|
-| `present` | Recorded, submitted, presented; per-frame state advanced |
+| `present` | Recorded, submitted, presented |
 | `skip-minimized` | Zero-sized framebuffer. The tick ran; nothing was drawn, and `frameCount` did not move |
-| `skip-acquire-out-of-date` | The acquire failed; the swapchain was rebuilt and this frame was never recorded |
-| `present-recreate` | Drawn and presented, but the swapchain was rebuilt afterwards, so `cloudframe`, `prevVP` and the frame-in-flight slot did **not** advance |
+| `skip-resized` | The swapchain was rebuilt at a new extent, so this frame — built for the old one — was dropped |
+| `present-recreate` | Drawn and presented, and the swapchain rebuilt afterwards |
 | `*-error` | A Vulkan call failed at that stage |
+
+A line also carries `provoked=out-of-date` when
+`GLYPHENGINE_PROVOKE_SKIP_FRAMES` named that frame, so a provoked run's trace
+says so rather than looking like a spontaneous one.
+
+An out-of-date acquire has no outcome of its own because it no longer costs the
+frame: the swapchain is rebuilt and the frame is drawn into it, ending at
+`present`. Only a rebuild that changed the extent gives `skip-resized`.
 
 ## Reading a diff
 
