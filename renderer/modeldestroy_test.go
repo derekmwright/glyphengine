@@ -187,20 +187,33 @@ func TestDestroyModelDefersRatherThanFreeingNow(t *testing.T) {
 }
 
 // TestResourceCountsReportsTheTrackingLists keeps ResourceCounts honest about
-// what it is: the renderer's own cleanup lists plus the pending-destroy queue,
-// which is what the reload loop compares against a baseline.
+// what it is: the renderer's own cleanup lists, the count of descriptor sets
+// those resources hold, and the pending-destroy queue -- which is what the
+// reload loop compares against a baseline.
+//
+// The descriptor set count is deliberately NOT one per texture plus one per
+// material here. It is its own number because it is kept by hand (Vulkan
+// reports nothing about a pool's remaining capacity) and because the list
+// lengths are exactly what stayed level while the pool drained, before issue
+// #82: a fixture where it could be derived from the others would not notice a
+// ResourceCounts that derived it.
 //
 // BROKEN: made ResourceCounts report len(r.meshes) for Textures too. FAILED
 // with: "counts = {2 2 1 1}, want {2 3 1 1}".
+//
+// BROKEN: made ResourceCounts report len(r.textures) for DescriptorSets --
+// the derivation this fixture exists to rule out. FAILED with: "counts = {2 3
+// 1 3 1}, want {2 3 1 7 1}".
 func TestResourceCountsReportsTheTrackingLists(t *testing.T) {
 	r := &Renderer{
-		meshes:    []*Mesh{{}, {}},
-		textures:  []*Texture{{}, {}, {}},
-		materials: []*Material{{}},
+		meshes:             []*Mesh{{}, {}},
+		textures:           []*Texture{{}, {}, {}},
+		materials:          []*Material{{}},
+		liveDescriptorSets: 7,
 	}
 	r.DeferDestroy(func() {})
 
-	want := ResourceCounts{Meshes: 2, Textures: 3, Materials: 1, Deferred: 1}
+	want := ResourceCounts{Meshes: 2, Textures: 3, Materials: 1, DescriptorSets: 7, Deferred: 1}
 	if got := r.ResourceCounts(); got != want {
 		t.Errorf("counts = %v, want %v", got, want)
 	}

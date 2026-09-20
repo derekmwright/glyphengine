@@ -357,9 +357,9 @@ func (g *game) stepReload(e *glyph.Engine) {
 	g.steadyCounts, g.haveSteady = steady, true
 
 	if g.cyclesLeft == 0 {
-		log.Printf("-reload: %d swaps done; one level is %d meshes, %d textures, %d materials, and the renderer tracked the same %d/%d/%d at the top of every cycle",
-			g.reloadCycles, g.oneLevel.Meshes, g.oneLevel.Textures, g.oneLevel.Materials,
-			steady.Meshes, steady.Textures, steady.Materials)
+		log.Printf("-reload: %d swaps done; one level is %d meshes, %d textures, %d materials, %d descriptor sets, and the renderer tracked the same %d/%d/%d/%d at the top of every cycle",
+			g.reloadCycles, g.oneLevel.Meshes, g.oneLevel.Textures, g.oneLevel.Materials, g.oneLevel.DescriptorSets,
+			steady.Meshes, steady.Textures, steady.Materials, steady.DescriptorSets)
 		e.Close()
 		return
 	}
@@ -387,16 +387,27 @@ func (g *game) stepReload(e *glyph.Engine) {
 	}
 }
 
+// sameResources compares what a reload has to give back exactly.
+//
+// DescriptorSets is in here and it is the one that took 677 cycles to notice
+// without it: a released model's meshes, textures and materials all returned
+// to the same numbers at the top of every cycle while its descriptor sets did
+// not come back at all, because nothing could give one back (issue #82). The
+// three list lengths cannot see that; the pool running dry, hundreds of cycles
+// later and inside the next LOAD, was the only symptom.
 func sameResources(a, b renderer.ResourceCounts) bool {
-	return a.Meshes == b.Meshes && a.Textures == b.Textures && a.Materials == b.Materials
+	return a.Meshes == b.Meshes && a.Textures == b.Textures && a.Materials == b.Materials &&
+		a.DescriptorSets == b.DescriptorSets
 }
 
 func sumResources(a, b renderer.ResourceCounts) renderer.ResourceCounts {
-	return renderer.ResourceCounts{Meshes: a.Meshes + b.Meshes, Textures: a.Textures + b.Textures, Materials: a.Materials + b.Materials}
+	return renderer.ResourceCounts{Meshes: a.Meshes + b.Meshes, Textures: a.Textures + b.Textures, Materials: a.Materials + b.Materials,
+		DescriptorSets: a.DescriptorSets + b.DescriptorSets}
 }
 
 func subResources(a, b renderer.ResourceCounts) renderer.ResourceCounts {
-	return renderer.ResourceCounts{Meshes: a.Meshes - b.Meshes, Textures: a.Textures - b.Textures, Materials: a.Materials - b.Materials}
+	return renderer.ResourceCounts{Meshes: a.Meshes - b.Meshes, Textures: a.Textures - b.Textures, Materials: a.Materials - b.Materials,
+		DescriptorSets: a.DescriptorSets - b.DescriptorSets}
 }
 
 func (g *game) Update(e *glyph.Engine, dt float32) {

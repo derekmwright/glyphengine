@@ -110,6 +110,7 @@ func (r *Renderer) BuildTerrainMaterial(grass, path, rock, splat *Texture) (*Ter
 	if err != nil {
 		return nil, fmt.Errorf("allocate terrain descriptor set: %w", err)
 	}
+	r.liveDescriptorSets++
 
 	textures := [4]*Texture{grass, path, rock, splat}
 	writes := make([]core1_0.WriteDescriptorSet, 4)
@@ -128,6 +129,7 @@ func (r *Renderer) BuildTerrainMaterial(grass, path, rock, splat *Texture) (*Ter
 		}
 	}
 	if err := r.deviceDriver.UpdateDescriptorSets(writes, nil); err != nil {
+		r.freeDescriptorSets(sets[0])
 		return nil, fmt.Errorf("update terrain descriptor set: %w", err)
 	}
 	return &TerrainMaterial{DescriptorSet: sets[0]}, nil
@@ -169,6 +171,26 @@ const uiLayerSetFactor = 2
 // uniform buffer descriptor sets. Extra capacity for shadow mapping descriptors.
 func createDescriptorPool(deviceDriver core1_0.DeviceDriver, maxSets int) (core1_0.DescriptorPool, error) {
 	pool, _, err := deviceDriver.CreateDescriptorPool(nil, core1_0.DescriptorPoolCreateInfo{
+		// Without this flag vkFreeDescriptorSets is not a legal call on this
+		// pool at all, so a set could only come back by resetting or
+		// destroying the whole pool -- and every Texture and Material a game
+		// loaded and released kept its set until the process ended. Measured
+		// before it was set, on 22-level -reload 700 -level
+		// renderer/testdata/blender/level.glb (a level with one texture and
+		// no Material): the 677th upload failed with
+		//
+		//   load gltf images: upload texture 0 (GroundTex):
+		//   allocate descriptor set: vulkan error: out of pool memory
+		//
+		// with nothing wrong except that 676 loads had used MaxSets up. See
+		// DestroyTexture and DestroyMaterial, which give the sets back now.
+		//
+		// What the flag costs is that the driver can no longer hand sets out
+		// of this pool as a bump allocator. Nothing here allocates a set on a
+		// frame path -- CreateTexture and CreateMaterial are load-time calls
+		// and the pass targets allocate at startup and on resize -- so that
+		// buys back a bound this renderer would otherwise keep walking into.
+		Flags:   core1_0.DescriptorPoolCreateFreeDescriptorSet,
 		MaxSets: maxSets + 36 + maxMaterials + uiLayerSetFactor*(maxHDRSets+maxBloomSets),
 		PoolSizes: []core1_0.DescriptorPoolSize{
 			{
@@ -210,6 +232,41 @@ func createDescriptorPool(deviceDriver core1_0.DeviceDriver, maxSets int) (core1
 		return core1_0.DescriptorPool{}, fmt.Errorf("create descriptor pool: %w", err)
 	}
 	return pool, nil
+}
+
+// freeDescriptorSets gives sets back to the descriptor pool and moves the live
+// count with them.
+//
+// One function rather than a free call and a `r.liveDescriptorSets--` at each
+// site, because the count is the only way anything outside this package can
+// see a set leak -- Vulkan reports neither how many sets a pool has handed out
+// nor how many are left -- and a decrement that drifts away from its free
+// turns that number into a comfortable lie. ResourceCounts reports it and
+// examples/22-level's -reload loop asserts on it.
+//
+// A zero handle is skipped rather than passed through. vkFreeDescriptorSets
+// ignores a null set handle, but the wrapper groups the call by the POOL each
+// set carries, and a set that was never allocated carries a null pool -- which
+// would be the invalid-handle call, not the ignored one. Textures built by
+// hand rather than by CreateTexture exist (see createSceneColorTarget), and
+// the renderer's own tests construct bare ones.
+//
+// The VkResult is dropped for the same reason the Destroy* calls around it
+// drop theirs: vkFreeDescriptorSets is defined to succeed, and the wrapper's
+// error is a loader failure that would have taken the process out long before
+// teardown.
+func (r *Renderer) freeDescriptorSets(sets ...core1_0.DescriptorSet) {
+	allocated := make([]core1_0.DescriptorSet, 0, len(sets))
+	for _, s := range sets {
+		if s.Handle() != 0 {
+			allocated = append(allocated, s)
+		}
+	}
+	if len(allocated) == 0 {
+		return
+	}
+	r.deviceDriver.FreeDescriptorSets(allocated...)
+	r.liveDescriptorSets -= len(allocated)
 }
 
 // createJointDescriptorSetLayout creates a layout with a single UBO at set=1,
@@ -801,6 +858,7 @@ func (r *Renderer) createTexture(pixels []byte, width, height int, opts textureO
 		r.deviceDriver.DestroyImage(img, nil)
 		return nil, fmt.Errorf("allocate descriptor set: %w", err)
 	}
+	r.liveDescriptorSets++
 
 	// Update descriptor set with image + sampler
 	err = r.deviceDriver.UpdateDescriptorSets([]core1_0.WriteDescriptorSet{
@@ -818,6 +876,7 @@ func (r *Renderer) createTexture(pixels []byte, width, height int, opts textureO
 		},
 	}, nil)
 	if err != nil {
+		r.freeDescriptorSets(sets[0])
 		r.deviceDriver.DestroySampler(sampler, nil)
 		r.deviceDriver.DestroyImageView(view, nil)
 		r.deviceDriver.FreeMemory(imgMem, nil)
@@ -843,7 +902,8 @@ func (r *Renderer) createFallbackTexture() (*Texture, error) {
 	return r.CreateTexture(white, 1, 1)
 }
 
-// DestroyTexture releases GPU resources for a texture.
+// DestroyTexture releases GPU resources for a texture, including the
+// descriptor set it took from the pool at upload.
 func (r *Renderer) DestroyTexture(t *Texture) {
 	if t == nil || t.destroyed {
 		return
@@ -858,6 +918,22 @@ func (r *Renderer) DestroyTexture(t *Texture) {
 			break
 		}
 	}
+
+	// The set goes back BEFORE the view and sampler it names are destroyed.
+	// That is the same ordering Renderer.Destroy uses when it sweeps
+	// materials before textures, for the same reason: what the layer reports
+	// is a sampler destroyed while a descriptor set still names it
+	// (VUID-vkDestroySampler-sampler-01082), so the set has to stop naming it
+	// first.
+	//
+	// Freed here and now, not deferred, because everything else this function
+	// owns is freed here and now -- so the set's exposure to a frame still in
+	// flight is exactly the sampler's, and it is the CALLER's to arrange, as
+	// it already was before there was a set to give back. DestroyModel runs
+	// this whole call through DeferDestroy; Renderer.Destroy has waited for
+	// the device to go idle. Deferring only the set would buy nothing and
+	// would leave it naming a destroyed sampler for two frames.
+	r.freeDescriptorSets(t.DescriptorSet)
 
 	r.deviceDriver.DestroySampler(t.sampler, nil)
 	r.deviceDriver.DestroyImageView(t.view, nil)
