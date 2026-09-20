@@ -27,6 +27,7 @@ api:
   - renderer.Model.Node
   - renderer.Model.NodeInMeshSpace
   - renderer.Model.NodeMeshes
+  - renderer.Model.MeshInstances
   - renderer.Model.LightWorldPosDir
   - renderer.Renderer.CombineModel
   - renderer.Renderer.LoadGLTF
@@ -774,12 +775,20 @@ extractors cannot drift apart from each other silently.
   positions" straight into it for you, so a caller does that arithmetic
   itself (or reaches for a box `Collider` from bounds, the way
   `examples/22-level` does — see "Loading a level" above).
-- **`EXT_mesh_gpu_instancing`.** A level with several nodes instancing one
-  doc mesh (see `Model.NodeMeshes` above) is exactly the shape that
-  extension exists for, and it is a plausible next step for a level with
-  hundreds of identical props — but nothing here needed it yet, and the
-  existing `renderer.InstanceSet` API (`docs/agents/instancing.md`) already
-  covers the same case without it: a loader could detect nodes sharing a
-  mesh index and build one `InstanceSet` from their `World` transforms with
-  no glTF extension involved. Worth deciding deliberately if it comes up
-  again, not defaulted to.
+- **Turning repeated nodes into instances — done, not a plan anymore (issue
+  #71).** `Model.MeshInstances(docMesh int) []int` is `NodeMeshes` run
+  backwards: given a doc mesh, every node that instances it, in node order.
+  `examples/22-level -instanced` is the worked recipe — group by doc mesh,
+  decide which groups qualify (the game's call, not the engine's, per rule
+  14 above), build one `renderer.InstanceSet` per qualifying group with one
+  `MeshInstance` per node's `World`. See
+  [`instancing.md`](instancing.md#turning-a-levels-repeated-nodes-into-instances)
+  for the accessor, the rule the example picked, and the measurement (500
+  props, draw calls 261 to 4, `cpu_drawlist + cpu_record` down about 78%).
+  `EXT_mesh_gpu_instancing` itself stays unread: issue #67's real-Blender
+  fixture measurement (`renderer/testdata/blender/level.glb`,
+  `docs/agents/blender-pipeline.md`, "Instancing") found that nothing a level
+  artist actually does in Blender writes it — Alt-D and collection
+  instances both arrive as ordinary "several nodes, one doc mesh" that
+  `NodeMeshes` already reads correctly — so there was nothing to gain from
+  reading an extension no exporter emits for this use.

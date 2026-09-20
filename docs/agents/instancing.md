@@ -14,13 +14,14 @@ api:
   - renderer.InstanceSet
   - renderer.Renderer.CreateInstanceSet
   - renderer.Renderer.UpdateInstanceSet
+  - renderer.Model.MeshInstances
 example: examples/19-instanced
 run: task example:19-instanced
 requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-09-16
+verified: 2026-09-19
 ---
 
 # Draw repeated static meshes in one call
@@ -135,6 +136,201 @@ it is the one to watch for when changing this.
 
 Cascade culling is per set, as above. `NoCastShadow` and `Emissive` on the
 entity apply to the whole set.
+
+## Turning a level's repeated nodes into instances
+
+`InstancedMesh` above is the primitive: a game hands it placements it already
+has. A level LOADED from glTF (`docs/agents/models.md`'s "Loading a level")
+has the opposite problem -- the placements are node transforms already
+sitting in `Model.Nodes`, several of them sharing one doc mesh, and turning
+that repetition into one `InstanceSet` needs the inverse of `Model.NodeMeshes`
+(issue #71).
+
+**Reading `EXT_mesh_gpu_instancing` is explicitly not the answer here.**
+Issue #67 built a real-Blender fixture specifically to find out what a level
+artist's repetition (Alt-D, a collection instance, a geometry-nodes scatter)
+turns into on the wire, and the answer, measured, is: never that extension.
+Every mechanism a Blender level actually uses arrives as ordinary "several
+nodes, one doc mesh" -- `Model.NodeMeshes` already reads that correctly, and
+`export_gpu_instances` recognises only Blender's own particle/geometry-node
+instancer flag, which none of the three mechanisms sets. See
+[`blender-pipeline.md`](blender-pipeline.md#instancing-issue-71s-ground-truth)
+for the measurement.
+So this is entirely engine- and game-side: batch what the file already gives
+you, not a new format to read.
+
+### `Model.MeshInstances`
+
+```go
+func (m *Model) MeshInstances(docMesh int) []int
+```
+
+`NodeMeshes(node int) []int` answers "which primitives does this node draw";
+a level loader turning repetition into instances needs the other direction,
+so `MeshInstances` is its mirror image: given a doc mesh index (the same
+number `ModelNode.Mesh` and `ModelMesh.DocMesh` already use), every node
+index that instances it, in glTF node order. Pure arithmetic over
+`Model.Nodes` -- no GPU, works on a `Model` from `ReadGLTF` as well as
+`LoadGLTF` -- and nil for a doc mesh nothing references, the same "not an
+error" contract `NodeMeshes` gives a meshless node.
+
+Shaped as a single-doc-mesh query rather than one grouping over the whole
+model (`map[int][]int`) because that is what a spawn loop over
+`Model.Nodes` actually wants: ask once, the first time a node naming a given
+doc mesh is reached, not once per node and not as a whole-model
+precomputation most levels do not need (most doc meshes in a level are not
+shared at all). `examples/22-level`'s `spawnLevel` does exactly this --
+see below.
+
+### The recipe, in `examples/22-level -instanced`
+
+```
+go run ./22-level -instanced
+go run ./22-level -instanced -level ../renderer/testdata/blender/level.glb
+```
+
+Default off, so the ordinary per-node path (`docs/agents/models.md`'s
+"Loading a level") is exactly what runs without the flag -- verified
+byte-identical under `GLYPHENGINE_FIXED_FRAME_TIME=16.667ms` (see "What it
+costs" below).
+
+**Deciding WHICH nodes to instance is the example's call, not the engine's**
+(AGENTS.md rule 14) -- `instancedGroupCandidate` in
+`examples/22-level/main.go` reads the level's own `extras` vocabulary
+(`docs/agents/models.md`'s "extras as the level's own vocabulary") to decide,
+per doc mesh:
+
+- **Shared**: `Model.MeshInstances(docMesh)` names more than one node, or
+  there is nothing to batch.
+- **Every node sharing it is tagged `{"static": true}`.** A set's placements
+  only change through `UpdateInstanceSet`, which nothing in this example
+  drives per frame, so a node that might move cannot safely be folded into
+  one -- and "static" is already this engine's own word for "never moves"
+  (`glyph.Static`'s doc comment), not a second vocabulary invented for the
+  occasion.
+- **None of the doc mesh's primitives is `alphaMode` `BLEND`.** `Translucent`
+  does nothing on an `InstancedMesh` (see "Failure modes" above); excluding a
+  blended doc mesh here keeps that failure from happening at all, rather than
+  silently drawing a glass pane opaque.
+
+A node that also carries `{"collider": "box"}` keeps its collider through a
+companion entity (`spawnInstancedCollider`): `Transform` (via
+`glyph.TransformFromMatrix`, same as the individual path), `Collider`,
+`Static`, and deliberately **no `MeshRef`** -- the `InstanceSet` already drew
+that node's geometry once, in the shared draw call, and a `MeshRef` on the
+companion would draw it a second time on top of itself.
+
+**What an instanced node loses that the companion collider does NOT give
+back**: picking (an `InstanceSet` placement is not an entity, so there is no
+way to ask "which building did a raycast hit" -- only "did it hit the set at
+all"), and any other per-instance component a game might want to attach to
+one building rather than the whole set. A physical obstacle is the only
+thing this recipe restores; nothing here works around the rest, because
+nothing in `InstanceSet` or `MeshInstance` has anywhere to put it.
+
+**Shear is not the obstacle it looks like.** `MeshInstance.Model` is a full
+4x4 matrix, not a Position/Rotation/Scale triple, so a sheared node's `World`
+carries into an `InstanceSet` placement exactly -- unlike the individual
+path, which has to fit the same matrix through `TransformFromMatrix` and
+drops the shear when `exact` comes back false. `instancedGroupCandidate`
+does not gate on shear at all for this reason; `TransformFromMatrix` is only
+reached for a collider companion's own `Transform`, where a sheared
+collider-tagged node loses exactly the part it always has on the individual
+path. (Neither level file this example loads has a sheared node sharing a
+mesh with anything else, so this is a property of the code, not something
+either render below exercises.)
+
+### With and without: the same picture
+
+Screenshots at `GLYPHENGINE_FIXED_FRAME_TIME=16.667ms`, `-frames 90`, `cmp`
+against the default (`-instanced` off):
+
+- **Built-in level** (`examples/22-level/assets/level.glb`): byte-identical,
+  `cmp` confirms. Both groups qualify (four buildings sharing one doc mesh,
+  four lamp posts sharing a second, all tagged `static`) and both become one
+  `InstanceSet` apiece -- checked directly, not assumed: three of the four
+  buildings are rotated nodes, and running their `World` through
+  `TransformFromMatrix` and back through `Transform.ModelMatrix()` (what the
+  individual path does, and the instanced path does not -- see "Shear"
+  above) shows the same non-zero round-trip noise the Blender fixture has
+  below (`Building1`/`2`/`3` differ by 1.19e-7 to 2.38e-7 per matrix
+  element). It simply never lands on a different MSAA sample at this
+  camera's framing, so the two renders agree to the byte anyway -- a property
+  of this one capture angle, not a guarantee.
+- **Real Blender fixture** (`renderer/testdata/blender/level.glb`): 7 pixels
+  of 921,600 differ (0.0008%), max single-channel delta 1/255, clustered at
+  the base of the two `Building`/`Building_Linked` boxes -- the only pair in
+  that file both shared and tagged `static`. Same root cause as above, just
+  visible this time: `Building_Linked`'s node is NOT sheared
+  (`TransformFromMatrix` reports `exact=true`), and its round-trip noise
+  (up to 1.19e-7 per matrix element) crosses an MSAA sample boundary at this
+  camera's framing where the built-in level's did not. This is the same
+  class of last-bit MSAA-edge difference `19-instanced`'s own table
+  documents (27 of 832,000 pixels, up to 15/255, from `HomogRotate3DY` vs
+  `Transform`'s Euler composition disagreeing) -- smaller here because the
+  two paths here agree on everything except one float32 round trip, not two
+  independently-built rotations.
+
+### What it costs, measured
+
+The built-in level's eight shared props (four buildings, four lamp posts)
+are all tagged `collider`, which the rule above allows -- the collider
+companion keeps them working as obstacles -- and draw calls do drop, 10 to
+4, but `cpu_drawlist + cpu_record` moves from 0.140 ms to 0.071 ms in a
+single sample at that size, well inside the run-to-run noise the interleaved
+methodology below measures at 261 props (0.446-0.695 ms). `19-instanced`'s
+own table already established the threshold where this stops being noise is
+around 300 props, so the measurement worth trusting is against a synthetic
+level built for the purpose, NOT the committed one:
+
+```
+go run ./22-level/gen -big -buildings 100 -lamps 400 -out /scratch/biglevel.glb
+go run ./22-level -level /scratch/biglevel.glb -frames 200 -camdist 180 -campitch 0.7
+go run ./22-level -level /scratch/biglevel.glb -frames 200 -camdist 180 -campitch 0.7 -instanced
+```
+
+500 static, `collider`-tagged props (100 buildings sharing one doc mesh, 400
+lamp posts sharing a second), camera framed so 261 of them clear the
+frustum. 5 runs each, interleaved (individual, instanced, individual, ...,
+not five-then-five, so a drifting machine load cannot land on only one
+side), 200 frames, 1280x720, `GLYPHENGINE_TIMING=tsv`:
+
+| | draw calls | instances drawn | triangles | cpu_drawlist+cpu_record (mean) | range | gpu_total (mean) |
+| --- | --- | --- | --- | --- | --- | --- |
+| individual | 261 | 261 | 3,144 | 0.574 ms | 0.446–0.695 ms | 0.161 ms |
+| instanced | 4 | 502 | 6,036 | 0.123 ms | 0.071–0.171 ms | 0.161 ms |
+
+Draw calls: 261 to 4 -- one per instanced doc mesh (2: buildings, lamp
+posts), the ground (still its own individual entity, not a candidate: it is
+the only node instancing its doc mesh), and one constant draw this example
+always issues regardless of the level (the night sky). That constant is what
+makes the arithmetic on the BUILT-IN level check out too: its non-instanced
+run draws 10 (9 level entities, all in frustum, plus the same 1), and its
+instanced run draws 4 (ground + 2 InstanceSets + the same 1) -- both matching
+what was measured for it above, byte-identical picture included. `cpu_drawlist + cpu_record`
+-- building the draw list and recording the command buffer, the cost this
+removes, same metric `19-instanced`'s table uses -- drops by a mean of 0.45
+ms, about 78%, consistent with that table's shape at this scale (0.7 ms
+saved at 300 individually-drawn props there; this scene has fewer actually
+in frustum but two doc meshes' worth of savings compounding).
+
+**Instances drawn and triangles both roughly double (261 to 502; 3,144 to
+6,036, a 1.92x ratio in each case), because culling is per SET, not per
+placement** (see "Culling is per
+set" above) -- every one of the 500 props draws once the set itself is in
+frustum, not just the 261 that were individually visible. `gpu_total` does
+not move against it (0.161 ms both ways, mean over the same 5 runs): these
+are 12-triangle boxes (`boxMesh`'s own count -- 24 vertices, 36 indices), so
+doubling the triangle count doubles a number too small to matter, the same
+finding `19-instanced`'s own GPU table already made at a different scale.
+
+**The honest cost, restated**: an instanced prop has no per-entity picking
+and no per-entity component beyond the physical box `spawnInstancedCollider`
+restores for a `collider`-tagged node. A node with neither `static` nor
+`collider` extras, or one that needs to move or be looked up individually,
+stays on the ordinary path -- this recipe batches what is provably safe to
+batch and leaves the rest exactly as `docs/agents/models.md` already
+describes it.
 
 ## Failure modes
 
