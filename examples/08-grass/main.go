@@ -15,6 +15,18 @@
 //	go run ./08-grass              # windowed
 //	go run ./08-grass -frames 150  # render 150 frames, then exit
 //	go run ./08-grass -seed 3      # a different island
+//	go run ./08-grass -regrow 20   # re-initialise grass with new parameters, 20 times
+//
+// -regrow is issue #87's proof that a second InitGrass call replaces the
+// grass a previous one built rather than abandoning it: every
+// grassRegrowCycleFrames frames it calls InitGrass again with different
+// weights and a different density mask WHILE the previous generation may
+// still be drawn by a frame in flight, and asserts the renderer's live
+// resource counts return to the same numbers at the top of every cycle. Run
+// it under the validation layer (task validate does) -- the layer is what
+// would notice the previous atlas's descriptor set freed while a frame still
+// named it; the resource counts this asserts on are what notice one never
+// freed at all, which the layer alone cannot (see docs/agents/grass.md).
 //
 // WASD moves, mouse looks, Shift runs, Escape releases the cursor.
 package main
@@ -65,7 +77,33 @@ type game struct {
 
 	intent     glyph.MoveIntent
 	jumpQueued bool
+
+	// hm is kept for -regrow, which calls InitGrass again against the SAME
+	// heightmap every cycle -- only the specs and the mask change.
+	hm *glyph.Heightmap
+
+	// -regrow state. See stepRegrow.
+	regrowCycles int
+	cyclesLeft   int
+	phaseFrame   int
+	altGrass     bool
+	haveSteady   bool
+	steadyCounts renderer.ResourceCounts
+	oneGrass     renderer.ResourceCounts
 }
+
+// grassRegrowCycleFrames is how many frames -regrow draws between
+// re-initialisations.
+//
+// InitGrass's replace goes through DeferDestroy the way DestroyModel does,
+// and the previous generation's flora models are then released through
+// DestroyModel itself, which queues its OWN DeferDestroy from inside that
+// already-deferred callback (see renderer.replaceGrass) -- so a replaced
+// generation's meshes and textures take 2*maxFramesInFlight frames to
+// actually free, not one. examples/22-level's reloadCycleFrames leaves the
+// identical margin for the identical reason (DestroyModel calling
+// DestroyMaterial), at 4; six leaves a bit more without making the loop slow.
+const grassRegrowCycleFrames = 6
 
 func (g *game) Init(e *glyph.Engine) error {
 	// Dump the baked impostor atlas when asked. An impostor that is framed
@@ -105,6 +143,7 @@ func (g *game) Init(e *glyph.Engine) error {
 		return err
 	}
 	e.SetTerrain(hm)
+	g.hm = hm
 
 	mesh, err := e.CreateTerrainMesh(hm, &glyph.TerrainOptions{Tint: tint})
 	if err != nil {
@@ -120,17 +159,14 @@ func (g *game) Init(e *glyph.Engine) error {
 	// game uses for paths, clearings, and building footprints. Here it only
 	// clears the player's own footprint, so they stand in the grass rather
 	// than on a bald patch.
-	mask := renderer.NewDensityMask(-worldSize/2, -worldSize/2, worldSize, worldSize, 1.0)
-	mask.ClearCircle(0, 0, 1.5, 1.5)
-
-	// Weights bias the scatter: mostly common grass, some wispy for variety.
-	r.InitGrass(assetsFS, hm, hm.OriginX, hm.OriginZ, hm.WorldW, hm.WorldD,
-		[]renderer.GrassModelSpec{
-			{Path: "assets/flora/Grass_Common_Short.gltf", Weight: 40},
-			{Path: "assets/flora/Grass_Common_Tall.gltf", Weight: 26},
-			{Path: "assets/flora/Grass_Wispy_Short.gltf", Weight: 20},
-			{Path: "assets/flora/Grass_Wispy_Tall.gltf", Weight: 14},
-		}, mask)
+	//
+	// Routed through grassRegrowSpecs(false) rather than written out here so
+	// that -regrow's alternate call (grassRegrowSpecs(true)) is provably the
+	// same specs/mask machinery, not a second, drifting copy of it -- and so
+	// that -regrow 0 (the default) takes exactly this path and nothing else,
+	// which is what keeps its render byte-identical to before issue #87.
+	specs, mask := grassRegrowSpecs(false)
+	r.InitGrass(assetsFS, hm, hm.OriginX, hm.OriginZ, hm.WorldW, hm.WorldD, specs, mask)
 
 	// ── player ──
 	spawnY, _ := hm.HeightAt(0, 0)
@@ -197,6 +233,10 @@ func (g *game) Update(e *glyph.Engine, dt float32) {
 			g.jumpQueued = true
 		}
 	}
+
+	if g.regrowCycles > 0 {
+		g.stepRegrow(e)
+	}
 }
 
 func (g *game) FixedUpdate(e *glyph.Engine, dt float32) {
@@ -229,6 +269,126 @@ func (g *game) LateUpdate(e *glyph.Engine, _ float32) {
 	e.Debugf("ToD  %.4f", e.Scene.TimeOfDay())
 	e.Debugf("sun  %+.4f  %s", env.SunElevation, phase)
 
+}
+
+// grassRegrowSpecs returns InitGrass's arguments for one -regrow cycle,
+// alternating between two settings so each call is materially different from
+// the one it replaces: weights that favour the opposite pair of variants, and
+// a density mask cleared in a different place. alt=false is exactly what
+// Init runs with -regrow 0 (the default), unchanged.
+//
+// Deliberately the SAME four species, same paths, on both sides. What issue
+// #87's check needs to hold steady is Renderer.ResourceCounts -- meshes,
+// textures, materials, descriptor sets -- not instance counts or where grass
+// is cleared, and those four numbers come from which species are loaded, not
+// from their weights or the mask. Keeping the species list fixed means every
+// cycle's top-of-cycle counts are the SAME baseline rather than one that
+// alternates between two different footprints, which is what lets
+// stepRegrow's assertion be a plain equality instead of one that also has to
+// know which of two shapes it is comparing against.
+func grassRegrowSpecs(alt bool) ([]renderer.GrassModelSpec, *renderer.GrassDensityMask) {
+	mask := renderer.NewDensityMask(-worldSize/2, -worldSize/2, worldSize, worldSize, 1.0)
+	if !alt {
+		mask.ClearCircle(0, 0, 1.5, 1.5)
+		return []renderer.GrassModelSpec{
+			{Path: "assets/flora/Grass_Common_Short.gltf", Weight: 40},
+			{Path: "assets/flora/Grass_Common_Tall.gltf", Weight: 26},
+			{Path: "assets/flora/Grass_Wispy_Short.gltf", Weight: 20},
+			{Path: "assets/flora/Grass_Wispy_Tall.gltf", Weight: 14},
+		}, mask
+	}
+	mask.ClearCircle(20, -15, 4, 3)
+	return []renderer.GrassModelSpec{
+		{Path: "assets/flora/Grass_Common_Short.gltf", Weight: 14},
+		{Path: "assets/flora/Grass_Common_Tall.gltf", Weight: 20},
+		{Path: "assets/flora/Grass_Wispy_Short.gltf", Weight: 26},
+		{Path: "assets/flora/Grass_Wispy_Tall.gltf", Weight: 40},
+	}, mask
+}
+
+// stepRegrow drives the -regrow loop: call InitGrass again, with different
+// parameters, on top of whatever the previous cycle built.
+//
+// Unlike examples/22-level's -reload (a separate load-then-release the
+// example code sequences itself), InitGrass does both halves atomically --
+// the new generation is live and the old one is queued for release before it
+// returns -- so there is no equivalent of loadLevel/releaseLevel to split
+// here. What there IS to check is the same shape CLAUDE.md asks for:
+//
+//   - Deferred must be 0 at the top of each cycle: the previous cycle's
+//     release actually ran.
+//   - Every cycle must start from the same steady counts, with the species
+//     list held fixed across alt so this is a plain equality (see
+//     grassRegrowSpecs) -- this is the one that catches a replaceGrass that
+//     does nothing: each cycle loads a whole new generation, so if the old
+//     one were never released the counts would climb every cycle.
+//   - Right after the InitGrass call, the counts must NOT have dropped below
+//     what they were before it (the previous generation freed immediately)
+//     and Deferred must have grown by exactly one (replaceGrass queued
+//     exactly one retirement, not zero and not a double-queue).
+func (g *game) stepRegrow(e *glyph.Engine) {
+	r := e.Renderer()
+	g.phaseFrame++
+	if g.phaseFrame < grassRegrowCycleFrames {
+		return
+	}
+	g.phaseFrame = 0
+
+	steady := r.ResourceCounts()
+	if steady.Deferred != 0 {
+		log.Fatalf("-regrow: %d deferred destroys still queued %d frames after the last InitGrass call; the previous generation's release never ran", steady.Deferred, grassRegrowCycleFrames)
+	}
+	if g.haveSteady && !sameGrassResources(steady, g.steadyCounts) {
+		log.Fatalf("-regrow: the renderer tracks %+v at the top of this cycle, want %+v -- InitGrass is accumulating or losing resources on replace", steady, g.steadyCounts)
+	}
+	g.steadyCounts, g.haveSteady = steady, true
+
+	if g.cyclesLeft == 0 {
+		log.Printf("-regrow: %d re-initialisations done; one grass generation is %d meshes, %d textures, %d materials, %d descriptor sets, and the renderer tracked the same %d/%d/%d/%d at the top of every cycle",
+			g.regrowCycles, g.oneGrass.Meshes, g.oneGrass.Textures, g.oneGrass.Materials, g.oneGrass.DescriptorSets,
+			steady.Meshes, steady.Textures, steady.Materials, steady.DescriptorSets)
+		e.Close()
+		return
+	}
+	g.cyclesLeft--
+
+	g.altGrass = !g.altGrass
+	specs, mask := grassRegrowSpecs(g.altGrass)
+	r.InitGrass(assetsFS, g.hm, g.hm.OriginX, g.hm.OriginZ, g.hm.WorldW, g.hm.WorldD, specs, mask)
+
+	after := r.ResourceCounts()
+	if g.oneGrass.Meshes == 0 {
+		g.oneGrass = subGrassResources(after, steady)
+		if g.oneGrass.Meshes <= 0 {
+			log.Fatalf("-regrow: re-initialising grass added %d meshes; this check proves nothing unless it adds some", g.oneGrass.Meshes)
+		}
+	}
+	if after.Deferred != steady.Deferred+1 {
+		log.Fatalf("-regrow: InitGrass queued %d deferred destroys (was %d before the call), want exactly one more -- replaceGrass should defer the previous generation exactly once", after.Deferred, steady.Deferred)
+	}
+	if after.Meshes < steady.Meshes || after.Textures < steady.Textures || after.DescriptorSets < steady.DescriptorSets {
+		log.Fatalf("-regrow: InitGrass freed the previous generation immediately: %+v before the call, %+v right after, in the same tick that frames in flight still reference those buffers", steady, after)
+	}
+}
+
+// sameGrassResources compares what a regrow cycle has to give back exactly.
+//
+// DescriptorSets is in here for the same reason examples/22-level's
+// sameResources carries it: a released generation's meshes, textures and
+// materials can all return to the same numbers at the top of every cycle
+// while its descriptor set does not come back at all, and the three list
+// lengths alone cannot see that -- only the pool running dry, cycles later,
+// would be the symptom (issue #82's shape, applied to InitGrass by #87).
+func sameGrassResources(a, b renderer.ResourceCounts) bool {
+	return a.Meshes == b.Meshes && a.Textures == b.Textures && a.Materials == b.Materials &&
+		a.DescriptorSets == b.DescriptorSets
+}
+
+func subGrassResources(a, b renderer.ResourceCounts) renderer.ResourceCounts {
+	return renderer.ResourceCounts{
+		Meshes: a.Meshes - b.Meshes, Textures: a.Textures - b.Textures, Materials: a.Materials - b.Materials,
+		DescriptorSets: a.DescriptorSets - b.DescriptorSets,
+	}
 }
 
 // tint keeps the terrain readable under the grass: earth where grass will
@@ -317,6 +477,9 @@ func main() {
 	grassImp := flag.Float64("grassimpostor", 0, "distance past which grass becomes billboards (0 = meshes everywhere)")
 	timeOfDay := flag.Float64("timeofday", 0.28, "starting time of day: 0 = midnight, 0.5 = noon")
 	stars := flag.Float64("stars", 1.0, "star density multiplier (0 = none)")
+	regrow := flag.Int("regrow", 0, "re-initialise grass with different parameters N times, every "+
+		"a few frames; asserts the renderer's live resource counts return to their baseline "+
+		"(exercises a replacing Renderer.InitGrass, issue #87)")
 	flag.Parse()
 
 	opts := []glyph.Option{
@@ -329,14 +492,32 @@ func main() {
 	if *fullscreen {
 		opts = append(opts, glyph.WithFullscreen())
 	}
-	if *frames > 0 {
+	// -regrow closes the window itself when its last cycle finishes, and each
+	// cycle takes grassRegrowCycleFrames frames, so a -frames cap smaller than
+	// that would end the run mid-loop with every check still unmade --
+	// looking exactly like a pass. `task validate` runs every example with
+	// -frames 30, so this is not hypothetical; see examples/22-level's
+	// identical reasoning for -reload. A cap is still applied as a backstop
+	// in case the loop itself never terminates.
+	switch {
+	case *regrow > 0:
+		needed := (*regrow + 3) * grassRegrowCycleFrames
+		if *frames > 0 && *frames < needed {
+			log.Printf("-regrow %d needs about %d frames; ignoring -frames %d, which would cut the loop short", *regrow, needed, *frames)
+		}
+		opts = append(opts, glyph.WithMaxFrames(needed))
+	case *frames > 0:
 		opts = append(opts, glyph.WithMaxFrames(*frames))
 	}
 	if *shot != "" {
 		opts = append(opts, glyph.WithScreenshot(*shot))
 	}
 
-	e, err := glyph.New(&game{seed: *seed, grassDist: float32(*grassDist), grassThin: float32(*grassThin), grassImp: float32(*grassImp), timeOfDay: float32(*timeOfDay), stars: *stars}, opts...)
+	e, err := glyph.New(&game{
+		seed: *seed, grassDist: float32(*grassDist), grassThin: float32(*grassThin), grassImp: float32(*grassImp),
+		timeOfDay: float32(*timeOfDay), stars: *stars,
+		regrowCycles: *regrow, cyclesLeft: *regrow,
+	}, opts...)
 	if err != nil {
 		log.Fatalf("create engine: %v", err)
 	}
