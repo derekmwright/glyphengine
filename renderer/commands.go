@@ -495,6 +495,9 @@ func recordCommandBuffer(
 	instancedDoubleSidedPipeline core1_0.Pipeline,
 	overlayPipeline core1_0.Pipeline,
 	skyPipeline core1_0.Pipeline,
+	// skyVolumetricPipeline draws in-scattering over the pixels the sky
+	// covers. Recorded only when a light asked to scatter; see the draw.
+	skyVolumetricPipeline core1_0.Pipeline,
 	starsPipeline core1_0.Pipeline,
 	celestialPipeline core1_0.Pipeline,
 	uiPipeline core1_0.Pipeline,
@@ -1199,16 +1202,9 @@ func recordCommandBuffer(
 		deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, skyPipeline)
 		scratch.setViewport(deviceDriver, cmdBuf, viewport)
 		scratch.setScissor(deviceDriver, cmdBuf, scissor)
-		// Set 0 is the half-resolution cloud target, which the sky composites
-		// over its dome, written earlier in this same command buffer. Set 1 is
-		// the shadow/light set, for the three storage buffers sky.frag's
-		// in-scattering march reads (shaders/lights.inc, bindings 3-5).
-		//
-		// Both in one call: a beam aimed at the sky is the shot this feature
-		// exists for, and it costs no extra driver call to get the light data
-		// here -- the same CmdBindDescriptorSets that was already binding the
-		// cloud set binds two sets instead of one.
-		scratch.bindDescriptorSets(deviceDriver, cmdBuf, core1_0.PipelineBindPointGraphics, skyPipelineLayout, 0, cloudSet, shadowDS)
+		// The half-resolution cloud target, which the sky composites over its
+		// dome. It is written earlier in this same command buffer.
+		scratch.bindDescriptorSets(deviceDriver, cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, cloudSet)
 
 		scratch.resetPC()
 		copy(scratch.pc[:16], lighting.InvVP[:])
@@ -1225,27 +1221,50 @@ func recordCommandBuffer(
 		scratch.pc[41] = lighting.SunColor[1]
 		scratch.pc[42] = lighting.SunColor[2]
 		scratch.pc[43] = lighting.SunElevation
-		// cameraPos and fog.xy, at the same offsets every lit shader reads
-		// them from. The sky has always declared these members and left them
-		// unfilled, taking the eye from model[0] instead; the march needs the
-		// fog, because the fog IS the medium it scatters off, and taking the
-		// eye from the same place the lit shaders do means volumetric.inc can
-		// be one file rather than one with a sky special case.
-		//
-		// These six floats are the whole of why goldenStreamHash moved: no
-		// call was added, one call's arguments grew.
-		scratch.pc[56] = lighting.CameraPos[0]
-		scratch.pc[57] = lighting.CameraPos[1]
-		scratch.pc[58] = lighting.CameraPos[2]
-		scratch.pc[59] = lighting.FogDensity
-		scratch.pc[60] = lighting.FogHeight
-		scratch.pc[61] = lighting.FogBaseHeight
 		// fog.zw, at the same offsets every other shader reads it from: the real
 		// sun's horizontal direction. sky.frag declares the intervening cameraPos
 		// and fog members solely to land on these offsets, so that there is one
 		// convention rather than a per-shader packing to get wrong.
 		scratch.pc[62] = lighting.RealSunDir[0]
 		scratch.pc[63] = lighting.RealSunDir[2]
+		scratch.pushConstants(deviceDriver, cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment)
+		deviceDriver.CmdDraw(cmdBuf, 3, 1, 0, 0)
+	}
+
+	// In-scattering from the local lights over the pixels nothing else
+	// covered: the air in front of the dome, which is where a beam aimed at
+	// the night sky lives. Same fullscreen triangle, same far-plane depth
+	// test, blended additively over whatever the sky left there.
+	//
+	// Recorded only when a light actually asked to scatter, which is the
+	// whole of what this feature costs a scene that does not use it: no
+	// pipeline bind, no draw, nothing. That is also why it is a draw rather
+	// than four lines in sky.frag -- see shaders/skyvolumetric.frag for the
+	// three pixels the other arrangement moved.
+	//
+	// Not conditional on lighting.DrawSky. A game with no dome still has air,
+	// and the depth test is what decides which pixels this covers, not
+	// whether something was drawn on them first.
+	if lighting.LightFlags&LightFlagVolumetric != 0 {
+		deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, skyVolumetricPipeline)
+		scratch.setViewport(deviceDriver, cmdBuf, viewport)
+		scratch.setScissor(deviceDriver, cmdBuf, scissor)
+		// Set 0 is bound only because the layout has it; this shader reads
+		// nothing from it. Set 1 is the shadow/light set, for the per-frame
+		// block at binding 0 and the three light storage buffers at 3-5.
+		scratch.bindDescriptorSets(deviceDriver, cmdBuf, core1_0.PipelineBindPointGraphics, skyPipelineLayout, 0, cloudSet, shadowDS)
+
+		scratch.resetPC()
+		copy(scratch.pc[:16], lighting.InvVP[:])
+		// cameraPos and fog, at the offsets every lit shader reads them from.
+		// The eye and the fog are the whole of what the march needs from the
+		// push block, and the fog IS the medium it scatters off.
+		scratch.pc[56] = lighting.CameraPos[0]
+		scratch.pc[57] = lighting.CameraPos[1]
+		scratch.pc[58] = lighting.CameraPos[2]
+		scratch.pc[59] = lighting.FogDensity
+		scratch.pc[60] = lighting.FogHeight
+		scratch.pc[61] = lighting.FogBaseHeight
 		scratch.pushConstants(deviceDriver, cmdBuf, skyPipelineLayout, core1_0.StageVertex|core1_0.StageFragment)
 		deviceDriver.CmdDraw(cmdBuf, 3, 1, 0, 0)
 	}

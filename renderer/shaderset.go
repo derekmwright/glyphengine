@@ -22,19 +22,24 @@ import "github.com/derekmwright/glyphengine/shaders"
 // pipeline-creation failure at startup, or — worse — a shader that links and
 // draws nothing. Run with WithValidation while developing one.
 type ShaderSet struct {
-	TriangleVert, TriangleFrag   []byte // diagnostic tri-color triangle
-	MeshVert, MeshFrag           []byte // unlit textured mesh
-	LitVert, LitFrag             []byte // lit static geometry
-	LitInstancedVert             []byte // lit, model matrix per instance (shares LitFrag)
-	LitMaterialFrag              []byte // lit + normal/roughness/AO maps (shares LitVert)
-	TerrainFrag                  []byte // terrain splat blend (shares LitVert)
-	SkinnedLitVert               []byte // GPU-skinned lit geometry
-	SkinnedLitFrag               []byte
-	SkinnedLitMaterialFrag       []byte // skinned + material maps (shares SkinnedLitVert)
-	ShadowVert, ShadowFrag       []byte // depth-only shadow pass
-	ShadowSkinnedVert            []byte // depth-only, skinned
-	ShadowInstancedVert          []byte // depth-only, model matrix per instance
-	SkyVert, SkyFrag             []byte // sky gradient
+	TriangleVert, TriangleFrag []byte // diagnostic tri-color triangle
+	MeshVert, MeshFrag         []byte // unlit textured mesh
+	LitVert, LitFrag           []byte // lit static geometry
+	LitInstancedVert           []byte // lit, model matrix per instance (shares LitFrag)
+	LitMaterialFrag            []byte // lit + normal/roughness/AO maps (shares LitVert)
+	TerrainFrag                []byte // terrain splat blend (shares LitVert)
+	SkinnedLitVert             []byte // GPU-skinned lit geometry
+	SkinnedLitFrag             []byte
+	SkinnedLitMaterialFrag     []byte // skinned + material maps (shares SkinnedLitVert)
+	ShadowVert, ShadowFrag     []byte // depth-only shadow pass
+	ShadowSkinnedVert          []byte // depth-only, skinned
+	ShadowInstancedVert        []byte // depth-only, model matrix per instance
+	SkyVert, SkyFrag           []byte // sky gradient
+	// SkyVolumetricFrag is the in-scattering over the pixels nothing else
+	// covered -- a beam aimed at the night sky. It is a draw of its own and
+	// not four lines at the end of SkyFrag; skyvolumetric.frag records the
+	// three pixels that cost. Uses SkyVert.
+	SkyVolumetricFrag            []byte
 	StarsVert, StarsFrag         []byte // star field
 	GrassVert, GrassFrag         []byte // instanced grass
 	GrassBakeVert, GrassBakeFrag []byte // impostor atlas bake
@@ -75,6 +80,7 @@ func DefaultShaders() ShaderSet {
 		ShadowInstancedVert:    shaders.ShadowInstancedVertSpv,
 		SkyVert:                shaders.SkyVertSpv,
 		SkyFrag:                shaders.SkyFragSpv,
+		SkyVolumetricFrag:      shaders.SkyVolumetricFragSpv,
 		StarsVert:              shaders.StarsVertSpv,
 		StarsFrag:              shaders.StarsFragSpv,
 		GrassVert:              shaders.GrassVertSpv,
@@ -122,6 +128,7 @@ func (s ShaderSet) withDefaults() ShaderSet {
 		{&s.ShadowSkinnedVert, d.ShadowSkinnedVert},
 		{&s.ShadowInstancedVert, d.ShadowInstancedVert},
 		{&s.SkyVert, d.SkyVert}, {&s.SkyFrag, d.SkyFrag},
+		{&s.SkyVolumetricFrag, d.SkyVolumetricFrag},
 		{&s.StarsVert, d.StarsVert}, {&s.StarsFrag, d.StarsFrag},
 		{&s.GrassVert, d.GrassVert}, {&s.GrassFrag, d.GrassFrag},
 		{&s.GrassBakeVert, d.GrassBakeVert}, {&s.GrassBakeFrag, d.GrassBakeFrag},
