@@ -14,14 +14,16 @@ api:
   - renderer.InstanceSet
   - renderer.Renderer.CreateInstanceSet
   - renderer.Renderer.UpdateInstanceSet
+  - renderer.Renderer.DestroyInstanceSet
   - renderer.Model.MeshInstances
+  - renderer.ResourceCounts.InstanceSets
 example: examples/19-instanced
 run: task example:19-instanced
 requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-09-19
+verified: 2026-09-20
 ---
 
 # Draw repeated static meshes in one call
@@ -136,6 +138,199 @@ it is the one to watch for when changing this.
 
 Cascade culling is per set, as above. `NoCastShadow` and `Emissive` on the
 entity apply to the whole set.
+
+## Releasing one
+
+```go
+r.DestroyInstanceSet(set)
+```
+
+Gives the set's instance buffer back, after the frames currently in flight
+have finished drawing from it. Idempotent, and nil-safe.
+
+`ResourceCounts.InstanceSets` is the live count -- `len(r.instanceSets)` --
+the same shape `Meshes`/`Textures`/`Materials` already are for `DestroyModel`:
+a number a caller can compare against a baseline, so "did this actually
+release anything" is an assertion rather than a hunch. Like `Deferred`, a
+count taken immediately after `DestroyInstanceSet` still includes the set,
+because it is genuinely still alive for `maxFramesInFlight` more frames --
+see "Deferred, not freed now" below.
+
+### Stop drawing it first
+
+The same contract `docs/agents/models.md`'s "Stop drawing it first" gives
+`DestroyModel`: despawn the entity carrying the `InstancedMesh` component (or
+remove the component) **before** calling `DestroyInstanceSet`.
+`examples/22-level`'s `releaseLevel` does exactly this -- despawn every
+entity the load created, instanced group entities included, then release the
+GPU resources.
+
+**If a game does not, the failure is loud rather than silent.**
+`DestroyInstanceSet` nils the set's `Mesh` field the moment it is called, not
+only when the deferred free eventually runs. `recordInstanced` and
+`recordInstancedShadow` both reach `set.Mesh.vertexBuffer` while recording a
+set that is still in the draw list, so a stale draw panics on a nil pointer
+in Go rather than binding a stale or freed buffer handle in the driver.
+`set.count` is left exactly as it was for the same reason, in the other
+direction -- zeroing it too would let both draw functions' existing
+`set.count == 0` skip swallow the stale draw silently, which is the failure
+the nil `Mesh` exists to avoid.
+
+Measured, not assumed: `examples/22-level -reload -instanced` with the
+despawn in `releaseLevel` removed (the code otherwise unchanged, so
+`DestroyInstanceSet` still defers correctly) panics on the very next frame
+after the first swap, under `GLYPHENGINE_VALIDATION=1` with **zero** `VULKAN`
+messages printed before it:
+
+```
+panic: runtime error: invalid memory address or nil pointer dereference
+[signal 0xc0000005 code=0x0 addr=0x0 pc=0x...]
+
+goroutine 1 [running, locked to thread]:
+github.com/derekmwright/glyphengine/renderer.recordInstanced(...)
+	.../renderer/instanced_record.go:74 +0x51b
+github.com/derekmwright/glyphengine/renderer.recordCommandBuffer(...)
+	.../renderer/commands.go:988 +0x32ad
+github.com/derekmwright/glyphengine/renderer.(*Renderer).DrawFrame(...)
+	.../renderer/renderer.go:1746 +0x2696
+```
+
+at `instanced_record.go:74`, which is
+`scratch.bindVertexBuffers(deviceDriver, cmdBuf, 0, set.Mesh.vertexBuffer, set.buffer)`.
+The panic fires on the FIRST subsequent draw, in the same tick as the swap --
+before the validation layer, running the whole time, ever gets a chance to
+see anything. That is a stronger property than "the layer would catch it":
+the layer never has to, because the Go-level crash always wins the race to
+notice first. Restored with `git checkout -- examples/22-level/main.go`.
+
+### Deferred, not freed now
+
+The harder case is the same one `DestroyModel` has: a level's `-reload` swap
+loads the new level's `InstanceSet`s, swaps them into the draw list, and only
+then releases the old ones -- in the same tick, so a frame already submitted
+when the swap happens can still be reading the old buffer in
+`recordInstanced`. `DestroyInstanceSet` routes its whole release through
+`DeferDestroy`, the same queue `DestroyModel` uses, so the free waits out
+`maxFramesInFlight` frames before it actually runs.
+
+`examples/22-level -reload N -instanced` is this measured for real, on both
+committed level files (`task reload` runs both under `GLYPHENGINE_FIXED_FRAME_TIME`,
+`task validate` runs both under the layer):
+
+```
+-reload: 20 swaps done; one level is 3 meshes, 0 textures, 0 materials,
+0 descriptor sets, 2 instance sets, and the renderer tracked the same
+8/2/0/2/2 at the top of every cycle
+```
+
+built-in level, two `InstanceSet`s per load (four buildings, four lamp
+posts); and
+
+```
+-reload: 20 swaps done; one level is 9 meshes, 1 textures, 0 materials,
+1 descriptor sets, 1 instance sets, and the renderer tracked the same
+20/4/0/4/1 at the top of every cycle
+```
+
+the real Blender export, one `InstanceSet` (`Building`/`Building_Linked`,
+the only pair both shared and tagged `static` in that file -- see "With and
+without" above). `InstanceSets` returns to the same number at the top of
+every cycle in both, the same property `sameResources` already checked for
+`Meshes`/`Textures`/`Materials`/`DescriptorSets`.
+
+`task reload`'s draw-count and draw-hash assertions hold across the
+instanced swap too, at a different number than the individual path -- fewer
+draws, not the same count, because that is the whole point of instancing:
+
+| level | individual | instanced |
+| --- | --- | --- |
+| built-in (`assets/level.glb`) | 10 draws | 4 draws |
+| Blender export (`renderer/testdata/blender/level.glb`) | 8 draws | 7 draws |
+
+(Measured by `cmd/tracefield -key draws -count -constant`, the same metric
+"With and without" above cites for the non-reloading case: ground + sky
+always draw, plus one `InstanceSet` per qualifying doc mesh in the instanced
+column, one entity per node in the individual column.)
+
+### Breaks, measured
+
+Three ways to get this wrong, each broken deliberately on the tree committed
+for issue #84, run under `examples/22-level -reload -instanced`, and restored
+with `git checkout -- renderer/instancedmesh.go` (and, for the third,
+`examples/22-level/main.go` too).
+
+**`DestroyInstanceSet` made a no-op.** `ResourceCounts.InstanceSets` climbs by
+the level's set count every cycle instead of returning to baseline, and the
+`-reload` loop's own per-cycle assertion catches it on cycle two -- the very
+first cycle it has a prior baseline to compare against:
+
+```
+-reload: the renderer tracks {Meshes:8 Textures:2 Materials:0 DescriptorSets:2
+InstanceSets:4 Deferred:0} at the top of this cycle, want {Meshes:8 Textures:2
+Materials:0 DescriptorSets:2 InstanceSets:2 Deferred:0} -- a reload is
+accumulating or losing resources
+```
+
+(built-in level, `-reload 20 -instanced`: two `InstanceSet`s per load, so the
+count is exactly double after one un-released cycle.)
+
+**Freed immediately instead of deferred.** The whole release closure called
+inline instead of passed to `DeferDestroy`. This fires the `-reload` swap's
+OTHER assertion -- not the accumulation check above, but the same-tick one,
+because the count now drops the moment the old set is released rather than
+staying put for `maxFramesInFlight` more frames:
+
+```
+-reload: DestroyModel/DestroyInstanceSet freed immediately -- the renderer
+tracked {Meshes:11 Textures:2 Materials:0 DescriptorSets:2 InstanceSets:4
+Deferred:0} before it and {Meshes:11 Textures:2 Materials:0 DescriptorSets:2
+InstanceSets:2 Deferred:1} after, in the same tick that frames in flight
+still reference those buffers
+```
+
+Under `GLYPHENGINE_VALIDATION=1`, this combination produced **zero** `VULKAN`
+messages, in both directions tested: with `releaseLevel`'s despawn left in
+place (only an already-submitted frame still referenced the buffer) and with
+it also removed (the live draw list still names it). That is a narrower
+result than `docs/agents/models.md`'s analogous descriptor-set measurement,
+which DID get a VUID with the despawn removed -- and the reason is the nil
+`Mesh` guard above: `DestroyInstanceSet` nils `s.Mesh` immediately regardless
+of this break, so with the despawn removed the process panics in Go on the
+very next draw (see "Stop drawing it first") before a second command buffer
+naming the freed buffer can ever be recorded, and with the despawn left in
+place the `-reload` loop's own `log.Fatalf` above exits the process before a
+further frame runs either way. The Go-level assertion (or, with no despawn,
+the nil-pointer panic) always wins the race to notice first; the validation
+layer never gets a turn. `docs/agents/models.md`'s wall-clock story (a
+descriptor set can outlive the frames that used it for a while before the
+layer or anything else notices) does not have an equivalent here.
+
+**Deregistration removed.** The `for i, other := range r.instanceSets { ... }`
+loop deleted from the deferred callback, leaving the freed set's pointer in
+`r.instanceSets`. `ResourceCounts.InstanceSets` is `len(r.instanceSets)`, so
+this has the identical externally-visible symptom as "does nothing" above --
+the count climbs, and the `-reload` loop's accumulation check catches it on
+cycle two the same way, before the run ever reaches a normal shutdown.
+
+To see what `Renderer.Destroy` itself does with the stale entry, the
+`-reload` loop's own two assertions were also disabled for this one
+measurement (`git checkout` restores that too), letting `-reload 5 -instanced`
+run to a normal `e.Close()` and shutdown under `GLYPHENGINE_VALIDATION=1`.
+Result: **zero `VULKAN` messages, exit 0.** `Renderer.Destroy`'s teardown
+sweep does call `s.destroy(r.deviceDriver)` a second time on every stale
+entry, but `DestroyInstanceSet` already zeroed that set's `buffer`, `memory`
+and `mapped` fields before the break was even introduced -- that part of the
+method is not what this break touches -- so `destroy`'s own
+`.Handle() != 0` / `!= nil` guards turn the second call into a silent no-op
+before it reaches Vulkan. The same thing `docs/agents/models.md` found for
+`DestroyTexture`/`DestroyMesh`/`DestroyMaterial`'s `destroyed` flag -- "a
+second free returns before it reaches Vulkan and the validation layer never
+sees it" -- holds here too, by a different mechanism (zeroed handles rather
+than a checked flag) with the identical result: **this bug is invisible to
+the validation layer in both directions, at every cycle and at shutdown.**
+`ResourceCounts.InstanceSets` is not a nice-to-have alongside the layer for
+this one; for a missing deregistration, it is the only thing that would ever
+report it.
 
 ## Turning a level's repeated nodes into instances
 
