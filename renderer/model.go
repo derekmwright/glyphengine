@@ -251,3 +251,43 @@ func nodeMeshes(nodes []ModelNode, meshes []ModelMesh, node int) []int {
 	}
 	return out
 }
+
+// MeshInstances returns the indices into Model.Nodes of every node that
+// instances the doc mesh at index docMesh -- NodeMeshes' inverse (issue
+// #71). NodeMeshes goes from a node to what it draws; a level loader turning
+// repetition into an InstancedMesh needs the other direction: from a doc
+// mesh to every node placing it, so it can hand Renderer.CreateInstanceSet
+// one MeshInstance per node's World in a single call rather than one entity
+// per node.
+//
+// Deliberately shaped like NodeMeshes rather than as one grouping over the
+// whole model (e.g. map[int][]int): a spawn loop already walks Model.Nodes
+// node by node the way examples/22-level's spawnLevel does for NodeMeshes,
+// and the natural shape there is "the first time this node's doc mesh is
+// seen, ask who else shares it" -- one MeshInstances call per DISTINCT doc
+// mesh actually encountered, not one per node and not a whole-model
+// precomputation nothing may need (most doc meshes in a level are not
+// shared at all). See docs/agents/instancing.md for the worked recipe.
+//
+// Returns nil for a doc mesh index no node references (including a
+// negative one, which is what Model.Nodes[i].Mesh is for an empty node) --
+// the "nobody instances this" case, not an error, the same contract
+// NodeMeshes gives for a meshless node.
+func (m *Model) MeshInstances(docMesh int) []int {
+	return meshInstances(m.Nodes, docMesh)
+}
+
+// meshInstances is MeshInstances' pure arithmetic, split out so it can be
+// tested without a Renderer.
+func meshInstances(nodes []ModelNode, docMesh int) []int {
+	if docMesh < 0 {
+		return nil
+	}
+	var out []int
+	for i := range nodes {
+		if nodes[i].Mesh == docMesh {
+			out = append(out, i)
+		}
+	}
+	return out
+}
