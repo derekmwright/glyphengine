@@ -313,8 +313,19 @@ func buildBigDoc(buildingCount, lampCount int) *gltf.Document {
 	}
 
 	// Big enough to sit under every building and lamp post the grid below
-	// places, with room to spare -- see the spacing chosen there.
-	span := float32(10 * math.Max(math.Sqrt(float64(buildingCount)), math.Sqrt(float64(lampCount))))
+	// places, with room to spare -- see the spacing chosen there. Both grids
+	// are centred on the origin and sized to roughly the same footprint
+	// (buildingSpan/lampSpan below) rather than pushed kilometres apart, so
+	// the whole level fits inside the engine's default 500-unit far plane
+	// (app.go's cfg.far) from a camera distance that still frames it -- a
+	// scene built for measuring draw calls is worthless if half of it never
+	// clears the frustum to be drawn at all.
+	buildingSpacing, lampSpacing := 6.0, 2.5
+	bSide := int(math.Ceil(math.Sqrt(float64(buildingCount))))
+	lSide := int(math.Ceil(math.Sqrt(float64(lampCount))))
+	buildingSpan := float64(bSide) * buildingSpacing
+	lampSpan := float64(lSide) * lampSpacing
+	span := float32(math.Max(buildingSpan, lampSpan)/2 + 10)
 	groundMesh := boxMesh(doc, "GroundSlab", [3]float32{-span, -0.3, -span}, [3]float32{span, 0, span})
 	buildingMesh := boxMesh(doc, "Building", [3]float32{-0.5, 0, -0.5}, [3]float32{0.5, 1, 0.5})
 	lampMesh := boxMesh(doc, "LampPost", [3]float32{-0.06, 0, -0.06}, [3]float32{0.06, 3, 0.06})
@@ -340,17 +351,17 @@ func buildBigDoc(buildingCount, lampCount int) *gltf.Document {
 		Extras: map[string]any{"static": true, "collider": "box"},
 	}))
 
-	// Buildings on a grid, 10 units apart, height varied by position so a
-	// few hundred of them read as a skyline rather than a carpet of
-	// identical dots -- spawnInstancedGroup draws every one of these
-	// through ONE InstanceSet when -instanced is on, so the placements have
-	// to actually differ (position, and here height) or the measurement
-	// would be drawing one prop's transform N times, which proves nothing
-	// about a level whose props are not all identical.
-	bSide := int(math.Ceil(math.Sqrt(float64(buildingCount))))
+	// Buildings on a grid centred on the origin, height varied by position so
+	// a few hundred of them read as a skyline rather than a carpet of
+	// identical dots -- spawnInstancedGroup draws every one of these through
+	// ONE InstanceSet when -instanced is on, so the placements have to
+	// actually differ (position, and here height) or the measurement would
+	// be drawing one prop's transform N times, which proves nothing about a
+	// level whose props are not all identical.
+	bOffset := buildingSpan / 2
 	for i := 0; i < buildingCount; i++ {
-		gx := float64(i%bSide) * 10
-		gz := float64(i/bSide) * 10
+		gx := float64(i%bSide)*buildingSpacing - bOffset
+		gz := float64(i/bSide)*buildingSpacing - bOffset
 		roots = append(roots, addNode(doc, &gltf.Node{
 			Name: fmt.Sprintf("Building%d", i), Mesh: gltf.Index(buildingMesh),
 			Translation: [3]float64{gx, 0, gz}, Rotation: identQuat,
@@ -359,12 +370,17 @@ func buildBigDoc(buildingCount, lampCount int) *gltf.Document {
 		}))
 	}
 
-	// Lamp posts on their own grid, well clear of the buildings' footprint.
-	lSide := int(math.Ceil(math.Sqrt(float64(lampCount))))
-	lampOriginX := float64(-span) + 5
+	// Lamp posts on their own grid, also centred on the origin -- deliberately
+	// overlapping the buildings' footprint rather than pushed to one side.
+	// This scene exists to be timed with -level, not screenshotted for its
+	// own sake (docs/agents/instancing.md's numbers come from RenderStats,
+	// not from looking at it), and keeping both groups over the same ground
+	// slab is what lets a single moderate camera distance see all 500 props
+	// at once within the far plane.
+	lOffset := lampSpan / 2
 	for i := 0; i < lampCount; i++ {
-		gx := lampOriginX + float64(i%lSide)*4
-		gz := float64(i/lSide) * 4
+		gx := float64(i%lSide)*lampSpacing - lOffset
+		gz := float64(i/lSide)*lampSpacing - lOffset
 		roots = append(roots, addNode(doc, &gltf.Node{
 			Name: fmt.Sprintf("LampPost%d", i), Mesh: gltf.Index(lampMesh),
 			Translation: [3]float64{gx, 0, gz},
