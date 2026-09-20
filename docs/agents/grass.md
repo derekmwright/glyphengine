@@ -22,7 +22,7 @@ api:
 assets: glTF flora meshes with a baseColorTexture
 example: examples/08-grass
 run: task example:08-grass
-verified: 2026-08-04
+verified: 2026-09-19
 ---
 
 # Instanced grass and flora
@@ -48,6 +48,41 @@ optional — pass `nil` for uniform coverage.
 Each variant owns one instance buffer, ordered by tile so every tile is a
 contiguous draw range. Tiles are 16 world units, and the draw loop culls them
 against the frustum and the cull distance, then sorts near to far.
+
+## Calling InitGrass again
+
+A second call **replaces** the grass a previous one built — a game changing
+`GrassModelSpecs` or the density mask at runtime, or a level transition that
+calls `InitGrass` again, is the normal case this exists for, not a misuse.
+Refusing the second call was the other option issue #87 considered and it is
+not safe: the caller has no way to reach `Renderer`'s internal
+`grassImpostor`/`GrassSystem` fields itself, so refusing would just move the
+abandonment into application code that cannot fix it either.
+
+Nothing the previous generation allocated — the impostor atlas (images,
+views, framebuffer, render pass, pipeline, descriptor set), the flora's
+instance buffers, and the flora models themselves — is dropped or freed
+immediately. It is released through `Renderer.DeferDestroy`, past the frames
+in flight that may still be drawing it, the same guarantee `DestroyModel`
+gives an explicitly released `Model` (`docs/agents/models.md`). The flora
+models go back through `DestroyModel` itself rather than a second
+implementation of the same bookkeeping, so a leak there is caught by whatever
+already catches one for any other model.
+
+Before this, a second `InitGrass` silently abandoned the whole previous
+atlas: `r.grassImpostor` was simply overwritten, `Renderer.Destroy` only ever
+knew about the last generation, and nothing freed the rest. `examples/08-grass
+-regrow N` re-initialises grass with different parameters every few frames
+under the validation layer (`task validate` runs it) and asserts
+`Renderer.ResourceCounts` — including `DescriptorSets`, which is what actually
+notices a leaked set; the layer itself is silent for one named only by a
+frame already *submitted*, as opposed to one still in the live draw list —
+returns to the same numbers at the top of every cycle.
+
+Calling `InitGrass` again with the exact same arguments is deliberately a
+no-op on the picture: the scatter (`grassHash`) and the bake are both pure
+functions of their inputs, so nothing about re-running them changes what gets
+drawn. A game does not need to guard against calling `InitGrass` redundantly.
 
 ## It is the most expensive thing in the frame
 

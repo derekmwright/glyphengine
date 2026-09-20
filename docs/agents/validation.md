@@ -151,13 +151,22 @@ before adding a fourth:
   every other frame died on the 16th rebuild with `allocate bloom descriptor
   sets 1: vulkan error: out of pool memory`. It survives 96 rebuilds silently
   now, as does `09-water`.
+- **Returned when `InitGrass` replaces it.** The grass impostor atlas's one
+  set, allocated by `InitGrass` (`docs/agents/grass.md`). Until issue #87 a
+  second `InitGrass` call abandoned the whole previous atlas — images, views,
+  framebuffer, render pass and pipeline, not only the set — because nothing
+  checked for a previous one: `r.grassImpostor` was simply overwritten, and
+  `Renderer.Destroy` only ever knew about the last generation. `replaceGrass`
+  (`renderer/renderer.go`) now retires the previous generation — the atlas,
+  the `GrassSystem`'s instance buffers, and the flora models `InitGrass`
+  loaded, through `DestroyModel` itself — deferred past the frames in flight
+  the same way `DestroyModel` defers a released `Model`. It *is* counted in
+  `ResourceCounts.DescriptorSets`, one while a bake is live, zero between
+  `New` and the first `InitGrass` call or after a bake failure.
 - **Never returned before `vkDestroyDescriptorPool`.** The shadow pass's
-  per-frame sets, allocated in `New`, and the grass impostor atlas's one set,
-  allocated by `InitGrass`. Both live for the renderer's lifetime, so there is
-  nothing to give back until the pool itself goes; no leak, and nothing to
-  count. (A second `InitGrass` would abandon the whole atlas — images, views,
-  framebuffer and pipeline, not only the set — which is a different bug from
-  this one and not one anything here checks.)
+  per-frame sets, allocated in `New`. It lives for the renderer's lifetime, so
+  there is nothing to give back until the pool itself goes; no leak, and
+  nothing to count.
 
 If you add a set to the pool, decide which of those three it is and say so
 where you allocate it. The pool is a fixed budget — `MaxSets` is 708 on the
