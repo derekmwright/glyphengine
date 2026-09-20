@@ -92,11 +92,23 @@ type ResourceCounts struct {
 	// holds.
 	DescriptorSets int
 
+	// InstanceSets is the length of r.instanceSets: every InstanceSet handed
+	// out by CreateInstanceSet that DestroyInstanceSet has not yet actually
+	// freed. Like the three list lengths above and unlike DescriptorSets, it
+	// IS derivable in principle -- but it is its own count for the same
+	// reason those are counted at all: a number a caller can compare against
+	// a baseline is what turns "did DestroyInstanceSet do anything" into an
+	// assertion instead of a hunch. Kept in step with the list rather than
+	// recomputed, because the list is the thing DestroyInstanceSet's
+	// deferred callback actually edits.
+	InstanceSets int
+
 	// Deferred is how many destruction callbacks are queued behind the frames
 	// in flight. DestroyModel routes everything through that queue, so a
 	// count taken immediately after it still includes the model: the
 	// resources are genuinely still alive, and reporting them as gone would
-	// be a lie with a use-after-free hiding behind it.
+	// be a lie with a use-after-free hiding behind it. DestroyInstanceSet
+	// does the same for the same reason.
 	Deferred int
 }
 
@@ -107,6 +119,7 @@ func (r *Renderer) ResourceCounts() ResourceCounts {
 		Textures:       len(r.textures),
 		Materials:      len(r.materials),
 		DescriptorSets: r.liveDescriptorSets,
+		InstanceSets:   len(r.instanceSets),
 		Deferred:       len(r.deferredDestroys),
 	}
 }

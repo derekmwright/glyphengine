@@ -123,3 +123,115 @@ func TestInstanceAttributeLayout(t *testing.T) {
 		t.Errorf("binding stride %d does not match MeshInstance size %d", got, meshInstanceSize)
 	}
 }
+
+// The three tests below mirror renderer/modeldestroy_test.go's
+// TestDestroyModelIsIdempotentAndNilsHandles/DefersRatherThanFreeingNow and
+// TestResourceCountsReportsTheTrackingLists, for DestroyInstanceSet instead of
+// DestroyModel. Like those, they need no device: DeferDestroy,
+// flushDeferredDestroys and r.instanceSets are plain bookkeeping on the
+// Renderer struct, and the fixture sets carry no real buffer/memory handles,
+// so the deferred callback's device calls are all gated off by the same
+// `.Handle() != 0` / `!= nil` checks DestroyInstanceSet and destroy already
+// have to make for a genuinely empty set. The live-resource half -- an actual
+// VkBuffer released for real -- is proved under the validation layer by
+// examples/22-level -reload -instanced (see docs/agents/instancing.md).
+
+// TestDestroyInstanceSetIsIdempotentAndNilsHandles pins what a caller can
+// observe about a single call without a device: the second call does
+// nothing, and Mesh plus the buffer/memory/mapped handles are nil/zero
+// afterwards so a stale draw fails on a nil pointer in Go (set.Mesh.vertexBuffer
+// in recordInstanced/recordInstancedShadow) instead of passing a freed handle
+// to the driver. count is deliberately NOT one of the things zeroed -- see
+// DestroyInstanceSet's own comment for why zeroing it would turn that loud
+// failure back into the silent skip both draw functions already have for
+// set.count == 0.
+//
+// BROKEN: removed `s.destroyed = true` from DestroyInstanceSet. FAILED with:
+// "the second DestroyInstanceSet queued another destroy: 2 deferred, want 1".
+// Restored with `git checkout -- renderer/instancedmesh.go`.
+func TestDestroyInstanceSetIsIdempotentAndNilsHandles(t *testing.T) {
+	r := &Renderer{}
+	s := &InstanceSet{Mesh: &Mesh{}, count: 4, capacity: 4}
+
+	r.DestroyInstanceSet(s)
+	if got := len(r.deferredDestroys); got != 1 {
+		t.Fatalf("DestroyInstanceSet queued %d deferred destroys, want 1", got)
+	}
+	if s.Mesh != nil {
+		t.Error("Mesh still set after DestroyInstanceSet")
+	}
+	if s.buffer.Handle() != 0 || s.memory.Handle() != 0 || s.mapped != nil {
+		t.Error("buffer/memory/mapped still set after DestroyInstanceSet")
+	}
+	if s.count != 4 {
+		t.Errorf("count changed to %d, want it left at 4", s.count)
+	}
+
+	r.DestroyInstanceSet(s)
+	if got := len(r.deferredDestroys); got != 1 {
+		t.Errorf("the second DestroyInstanceSet queued another destroy: %d deferred, want 1", got)
+	}
+
+	r.DestroyInstanceSet(nil) // must not panic
+	if got := len(r.deferredDestroys); got != 1 {
+		t.Errorf("DestroyInstanceSet(nil) queued %d deferred destroy, want 1", got)
+	}
+}
+
+// TestDestroyInstanceSetDefersRatherThanFreeingNow is DestroyModel's
+// frames-in-flight property, stated for InstanceSet: a submitted frame can
+// still be reading this set's buffer in recordInstanced the moment a game
+// gives it back -- exactly the shape of an -instanced -reload swap, where the
+// new level's sets are already drawing before the old ones are released, in
+// the same tick.
+//
+// BROKEN: made DestroyInstanceSet run its release closure inline instead of
+// passing it to DeferDestroy. FAILED with: "DestroyInstanceSet freed
+// immediately: 0 deferred destroys queued, want 1". Restored with
+// `git checkout -- renderer/instancedmesh.go`.
+func TestDestroyInstanceSetDefersRatherThanFreeingNow(t *testing.T) {
+	r := &Renderer{}
+	s := &InstanceSet{}
+	r.DestroyInstanceSet(s)
+
+	if got := len(r.deferredDestroys); got != 1 {
+		t.Fatalf("DestroyInstanceSet freed immediately: %d deferred destroys queued, want 1", got)
+	}
+	if got := r.deferredDestroys[0].framesLeft; got != maxFramesInFlight {
+		t.Errorf("queued with framesLeft = %d, want %d -- one per frame slot whose fence has to be waited on", got, maxFramesInFlight)
+	}
+}
+
+// TestDestroyInstanceSetDeregistersOnlyWhenTheDeferredFreeRuns is issue #82's
+// same-tick assertion, restated for InstanceSet: ResourceCounts().InstanceSets
+// must NOT drop at the DestroyInstanceSet call, only once the deferred free
+// has actually run, because the set is genuinely still alive for the frames
+// still in flight at the moment of the call. This is exactly what
+// examples/22-level's -reload loop compares against its steady-state baseline
+// for the instanced path.
+//
+// BROKEN: moved the r.instanceSets deregistration out of the deferred
+// closure to run synchronously inside DestroyInstanceSet instead. FAILED
+// with: "InstanceSets = 0 immediately after DestroyInstanceSet, want 1 -- the
+// set is still alive for 2 more frames". Restored with
+// `git checkout -- renderer/instancedmesh.go`.
+func TestDestroyInstanceSetDeregistersOnlyWhenTheDeferredFreeRuns(t *testing.T) {
+	r := &Renderer{}
+	s := &InstanceSet{}
+	r.instanceSets = append(r.instanceSets, s)
+
+	r.DestroyInstanceSet(s)
+	if got := r.ResourceCounts().InstanceSets; got != 1 {
+		t.Fatalf("InstanceSets = %d immediately after DestroyInstanceSet, want 1 -- the set is still alive for %d more frames", got, maxFramesInFlight)
+	}
+
+	for i := 0; i < maxFramesInFlight; i++ {
+		r.flushDeferredDestroys()
+	}
+	if got := r.ResourceCounts().InstanceSets; got != 0 {
+		t.Errorf("InstanceSets = %d after %d flushes, want 0", got, maxFramesInFlight)
+	}
+	if got := len(r.instanceSets); got != 0 {
+		t.Errorf("%d entries still in r.instanceSets after the deferred free ran, want 0", got)
+	}
+}
