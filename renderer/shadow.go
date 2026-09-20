@@ -103,9 +103,9 @@ type Volumetrics struct {
 // cos(theta) = 0.
 //
 // What that does to a capture, measured rather than left as arithmetic: the
-// side-on doorway pose below at 1280x720, box 600,270,60,60 across a door
-// spot's cone, mean luma added at -volg 0 / 0.2 / 0.4 / 0.7 is +7.33 / +7.04
-// / +6.04 / +3.36. The default keeps 82% of the isotropic brightness when
+// side-on doorway pose below at 1280x720 and the default 32 steps, box
+// 600,270,60,60 across a door spot's cone, mean luma added at -volg 0 / 0.2 /
+// 0.4 / 0.7 is +7.33 / +7.04 / +6.04 / +3.36. The default keeps 82% of the isotropic brightness when
 // looking ACROSS a beam; 0.7 keeps 46%, and a spotlight at night is usually
 // there to be seen from the side.
 //

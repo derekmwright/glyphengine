@@ -322,8 +322,8 @@ e.Scene.SetVolumetrics(v)
 `Anisotropy` is how forward-scattering the air is. Positive makes a beam
 coming toward the eye brighter than the same beam crossing it, which is what
 a real beam does. It is a strong lever: measured across a door spot's cone in
-`21-streetlights`, the light added at g = 0 / 0.2 / 0.4 / 0.7 is +7.33 /
-+7.04 / +6.04 / +3.36 mean luma. The default 0.4 keeps 82% of the isotropic
+`21-streetlights` at 1280x720 and the default 32 steps, the light added at
+g = 0 / 0.2 / 0.4 / 0.7 is +7.33 / +7.04 / +6.04 / +3.36 mean luma. The default 0.4 keeps 82% of the isotropic
 brightness side-on; 0.7 keeps 46% and a street lamp seen from the side nearly
 disappears.
 
