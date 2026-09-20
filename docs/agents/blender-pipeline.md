@@ -14,6 +14,7 @@ api:
   - renderer.ModelNode.Extras
   - renderer.Model.Node
   - renderer.Model.NodeMeshes
+  - renderer.Model.MeshInstances
   - renderer.ModelLight
   - renderer.Model.LightWorldPosDir
   - glyphengine.TransformFromMatrix
@@ -65,7 +66,7 @@ one at a time:
 |---|---|---|
 | `export_extras` | `True` | OFF by default. Custom properties are the tagging mechanism (see below) -- without this every `ModelNode.Extras` is nil. |
 | `export_lights` | `True` | OFF by default. Without this `Model.Lights` is empty; no lamp in the scene reaches the file. |
-| `export_gpu_instances` | `True` | OFF by default. Lets Blender's own instancer flag (particle/geometry-nodes duplicators the exporter recognises as instanced) reach the file as `EXT_mesh_gpu_instancing` rather than being silently baked into N separate meshes. The engine does not read the extension yet (issue #71) -- see "Instancing" below for what actually triggers it in practice, which turned out to be neither of this fixture's two instancing probes. |
+| `export_gpu_instances` | `True` | OFF by default. Lets Blender's own instancer flag (particle/geometry-nodes duplicators the exporter recognises as instanced) reach the file as `EXT_mesh_gpu_instancing` rather than being silently baked into N separate meshes. The engine deliberately does not read the extension (issue #71 measured that nothing a level artist actually does triggers it -- see "Instancing" below for what does, which turned out to be neither of this fixture's two instancing probes). Left on here anyway, since a future export mechanism could set Blender's instancer flag and this fixture should not silently stop testing for it. |
 | `export_yup` | `True` | Already the exporter's own default on every version checked; set explicitly so this recipe does not depend on that default never changing. |
 | `export_import_convert_lighting_mode` | `'SPEC'` | Already the exporter's own default. This is what makes a 1000 W spot arrive as 54351.4 candela -- see "Light units" below. Set explicitly for the same reason as `export_yup`. |
 | `export_apply` | `True` | OFF by default ("Apply Modifiers"). An unapplied modifier (mirror, subdivision) exports its CAGE, not its result -- this is the toggle that keeps the file matching the viewport. |
@@ -465,6 +466,20 @@ UN-realized reaching a mesh some other way); this fixture's two probes
 between them cover "ordinary duplication," "collection instancing" and
 "geometry-nodes scatter," and none of the three is what that toggle is
 for.
+
+**What this means for an artist:** the two mechanisms that actually put
+repetition into a level file are Alt-D (linked duplicate) and a collection
+instance -- both arrive as ordinary "several nodes, one doc mesh," which the
+engine already reads correctly and, since issue #71, can batch into one draw
+call with `Model.MeshInstances` and `examples/22-level -instanced` (see
+[`instancing.md`](instancing.md#turning-a-levels-repeated-nodes-into-instances)).
+A geometry-nodes scatter is not a substitute for either if the level needs
+per-instance behaviour later: it has to be realised to export at all, and
+once realised it is one baked mesh with every copy's geometry merged in --
+fine for static dressing nobody will ever separate again, useless for
+anything the game wants to address as an individual instance (a collider, a
+pick target, a "this one is on fire" flag), because by the time it reaches
+the engine there is no "this one" left to point at.
 
 ## Through the example
 
