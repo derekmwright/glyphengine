@@ -32,12 +32,16 @@
 //	go run ./22-level -screenshot out.png # capture the last frame
 //	go run ./22-level -reload 20          # swap the level for a fresh load, 20 times
 //	go run ./22-level -instanced          # batch repeated static props into InstanceSets
+//	go run ./22-level -reload 20 -instanced # both: reload a level whose repeated
+//	                                         # props are InstanceSets, not entities
 //
 // -reload is the Blender iteration story with the file changing underneath it
 // taken out: it loads a SECOND copy of the level, spawns it, and only then
-// gives the first one back with Renderer.DestroyModel -- the swap happening
-// inside one tick, so no frame is ever drawn without a level. That is both the
-// only reload a game would ship and the harder case for DestroyModel: at the
+// gives the first one back with Renderer.DestroyModel -- and, under
+// -instanced, gives its InstanceSets back with Renderer.DestroyInstanceSet in
+// the same tick -- the swap happening inside one tick, so no frame is ever
+// drawn without a level. That is both the only reload a game would ship and
+// the harder case for DestroyModel and DestroyInstanceSet alike: at the
 // moment of the swap, frames still in flight reference the buffers being
 // released. A never-destroyed second model sits beside it as the control.
 // Run it under the validation layer (task validate does) -- the layer is what
@@ -65,10 +69,10 @@
 // drive it, no component beyond the physical box. See
 // spawnInstancedGroup/instancedGroupCandidate below and
 // docs/agents/instancing.md for the measurement this rule was chosen to
-// demonstrate. -instanced and -reload do not combine -- nothing releases an
-// InstanceSet's buffer yet (see renderer/instancedmesh.go), so reloading
-// under -instanced would leak one per swap; main() refuses the combination
-// rather than doing that silently.
+// demonstrate. -instanced combines with -reload (issue #84): stepReload
+// swaps in the new level's InstanceSets the same tick it swaps in its Model,
+// then gives the old level's sets back with Renderer.DestroyInstanceSet
+// right alongside Renderer.DestroyModel -- see releaseLevel.
 //
 // Left-drag orbits, scroll zooms, Escape quits.
 package main
@@ -150,11 +154,14 @@ type game struct {
 	// comment and instancedGroupCandidate for the rule.
 	instanced bool
 
-	// model and levelEntities are what the current load of the level
-	// produced. Nothing reads them after Init with -reload 0; they exist
-	// because -reload has to give them back.
+	// model, levelEntities and levelSets are what the current load of the
+	// level produced. Nothing reads them after Init with -reload 0; they
+	// exist because -reload has to give them back. levelSets is only
+	// non-empty under -instanced -- the ordinary per-node path creates no
+	// InstanceSet at all.
 	model         *renderer.Model
 	levelEntities []glyph.Entity
+	levelSets     []*renderer.InstanceSet
 
 	// anchor is a SECOND model, loaded once under -reload and never
 	// destroyed. It is the control: it must keep drawing exactly the same
@@ -238,8 +245,9 @@ func (g *game) loadLevel(e *glyph.Engine) (mgl32.Vec3, error) {
 	}
 	g.model = model
 
-	spawnTarget, entities := spawnLevel(e, model, g.instanced)
+	spawnTarget, entities, sets := spawnLevel(e, model, g.instanced)
 	g.levelEntities = entities
+	g.levelSets = sets
 	e.RebuildStatics()
 
 	spots, points := lightsFromModel(model)
@@ -287,19 +295,28 @@ func (g *game) loadAnchor(e *glyph.Engine) error {
 }
 
 // releaseLevel gives one load of the level back: the entities that draw it
-// first, then the model.
+// first, then its GPU resources -- InstanceSets and the model.
 //
 // That order is the contract, not a preference. DestroyModel nils every
-// ModelMesh's Mesh, Texture and Material, so an entity still holding a MeshRef
-// to one of them would be drawing a handle nothing owns; see
-// docs/agents/models.md for what that actually costs. Despawning first is how
-// a game avoids it. The model's own release is then safe against the frames
-// already submitted, because DestroyModel defers it rather than freeing now.
-func (g *game) releaseLevel(e *glyph.Engine, model *renderer.Model, entities []glyph.Entity) {
+// ModelMesh's Mesh, Texture and Material, and DestroyInstanceSet nils a set's
+// own Mesh the same way, so an entity still holding a MeshRef or an
+// InstancedMesh pointed at one of them would be drawing a handle nothing owns
+// (docs/agents/models.md, docs/agents/instancing.md). Despawning first is how
+// a game avoids it -- entities is every entity spawnLevel created, instanced
+// group entities included, so this one despawn loop already stops drawing
+// both. The GPU release is then safe against the frames already submitted,
+// because DestroyInstanceSet and DestroyModel both defer rather than freeing
+// now. Sets before the model is not load-bearing order -- an InstanceSet's
+// buffer and a Model's mesh buffers are disjoint resources -- but it mirrors
+// the despawn-then-destroy shape above, entities before the things they named.
+func (g *game) releaseLevel(e *glyph.Engine, model *renderer.Model, entities []glyph.Entity, sets []*renderer.InstanceSet) {
 	for _, ent := range entities {
 		e.Scene.Despawn(ent)
 	}
 	e.RebuildStatics()
+	for _, s := range sets {
+		e.Renderer().DestroyInstanceSet(s)
+	}
 	e.Renderer().DestroyModel(model)
 }
 
@@ -357,15 +374,15 @@ func (g *game) stepReload(e *glyph.Engine) {
 	g.steadyCounts, g.haveSteady = steady, true
 
 	if g.cyclesLeft == 0 {
-		log.Printf("-reload: %d swaps done; one level is %d meshes, %d textures, %d materials, %d descriptor sets, and the renderer tracked the same %d/%d/%d/%d at the top of every cycle",
-			g.reloadCycles, g.oneLevel.Meshes, g.oneLevel.Textures, g.oneLevel.Materials, g.oneLevel.DescriptorSets,
-			steady.Meshes, steady.Textures, steady.Materials, steady.DescriptorSets)
+		log.Printf("-reload: %d swaps done; one level is %d meshes, %d textures, %d materials, %d descriptor sets, %d instance sets, and the renderer tracked the same %d/%d/%d/%d/%d at the top of every cycle",
+			g.reloadCycles, g.oneLevel.Meshes, g.oneLevel.Textures, g.oneLevel.Materials, g.oneLevel.DescriptorSets, g.oneLevel.InstanceSets,
+			steady.Meshes, steady.Textures, steady.Materials, steady.DescriptorSets, steady.InstanceSets)
 		e.Close()
 		return
 	}
 	g.cyclesLeft--
 
-	oldModel, oldEntities := g.model, g.levelEntities
+	oldModel, oldEntities, oldSets := g.model, g.levelEntities, g.levelSets
 
 	// The swap. New first.
 	if _, err := g.loadLevel(e); err != nil {
@@ -380,10 +397,10 @@ func (g *game) stepReload(e *glyph.Engine) {
 	}
 
 	// Old second, in the same tick, so no frame is ever drawn without a level.
-	g.releaseLevel(e, oldModel, oldEntities)
+	g.releaseLevel(e, oldModel, oldEntities, oldSets)
 
 	if after := r.ResourceCounts(); !sameResources(after, both) {
-		log.Fatalf("-reload: DestroyModel freed immediately -- the renderer tracked %+v before it and %+v after, in the same tick that frames in flight still reference those buffers", both, after)
+		log.Fatalf("-reload: DestroyModel/DestroyInstanceSet freed immediately -- the renderer tracked %+v before it and %+v after, in the same tick that frames in flight still reference those buffers", both, after)
 	}
 }
 
@@ -395,19 +412,26 @@ func (g *game) stepReload(e *glyph.Engine) {
 // not come back at all, because nothing could give one back (issue #82). The
 // three list lengths cannot see that; the pool running dry, hundreds of cycles
 // later and inside the next LOAD, was the only symptom.
+//
+// InstanceSets is the same idea for issue #84: under -instanced, a
+// DestroyInstanceSet that did nothing leaves the other four numbers
+// unchanged -- an InstanceSet takes no descriptor set and shares its mesh
+// with the model that already returned its own count to baseline -- so
+// without this field the reload loop would watch an -instanced run leak one
+// set's buffer per cycle and report nothing wrong.
 func sameResources(a, b renderer.ResourceCounts) bool {
 	return a.Meshes == b.Meshes && a.Textures == b.Textures && a.Materials == b.Materials &&
-		a.DescriptorSets == b.DescriptorSets
+		a.DescriptorSets == b.DescriptorSets && a.InstanceSets == b.InstanceSets
 }
 
 func sumResources(a, b renderer.ResourceCounts) renderer.ResourceCounts {
 	return renderer.ResourceCounts{Meshes: a.Meshes + b.Meshes, Textures: a.Textures + b.Textures, Materials: a.Materials + b.Materials,
-		DescriptorSets: a.DescriptorSets + b.DescriptorSets}
+		DescriptorSets: a.DescriptorSets + b.DescriptorSets, InstanceSets: a.InstanceSets + b.InstanceSets}
 }
 
 func subResources(a, b renderer.ResourceCounts) renderer.ResourceCounts {
 	return renderer.ResourceCounts{Meshes: a.Meshes - b.Meshes, Textures: a.Textures - b.Textures, Materials: a.Materials - b.Materials,
-		DescriptorSets: a.DescriptorSets - b.DescriptorSets}
+		DescriptorSets: a.DescriptorSets - b.DescriptorSets, InstanceSets: a.InstanceSets - b.InstanceSets}
 }
 
 func (g *game) Update(e *glyph.Engine, dt float32) {
@@ -435,7 +459,10 @@ func (g *game) Update(e *glyph.Engine, dt float32) {
 // The entity list is what -reload despawns before handing the model back.
 // Tracking it is the level loader's job, not the engine's: nothing in the ECS
 // records which entities came from which file, and a game that reloads a level
-// has to know which of its entities were the level.
+// has to know which of its entities were the level. The InstanceSet list is
+// the same idea one level down: -reload has to give each one back with
+// Renderer.DestroyInstanceSet, and nothing but this loop knows which sets a
+// given load created.
 //
 // instanced turns on issue #71's recipe: see the package comment and
 // instancedGroupCandidate for the rule that decides which doc meshes qualify.
@@ -446,10 +473,11 @@ func (g *game) Update(e *glyph.Engine, dt float32) {
 // and later nodes in a group are skipped for the shared draw while still
 // getting their own pass through the extras below (a companion collider,
 // the floors log line).
-func spawnLevel(e *glyph.Engine, model *renderer.Model, instanced bool) (mgl32.Vec3, []glyph.Entity) {
+func spawnLevel(e *glyph.Engine, model *renderer.Model, instanced bool) (mgl32.Vec3, []glyph.Entity, []*renderer.InstanceSet) {
 	spawnTarget := mgl32.Vec3{0, 1.6, 0}
 	foundSpawn := false
 	var entities []glyph.Entity
+	var instanceSets []*renderer.InstanceSet
 
 	instancedDocMesh := map[int]bool{}
 	spawnedInstanceSet := map[int]bool{}
@@ -483,7 +511,9 @@ func spawnLevel(e *glyph.Engine, model *renderer.Model, instanced bool) (mgl32.V
 			if decided {
 				if !spawnedInstanceSet[node.Mesh] {
 					spawnedInstanceSet[node.Mesh] = true
-					entities = append(entities, spawnInstancedGroup(e, model, node.Mesh, meshIdxs)...)
+					grpEntities, grpSets := spawnInstancedGroup(e, model, node.Mesh, meshIdxs)
+					entities = append(entities, grpEntities...)
+					instanceSets = append(instanceSets, grpSets...)
 				}
 				// The set already drew this node's geometry once, in the
 				// shared draw call above -- no per-node MeshRef here, or it
@@ -550,7 +580,7 @@ func spawnLevel(e *glyph.Engine, model *renderer.Model, instanced bool) (mgl32.V
 	if !foundSpawn {
 		log.Printf("level: no node with extras {\"spawn\":\"player\"} found; camera targets the origin")
 	}
-	return spawnTarget, entities
+	return spawnTarget, entities, instanceSets
 }
 
 // instancedGroupCandidate is -instanced's whole rule, in one place: does
@@ -622,9 +652,14 @@ func instancedGroupCandidate(model *renderer.Model, docMesh int) bool {
 // reads) already tints the whole set identically to how each node would
 // have been tinted individually, since every node in a candidate group
 // shares the one doc mesh and therefore the one material.
-func spawnInstancedGroup(e *glyph.Engine, model *renderer.Model, docMesh int, meshIdxs []int) []glyph.Entity {
+//
+// Returns the sets alongside the entities -- spawnLevel hands them to the
+// caller so -reload can give each one back with Renderer.DestroyInstanceSet;
+// nothing else keeps a list of which InstanceSets a load created.
+func spawnInstancedGroup(e *glyph.Engine, model *renderer.Model, docMesh int, meshIdxs []int) ([]glyph.Entity, []*renderer.InstanceSet) {
 	nodes := model.MeshInstances(docMesh)
 	entities := make([]glyph.Entity, 0, len(meshIdxs))
+	sets := make([]*renderer.InstanceSet, 0, len(meshIdxs))
 	for _, mi := range meshIdxs {
 		mm := model.Meshes[mi]
 		placements := make([]renderer.MeshInstance, len(nodes))
@@ -638,6 +673,7 @@ func spawnInstancedGroup(e *glyph.Engine, model *renderer.Model, docMesh int, me
 		if err != nil {
 			log.Fatalf("level: -instanced: create instance set for doc mesh %d: %v", docMesh, err)
 		}
+		sets = append(sets, set)
 		ent := e.Spawn()
 		e.C.InstancedMesh.Set(ent, &glyph.InstancedMesh{Set: set})
 		e.C.MeshRef.Set(ent, &glyph.MeshRef{Mesh: mm.Mesh, Metallic: mm.Metallic, Roughness: mm.Roughness})
@@ -647,7 +683,7 @@ func spawnInstancedGroup(e *glyph.Engine, model *renderer.Model, docMesh int, me
 		}
 		entities = append(entities, ent)
 	}
-	return entities
+	return entities, sets
 }
 
 // spawnInstancedCollider gives an instanced node's physical presence back.
@@ -822,15 +858,6 @@ func main() {
 	reload := flag.Int("reload", 0, "load, draw, destroy and reload the level N times, then exit; asserts the renderer's live resource counts return to their baseline (exercises Renderer.DestroyModel)")
 	instanced := flag.Bool("instanced", false, "batch every doc mesh shared by several static nodes into one renderer.InstanceSet instead of one entity per node (issue #71; see the package comment for the rule)")
 	flag.Parse()
-
-	if *instanced && *reload > 0 {
-		// Nothing releases an InstanceSet's GPU buffer yet
-		// (renderer/instancedmesh.go has no DestroyInstanceSet), so a level
-		// reloaded under -instanced would leak one set's worth of memory per
-		// swap. Refusing the combination is the honest failure; leaking
-		// silently for twenty cycles is not.
-		log.Fatalf("-instanced and -reload do not combine: reloading would leak an InstanceSet's buffer every swap")
-	}
 
 	opts := []glyph.Option{
 		glyph.WithTitle("GlyphEngine - 22 Level"),
