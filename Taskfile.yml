@@ -428,8 +428,9 @@ tasks:
           exit 1
         fi
         run() {
-          label="22-level -reload 20 $*"
-          GLYPHENGINE_FIXED_FRAME_TIME=16.667ms GLYPHENGINE_STATE_TRACE=$d/r.trace go run ./22-level -reload 20 "$@" >$d/r.log 2>&1 || {
+          cycles=$1; shift
+          label="22-level -reload $cycles $*"
+          GLYPHENGINE_FIXED_FRAME_TIME=16.667ms GLYPHENGINE_STATE_TRACE=$d/r.trace go run ./22-level -reload $cycles "$@" >$d/r.log 2>&1 || {
             echo "$label: FAILED TO RUN"; tail -5 $d/r.log; status=1; return
           }
           if [ ! -s $d/r.trace ]; then echo "$label: MISSING TRACE -- this gate proves nothing"; status=1; return; fi
@@ -442,8 +443,37 @@ tasks:
             status=1
           fi
         }
-        run
-        run -level ../renderer/testdata/blender/level.glb
+        run 20
+        run 20 -level ../renderer/testdata/blender/level.glb
+        # And the same level 700 times, which is the run that would have
+        # caught issue #82 and the reason this gate is not 20 cycles of
+        # everything.
+        #
+        # 22-level's own per-cycle assertion is what does the catching here:
+        # every cycle must start from the same ResourceCounts, and that now
+        # includes the descriptor sets the level's texture holds. The failure
+        # it was blind to before needed no assertion at all, only enough
+        # cycles -- the pool simply ran out inside the next LOAD. On the tree
+        # before the fix this run FAILED, exit 1, after 676 successful loads:
+        #
+        #   -reload: reloading the level: load level.glb: load gltf images:
+        #   upload texture 0 (GroundTex): allocate descriptor set:
+        #   vulkan error: out of pool memory
+        #
+        # 700 rather than 677 because the wall is not a fixed cycle number:
+        # the pool fits MaxSets = 708 sets, the first two loads are the anchor
+        # and the level Init already put up, and the renderer's own pass sets
+        # come out of the same 708 and vary with the swapchain image count the
+        # driver picks. 700 clears it on any of them with room to spare, and
+        # this run is the only one here long enough for that to mean anything:
+        # 2804 frames and 50 s on an RX 7900 XTX, where the same run at 20
+        # cycles is 4 s.
+        #
+        # -level, not the built-in level: the built-in one carries no texture,
+        # takes no descriptor set, and reloads indefinitely with the bug in
+        # place. That is exactly why `task reload` did not see this for 20
+        # cycles or for 700.
+        run 700 -level ../renderer/testdata/blender/level.glb
         rm -rf $d
         exit $status
 
