@@ -302,7 +302,10 @@ func createWaterFramebuffers(deviceDriver core1_0.DeviceDriver, renderPass core1
 			Layers:      1,
 		})
 		if err != nil {
-			return nil, err
+			for _, made := range framebuffers[:i] {
+				deviceDriver.DestroyFramebuffer(made, nil)
+			}
+			return nil, fmt.Errorf("create water framebuffer %d: %w", i, err)
 		}
 		framebuffers[i] = fb
 	}
