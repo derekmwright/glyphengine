@@ -200,6 +200,23 @@ func (t *hdrTarget) destroy(deviceDriver core1_0.DeviceDriver) {
 	if t == nil {
 		return
 	}
+	// The sets go back to the pool, before the sampler and views they name.
+	// recreateSwapchain builds a whole new target on every rebuild -- not only
+	// on a resize -- and until the pool carried
+	// VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT these could not be
+	// given back, so each rebuild spent MaxSets and never refilled it.
+	// Measured on 13-ui -glow on with a rebuild provoked every other frame:
+	// the 16th one failed with "allocate bloom descriptor sets 1: vulkan
+	// error: out of pool memory", which a window dragged between monitors
+	// reaches without trying. The layer says nothing about it -- the failure
+	// is a legitimate allocation refusal, not misuse.
+	//
+	// Safe without any deferral here, and only here: both callers have
+	// already idled the device. recreateSwapchain waits before it destroys
+	// anything, and Destroy waits before it unwinds the init stack this sits
+	// on.
+	freeSets(deviceDriver, t.sceneSets)
+	freeSets(deviceDriver, t.tonemapSets)
 	if t.sampler.Handle() != 0 {
 		deviceDriver.DestroySampler(t.sampler, nil)
 		t.sampler = core1_0.Sampler{}

@@ -1451,9 +1451,10 @@ func (r *Renderer) recreateSwapchain() error {
 
 	// The HDR targets are swapchain-sized, so they go with it.
 	// Both chains and the sets that point into them are size-dependent, so all
-	// three are rebuilt together. The descriptor sets come from the pool, which
-	// is not reset here -- so this leaks pool capacity across resizes and is why
-	// maxHDRSets and maxBloomSets carry headroom rather than being exact.
+	// three are rebuilt together. The sets come from the pool, which is not
+	// reset here -- each target's destroy gives its own back instead (issue
+	// #82). Before it did, a rebuild spent pool capacity that never came back,
+	// and the sixteenth rebuild of 13-ui -glow on failed to allocate.
 	r.bloom.destroy(r.deviceDriver)
 	r.hdr.destroy(r.deviceDriver)
 	r.hdr, err = createHDRTargets(r.instanceDriver, r.deviceDriver, r.physicalDevice,

@@ -164,6 +164,11 @@ func (s *sceneColorTarget) destroy(deviceDriver core1_0.DeviceDriver) {
 	if s == nil {
 		return
 	}
+	// Its one set goes back with it, ahead of the sampler and view it names.
+	// DestroyTexture is not what frees this Texture -- see the comment above
+	// -- so the set has to be given back here or nowhere, and a swapchain
+	// rebuild builds a fresh target every time.
+	freeSets(deviceDriver, []core1_0.DescriptorSet{s.texture.DescriptorSet})
 	deviceDriver.DestroySampler(s.texture.sampler, nil)
 	deviceDriver.DestroyImageView(s.texture.view, nil)
 	deviceDriver.FreeMemory(s.memory, nil)

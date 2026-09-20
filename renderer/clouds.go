@@ -248,6 +248,11 @@ func (t *cloudTarget) destroy(deviceDriver core1_0.DeviceDriver) {
 	if t == nil {
 		return
 	}
+	// The sets first, same as hdrTarget and bloomTarget. These are rebuilt
+	// only when the extent actually moved rather than on every rebuild (see
+	// recreateSwapchain), so they leaked more slowly than the rest -- a real
+	// resize rather than any out-of-date swapchain -- but they leaked.
+	freeSets(deviceDriver, t.sets)
 	for _, fb := range t.fbs {
 		deviceDriver.DestroyFramebuffer(fb, nil)
 	}
