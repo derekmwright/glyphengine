@@ -235,6 +235,14 @@ func (t *bloomTarget) destroy(deviceDriver core1_0.DeviceDriver) {
 	if t == nil {
 		return
 	}
+	// The sets first, for the reason hdrTarget.destroy spells out: the chain
+	// is rebuilt on every swapchain rebuild, and this is the biggest single
+	// consumer in the pool -- bloomLevels sets per swapchain image, and twice
+	// that with the UI glow layer on. It was also the allocation that failed
+	// first when the pool ran dry after fifteen rebuilds.
+	for _, sets := range t.sets {
+		freeSets(deviceDriver, sets)
+	}
 	if t.sampler.Handle() != 0 {
 		deviceDriver.DestroySampler(t.sampler, nil)
 		t.sampler = core1_0.Sampler{}

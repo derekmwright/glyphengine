@@ -151,11 +151,13 @@ const maxHDRSets = 8
 // swapchain image. Sized against maxHDRSets rather than the real image count for
 // the same reason -- the driver picks that, and it can change on a resize.
 //
-// Resizing rebuilds both chains without resetting the pool, so this is headroom
-// for several resizes rather than an exact fit. A long session of window
-// dragging will eventually exhaust it and fail the reallocation with a clear
-// error, which is worse than resetting the pool but better than the silent
-// corruption of reusing sets that still name freed views.
+// This used to be headroom for "several resizes" rather than a budget, because
+// a rebuild allocated a new chain and could not give the old one back. Several
+// turned out to be fifteen: 13-ui -glow on, with a rebuild provoked every
+// other frame, failed the sixteenth with "allocate bloom descriptor sets 1:
+// vulkan error: out of pool memory". bloomTarget.destroy frees its sets now
+// (issue #82), so this is what ONE chain needs, and a rebuild costs nothing
+// that is not given back.
 const maxBloomSets = maxHDRSets * bloomLevels
 
 // The UI glow layer is a second colour target and a second bloom chain with the
@@ -234,28 +236,27 @@ func createDescriptorPool(deviceDriver core1_0.DeviceDriver, maxSets int) (core1
 	return pool, nil
 }
 
-// freeDescriptorSets gives sets back to the descriptor pool and moves the live
-// count with them.
-//
-// One function rather than a free call and a `r.liveDescriptorSets--` at each
-// site, because the count is the only way anything outside this package can
-// see a set leak -- Vulkan reports neither how many sets a pool has handed out
-// nor how many are left -- and a decrement that drifts away from its free
-// turns that number into a comfortable lie. ResourceCounts reports it and
-// examples/22-level's -reload loop asserts on it.
+// freeSets gives sets back to the pool they were allocated from and reports
+// how many actually went back.
 //
 // A zero handle is skipped rather than passed through. vkFreeDescriptorSets
 // ignores a null set handle, but the wrapper groups the call by the POOL each
 // set carries, and a set that was never allocated carries a null pool -- which
-// would be the invalid-handle call, not the ignored one. Textures built by
-// hand rather than by CreateTexture exist (see createSceneColorTarget), and
-// the renderer's own tests construct bare ones.
+// would be the invalid-handle call, not the ignored one. Sets that may be
+// zero reach here for real: a Texture built by hand rather than by
+// CreateTexture (see createSceneColorTarget), a render target destroyed on the
+// error path that created it, and the renderer's own tests.
 //
 // The VkResult is dropped for the same reason the Destroy* calls around it
 // drop theirs: vkFreeDescriptorSets is defined to succeed, and the wrapper's
-// error is a loader failure that would have taken the process out long before
+// error would be a loader failure that took the process out long before
 // teardown.
-func (r *Renderer) freeDescriptorSets(sets ...core1_0.DescriptorSet) {
+//
+// A free function because the render targets that call it (hdrTarget,
+// bloomTarget, cloudTarget, sceneColorTarget) are torn down without a
+// *Renderer in hand. Their sets are not counted either -- see
+// ResourceCounts.DescriptorSets for which ones are.
+func freeSets(deviceDriver core1_0.DeviceDriver, sets []core1_0.DescriptorSet) int {
 	allocated := make([]core1_0.DescriptorSet, 0, len(sets))
 	for _, s := range sets {
 		if s.Handle() != 0 {
@@ -263,10 +264,23 @@ func (r *Renderer) freeDescriptorSets(sets ...core1_0.DescriptorSet) {
 		}
 	}
 	if len(allocated) == 0 {
-		return
+		return 0
 	}
-	r.deviceDriver.FreeDescriptorSets(allocated...)
-	r.liveDescriptorSets -= len(allocated)
+	deviceDriver.FreeDescriptorSets(allocated...)
+	return len(allocated)
+}
+
+// freeDescriptorSets gives an application resource's sets back and moves the
+// live count with them.
+//
+// One function rather than a free call and a `r.liveDescriptorSets--` at each
+// site, because the count is the only way anything outside this package can
+// see a set leak -- Vulkan reports neither how many sets a pool has handed out
+// nor how many are left -- and a decrement that drifts away from its free
+// turns that number into a comfortable lie. ResourceCounts reports it and
+// examples/22-level's -reload loop asserts on it.
+func (r *Renderer) freeDescriptorSets(sets ...core1_0.DescriptorSet) {
+	r.liveDescriptorSets -= freeSets(r.deviceDriver, sets)
 }
 
 // createJointDescriptorSetLayout creates a layout with a single UBO at set=1,
