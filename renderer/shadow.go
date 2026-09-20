@@ -62,7 +62,7 @@ const skyPaletteCount = 6
 
 // Volumetrics is the scattering medium's look and its sampling: how
 // forward-scattering the air is, and how many steps the in-scattering march
-// spends crossing it. See volInscatter in shaders/lighting.inc.
+// spends crossing it. See volInscatter in shaders/volumetric.inc.
 //
 // It is not the medium's density -- that is the scene's fog
 // (SceneLighting.FogDensity and the height profile beside it), because the

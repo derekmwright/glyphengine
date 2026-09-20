@@ -35,7 +35,7 @@ layout(set = 1, binding = 0) uniform ShadowData {
     vec4 skyPalette[6];
     // The in-scattering march's medium and sampling: x = the
     // Henyey-Greenstein anisotropy, y = the step count, zw spare. See
-    // volInscatter in lighting.inc, and Volumetrics in renderer/shadow.go for
+    // volInscatter in volumetric.inc, and Volumetrics in renderer/shadow.go for
     // why these are data rather than constants in this file.
     vec4 volumetric;
 } shadow;
