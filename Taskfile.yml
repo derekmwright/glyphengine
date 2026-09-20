@@ -210,6 +210,15 @@ tasks:
         # with stock settings, so an opt-in path can rot for months with every
         # gate green -- the layer only ever sees the code that actually runs.
         check 08-grass -grassimpostor 25
+        # A second InitGrass call, replacing the first's atlas, instance
+        # buffers and flora models while frames still in flight may be
+        # drawing them (issue #87). No stock run above calls InitGrass more
+        # than once, so replaceGrass's deferred release -- and the descriptor
+        # set it gives back, which the pool has no other way to notice a leak
+        # of before it runs dry -- is otherwise untested under the layer. The
+        # run asserts its own live resource counts and exits non-zero if they
+        # move; see docs/agents/grass.md.
+        check 08-grass -regrow 20
         # The blended skinned pipeline. No default run reaches it: 06-skinned's
         # character carries a generated normal map, which routes it through the
         # skinned material pipeline instead.
