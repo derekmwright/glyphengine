@@ -40,10 +40,20 @@
 //     actually measured, not one tuned to look nice.
 //
 // Run it from this directory: go run ./gen
+//
+// -big writes a SECOND, unrelated document -- buildBigDoc, not
+// buildSettlementDoc -- for measuring examples/22-level -instanced
+// (docs/agents/instancing.md): hundreds of buildings sharing one doc mesh
+// and hundreds of lamp posts sharing another, nothing else. It never touches
+// the committed level.glb; always give it its own -out pointed outside the
+// repository:
+//
+//	go run ./gen -big -out /scratch/biglevel.glb -buildings 100 -lamps 400
 package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"math"
 	"os"
@@ -109,8 +119,34 @@ var identQuat = [4]float64{0, 0, 0, 1}
 
 func main() {
 	out := flag.String("out", "assets/level.glb", "output path for the generated GLB")
+	big := flag.Bool("big", false, "write a large synthetic level (many repeated props) instead of the small settlement -- for measuring examples/22-level -instanced (docs/agents/instancing.md), NOT the committed default; always pass -out to a scratch path outside the repo when using this")
+	buildings := flag.Int("buildings", 100, "-big only: number of buildings, all sharing one doc mesh")
+	lamps := flag.Int("lamps", 400, "-big only: number of lamp posts, all sharing a second doc mesh")
 	flag.Parse()
 
+	var doc *gltf.Document
+	if *big {
+		doc = buildBigDoc(*buildings, *lamps)
+	} else {
+		doc = buildSettlementDoc()
+	}
+
+	if err := os.MkdirAll(dirOf(*out), 0o755); err != nil {
+		log.Fatalf("mkdir: %v", err)
+	}
+	if err := gltf.SaveBinary(doc, *out); err != nil {
+		log.Fatalf("save %s: %v", *out, err)
+	}
+	log.Printf("wrote %s: %d nodes, %d meshes", *out, len(doc.Nodes), len(doc.Meshes))
+}
+
+// buildSettlementDoc builds the small hand-authored settlement this package
+// exists to write to the committed examples/22-level/assets/level.glb --
+// unchanged by issue #71, just pulled out of main so -big can build a
+// different document without disturbing it. Every number here is unchanged
+// from before this split; see the package comment for what each one is
+// measured against.
+func buildSettlementDoc() *gltf.Document {
 	doc := &gltf.Document{
 		Asset:              gltf.Asset{Version: "2.0", Generator: "glyphengine examples/22-level/gen"},
 		ExtensionsUsed:     []string{"KHR_lights_punctual"},
@@ -252,14 +288,93 @@ func main() {
 
 	doc.Scene = gltf.Index(0)
 	doc.Scenes = []*gltf.Scene{{Name: "Level", Nodes: roots}}
+	return doc
+}
 
-	if err := os.MkdirAll(dirOf(*out), 0o755); err != nil {
-		log.Fatalf("mkdir: %v", err)
+// buildBigDoc writes a synthetic level for measuring examples/22-level
+// -instanced (docs/agents/instancing.md): buildingCount buildings sharing
+// ONE doc mesh and lampCount lamp posts sharing a second, every one tagged
+// {"static": true, "collider": "box"} -- the exact shape -instanced's rule
+// (examples/22-level/main.go's instancedGroupCandidate) merges into a single
+// InstanceSet apiece, so the measurement is against a level big enough for
+// the draw-call saving to be worth reading, not the eight shared props the
+// committed settlement has.
+//
+// No lights and no spawn marker -- this exists to be loaded with -level and
+// timed, not to be a scene anyone plays in, and every light in
+// buildSettlementDoc's version is already measured on its own page
+// (docs/agents/lights.md). Reusing boxMesh/pbrMaterial/addNode keeps this
+// geometrically identical in kind to the committed level -- same box
+// primitives, same material shape -- so the measurement is about instancing,
+// not about drawing a different sort of mesh.
+func buildBigDoc(buildingCount, lampCount int) *gltf.Document {
+	doc := &gltf.Document{
+		Asset: gltf.Asset{Version: "2.0", Generator: "glyphengine examples/22-level/gen -big"},
 	}
-	if err := gltf.SaveBinary(doc, *out); err != nil {
-		log.Fatalf("save %s: %v", *out, err)
+
+	// Big enough to sit under every building and lamp post the grid below
+	// places, with room to spare -- see the spacing chosen there.
+	span := float32(10 * math.Max(math.Sqrt(float64(buildingCount)), math.Sqrt(float64(lampCount))))
+	groundMesh := boxMesh(doc, "GroundSlab", [3]float32{-span, -0.3, -span}, [3]float32{span, 0, span})
+	buildingMesh := boxMesh(doc, "Building", [3]float32{-0.5, 0, -0.5}, [3]float32{0.5, 1, 0.5})
+	lampMesh := boxMesh(doc, "LampPost", [3]float32{-0.06, 0, -0.06}, [3]float32{0.06, 3, 0.06})
+
+	doc.Materials = []*gltf.Material{
+		pbrMaterial("Ground", [3]float64{0.25, 0.28, 0.22}, 0.9, 0),
+		pbrMaterial("Stone", [3]float64{0.55, 0.50, 0.42}, 0.8, 0),
+		pbrMaterial("DarkMetal", [3]float64{0.15, 0.15, 0.16}, 0.4, 0.6),
 	}
-	log.Printf("wrote %s: %d nodes, %d meshes, 2 lights (shared spot x4 lamp posts, 1 point)", *out, len(doc.Nodes), len(doc.Meshes))
+	for _, m := range doc.Meshes[groundMesh].Primitives {
+		m.Material = gltf.Index(0)
+	}
+	for _, m := range doc.Meshes[buildingMesh].Primitives {
+		m.Material = gltf.Index(1)
+	}
+	for _, m := range doc.Meshes[lampMesh].Primitives {
+		m.Material = gltf.Index(2)
+	}
+
+	var roots []int
+	roots = append(roots, addNode(doc, &gltf.Node{
+		Name: "Ground", Mesh: gltf.Index(groundMesh),
+		Extras: map[string]any{"static": true, "collider": "box"},
+	}))
+
+	// Buildings on a grid, 10 units apart, height varied by position so a
+	// few hundred of them read as a skyline rather than a carpet of
+	// identical dots -- spawnInstancedGroup draws every one of these
+	// through ONE InstanceSet when -instanced is on, so the placements have
+	// to actually differ (position, and here height) or the measurement
+	// would be drawing one prop's transform N times, which proves nothing
+	// about a level whose props are not all identical.
+	bSide := int(math.Ceil(math.Sqrt(float64(buildingCount))))
+	for i := 0; i < buildingCount; i++ {
+		gx := float64(i%bSide) * 10
+		gz := float64(i/bSide) * 10
+		roots = append(roots, addNode(doc, &gltf.Node{
+			Name: fmt.Sprintf("Building%d", i), Mesh: gltf.Index(buildingMesh),
+			Translation: [3]float64{gx, 0, gz}, Rotation: identQuat,
+			Scale:  [3]float64{3, 3 + float64(i%4), 3},
+			Extras: map[string]any{"static": true, "collider": "box"},
+		}))
+	}
+
+	// Lamp posts on their own grid, well clear of the buildings' footprint.
+	lSide := int(math.Ceil(math.Sqrt(float64(lampCount))))
+	lampOriginX := float64(-span) + 5
+	for i := 0; i < lampCount; i++ {
+		gx := lampOriginX + float64(i%lSide)*4
+		gz := float64(i/lSide) * 4
+		roots = append(roots, addNode(doc, &gltf.Node{
+			Name: fmt.Sprintf("LampPost%d", i), Mesh: gltf.Index(lampMesh),
+			Translation: [3]float64{gx, 0, gz},
+			Extras:      map[string]any{"static": true, "collider": "box"},
+		}))
+	}
+
+	doc.Scene = gltf.Index(0)
+	doc.Scenes = []*gltf.Scene{{Name: "BigLevel", Nodes: roots}}
+	return doc
 }
 
 func dirOf(path string) string {
