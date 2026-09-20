@@ -211,7 +211,8 @@ type Renderer struct {
 
 	// liveDescriptorSets is how many sets the APPLICATION's resources hold
 	// from descriptorPool right now: one per Texture, one per Material, one
-	// per TerrainMaterial, maxFramesInFlight per JointBuffer. Kept by hand
+	// per TerrainMaterial, maxFramesInFlight per JointBuffer, plus one for the
+	// grass impostor atlas while one is baked (issue #87). Kept by hand
 	// because Vulkan will not tell us -- there is no query for how much of a
 	// pool is spent, and the only signal it offers is the allocation that
 	// finally fails.
@@ -869,10 +870,17 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 			// Registered here rather than at bake time: the atlas is created
 			// from InitGrass, long after New has finished pushing teardown, and
 			// it has the same lifetime as the grass it stands in for.
-			r.grassImpostor.destroy(r.deviceDriver)
+			r.grassImpostor.destroy(r)
 			r.grassImpostor = nil
 		}
 		if r.grass != nil {
+			// Only the instance buffers: r.grass.models' meshes and textures
+			// are not special-cased here because they are not special --
+			// LoadGLTF recorded them in r.meshes/r.textures like any other
+			// model's, and the generic sweep just above (which runs before
+			// this stack unwinds) has already freed them. models only matters
+			// to replaceGrass, which retires a generation this field never
+			// reaches: r.grass.
 			r.grass.Destroy(r.deviceDriver)
 		}
 		r.deviceDriver.DestroyPipeline(r.grassPipeline, nil)
@@ -1254,6 +1262,20 @@ func (r *Renderer) FallbackTexture() *Texture { return r.fallbackTexture }
 // InitGrass loads glTF flora models from fsys and scatters instances across the
 // heightmap, weighted by each spec's spawn weight. If densityMask is non-nil,
 // flora is thinned/cleared based on the mask values.
+//
+// A second call REPLACES the grass a previous one built, rather than being
+// refused. A game that changes GrassModelSpecs or the density mask at
+// runtime, or that calls InitGrass again on a level transition, has no other
+// way to give the old flora back -- refusing the call would just move the
+// abandonment into the caller, which cannot reach r.grass or r.grassImpostor
+// to release them itself. Nothing the previous generation allocated -- the
+// atlas, the instance buffers, the flora models -- is dropped: replaceGrass
+// defers their release past the frames in flight that may still be drawing
+// them, the same guarantee DestroyModel gives an explicitly released Model
+// (issue #87; see replaceGrass). Calling InitGrass again with the SAME
+// arguments is deliberately a no-op on the picture, because the scatter and
+// the bake are both pure functions of their inputs -- a caller does not have
+// to guard against a redundant call of its own.
 func (r *Renderer) InitGrass(fsys fs.FS, hm GrassHeightmap, originX, originZ, worldW, worldD float32, specs []GrassModelSpec, densityMask *GrassDensityMask) {
 	var models []*Model
 	var weights []float32
@@ -1276,17 +1298,70 @@ func (r *Renderer) InitGrass(fsys fs.FS, hm GrassHeightmap, originX, originZ, wo
 		log.Printf("Failed to create flora: %v", err)
 		return
 	}
-	r.grass = gs
+	// Recorded the way modelResources records a LoadGLTF call: what THIS call
+	// created, so a later replaceGrass can release exactly that, exactly once.
+	gs.models = models
 
 	// Bake the impostor atlas from the meshes just loaded. Doing it here rather
 	// than lazily means the cost lands at load with the rest of the flora, and
 	// the atlas cannot be out of step with the meshes it stands in for.
 	//
 	// A bake failure is not fatal: impostors are an optimisation, and a game
-	// that cannot have them should still get its grass.
-	if err := r.bakeGrassImpostors(grassImpostorCellSize); err != nil {
+	// that cannot have them should still get its grass. It is also not a
+	// reason to keep a previous atlas around -- one baked from a different set
+	// of variants would silhouette the wrong meshes, which is worse than
+	// having none -- so replaceGrass retires whatever came before
+	// unconditionally, whether or not this bake succeeded.
+	imp, err := r.bakeGrassImpostors(gs, grassImpostorCellSize)
+	if err != nil {
 		log.Printf("Grass impostor bake failed, meshes will be drawn at all distances: %v", err)
 	}
+
+	r.replaceGrass(gs, imp)
+}
+
+// replaceGrass installs a newly built grass system and impostor atlas,
+// retiring whatever InitGrass built before them.
+//
+// The swap itself is immediate: r.grass and r.grassImpostor name the new
+// generation before this returns, so DrawFrame never draws a mix of the two
+// and never draws neither. The retirement behind it is not immediate, and
+// cannot be -- a frame submitted just before this call may still be reading
+// the previous atlas's descriptor set or the previous GrassSystem's instance
+// buffers, exactly the hazard DestroyModel's own deferral exists for (see
+// docs/agents/models.md). So the whole release goes through DeferDestroy and
+// runs only once every frame that could have been in flight at the moment of
+// the swap has retired -- nothing in it may run while a set or a framebuffer
+// still names the resource it is about to destroy.
+//
+// Inside the deferred callback: the atlas first (grassImpostor.destroy frees
+// its descriptor set before the view and sampler that set names, for the same
+// reason DestroyTexture does), then the instance buffers, then the flora
+// models -- through DestroyModel itself, reused rather than reimplemented, so
+// a leak in a replaced generation's meshes or textures is caught by the same
+// machinery and the same tests that already cover a released Model. Nesting
+// DestroyModel's own DeferDestroy inside this one is not a bug:
+// flushDeferredDestroys and flushAllDeferred both drain to any depth (see
+// TestDeferredDestroyQueuedFromInsideAFlushSurvives) -- it just means a
+// replaced generation's flora textures and meshes take one extra
+// maxFramesInFlight to actually free, which examples/08-grass's -regrow loop
+// budgets for the same way examples/22-level's -reload loop already does for
+// DestroyModel calling DestroyMaterial.
+func (r *Renderer) replaceGrass(gs *GrassSystem, imp *grassImpostor) {
+	prevGrass, prevImpostor := r.grass, r.grassImpostor
+	r.grass, r.grassImpostor = gs, imp
+	if prevGrass == nil && prevImpostor == nil {
+		return // first InitGrass call: nothing to retire
+	}
+	r.DeferDestroy(func() {
+		prevImpostor.destroy(r) // nil-safe: a first-call bake failure leaves this nil
+		if prevGrass != nil {
+			prevGrass.Destroy(r.deviceDriver)
+			for _, m := range prevGrass.models {
+				r.DestroyModel(m)
+			}
+		}
+	})
 }
 
 // InitParticles allocates the GPU particle system with the given max instance count.
