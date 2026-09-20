@@ -489,6 +489,49 @@ func TestNodeMeshesInstancing(t *testing.T) {
 	}
 }
 
+// TestMeshInstances covers Model.MeshInstances, NodeMeshes' inverse (issue
+// #71): given a doc mesh, every node that instances it. Built from the same
+// LampA/LampB/Ground/Empty shape TestNodeMeshesInstancing uses, so the two
+// tests are visibly asking opposite questions of the same data rather than
+// two unrelated fixtures.
+//
+// It has teeth: changing the equality test from `nodes[i].Mesh == docMesh`
+// to `nodes[i].Mesh >= 0` (matching any node with a mesh at all, not just
+// this one) returns all three mesh-bearing nodes for docMesh 0 instead of
+// the two that actually reference it, pulling in Ground. Introduced and
+// reverted to confirm -- see the comment on the assertion below for the
+// exact failure text.
+func TestMeshInstances(t *testing.T) {
+	nodes := []ModelNode{
+		{Name: "LampA", Mesh: 0}, // instances doc mesh 0
+		{Name: "LampB", Mesh: 0}, // same doc mesh, second instance
+		{Name: "Ground", Mesh: 1},
+		{Name: "Empty", Mesh: -1}, // no mesh at all
+	}
+
+	// BROKEN this way: "doc mesh 0 instances = [0 1 2], want [0 1]" --
+	// Ground (node 2, doc mesh 1) leaking into doc mesh 0's group. Restored
+	// with `git checkout -- renderer/model.go`.
+	if got := meshInstances(nodes, 0); len(got) != 2 || got[0] != 0 || got[1] != 1 {
+		t.Errorf("doc mesh 0 instances = %v, want [0 1] (LampA, LampB)", got)
+	}
+	if got := meshInstances(nodes, 1); len(got) != 1 || got[0] != 2 {
+		t.Errorf("doc mesh 1 instances = %v, want [2] (Ground)", got)
+	}
+	// No node names doc mesh 2 at all -- the "nobody instances this" case,
+	// which has to come back nil rather than panic or return every node.
+	if got := meshInstances(nodes, 2); got != nil {
+		t.Errorf("doc mesh 2 instances = %v, want nil (nothing references it)", got)
+	}
+	// Empty's Mesh is -1, the same sentinel a negative docMesh argument
+	// would collide with if the guard were missing -- asserted here so a
+	// caller passing an out-of-range/-1 index the way ModelNode.Mesh reports
+	// "no mesh" gets nil rather than every meshless node in the model.
+	if got := meshInstances(nodes, -1); got != nil {
+		t.Errorf("doc mesh -1 instances = %v, want nil", got)
+	}
+}
+
 // TestCappedNodeList covers the formatting behind the untransformed-node log
 // line: every name when there are few, first-N-plus-a-count when there are
 // not (issue #66's "cap the list of names ... first few + 'and N more'"),
