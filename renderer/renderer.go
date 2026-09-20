@@ -57,9 +57,13 @@ type Renderer struct {
 	instancedPipelineLayout            core1_0.PipelineLayout
 	instancedDoubleSidedPipeline       core1_0.Pipeline
 	instancedDoubleSidedPipelineLayout core1_0.PipelineLayout
-	// instanceSets is every set the renderer has handed out, so they can be
-	// freed at teardown. A set outlives the frames that reference it, so a game
-	// never destroys one itself.
+	// instanceSets is every set the renderer has handed out that has not been
+	// explicitly given back, so whatever remains can still be freed at
+	// teardown. DestroyInstanceSet removes an entry once its own deferred free
+	// has actually run -- not at the call that requests it -- the same
+	// bookkeeping DestroyModel's release closure keeps for r.meshes/
+	// r.textures/r.materials, and for the same reason: the resource is still
+	// genuinely alive for the frames still in flight when the call is made.
 	instanceSets      []*InstanceSet
 	overlayPipeline   core1_0.Pipeline
 	starsPipeline     core1_0.Pipeline
@@ -751,7 +755,13 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 
 	// Sets are created by the game after New returns, so this frees whatever
 	// the list holds at teardown rather than a fixed set. AGENTS.md rule 10:
-	// the teardown goes next to the thing that allocates.
+	// the teardown goes next to the thing that allocates. Only what the game
+	// never explicitly gave back reaches this: DestroyInstanceSet removes an
+	// entry from r.instanceSets as its own deferred free runs, and this stack
+	// unwinds after Destroy's own r.flushAllDeferred(), so a set released
+	// through DestroyInstanceSet before Destroy was called is already gone
+	// from the list by the time this runs, and s.destroy here would otherwise
+	// be a second free of the same handles.
 	r.onInit(func() {
 		for _, s := range r.instanceSets {
 			s.destroy(r.deviceDriver)

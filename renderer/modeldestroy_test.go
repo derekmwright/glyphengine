@@ -209,11 +209,12 @@ func TestResourceCountsReportsTheTrackingLists(t *testing.T) {
 		meshes:             []*Mesh{{}, {}},
 		textures:           []*Texture{{}, {}, {}},
 		materials:          []*Material{{}},
+		instanceSets:       []*InstanceSet{{}, {}, {}, {}},
 		liveDescriptorSets: 7,
 	}
 	r.DeferDestroy(func() {})
 
-	want := ResourceCounts{Meshes: 2, Textures: 3, Materials: 1, DescriptorSets: 7, Deferred: 1}
+	want := ResourceCounts{Meshes: 2, Textures: 3, Materials: 1, DescriptorSets: 7, InstanceSets: 4, Deferred: 1}
 	if got := r.ResourceCounts(); got != want {
 		t.Errorf("counts = %v, want %v", got, want)
 	}

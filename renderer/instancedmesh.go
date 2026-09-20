@@ -37,14 +37,19 @@ const meshInstanceSize = int(unsafe.Sizeof(MeshInstance{})) // 80
 // rather than staged through a transfer, because placements change when a
 // player builds something and staging a 72KB copy through a command buffer for
 // that is more machinery than the write is worth.
+//
+// Give it back with Renderer.DestroyInstanceSet when the level or the group of
+// props it draws goes away; see that method's comment for what a stale draw
+// does if a game does not stop drawing it first.
 type InstanceSet struct {
 	Mesh *Mesh
 
-	buffer   core1_0.Buffer
-	memory   core1_0.DeviceMemory
-	mapped   unsafe.Pointer
-	capacity int
-	count    int
+	buffer    core1_0.Buffer
+	memory    core1_0.DeviceMemory
+	mapped    unsafe.Pointer
+	capacity  int
+	count     int
+	destroyed bool
 
 	// Bound sphere over every instance, in world space. The draw list frustum
 	// tests this once for the set rather than once per instance.
@@ -200,8 +205,88 @@ func (s *InstanceSet) recomputeBounds(instances []MeshInstance) {
 	s.boundCenter, s.boundRadius = mid, r
 }
 
-// destroy releases the set's buffer. Called from the renderer's teardown stack,
-// never by a game: a set outlives the frames that reference it.
+// DestroyInstanceSet releases the set's instance buffer, after the frames
+// currently in flight have finished drawing from it, and deregisters it from
+// r.instanceSets so Renderer.Destroy does not free it a second time at
+// shutdown.
+//
+// Deferred through DeferDestroy for the same reason DestroyModel defers its
+// whole release rather than calling DestroyMesh/DestroyTexture inline: a
+// submitted frame can still be reading this set's buffer in
+// recordInstanced/recordInstancedShadow at the moment a game decides to give
+// it back -- the harder case, not the easier one, is a level's -reload swap,
+// where the set is replaced and released in the same tick the new one starts
+// drawing. Freeing now instead of deferring is silent, not caught by the
+// validation layer: the layer reports a buffer still named by the live draw
+// list (VUID-vkDestroyBuffer-buffer-00922), but has nothing to say about one
+// referenced only by a frame already submitted -- see the break recorded in
+// docs/agents/instancing.md.
+//
+// Everything the deferred callback needs (buffer, memory, mapped pointer) is
+// captured into locals before this returns, and s's own copies are zeroed
+// immediately -- not left for the callback to clear -- because a game must be
+// able to tell a destroyed set from a live one the moment this call returns,
+// the same contract DestroyModel gives ModelMesh.
+//
+// s.Mesh is nilled for the same reason, and it is what makes a stale draw --
+// one from a game that did not remove the set from its draw list first, see
+// docs/agents/instancing.md's "stop drawing it first" -- fail LOUD. Left
+// alone, a stale draw would pass this set's now-zeroed buffer handle straight
+// to vkCmdBindVertexBuffers: caught by the validation layer if one is
+// running, silently wrong if not. With Mesh nil, recordInstanced and
+// recordInstancedShadow panic on set.Mesh.vertexBuffer the moment they reach
+// a destroyed set, in Go, every time, layer or no layer -- the same trade
+// DestroyModel already makes for ModelMesh's Mesh/Texture/Material fields.
+//
+// s.count is deliberately left as it was, NOT zeroed. Both draw functions
+// skip a set on `set.count == 0` before they ever reach set.Mesh; zeroing
+// count here would route a stale draw through that skip instead of the nil
+// pointer above, turning a loud failure back into the silent one this exists
+// to avoid.
+//
+// Idempotent and nil-safe: a second call, or a call on nil, does nothing.
+func (r *Renderer) DestroyInstanceSet(s *InstanceSet) {
+	if s == nil || s.destroyed {
+		return
+	}
+	s.destroyed = true
+
+	buffer, memory, mapped := s.buffer, s.memory, s.mapped
+	s.buffer = core1_0.Buffer{}
+	s.memory = core1_0.DeviceMemory{}
+	s.mapped = nil
+	s.Mesh = nil
+
+	r.DeferDestroy(func() {
+		if mapped != nil {
+			r.deviceDriver.UnmapMemory(memory)
+		}
+		if buffer.Handle() != 0 {
+			r.deviceDriver.DestroyBuffer(buffer, nil)
+		}
+		if memory.Handle() != 0 {
+			r.deviceDriver.FreeMemory(memory, nil)
+		}
+		// Deregistered here, not at the top of this function, for the same
+		// reason DestroyModel's whole release runs inside DeferDestroy: a
+		// ResourceCounts taken right after this call still has to report the
+		// set as live, because it genuinely still is for
+		// maxFramesInFlight more frames. examples/22-level's -reload loop
+		// asserts exactly that in the same tick as an -instanced swap.
+		for i, other := range r.instanceSets {
+			if other == s {
+				r.instanceSets = append(r.instanceSets[:i], r.instanceSets[i+1:]...)
+				break
+			}
+		}
+	})
+}
+
+// destroy releases the set's buffer directly, with no deferral. Called only
+// from the renderer's teardown stack (Renderer.Destroy has already waited for
+// the device to go idle), and only for a set still in r.instanceSets --
+// DestroyInstanceSet removes an entry from that list as soon as its own
+// deferred free runs, so this never runs twice against the same set.
 func (s *InstanceSet) destroy(deviceDriver core1_0.DeviceDriver) {
 	if s == nil {
 		return
