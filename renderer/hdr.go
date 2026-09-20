@@ -207,9 +207,15 @@ func (t *hdrTarget) destroy(deviceDriver core1_0.DeviceDriver) {
 	// given back, so each rebuild spent MaxSets and never refilled it.
 	// Measured on 13-ui -glow on with a rebuild provoked every other frame:
 	// the 16th one failed with "allocate bloom descriptor sets 1: vulkan
-	// error: out of pool memory", which a window dragged between monitors
-	// reaches without trying. The layer says nothing about it -- the failure
-	// is a legitimate allocation refusal, not misuse.
+	// error: out of pool memory". Fifteen is not a number a long session has
+	// to work for -- recreateSwapchain's own comment lists what produces a
+	// rebuild, and showing a window, moving it between monitors and a
+	// suboptimal present are all on it.
+	//
+	// The validation layer does not report the exhaustion itself: an
+	// allocation refused for want of pool space is a legitimate return, not
+	// misuse. What it did report, in that run, was the wreckage afterwards --
+	// invalid framebuffer handles from the failure path.
 	//
 	// Safe without any deferral here, and only here: both callers have
 	// already idled the device. recreateSwapchain waits before it destroys
