@@ -1722,10 +1722,20 @@ tasks:
         # The ceilings are 0.50 and the arms read +0.00. They are not zero
         # because a ceiling that a rounding error trips is a gate people learn
         # to ignore, and `far` below is where the exact-zero claim is made.
+        #
+        # The beam box sits over TERRAIN, not over sky, and that is not an
+        # accident. The first version of this arm used a box 75 px below the
+        # bulb, which looked like the obvious place and turned out to be mostly
+        # night sky -- so it was measuring sky.frag's march rather than
+        # applyFog's, and those are different code in different shaders.
+        # Breaking the sky path alone dropped it from +9.68 to +0.69 and the
+        # arm fired, which is how that was found. A ground-backed box keeps
+        # each arm on one path: this one and `offscreen` exercise the march
+        # inside applyFog, and only `sky` exercises the sky's.
         pair cone -camtargetx 21 -camtargety 1.5 -camtargetz 0 \
           -camyaw 0 -campitch 0.1 -camdist 9 -camlook 0.6
         check cone \
-          -region "beam:604,295,60,60:min=3.0" \
+          -region "beam:480,420,70,70:min=5.0" \
           -region "above:604,145,60,60:max=0.50" \
           -region "beside-r:704,220,60,60:max=0.50" \
           -region "beside-l:504,220,60,60:max=0.50" \
@@ -1740,14 +1750,15 @@ tasks:
         # here by construction, while the froxel walk neither knows nor cares
         # whether the light is on screen.
         #
-        # The floor is 8.0 against a measured +27.5, which is loose on purpose
-        # -- what is being asserted is "the beam is still there at all", and a
-        # tight floor on a number this large would fail on a retune of the
-        # bulb rather than on the thing this arm is for.
+        # The floor is 6.0 against a measured +16.7, and the box is over the
+        # lit ground for the reason the cone arm's is. Loose on purpose: what
+        # is asserted is "the beam is still there at all", and a tight floor on
+        # a number this size would fail on a retune of the bulb rather than on
+        # the thing this arm exists for.
         pair offscreen -camtargetx 21 -camtargety 0.9 -camtargetz 0 \
           -camyaw 0 -campitch 0.02 -camdist 6.5 -camlook -1.25
         check offscreen \
-          -region "beam:560,100,60,60:min=8.0" \
+          -region "beam:600,230,60,60:min=6.0" \
           -region "open:900,500,60,60:max=0.50" \
           -region "far:400,620,80,80:max=0.00"
 
