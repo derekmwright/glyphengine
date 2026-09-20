@@ -247,6 +247,18 @@ tasks:
         # for the frame-by-frame half of the same check.
         check 22-level -reload 20
         check 22-level -reload 20 -level ../renderer/testdata/blender/level.glb
+        # Renderer.DestroyInstanceSet (issue #84), which nothing above
+        # reaches either: -instanced alone never releases a set, and
+        # -reload alone never creates one. Swapping an INSTANCED level
+        # exercises both DestroyModel and DestroyInstanceSet releasing
+        # their resources in the same tick, with frames still in flight
+        # referencing the old ones -- the harder case for InstanceSet for
+        # the same reason it is for Model. Both level files, same reason as
+        # the plain -reload runs above: only the Blender one carries a
+        # texture, and only the built-in one instances two doc meshes
+        # rather than one (see docs/agents/instancing.md).
+        check 22-level -reload 20 -instanced
+        check 22-level -reload 20 -instanced -level ../renderer/testdata/blender/level.glb
         # A heightmap converted from a real Blender terrain (issue #70),
         # not the procedurally-generated one the stock 07-terrain run above
         # uses -- CreateTerrainMesh/CreateIndexedMesh32 run against real
@@ -445,6 +457,17 @@ tasks:
         }
         run 20
         run 20 -level ../renderer/testdata/blender/level.glb
+        # -instanced (issue #84): the frame-by-frame half of the same check
+        # for DestroyInstanceSet. `task validate` already runs this same
+        # pair of commands under the layer; this asks the other question --
+        # did the picture stay whole across a swap that gives InstanceSets
+        # back, not only Models. The instanced level draws fewer draws than
+        # the individual path above (four buildings collapse into one
+        # InstanceSet, four lamp posts into another), which is fine: -count
+        # -constant only requires the draw COUNT not to move across the
+        # swaps, not to match the non-instanced run.
+        run 20 -instanced
+        run 20 -instanced -level ../renderer/testdata/blender/level.glb
         # And the same level 700 times, which is the run that would have
         # caught issue #82 and the reason this gate is not 20 cycles of
         # everything.
