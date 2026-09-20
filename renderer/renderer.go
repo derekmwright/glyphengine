@@ -313,6 +313,37 @@ func (r *Renderer) unwindInit() {
 	r.initStack = nil
 }
 
+// rebuildUndo is the same creation-order-in, reverse-order-out idiom as
+// initStack/onInit/unwindInit, scoped to a single recreateSwapchain attempt
+// instead of the renderer's whole lifetime.
+//
+// It cannot BE initStack. initStack's closures already read every
+// swapchain-dependent field through r rather than a captured value (rule 10
+// in AGENTS.md), precisely so recreateSwapchain can swap r.hdr, r.bloom and
+// the rest out from under them without New needing to know a resize would
+// happen. Destroy unwinds initStack exactly once, at the end of the
+// renderer's life; pushing recreateSwapchain's own per-attempt teardown onto
+// it would run every rebuild's teardown again at that point, once per resize
+// the renderer ever survived, destroying handles that were already replaced
+// or freed and were never leaked in the first place.
+type rebuildUndo []func()
+
+// push records a teardown step for a resource this rebuild attempt just
+// created successfully.
+func (u *rebuildUndo) push(fn func()) { *u = append(*u, fn) }
+
+// unwind runs every recorded step in reverse and empties the stack, undoing
+// only what this attempt built. Whatever recreateSwapchain destroyed before
+// the attempt started (the previous swapchain, depth, HDR and the rest) is
+// already gone and is not this stack's concern.
+func (u *rebuildUndo) unwind() {
+	s := *u
+	for i := len(s) - 1; i >= 0; i-- {
+		s[i]()
+	}
+	*u = nil
+}
+
 // deferredDestroy holds a GPU resource destruction callback that must wait
 // for all in-flight frames to complete before executing.
 type deferredDestroy struct {
@@ -1468,6 +1499,17 @@ func (r *Renderer) Minimized() bool {
 
 // recreateSwapchain tears down and rebuilds the swapchain, depth buffer, and
 // framebuffers after a resize or when the surface becomes out of date.
+//
+// A failure at any step past the swapchain itself unwinds everything this
+// call built, through rebuildSwapchainTargets's undo stack, and gives the
+// swapchain back too -- so a call that fails leaves the renderer with r.sc
+// nil rather than a mix of new and stale handles. That is deliberate: the
+// "old" resources this function is about to replace were already destroyed
+// below before any recreation was attempted (recreateSwapchain has always
+// worked that way -- idle, then destroy, then rebuild), so there is no
+// half-old state to fall back to on failure, only a half-new one to give up
+// cleanly. acquireImage checks for exactly this (r.sc == nil) and retries the
+// rebuild instead of dereferencing it; see issue #86.
 func (r *Renderer) recreateSwapchain() error {
 	// Skip while minimized — caller should poll and retry next frame.
 	width, height := r.win.GetFramebufferSize()
@@ -1476,15 +1518,31 @@ func (r *Renderer) recreateSwapchain() error {
 	}
 
 	// Remembered because not every rebuild is a resize, and one of the things
-	// rebuilt below accumulates across frames. See the cloud targets.
-	oldExtent := r.sc.extent
+	// rebuilt below accumulates across frames. See the cloud targets. Zero
+	// when r.sc is already nil -- a retry after a previous attempt failed and
+	// unwound everything, including the clouds this comparison exists to
+	// spare -- which is correct rather than merely safe: with no live clouds
+	// to compare against, this rebuild has to make new ones regardless of
+	// whether the size actually moved.
+	var oldExtent core1_0.Extent2D
+	if r.sc != nil {
+		oldExtent = r.sc.extent
+	}
 
 	r.deviceDriver.DeviceWaitIdle()
 
-	// Destroy old resources
+	// Destroy old resources. Every step here is rebuilt unconditionally below
+	// (clouds and the UI glow layer are the two exceptions, and each guards
+	// its own destroy separately), so every field this section touches is set
+	// back to nil immediately -- both because that is what makes the section
+	// safe to enter a second time with some of them already nil (a retry
+	// after a previous attempt unwound partway through) and because it is
+	// what keeps Destroy from freeing a handle destroyed here a second time
+	// if a step below fails before reaching that field's recreation.
 	for _, fb := range r.framebuffers {
 		r.deviceDriver.DestroyFramebuffer(fb, nil)
 	}
+	r.framebuffers = nil
 	for _, fb := range r.tonemapFramebuffers {
 		r.deviceDriver.DestroyFramebuffer(fb, nil)
 	}
@@ -1495,65 +1553,115 @@ func (r *Renderer) recreateSwapchain() error {
 	r.waterFramebuffers = nil
 	r.sceneColor.destroy(r.deviceDriver)
 	r.sceneColor = nil
-
-	r.depth.destroy(r.deviceDriver, len(r.depth.views))
-
+	// The sets come from the pool, which is not reset here -- each target's
+	// destroy gives its own back instead (issue #82). Before it did, a
+	// rebuild spent pool capacity that never came back, and the sixteenth
+	// rebuild of 13-ui -glow on failed to allocate.
+	r.bloom.destroy(r.deviceDriver)
+	r.bloom = nil
+	r.hdr.destroy(r.deviceDriver)
+	r.hdr = nil
+	if r.depth != nil {
+		r.depth.destroy(r.deviceDriver, len(r.depth.views))
+		r.depth = nil
+	}
 	if r.msaa != nil {
 		r.msaa.destroy(r.deviceDriver, len(r.msaa.views))
+		r.msaa = nil
+	}
+	if r.sc != nil {
+		for _, iv := range r.sc.imageViews {
+			r.deviceDriver.DestroyImageView(iv, nil)
+		}
+		r.swapchainExt.DestroySwapchain(r.sc.swapchain, nil)
+		r.sc = nil
 	}
 
-	for _, iv := range r.sc.imageViews {
-		r.deviceDriver.DestroyImageView(iv, nil)
-	}
+	// From here on, anything created is tracked so a later failure in this
+	// same call can give it back rather than leaving a half-new renderer
+	// behind. See rebuildUndo -- the same onInit/unwindInit shape New uses,
+	// scoped to one rebuild attempt instead of the renderer's whole life.
+	var undo rebuildUndo
 
-	r.swapchainExt.DestroySwapchain(r.sc.swapchain, nil)
-
-	// Recreate swapchain, depth, MSAA, framebuffers
-	var err error
-	r.sc, r.swapchainExt, err = createSwapchain(r.deviceDriver, r.surfaceExt, r.surface, r.physicalDevice, r.indices, width, height, r.vsync)
+	newSC, newSwapchainExt, err := createSwapchain(r.deviceDriver, r.surfaceExt, r.surface, r.physicalDevice, r.indices, width, height, r.vsync)
 	if err != nil {
+		// Nothing created yet in this call -- the old swapchain is already
+		// gone above, so there is nothing to unwind.
+		return fmt.Errorf("renderer: recreate swapchain: %w", err)
+	}
+	r.sc, r.swapchainExt = newSC, newSwapchainExt
+	undo.push(func() {
+		for _, iv := range r.sc.imageViews {
+			r.deviceDriver.DestroyImageView(iv, nil)
+		}
+		r.swapchainExt.DestroySwapchain(r.sc.swapchain, nil)
+		r.sc = nil
+	})
+
+	if err := r.rebuildSwapchainTargets(oldExtent, &undo); err != nil {
+		undo.unwind()
 		return err
 	}
+
+	log.Printf("Swapchain recreated: %dx%d", r.sc.extent.Width, r.sc.extent.Height)
+	return nil
+}
+
+// rebuildSwapchainTargets is recreateSwapchain's body from the depth buffer
+// on -- everything sized by the swapchain that createSwapchain itself is
+// not. Split out so it can be driven without a live window or a real Vulkan
+// device: see TestRebuildSwapchainTargetsUnwindsOnFailure. The swapchain step
+// in recreateSwapchain above cannot join it -- createSwapchain goes through
+// khr_swapchain.CreateExtensionDriverFromCoreDriver, which dereferences a
+// real device's loaded function table, so a fake driver does not fail it, it
+// segfaults. That step is covered on the GPU instead, by task validate's
+// GLYPHENGINE_PROVOKE_RECREATE_FRAMES runs.
+//
+// Every step it adds pushes that resource's teardown onto undo before moving
+// on, so a later failure in the same call unwinds this step and everything
+// before it -- including the swapchain recreateSwapchain already pushed.
+// oldExtent is the swapchain extent before this rebuild, zero if there was no
+// live swapchain to read it from; only the cloud targets read it.
+func (r *Renderer) rebuildSwapchainTargets(oldExtent core1_0.Extent2D, undo *rebuildUndo) error {
+	var err error
 
 	r.depth, err = createDepthResources(r.instanceDriver, r.deviceDriver, r.physicalDevice, r.sc.extent, len(r.sc.imageViews), r.msaaSamples)
 	if err != nil {
-		return err
+		return fmt.Errorf("renderer: recreate depth resources: %w", err)
 	}
+	undo.push(func() { r.depth.destroy(r.deviceDriver, len(r.depth.views)); r.depth = nil })
 
 	if r.msaaSamples != core1_0.Samples1 {
 		r.msaa, err = createMSAAResources(r.instanceDriver, r.deviceDriver, r.physicalDevice, r.sc.extent, hdrFormat, r.msaaSamples, len(r.sc.imageViews))
 		if err != nil {
-			return err
+			return fmt.Errorf("renderer: recreate MSAA resources: %w", err)
 		}
-	} else {
-		r.msaa = nil
+		undo.push(func() { r.msaa.destroy(r.deviceDriver, len(r.msaa.views)); r.msaa = nil })
 	}
+	// Else: r.msaa is already nil, from recreateSwapchain's teardown section.
 
 	var msaaViews []core1_0.ImageView
 	if r.msaa != nil {
 		msaaViews = r.msaa.views
 	}
 
-	// The HDR targets are swapchain-sized, so they go with it.
-	// Both chains and the sets that point into them are size-dependent, so all
-	// three are rebuilt together. The sets come from the pool, which is not
-	// reset here -- each target's destroy gives its own back instead (issue
-	// #82). Before it did, a rebuild spent pool capacity that never came back,
-	// and the sixteenth rebuild of 13-ui -glow on failed to allocate.
-	r.bloom.destroy(r.deviceDriver)
-	r.hdr.destroy(r.deviceDriver)
+	// The HDR and bloom targets are swapchain-sized, so they go with it. Both
+	// chains and the sets that point into them are size-dependent, so both
+	// are rebuilt together.
 	r.hdr, err = createHDRTargets(r.instanceDriver, r.deviceDriver, r.physicalDevice,
 		r.descriptorPool, r.descriptorSetLayout, r.sc.extent, len(r.sc.imageViews), r.maxAnisotropy, "HDR target")
 	if err != nil {
-		return err
+		return fmt.Errorf("renderer: recreate HDR targets: %w", err)
 	}
+	undo.push(func() { r.hdr.destroy(r.deviceDriver); r.hdr = nil })
 
 	r.bloom, err = createBloomTargets(r.instanceDriver, r.deviceDriver, r.physicalDevice,
 		r.descriptorPool, r.descriptorSetLayout, r.bloomDownRenderPass, r.bloomUpRenderPass,
 		r.sc.extent, len(r.sc.imageViews))
 	if err != nil {
-		return err
+		return fmt.Errorf("renderer: recreate bloom targets: %w", err)
 	}
+	undo.push(func() { r.bloom.destroy(r.deviceDriver); r.bloom = nil })
 
 	// The cloud targets are the one thing here that accumulates, and they are
 	// sized by the extent and nothing else -- their count is a constant and
@@ -1573,22 +1681,25 @@ func (r *Renderer) recreateSwapchain() error {
 	// task determinism's rebuild case is what holds this.
 	if r.sc.extent != oldExtent {
 		r.clouds.destroy(r.deviceDriver)
+		r.clouds = nil
 		r.clouds, err = createCloudTargets(r.instanceDriver, r.deviceDriver, r.physicalDevice,
 			r.descriptorPool, r.descriptorSetLayout, r.cloudRenderPass, r.sc.extent, cloudBufferCount,
 			r.shadow.lightVPBuffers)
 		if err != nil {
-			return err
+			return fmt.Errorf("renderer: recreate cloud targets: %w", err)
 		}
+		undo.push(func() { r.clouds.destroy(r.deviceDriver); r.clouds = nil })
+
 		// Priming gives a defined layout, and the reprojection rejects the
 		// contents on the next frame anyway because nothing was written at the
 		// new size yet.
 		if err := r.primeSampledImages(r.clouds.images); err != nil {
-			return err
+			return fmt.Errorf("renderer: prime cloud layouts: %w", err)
 		}
 	}
 
 	if err := r.primeBloomLayouts(r.bloom); err != nil {
-		return err
+		return fmt.Errorf("renderer: prime bloom layouts: %w", err)
 	}
 
 	// The UI glow layer is swapchain-sized too, so it goes with it -- images,
@@ -1598,43 +1709,65 @@ func (r *Renderer) recreateSwapchain() error {
 	// viewport and scissor state, exactly as it does for the tonemap pass's.
 	if r.uiLayer != nil {
 		r.uiLayer.destroy(r.deviceDriver)
+		r.uiLayer = nil
 		r.uiLayer, err = r.createUILayerTargets()
 		if err != nil {
-			return err
+			return fmt.Errorf("renderer: recreate UI glow layer: %w", err)
 		}
+		undo.push(func() { r.uiLayer.destroy(r.deviceDriver); r.uiLayer = nil })
 	}
 
 	// The resolve's sets name specific views, so they have to be rewritten
 	// against the new images. Skipping this leaves the tonemap sampling freed
 	// image views, which the validation layer catches and a release build does
-	// not.
+	// not. Nothing to push here: it writes into r.hdr.tonemapSets, which the
+	// HDR target's own teardown above already frees.
 	if err := writeTonemapSets(r.deviceDriver, r.descriptorPool, r.tonemapSetLayout, r.hdr, r.bloom); err != nil {
-		return err
+		return fmt.Errorf("renderer: recreate tonemap sets: %w", err)
 	}
 
 	r.framebuffers, err = createFramebuffers(r.deviceDriver, r.renderPass, r.hdr.views, r.depth.views, msaaViews, r.sc.extent)
 	if err != nil {
-		return err
+		return fmt.Errorf("renderer: recreate framebuffers: %w", err)
 	}
+	undo.push(func() {
+		for _, fb := range r.framebuffers {
+			r.deviceDriver.DestroyFramebuffer(fb, nil)
+		}
+		r.framebuffers = nil
+	})
 
 	r.tonemapFramebuffers, err = createTonemapFramebuffers(r.deviceDriver, r.tonemapRenderPass, r.sc.imageViews, r.sc.extent)
 	if err != nil {
-		return err
+		return fmt.Errorf("renderer: recreate tonemap framebuffers: %w", err)
 	}
+	undo.push(func() {
+		for _, fb := range r.tonemapFramebuffers {
+			r.deviceDriver.DestroyFramebuffer(fb, nil)
+		}
+		r.tonemapFramebuffers = nil
+	})
 
 	if r.sc.captureCapable {
 		r.sceneColor, err = createSceneColorTarget(r.instanceDriver, r.deviceDriver, r.physicalDevice,
 			r.descriptorPool, r.descriptorSetLayout, r.sc.extent, hdrFormat, r.maxAnisotropy)
 		if err != nil {
-			return err
+			return fmt.Errorf("renderer: recreate scene color target: %w", err)
 		}
+		undo.push(func() { r.sceneColor.destroy(r.deviceDriver); r.sceneColor = nil })
+
 		r.waterFramebuffers, err = createWaterFramebuffers(r.deviceDriver, r.waterRenderPass, r.hdr.views, r.depth.views, msaaViews, r.sc.extent)
 		if err != nil {
-			return err
+			return fmt.Errorf("renderer: recreate water framebuffers: %w", err)
 		}
+		undo.push(func() {
+			for _, fb := range r.waterFramebuffers {
+				r.deviceDriver.DestroyFramebuffer(fb, nil)
+			}
+			r.waterFramebuffers = nil
+		})
 	}
 
-	log.Printf("Swapchain recreated: %dx%d", r.sc.extent.Width, r.sc.extent.Height)
 	return nil
 }
 
@@ -1658,6 +1791,14 @@ func (r *Renderer) recreateSwapchain() error {
 // against the new extent and is the first one that can be right. A resize
 // changes the picture anyway, so nothing repeatable is lost.
 func (r *Renderer) acquireImage(f int) (int, bool, error) {
+	// A previous rebuild failed partway through and unwound back to no
+	// swapchain at all (see recreateSwapchain); there is nothing to acquire
+	// from until a rebuild succeeds, so go straight to one rather than
+	// dereferencing the swapchain that is not there. Issue #86.
+	if r.sc == nil {
+		return r.rebuildAndAcquire(f)
+	}
+
 	// A provoked out-of-date acquire takes the same path as a real one, minus
 	// the failed call: asking and being refused leaves no state behind, so
 	// there is nothing to undo. See ProvokeSkipNextFrame.
@@ -1679,15 +1820,34 @@ func (r *Renderer) acquireImage(f int) (int, bool, error) {
 
 // rebuildAndAcquire recreates the swapchain and acquires from the new one.
 func (r *Renderer) rebuildAndAcquire(f int) (int, bool, error) {
-	before := r.sc.extent
+	// Zero when there is no swapchain to compare against yet -- either the
+	// first call, or a retry after a previous rebuild unwound everything.
+	// r.sc.extent != before is then true as soon as the retry succeeds (a
+	// real extent is never the zero value while the window is not
+	// minimized), which is the right answer: this frame is skipped and the
+	// next one is built against whatever the recovered extent actually is,
+	// the same as an ordinary resize.
+	var before core1_0.Extent2D
+	if r.sc != nil {
+		before = r.sc.extent
+	}
 	if err := r.recreateSwapchain(); err != nil {
 		return 0, false, err
 	}
 	// recreateSwapchain returns without rebuilding while the framebuffer is
-	// zero-sized, so the swapchain is still the out-of-date one and asking
-	// again would fail the same way. The caller skips minimized frames; this is
-	// the window that closes between that check and here.
+	// zero-sized, so the swapchain is still the out-of-date one (or, after a
+	// previous rebuild failed partway through, simply gone) and asking again
+	// would fail the same way or dereference nil. The caller skips minimized
+	// frames; this is the window that closes between that check and here.
 	if w, h := r.win.GetFramebufferSize(); w == 0 || h == 0 {
+		return 0, false, nil
+	}
+	if r.sc == nil {
+		// recreateSwapchain returns nil only when it skipped (the check just
+		// above) or when it fully rebuilt r.sc, so this is not reachable --
+		// kept because "acquire never dereferences a nil swapchain" is
+		// exactly the contract issue #86 asks for, and a defensive check
+		// earning its place costs one comparison a rebuild.
 		return 0, false, nil
 	}
 	if r.sc.extent != before {
@@ -1713,8 +1873,14 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 
 	if t := r.trace; t != nil {
 		t.Int("slot", f)
-		t.Int("w", r.sc.extent.Width)
-		t.Int("h", r.sc.extent.Height)
+		// r.sc is nil here only when a previous frame's rebuild failed
+		// partway through (see recreateSwapchain) and acquireImage below has
+		// not yet retried it -- skip the two fields that name it rather than
+		// dereference it for a trace line.
+		if r.sc != nil {
+			t.Int("w", r.sc.extent.Width)
+			t.Int("h", r.sc.extent.Height)
+		}
 		t.Int("cloudframe", r.cloudFrame)
 	}
 
