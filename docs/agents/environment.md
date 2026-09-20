@@ -306,6 +306,17 @@ is quadratic, so turning `Height` on thickened every scene at the same density.
 
 Sensible `Height` values are on the order of the terrain's vertical scale.
 
+The fog is also the medium a lamp's beam is made of. A light with
+`SpotLight.Volumetric` or `PointLight.Volumetric` above zero scatters off
+*this* fog, at *this* density, through *this* height profile — the same
+`Density * exp(-(y - BaseHeight) / Height)` the integral above closes over,
+sampled a point at a time instead. So a scene with no `Fog`, or with
+`Density` 0, shows no beams however high a light's `Volumetric` goes, and a
+fog that rolls in thickens every beam in the scene with it. See
+[lights.md](lights.md#a-beam-is-the-air-being-lit). The anisotropy and the
+sample count are the one part that is not fog — they are
+`Scene.SetVolumetrics`, because the fog has nothing to say about them.
+
 ## Replacing it entirely
 
 Implement `EnvironmentSource`:

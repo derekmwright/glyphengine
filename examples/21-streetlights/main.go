@@ -30,6 +30,13 @@
 //	go run ./21-streetlights -nightshift 0       # no scotopic night grade at all
 //	go run ./21-streetlights -lightdebug heatmap # see the froxel grid instead
 //	go run ./21-streetlights -lightstats         # log the binner's stats on exit
+//	go run ./21-streetlights -volumetric 1       # the doorway cones become visible beams
+//	go run ./21-streetlights -lampvolumetric 1   # and the street lamps get a glow
+//	go run ./21-streetlights -skylamp -volumetric 1 # a shaft thrown at the night sky
+//
+// The beams scatter off the scene's FOG -- see docs/agents/lights.md -- so
+// -volumetric on a scene with Fog nil would show nothing. This one has
+// Density 0.006 and Height 6.
 //
 // Left-drag orbits, scroll zooms, L toggles the spotlights, Escape quits.
 package main

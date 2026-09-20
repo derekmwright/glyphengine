@@ -73,7 +73,16 @@ func (e *Engine) traceSimulation(t *renderer.StateTrace, view, proj, vp mgl32.Ma
 		Vec3(env.Ambient).
 		Float32(env.StarFade).
 		Float32(env.FogDensity).
-		Bool(env.CastShadows)
+		Bool(env.CastShadows).
+		// The scattering medium rides with the fog because it IS the fog's:
+		// the density and height profile above are what a beam scatters off,
+		// and these two are the only part of the medium the fog does not
+		// already say. A game that animates either -- dust settling, a step
+		// count dropped under load -- moves every beam in the frame, and
+		// without this the trace would show a capture that changed with a
+		// `sky=` that did not.
+		Float32(e.Scene.Volumetrics().Anisotropy).
+		Uint64(uint64(e.Scene.Volumetrics().Steps))
 	t.Hash("sky", sky)
 }
 
