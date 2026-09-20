@@ -31,6 +31,7 @@
 //	go run ./22-level -frames 200         # render 200 frames, then exit
 //	go run ./22-level -screenshot out.png # capture the last frame
 //	go run ./22-level -reload 20          # swap the level for a fresh load, 20 times
+//	go run ./22-level -instanced          # batch repeated static props into InstanceSets
 //
 // -reload is the Blender iteration story with the file changing underneath it
 // taken out: it loads a SECOND copy of the level, spawns it, and only then
@@ -42,6 +43,32 @@
 // Run it under the validation layer (task validate does) -- the layer is what
 // would notice a resource freed while a frame still referenced it, and the
 // resource counts this asserts on are what notice one never freed at all.
+//
+// -instanced is issue #71's recipe: turning "several nodes, one doc mesh" --
+// which Model.NodeMeshes already surfaces, see above -- into ONE
+// renderer.InstanceSet instead of N MeshRef entities, using
+// Model.MeshInstances to go the other way, from a doc mesh back to every
+// node placing it. WHICH doc meshes qualify is this example's own decision,
+// not the engine's (AGENTS.md rule 14): a doc mesh instances as a set only
+// when every node sharing it is tagged {"static": true} (a moving node can't
+// safely alias one set's fixed placements, and the level's own vocabulary
+// already has a word for "never moves") and none of its primitives is
+// alphaMode BLEND (InstancedMesh has no blended pipeline -- see
+// docs/agents/instancing.md -- so a translucent shared mesh stays on the
+// individual path rather than silently losing its translucency). A node
+// still tagged {"collider": "box"} keeps its collider through a companion
+// entity that carries Transform/Collider/Static and no MeshRef -- the
+// InstanceSet already drew its geometry once, in the shared draw call, so a
+// second MeshRef here would draw it twice. What that companion entity does
+// NOT get back is everything else an ordinary level entity has: no per-
+// instance picking, no way for the game to look this one building up and
+// drive it, no component beyond the physical box. See
+// spawnInstancedGroup/instancedGroupCandidate below and
+// docs/agents/instancing.md for the measurement this rule was chosen to
+// demonstrate. -instanced and -reload do not combine -- nothing releases an
+// InstanceSet's buffer yet (see renderer/instancedmesh.go), so reloading
+// under -instanced would leak one per swap; main() refuses the combination
+// rather than doing that silently.
 //
 // Left-drag orbits, scroll zooms, Escape quits.
 package main
@@ -118,6 +145,10 @@ type game struct {
 	// levelPath is a glTF on disk to load instead of the embedded level.glb:
 	// the way to look at a file exported from Blender without rebuilding.
 	levelPath string
+
+	// instanced turns on -instanced's recipe in spawnLevel: see the package
+	// comment and instancedGroupCandidate for the rule.
+	instanced bool
 
 	// model and levelEntities are what the current load of the level
 	// produced. Nothing reads them after Init with -reload 0; they exist
@@ -207,7 +238,7 @@ func (g *game) loadLevel(e *glyph.Engine) (mgl32.Vec3, error) {
 	}
 	g.model = model
 
-	spawnTarget, entities := spawnLevel(e, model)
+	spawnTarget, entities := spawnLevel(e, model, g.instanced)
 	g.levelEntities = entities
 	e.RebuildStatics()
 
@@ -394,10 +425,23 @@ func (g *game) Update(e *glyph.Engine, dt float32) {
 // Tracking it is the level loader's job, not the engine's: nothing in the ECS
 // records which entities came from which file, and a game that reloads a level
 // has to know which of its entities were the level.
-func spawnLevel(e *glyph.Engine, model *renderer.Model) (mgl32.Vec3, []glyph.Entity) {
+//
+// instanced turns on issue #71's recipe: see the package comment and
+// instancedGroupCandidate for the rule that decides which doc meshes qualify.
+// instancedDocMesh caches that decision per doc mesh (asked once, the first
+// time a node naming it is reached, not once per node -- the answer is the
+// same for every node sharing a mesh by construction) and spawnedInstanceSet
+// records which doc meshes already got their one InstanceSet, so the SECOND
+// and later nodes in a group are skipped for the shared draw while still
+// getting their own pass through the extras below (a companion collider,
+// the floors log line).
+func spawnLevel(e *glyph.Engine, model *renderer.Model, instanced bool) (mgl32.Vec3, []glyph.Entity) {
 	spawnTarget := mgl32.Vec3{0, 1.6, 0}
 	foundSpawn := false
 	var entities []glyph.Entity
+
+	instancedDocMesh := map[int]bool{}
+	spawnedInstanceSet := map[int]bool{}
 
 	for i := range model.Nodes {
 		node := model.Nodes[i]
@@ -417,6 +461,32 @@ func spawnLevel(e *glyph.Engine, model *renderer.Model) (mgl32.Vec3, []glyph.Ent
 		meshIdxs := model.NodeMeshes(i)
 		if len(meshIdxs) == 0 {
 			continue // an empty node: a light socket, or the spawn marker above
+		}
+
+		if instanced {
+			decided, asked := instancedDocMesh[node.Mesh]
+			if !asked {
+				decided = instancedGroupCandidate(model, node.Mesh)
+				instancedDocMesh[node.Mesh] = decided
+			}
+			if decided {
+				if !spawnedInstanceSet[node.Mesh] {
+					spawnedInstanceSet[node.Mesh] = true
+					entities = append(entities, spawnInstancedGroup(e, model, node.Mesh, meshIdxs)...)
+				}
+				// The set already drew this node's geometry once, in the
+				// shared draw call above -- no per-node MeshRef here, or it
+				// would draw twice. A collider is the one thing this node
+				// still needs an entity of its own for; see
+				// spawnInstancedCollider's doc comment for why.
+				if tags.Collider == "box" {
+					entities = append(entities, spawnInstancedCollider(e, model, node, meshIdxs))
+				}
+				if tags.Floors > 0 {
+					log.Printf("level: %q has %d floors (from extras, engine does not use this)", node.Name, int(tags.Floors))
+				}
+				continue
+			}
 		}
 
 		// The node's World is a matrix and an entity's Transform is position,
@@ -470,6 +540,134 @@ func spawnLevel(e *glyph.Engine, model *renderer.Model) (mgl32.Vec3, []glyph.Ent
 		log.Printf("level: no node with extras {\"spawn\":\"player\"} found; camera targets the origin")
 	}
 	return spawnTarget, entities
+}
+
+// instancedGroupCandidate is -instanced's whole rule, in one place: does
+// every node instancing docMesh get merged into one InstanceSet, or does the
+// doc mesh stay on the ordinary per-node path?
+//
+//   - Shared: model.MeshInstances(docMesh) has to name more than one node, or
+//     there is nothing to batch.
+//   - Every node sharing it is tagged {"static": true}. A set's placements
+//     only change through Renderer.UpdateInstanceSet, which nothing here
+//     drives per frame, so a node that might move cannot safely be one of
+//     them -- and "static" is already this level's own word for "never
+//     moves" (glyph.Static's doc comment), not a second vocabulary invented
+//     for this. A doc mesh shared by a mix of static and non-static nodes
+//     stays entirely on the individual path rather than splitting the group,
+//     which would need its own rule for something neither fixture needs.
+//   - None of the doc mesh's primitives is alphaMode BLEND.
+//     docs/agents/instancing.md is explicit that InstancedMesh has no
+//     blended pipeline and stays opaque rather than losing the placements,
+//     so a level that instanced a glass pane would silently lose its
+//     translucency; excluding it here keeps that failure from happening
+//     rather than documenting it after the fact.
+//
+// What this does NOT gate on: shear. MeshInstance.Model is a full 4x4
+// matrix, not a Position/Rotation/Scale triple, so a sheared node's World
+// carries across to an InstanceSet placement exactly -- unlike the
+// individual path just above, which has to fit it through
+// glyph.TransformFromMatrix and drops the shear when that comes back
+// inexact. Neither level file this example loads has a sheared node sharing
+// a mesh with anything else, so this is not exercised by a render here, but
+// it is why no exactness check appears in this function: TransformFromMatrix
+// is only reached below, for a collider companion entity's OWN Transform,
+// and a sheared collider-tagged instanced node loses exactly the part of its
+// transform the individual path always has.
+func instancedGroupCandidate(model *renderer.Model, docMesh int) bool {
+	nodes := model.MeshInstances(docMesh)
+	if len(nodes) < 2 {
+		return false
+	}
+	for _, ni := range nodes {
+		var tags nodeTags
+		if len(model.Nodes[ni].Extras) == 0 {
+			return false
+		}
+		if err := json.Unmarshal(model.Nodes[ni].Extras, &tags); err != nil || !tags.Static {
+			return false
+		}
+	}
+	for _, mi := range model.NodeMeshes(nodes[0]) {
+		if model.Meshes[mi].AlphaMode == renderer.AlphaModeBlend {
+			return false
+		}
+	}
+	return true
+}
+
+// spawnInstancedGroup builds and spawns one InstanceSet per primitive
+// docMesh split into (level.glb never splits one, but the individual path
+// above handles it and this mirrors that rather than silently dropping
+// geometry a level file in general might have), with one MeshInstance per
+// node in model.MeshInstances(docMesh).
+//
+// The placement matrix is the node's raw World, not a Transform run back
+// through ModelMatrix -- see instancedGroupCandidate's doc comment on why
+// that is the more faithful choice here, not a shortcut. Tint is left at
+// white: MeshInstance.Tint varies ONE placement from its neighbours, which
+// nothing about this level's extras asks for, and Color on the entity (set
+// below from the primitive's own BaseColor, the same source spawnPrimitive
+// reads) already tints the whole set identically to how each node would
+// have been tinted individually, since every node in a candidate group
+// shares the one doc mesh and therefore the one material.
+func spawnInstancedGroup(e *glyph.Engine, model *renderer.Model, docMesh int, meshIdxs []int) []glyph.Entity {
+	nodes := model.MeshInstances(docMesh)
+	entities := make([]glyph.Entity, 0, len(meshIdxs))
+	for _, mi := range meshIdxs {
+		mm := model.Meshes[mi]
+		placements := make([]renderer.MeshInstance, len(nodes))
+		for j, ni := range nodes {
+			var m [16]float32
+			copy(m[:], model.Nodes[ni].World[:])
+			placements[j] = renderer.MeshInstance{Model: m, Tint: [4]float32{1, 1, 1, 1}}
+		}
+
+		set, err := e.Renderer().CreateInstanceSet(mm.Mesh, len(placements), placements)
+		if err != nil {
+			log.Fatalf("level: -instanced: create instance set for doc mesh %d: %v", docMesh, err)
+		}
+		ent := e.Spawn()
+		e.C.InstancedMesh.Set(ent, &glyph.InstancedMesh{Set: set})
+		e.C.MeshRef.Set(ent, &glyph.MeshRef{Mesh: mm.Mesh, Metallic: mm.Metallic, Roughness: mm.Roughness})
+		e.C.Color.Set(ent, &glyph.Color{R: mm.BaseColor[0], G: mm.BaseColor[1], B: mm.BaseColor[2]})
+		if mm.DoubleSided {
+			e.C.DoubleSided.Set(ent, &glyph.DoubleSided{})
+		}
+		entities = append(entities, ent)
+	}
+	return entities
+}
+
+// spawnInstancedCollider gives an instanced node's physical presence back.
+//
+// An InstancedMesh entity carries no per-node Transform -- every placement's
+// matrix lives in the InstanceSet instead -- and Scene.RebuildStatics reads
+// Transform, Collider and Static off one entity (scene.go), none of which an
+// InstanceSet has anywhere to put. This companion entity is that: Transform
+// (through the same glyph.TransformFromMatrix the individual path uses, so a
+// sheared collider-tagged node loses exactly the part of its transform the
+// individual path always has -- see instancedGroupCandidate), Collider and
+// Static, and deliberately no MeshRef, since the InstanceSet already drew
+// this node's geometry once and a MeshRef here would draw it a second time
+// on top of itself.
+//
+// What it does NOT get back: picking, or any other per-instance component a
+// game might want to hang off one building rather than the whole set. A
+// physical obstacle is all this recipe restores; docs/agents/instancing.md
+// records that as the cost, not something this function works around.
+func spawnInstancedCollider(e *glyph.Engine, model *renderer.Model, node renderer.ModelNode, meshIdxs []int) glyph.Entity {
+	transform, exact := glyph.TransformFromMatrix(node.World)
+	if !exact {
+		log.Printf("level: node %q is sheared or has a zero scale; its collider is drawn without that part of its transform", node.Name)
+	}
+	ent := e.Spawn()
+	e.C.Transform.Set(ent, &transform)
+	e.C.Static.Set(ent, &glyph.Static{})
+	if half, ok := meshesLocalHalfExtent(model, meshIdxs); ok {
+		e.C.Collider.Set(ent, &glyph.Collider{HalfExtents: half})
+	}
+	return ent
 }
 
 // spawnPrimitive sets the render-facing components for one ModelMesh on an
@@ -611,7 +809,17 @@ func main() {
 	camLook := flag.Float64("camlook", 2.5, "how far above the target the camera looks")
 	level := flag.String("level", "", "a .glb or .gltf on disk to load instead of the built-in level, e.g. one exported from Blender")
 	reload := flag.Int("reload", 0, "load, draw, destroy and reload the level N times, then exit; asserts the renderer's live resource counts return to their baseline (exercises Renderer.DestroyModel)")
+	instanced := flag.Bool("instanced", false, "batch every doc mesh shared by several static nodes into one renderer.InstanceSet instead of one entity per node (issue #71; see the package comment for the rule)")
 	flag.Parse()
+
+	if *instanced && *reload > 0 {
+		// Nothing releases an InstanceSet's GPU buffer yet
+		// (renderer/instancedmesh.go has no DestroyInstanceSet), so a level
+		// reloaded under -instanced would leak one set's worth of memory per
+		// swap. Refusing the combination is the honest failure; leaking
+		// silently for twenty cycles is not.
+		log.Fatalf("-instanced and -reload do not combine: reloading would leak an InstanceSet's buffer every swap")
+	}
 
 	opts := []glyph.Option{
 		glyph.WithTitle("GlyphEngine - 22 Level"),
@@ -651,6 +859,7 @@ func main() {
 		levelPath:    *level,
 		reloadCycles: *reload,
 		cyclesLeft:   *reload,
+		instanced:    *instanced,
 	}
 	e, err := glyph.New(g, opts...)
 	if err != nil {
