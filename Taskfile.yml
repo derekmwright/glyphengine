@@ -1684,6 +1684,60 @@ tasks:
       # scene at the same fixed clock with only SpotLight.Volumetric changed,
       # so the night sky, the warm pools and the moonlit ground are identical
       # in both and subtract out.
+      #
+      # PROVED by breaking the committed code four ways, each restored
+      # immediately after. What each one printed, verbatim:
+      #
+      # 1. The cone term dropped (`float spot = 1.0` in volumetric.inc's light
+      #    loop), so the light scatters in every direction from the bulb --
+      #    the halo the screen-space route produced. Every outside arm fires,
+      #    and the sky arm's column stops being a column:
+      #
+      #      beam     +49.15  ok
+      #      above    +36.45  FAIL: over the ceiling 0.50
+      #      beside-r +20.88  FAIL: over the ceiling 0.50
+      #      beside-l +56.09  FAIL: over the ceiling 0.50
+      #      far      +19.69  FAIL: over the ceiling 0.00
+      #      offscreen open +16.60 FAIL, far +10.56 FAIL
+      #      sky column +15.04 against beside-l +14.62 and beside-r +14.80
+      #
+      #    That last line is the signature: a wash puts the same light on the
+      #    beam and beside it. It is the #47 spike's failure exactly.
+      #
+      # 2. Only the first cell marched, never traversed
+      #    (`resolveLightRange(px, nearDist * depthPerDist)`, so every sample
+      #    walks slice 0's list wherever it actually is):
+      #
+      #      cone      SELF-CHECK: the two captures are pixel-identical
+      #      control   -volumetric 1 and -volumetric 0 rendered the same bytes
+      #
+      #    Worth knowing, because it is not what was expected: `offscreen` and
+      #    `sky` did NOT move, to the digit. In both of those poses the light's
+      #    range sphere contains the camera, so it is in slice 0's list as well
+      #    and "the first cell" happens to be the right list. The cone pose,
+      #    where the camera looks past the lamp rather than standing under it,
+      #    is the one that catches this -- which is an argument for keeping a
+      #    pose of each shape rather than the one that reads highest.
+      #
+      # 3. The per-light intensity never reaching the GPU (volumetricIntensity
+      #    in app.go returning 0), which also clears LightFlagVolumetric, so
+      #    the march is skipped outright:
+      #
+      #      cone      SELF-CHECK: the two captures are pixel-identical
+      #      offscreen SELF-CHECK: the two captures are pixel-identical
+      #      sky       SELF-CHECK: the two captures are pixel-identical
+      #      control   -volumetric 1 and -volumetric 0 rendered the same bytes
+      #
+      # 4. The sky path alone (sky.frag's volInscatter result multiplied by
+      #    zero -- the state this feature was in before the sky pipeline got
+      #    the light buffers). Only the sky arm fires, and the other two do not
+      #    move at all:
+      #
+      #      cone beam      +14.30  ok  (unchanged)
+      #      offscreen beam +16.70  ok  (unchanged)
+      #      sky column      +0.00  FAIL: under the floor 1.50
+      #
+      #    Which is the point of having three poses: they fail separately.
       - |
         status=0
         d=.volumetric
