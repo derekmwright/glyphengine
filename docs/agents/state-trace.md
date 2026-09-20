@@ -100,7 +100,7 @@ cascades=71e68c… lights=0/e79af2… grass=124/82b4a2… outcome=present render
 | `ticks` | Fixed simulation ticks so far |
 | `clock` | `elapsed`, interpolation `alpha`, `timeScale`, the accumulator |
 | `cam` | Eye, centre, up, and the view / projection / view-projection matrices |
-| `sky` | Time of day, sun direction and elevation, ambient, fog, shadow enable |
+| `sky` | Time of day, sun direction and elevation, ambient, fog, shadow enable, and the scattering medium (`Scene.Volumetrics`) the fog doubles as |
 | `draws`, `overlays`, `celestials`, `msdf` | Count and **order-dependent** hash of each draw list |
 | `drawsset` etc. | The same per-draw hashes XORed, so order does not affect it |
 | `uioverlays` | Count of UI overlay draws |
@@ -112,7 +112,7 @@ cascades=71e68c… lights=0/e79af2… grass=124/82b4a2… outcome=present render
 | `dynmesh` | Dynamic-mesh count and order-independent content hash |
 | `dynmeshorder` | The order the dynamic-mesh **map** was walked in |
 | `cascades` | The shadow cascade view-projections |
-| `lights` | Clustered light count and the whole binning |
+| `lights` | Clustered light count and the whole binning -- the uploaded `GpuLight` array is hashed as bytes, so per-light fields like `Volumetric` are covered without listing them |
 | `grass` | Grass tile draw count and the ordered (variant, range, instance count) sequence |
 | `grasslod` | The live `GrassLOD`, which `SetGrassLOD` can move at any time |
 | `post` | Exposure, tonemap curve and white point, and the four bloom knobs |
