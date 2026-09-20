@@ -23,6 +23,13 @@ import (
 // images, which the spec permits. That is rare on desktop, and reported at
 // swapchain creation.
 func (r *Renderer) CaptureFrame() (*image.RGBA, error) {
+	if r.sc == nil {
+		// A swapchain rebuild failed and has not yet been retried (see
+		// recreateSwapchain and issue #86); there is no live image to read
+		// back, and r.lastPresented names an index into a swapchain that no
+		// longer exists.
+		return nil, errors.New("renderer: no live swapchain; a rebuild is pending")
+	}
 	if !r.sc.captureCapable {
 		return nil, errors.New("renderer: swapchain images lack TRANSFER_SRC; frame capture unavailable on this surface")
 	}
