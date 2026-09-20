@@ -298,7 +298,12 @@ of the same `ModelMesh`, none of which required the others.
 
 ## Teardown
 
-`DestroyMaterial` releases the uniform buffer after the in-flight frames drain;
-the descriptor set returns with the pool. Textures are **not** released — several
+`DestroyMaterial` releases the uniform buffer after the in-flight frames drain,
+and the descriptor set goes back to the pool in that same deferred step — it
+names the buffer, so it has to stop naming it first. (Until issue #82 the set
+was never returned at all — the pool carried no
+`VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT` — so materials created and
+destroyed while a game ran spent the pool's fixed budget permanently.
+`docs/agents/models.md` has the measurement that found it.) Textures are **not** released — several
 materials commonly share one albedo, and they outlive any single material. Call
 `DestroyTexture` separately. `Renderer.Destroy` sweeps both, materials first.
