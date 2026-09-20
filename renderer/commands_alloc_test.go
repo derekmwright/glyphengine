@@ -20,7 +20,7 @@ func (fx *frame) record(d core1_0.DeviceDriver, frameIndex int) error {
 	return recordCommandBuffer(
 		d, fx.cmdBuf, fx.renderPass, fx.framebuffer, fx.pipeline, fx.litDoubleSidedPipeline,
 		fx.translucentPipeline, fx.translucentDoubleSidedPipeline, fx.skinnedTranslucentPipel,
-		fx.instancedPipeline, fx.instancedDoubleSidedPipeline, fx.overlayPipeline, fx.skyPipeline,
+		fx.instancedPipeline, fx.instancedDoubleSidedPipeline, fx.overlayPipeline, fx.skyPipeline, fx.skyVolumetricPipeline,
 		fx.starsPipeline, fx.celestialPipeline, fx.uiPipeline, fx.msdfPipeline, fx.skinnedPipeline,
 		fx.grassPipeline, fx.waterPipeline, fx.godRayPipeline, fx.waterRenderPass, fx.waterFramebuffer,
 		fx.sceneColor, fx.sceneImage, noClouds, fx.cloudSet, fx.bloom, fx.tonemap, fx.particlePipeline,
@@ -154,44 +154,34 @@ func benchName(n int) string {
 // test -- 0x08525eb349c579bc, the value above exactly -- so those two floats
 // are the whole of the difference.
 //
-// Recomputed a fourth time, for #47: the sky draw now reads the clustered
-// light buffers, because a beam aimed at the night sky has to show against
-// it. NO DRIVER CALL WAS ADDED -- 3299 before and 3299 after, the same count
-// this constant has pinned since the shaft draw landed. THREE things changed
-// arguments, and each was measured on its own rather than assumed:
+// NOT recomputed for #47, and that is the point of saying so. Volumetric
+// in-scattering added a pipeline and a draw -- the one that fronts the sky --
+// and this hash did not move by a bit: 3299 driver calls with the same
+// arguments, 0x7f81990a07a357c6, the value it has held since the shaft draw
+// landed. The new draw is recorded only when a light asks to scatter and
+// buildFrame's lights do not, so "a scene that does not use volumetrics pays
+// nothing" is pinned here at the level of driver calls, the same way the G1
+// captures pin it at the level of pixels.
 //
-//	(a) buildFrame's lighting gained FogDensity/FogHeight/FogBaseHeight. That
-//	    is not the sky: fog rides in pc.cameraPos.w and pc.fog.xy for EVERY
-//	    lit draw, so it moves most of the push blocks in the frame. It is here
-//	    because the sky now pushes the fog too, and a value the fixture leaves
-//	    at zero is a push-constant word this hash cannot pin.
-//	(b) The sky's CmdBindDescriptorSets binds two sets (cloud, shadow)
-//	    instead of one, against skyPipelineLayout instead of pipelineLayout.
-//	(c) The sky's CmdPushConstants carries the eye and the fog in six words
-//	    that were zero (pc[56..61]), and goes to skyPipelineLayout.
+// It did move, twice, on the way to that -- and both times for a reason worth
+// leaving written down:
 //
-// Built up one at a time, each re-running this test:
-//
-//	nothing (fixture fog off, (b) and (c) reverted)   3299 calls, 0x7f81990a07a357c6
-//	(a) alone                                         3299 calls, 0x58d24cfbaf980c5d
-//	(a) + (c)                                         3299 calls, 0xb7ca58e2efca8dde
-//	(a) + (b)                                         3299 calls, 0xbb26bbcb5be1ea70
-//	(a) + (b) + (c), as shipped                       3299 calls, 0xb532df1b50aa9c73
-//
-// The first line is the one that matters, and it is exact: with the fixture's
-// fog off and the sky's two calls put back the way they were, the recorded
-// frame is bit-for-bit the frame this constant pinned before -- 0x7f81..., to
-// the digit. So nothing else in the volumetrics change reaches the driver at
-// all, which is the claim the G1 captures make about pixels and this makes
-// about calls.
+//   - The first arrangement put the march at the end of sky.frag, which meant
+//     the sky draw binding a second descriptor set and pushing the fog. Same
+//     3299 calls, different arguments. It also moved three PIXELS of a scene
+//     with no volumetric light in it, which is what sent the march into a
+//     draw of its own; see shaders/skyvolumetric.frag.
+//   - buildFrame briefly gained FogDensity/FogHeight/FogBaseHeight, which is
+//     not a sky change at all: fog rides in pc.cameraPos.w and pc.fog.xy for
+//     every lit draw, so it moved most of the push blocks in the frame
+//     (0x58d24cfbaf980c5d). Removed again once the sky stopped needing it.
 //
 // One trap worth recording, because it cost an hour and would cost it again.
-// fakeHandles hands out a monotonic counter, so the first attempt -- which
-// allocated fx.skyPipelineLayout in the middle of buildFrame's struct literal
-// -- renumbered every handle after it and moved this hash by itself, with the
-// sky's calls already reverted. It now allocates after the literal, and that
-// is why.
-const goldenStreamHash = Hasher(0xb532df1b50aa9c73)
+// fakeHandles hands out a monotonic counter, so allocating the new
+// skyPipelineLayout in the middle of buildFrame's struct literal renumbered
+// every handle after it and moved this hash by itself, with nothing else
+// changed. Both new handles are allocated after the literal, and that is why.
+const goldenStreamHash = Hasher(0x7f81990a07a357c6)
 
 // TestRecordCommandBufferStreamIsUnchanged is the GPU-free half of "nothing
 // changed": every driver call the recorder makes, folded in order with its
@@ -217,5 +207,82 @@ func TestRecordCommandBufferStreamIsUnchanged(t *testing.T) {
 	t.Logf("stream hash: %#x over %d driver calls", uint64(d.h), d.calls)
 	if d.h != goldenStreamHash {
 		t.Fatalf("command stream hash = %#x, want %#x: the driver calls (or their argument values) changed", d.h, goldenStreamHash)
+	}
+}
+
+// withVolumetricLight makes a fixture frame ask for in-scattering: one spot
+// with a non-zero Params.x, the header flag that says so, and the fog it
+// scatters off.
+//
+// A separate helper rather than a change to buildFrame, exactly as
+// withUILayer is and for the same reason. The feature has to be FREE when
+// nothing asks for it, so the fixture that pins the recorder's stream has to
+// be able to stay exactly as it was -- and goldenStreamHash being UNCHANGED
+// across this whole change is the evidence for that rather than a claim about
+// it.
+func withVolumetricLight(fx *frame) *frame {
+	fx.lighting.LightFlags |= LightFlagVolumetric
+	fx.lighting.FogDensity = 0.006
+	fx.lighting.FogHeight = 6
+	fx.lighting.FogBaseHeight = 0.5
+	fx.lighting.Lights = []GpuLight{{
+		PosRange: [4]float32{1, 3, -2, 10},
+		Color:    [4]float32{1, 0.58, 0.28, 0.93},
+		DirCone:  [4]float32{0, -1, 0, 0.68},
+		Params:   [4]float32{1, 0, 0, 0},
+	}}
+	return fx
+}
+
+// goldenVolumetricStreamHash pins the stream with the sky in-scattering draw
+// recorded, the way goldenUILayerStreamHash pins the UI glow layer's.
+//
+// A SECOND pinned value beside goldenStreamHash rather than a replacement,
+// because the two say different things and the first says the more important
+// one. Recomputing that constant to accommodate this feature would have
+// thrown away the only call-level evidence that a scene asking for no
+// volumetrics records the frame it always did.
+//
+// Captured once by logging d.h from the test below; reproduce it the same way
+// if a deliberate change to the draw moves it. SIX driver calls more than the
+// volumetrics-off stream -- 3305 against 3299 -- which is bind pipeline, set
+// viewport, set scissor, bind descriptor sets, push constants, draw, and
+// nothing else.
+const goldenVolumetricStreamHash = Hasher(0x01e4b081132b7d26)
+
+// TestVolumetricSkyDrawIsRecorded is the volumetrics-on half of "nothing
+// changed": the extra draw reaches the driver, with the argument values it
+// reaches it with today, and it costs exactly six calls.
+//
+// The direction of the count matters as much as the hash. A volumetrics-on
+// frame recording the SAME number of calls as a volumetrics-off one would
+// mean the draw was never entered, which no comparison against a single
+// pinned value can see -- and "the pipeline was built, handed to this
+// recorder and never bound" is not hypothetical here. That is exactly what
+// happened to godRayPipeline from 2026-07-29 to 2026-09-19, with every gate
+// in the repository green; see cmd/shaftcheck.
+func TestVolumetricSkyDrawIsRecorded(t *testing.T) {
+	off := &fakeDriver{hashing: true}
+	if err := buildFrame(97).record(off, 1); err != nil {
+		t.Fatalf("record (volumetrics off): %v", err)
+	}
+	on := &fakeDriver{hashing: true}
+	if err := withVolumetricLight(buildFrame(97)).record(on, 1); err != nil {
+		t.Fatalf("record (volumetrics on): %v", err)
+	}
+	t.Logf("off: %d calls, hash %#x; on: %d calls, hash %#x",
+		off.calls, uint64(off.h), on.calls, uint64(on.h))
+
+	if off.h != goldenStreamHash {
+		t.Errorf("volumetrics-off hash = %#x, want the unchanged %#x: the march is not free when nothing asks for it",
+			off.h, goldenStreamHash)
+	}
+	if got, want := on.calls-off.calls, 6; got != want {
+		t.Errorf("the sky in-scattering draw records %d driver calls, want %d "+
+			"(bind pipeline, viewport, scissor, descriptor sets, push constants, draw)", got, want)
+	}
+	if on.h != goldenVolumetricStreamHash {
+		t.Errorf("volumetrics-on command stream hash = %#x, want %#x: the draw (or its argument values) changed",
+			on.h, goldenVolumetricStreamHash)
 	}
 }

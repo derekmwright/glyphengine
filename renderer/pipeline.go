@@ -1502,3 +1502,106 @@ func createGodRayPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, rende
 	log.Println("God ray pipeline created")
 	return pipelines[0], nil
 }
+
+// createSkyVolumetricPipeline builds the in-scattering draw that fronts the
+// sky: the same fullscreen triangle at the same far-plane depth test, blended
+// additively over whatever the dome left there.
+//
+// It exists as a pipeline rather than as four lines at the end of sky.frag for
+// a measured reason recorded in shaders/skyvolumetric.frag -- putting the
+// march in that shader moved three pixels of a scene with no volumetric light
+// in it, because the compiler schedules the dome's existing arithmetic
+// differently once the march shares the function. Here the dome is untouched
+// and the cost is skipped rather than branched over.
+//
+// farPlaneDepthState is the sky's own, so this covers exactly the pixels the
+// sky covered: depth GreaterOrEqual against a buffer cleared to 0, which is
+// everything no geometry reached. Sharing that call rather than restating it
+// is deliberate -- a depth state that drifted from the sky's would put the
+// beam on pixels the dome is not on, and reverse-Z makes that the kind of
+// mistake that draws nothing at all rather than something slightly wrong.
+func createSkyVolumetricPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
+	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
+		Code: bytesToUint32Slice(sh.SkyVert),
+	})
+	if err != nil {
+		return core1_0.Pipeline{}, err
+	}
+	defer deviceDriver.DestroyShaderModule(vertModule, nil)
+
+	fragModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
+		Code: bytesToUint32Slice(sh.SkyVolumetricFrag),
+	})
+	if err != nil {
+		return core1_0.Pipeline{}, err
+	}
+	defer deviceDriver.DestroyShaderModule(fragModule, nil)
+
+	pipelines, _, err := deviceDriver.CreateGraphicsPipelines(nil, nil, core1_0.GraphicsPipelineCreateInfo{
+		Stages: []core1_0.PipelineShaderStageCreateInfo{
+			{Stage: core1_0.StageVertex, Module: vertModule, Name: "main"},
+			{Stage: core1_0.StageFragment, Module: fragModule, Name: "main"},
+		},
+		VertexInputState: &core1_0.PipelineVertexInputStateCreateInfo{},
+		InputAssemblyState: &core1_0.PipelineInputAssemblyStateCreateInfo{
+			Topology: core1_0.PrimitiveTopologyTriangleList,
+		},
+		ViewportState: &core1_0.PipelineViewportStateCreateInfo{
+			Viewports: []core1_0.Viewport{{
+				X: 0, Y: 0,
+				Width: float32(extent.Width), Height: float32(extent.Height),
+				MinDepth: 0, MaxDepth: 1,
+			}},
+			Scissors: []core1_0.Rect2D{{
+				Offset: core1_0.Offset2D{X: 0, Y: 0},
+				Extent: extent,
+			}},
+		},
+		RasterizationState: &core1_0.PipelineRasterizationStateCreateInfo{
+			PolygonMode: core1_0.PolygonModeFill,
+			CullMode:    0, // no culling
+			FrontFace:   core1_0.FrontFaceClockwise,
+			LineWidth:   1.0,
+		},
+		MultisampleState: &core1_0.PipelineMultisampleStateCreateInfo{
+			RasterizationSamples: samples,
+		},
+		DepthStencilState: farPlaneDepthState(),
+		ColorBlendState: &core1_0.PipelineColorBlendStateCreateInfo{
+			Attachments: []core1_0.PipelineColorBlendAttachmentState{{
+				ColorWriteMask: core1_0.ColorComponentRed | core1_0.ColorComponentGreen | core1_0.ColorComponentBlue | core1_0.ColorComponentAlpha,
+				BlendEnabled:   true,
+				// Plain additive. Unlike the star pass above this is NOT scaled
+				// by destination alpha: a star is a thing behind the cloud
+				// layer and has to be hidden by it, while in-scattering is
+				// light in the air between the eye and the cloud, so a cloud
+				// cannot occlude it. The two differ deliberately.
+				SrcColorBlendFactor: core1_0.BlendFactorOne,
+				DstColorBlendFactor: core1_0.BlendFactorOne,
+				ColorBlendOp:        core1_0.BlendOpAdd,
+				// Alpha is the cloud transmittance the dome wrote. Nothing
+				// here has an opinion about it, and the fragment shader
+				// outputs 0 there so a driver that ignored these factors
+				// would still leave it alone.
+				SrcAlphaBlendFactor: core1_0.BlendFactorZero,
+				DstAlphaBlendFactor: core1_0.BlendFactorOne,
+				AlphaBlendOp:        core1_0.BlendOpAdd,
+			}},
+		},
+		DynamicState: &core1_0.PipelineDynamicStateCreateInfo{
+			DynamicStates: []core1_0.DynamicState{
+				core1_0.DynamicStateViewport,
+				core1_0.DynamicStateScissor,
+			},
+		},
+		Layout:     pipelineLayout,
+		RenderPass: renderPass,
+		Subpass:    0,
+	})
+	if err != nil {
+		return core1_0.Pipeline{}, err
+	}
+
+	log.Println("Sky volumetric pipeline created")
+	return pipelines[0], nil
+}

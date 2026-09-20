@@ -65,8 +65,11 @@ type Renderer struct {
 	starsPipeline     core1_0.Pipeline
 	celestialPipeline core1_0.Pipeline
 	skyPipeline       core1_0.Pipeline
-	// skyPipelineLayout is the non-lit layout plus the shadow/light set at
-	// set 1; sky.frag marches the froxel grid. See createSkyPipelineLayout.
+	// skyVolumetricPipeline draws in-scattering over the pixels the sky
+	// covers, and skyPipelineLayout is the non-lit layout plus the
+	// shadow/light set at set 1 that it needs to read the froxel grid. See
+	// createSkyVolumetricPipeline and shaders/skyvolumetric.frag.
+	skyVolumetricPipeline    core1_0.Pipeline
 	skyPipelineLayout        core1_0.PipelineLayout
 	uiPipeline               core1_0.Pipeline
 	msdfPipeline             core1_0.Pipeline
@@ -754,23 +757,31 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	}
 	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.starsPipeline, nil) })
 
-	// The sky is the one non-lit pipeline that reads the clustered light
-	// buffers: a beam aimed at the night sky has to show against it, and that
-	// is the shot this whole feature exists for. See createSkyPipelineLayout
-	// for why it gets a layout of its own rather than borrowing the non-lit
-	// one, and note the order -- r.shadow must already exist, which it does,
-	// since shadow resources are step 7b and this is step 8.
+	r.skyPipeline, err = createSkyPipeline(r.deviceDriver, r.shaders, r.renderPass, r.pipelineLayout, r.sc.extent, r.msaaSamples)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create sky pipeline: %w", err)
+	}
+	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.skyPipeline, nil) })
+
+	// The in-scattering that fronts the sky -- a beam aimed at the night sky,
+	// which is the shot this whole feature exists for. It is the one non-lit
+	// pipeline that reads the clustered light buffers, so it gets a layout of
+	// its own; see createSkyPipelineLayout for why, and skyvolumetric.frag
+	// for why it is a draw of its own rather than part of the dome.
+	//
+	// r.shadow must already exist for that layout, and it does: shadow
+	// resources are step 7b and this is step 8.
 	r.skyPipelineLayout, err = createSkyPipelineLayout(r.deviceDriver, r.descriptorSetLayout, r.shadow.descriptorSetLayout)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create sky pipeline layout: %w", err)
 	}
 	r.onInit(func() { r.deviceDriver.DestroyPipelineLayout(r.skyPipelineLayout, nil) })
 
-	r.skyPipeline, err = createSkyPipeline(r.deviceDriver, r.shaders, r.renderPass, r.skyPipelineLayout, r.sc.extent, r.msaaSamples)
+	r.skyVolumetricPipeline, err = createSkyVolumetricPipeline(r.deviceDriver, r.shaders, r.renderPass, r.skyPipelineLayout, r.sc.extent, r.msaaSamples)
 	if err != nil {
-		return nil, fmt.Errorf("renderer: create sky pipeline: %w", err)
+		return nil, fmt.Errorf("renderer: create sky volumetric pipeline: %w", err)
 	}
-	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.skyPipeline, nil) })
+	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.skyVolumetricPipeline, nil) })
 
 	r.skinnedPipelineLayout, err = createSkinnedPipelineLayout(r.deviceDriver, r.descriptorSetLayout, r.jointDescriptorSetLayout, r.shadow.descriptorSetLayout)
 	if err != nil {
@@ -1701,7 +1712,7 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 		return err
 	}
 	recordStart := time.Now()
-	err = recordCommandBuffer(r.deviceDriver, cmdBuf, r.renderPass, r.framebuffers[imageIndex], r.pipeline, r.litDoubleSidedPipeline, r.translucentPipeline, r.translucentDoubleSidedPipeline, r.skinnedTranslucentPipeline, r.instancedPipeline, r.instancedDoubleSidedPipeline, r.overlayPipeline, r.skyPipeline, r.starsPipeline, r.celestialPipeline, r.uiPipeline, r.msdfPipeline, r.skinnedPipeline, r.grassPipeline, r.waterPipeline, r.godRayPipeline, r.waterRenderPass, waterFB, r.sceneColor, r.hdr.images[imageIndex],
+	err = recordCommandBuffer(r.deviceDriver, cmdBuf, r.renderPass, r.framebuffers[imageIndex], r.pipeline, r.litDoubleSidedPipeline, r.translucentPipeline, r.translucentDoubleSidedPipeline, r.skinnedTranslucentPipeline, r.instancedPipeline, r.instancedDoubleSidedPipeline, r.overlayPipeline, r.skyPipeline, r.skyVolumetricPipeline, r.starsPipeline, r.celestialPipeline, r.uiPipeline, r.msdfPipeline, r.skinnedPipeline, r.grassPipeline, r.waterPipeline, r.godRayPipeline, r.waterRenderPass, waterFB, r.sceneColor, r.hdr.images[imageIndex],
 		func(cb core1_0.CommandBuffer) error { return r.recordClouds(cb, lighting, f) },
 		r.cloudSetFor(f),
 		r.bloomFor(imageIndex), r.tonemapFor(imageIndex), r.particlePipeline, r.terrainPipeline, r.materialPipelines(), &r.stats, r.pipelineLayout, r.skyPipelineLayout, r.litPipelineLayout, r.skinnedPipelineLayout, r.terrainPipelineLayout, r.sc.extent, draws, overlays, celestials, uiOverlays, msdfOverlays, lighting, split, r.fallbackTexture, r.milkyWayTex, r.shadow, r.grass, r.grassLOD, r.grassImpostor, r.grassImpostorPipeline, r.particles, f, r.msaa != nil, r.gpuTimer, r.trace, &r.cmdScratch)

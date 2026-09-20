@@ -56,6 +56,9 @@ var SkyVertSpv []byte
 //go:embed sky.frag.spv
 var SkyFragSpv []byte
 
+//go:embed skyvolumetric.frag.spv
+var SkyVolumetricFragSpv []byte
+
 //go:embed msdf.vert.spv
 var MsdfVertSpv []byte
 

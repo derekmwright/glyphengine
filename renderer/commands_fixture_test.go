@@ -50,6 +50,7 @@ type frame struct {
 	mat                                                                                            materialPipelines
 	stats                                                                                          RenderStats
 	pipelineLayout, skyPipelineLayout, litPipelineLayout, skinnedPipelineLayout, terrainPipeLayout core1_0.PipelineLayout
+	skyVolumetricPipeline                                                                          core1_0.Pipeline
 	extent                                                                                         core1_0.Extent2D
 	draws                                                                                          []RenderObject
 	overlays, celestials, msdfOverlays                                                             []RenderObject
@@ -357,7 +358,6 @@ func buildFrame(n int) *frame {
 			// point of pinning the stream is that a draw that stops happening
 			// shows up, and a draw the fixture never asks for cannot.
 			LightShafts: 0.35, SunScreenPos: [2]float32{0.62, 0.71},
-			FogDensity: 0.006, FogHeight: 6, FogBaseHeight: 0.5,
 			// Height fog, for the same reason the shafts are on: the sky draw
 			// pushes the fog to the fragment shader now (it is the medium the
 			// in-scattering march scatters off), and a value the fixture
@@ -381,5 +381,6 @@ func buildFrame(n int) *frame {
 	// value it has always had, which is what let the sky change below be
 	// isolated to the two calls it really touched.
 	fx.skyPipelineLayout = h.layout()
+	fx.skyVolumetricPipeline = h.pipeline()
 	return fx
 }

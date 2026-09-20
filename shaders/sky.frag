@@ -3,15 +3,9 @@
 
 layout(location = 0) in vec2 fragUV;
 
-// Offsets match the lit shaders' block exactly. pointPos, pointColor and
-// ambient are unused here and declared only so what follows lands where every
-// other shader reads it from -- one packing convention beats a per-shader one
-// nobody can keep in step.
-//
-// cameraPos and fog.xy stopped being padding when this shader started
-// marching in-scattering: the eye and the fog are what volumetric.inc needs,
-// and the fog IS the medium it scatters off. They are filled by the sky draw
-// in renderer/commands.go.
+// Offsets match the lit shaders' block exactly. pointPos through cameraPos are
+// unused here and declared only so fog lands where every other shader reads it
+// from -- one packing convention beats a per-shader one nobody can keep in step.
 layout(push_constant) uniform PushConstants {
     mat4 invVP;    // inverse view-projection
     mat4 model;    // [0].xyz = camera position
@@ -21,8 +15,8 @@ layout(push_constant) uniform PushConstants {
     vec4 pointPos;
     vec4 pointColor;
     vec4 ambient;
-    vec4 cameraPos; // xyz = eye, w = fog density
-    vec4 fog;       // x = height falloff, y = base height, zw = real sun horizontal
+    vec4 cameraPos;
+    vec4 fog;      // zw = the real sun's horizontal direction
 } pc;
 
 // The half-resolution cloud target: rgb = in-scattered radiance, a =
@@ -45,23 +39,15 @@ layout(set = 0, binding = 1) uniform ShadowData {
     mat4 cascadeVP[2];
     vec4 nightGrade;
     vec4 skyPalette[6];
-    // x = the in-scattering march's Henyey-Greenstein anisotropy, y = its
-    // step count. Read by volInscatter below.
+    // Declared so this block's size matches renderer/shadow.go's litUBOSize.
+    // The dome does not read it; the in-scattering it fronts is a separate
+    // draw of its own (skyvolumetric.frag), for the reason recorded there.
     vec4 volumetric;
 } shadow;
-
-// The clustered light data at set 1, bindings 3-5, on the shadow/light set --
-// the same buffers the seven lit shaders read, bound here through
-// skyPipelineLayout. The sky is not a lit surface and takes no light from
-// these directly; what it needs them for is the air in FRONT of it, which is
-// the one place a beam aimed upward can be seen at all.
-#define LIGHT_SET 1
 
 layout(location = 0) out vec4 outColor;
 
 #include "atmosphere.inc"
-#include "lights.inc"
-#include "volumetric.inc"
 
 // The noise and the raymarch moved to clouds.frag, which runs at half
 // resolution. What is left here is the dome, which measured 0.008 ms against
@@ -130,35 +116,6 @@ void main() {
     vec4 clouds = texture(cloudTex, fragUV);
     float cloudTransmit = clouds.a;
     skyColor = skyColor * cloudTransmit + clouds.rgb;
-
-    // ----- In-scattering from the local lights, in front of all of it -----
-    //
-    // Without this a beam aimed at the night sky stops dead at the horizon,
-    // which is what the first capture of this feature showed: a column of
-    // light rising off the plaza, crossing the dark hills, and vanishing at
-    // the skyline as if it had hit something. The sky is drawn last and
-    // depth-tested, so these are exactly the pixels nothing else covered --
-    // the air between the eye and the end of the froxel grid, with no surface
-    // in it.
-    //
-    // Two numbers the lit path gets for free have to be built here. A lit
-    // fragment knows how far away it is and what its view depth is; a
-    // fullscreen triangle knows neither -- gl_FragCoord.w is 1.0 for every
-    // pixel of it, because sky.vert emits w = 1. So:
-    //
-    //   - how far to integrate is the grid's own far plane, recovered from
-    //     the binner's slice parameters (volGridFar), because there are no
-    //     froxels past it and nothing there could light the air anyway;
-    //   - view depth per metre along the ray is the cosine to the camera
-    //     axis, and the axis is the ray through NDC (0,0) -- the same
-    //     reconstruction `dir` above uses, at the centre of the screen.
-    //
-    // Nothing is composited over this and nothing fogs it: the dome IS the
-    // far distance, so light scattered in front of it is simply added.
-    vec4 axisWorld = pc.invVP * vec4(0.0, 0.0, 0.0, 1.0);
-    vec3 axis = normalize(axisWorld.xyz / axisWorld.w - camPos);
-    float depthPerDist = max(dot(dir, axis), 1e-4);
-    skyColor += volInscatter(gl_FragCoord.xy, dir, volGridFar() / depthPerDist, depthPerDist);
 
     outColor = vec4(skyColor, cloudTransmit);
 }

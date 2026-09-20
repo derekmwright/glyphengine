@@ -576,7 +576,15 @@ tasks:
         # of step with the image being presented, would show up as two runs
         # disagreeing. Without it this gate covers the feature not at all: no
         # other example allocates the layer.
-        for ex in "08-grass" "08-grass -timeofday 0.0" "08-grass -timeofday 0.03" "09-water" "12-particles" "06-skinned -demo" "15-kitchen-sink -demo" "09-water -plume -ghost -marker -submerged" "09-water -time 0.72 -yaw 1.771 -pitch -0.185 -pillars" "13-ui -glow on"; do
+        # The volumetric entry is the only one that marches in-scattering, and
+        # the march is the one thing in the renderer whose per-pixel result
+        # depends on a hash. volStartJitter has to be a function of
+        # gl_FragCoord and of nothing else -- seed it from the frame, the
+        # clock or anything that moves and every pixel of every beam changes
+        # run to run, which no other entry here would notice because no other
+        # entry turns the march on. -skylamp is in it because the sky's march
+        # is a second copy of the jitter in a second shader.
+        for ex in "08-grass" "08-grass -timeofday 0.0" "08-grass -timeofday 0.03" "09-water" "12-particles" "06-skinned -demo" "15-kitchen-sink -demo" "09-water -plume -ghost -marker -submerged" "09-water -time 0.72 -yaw 1.771 -pitch -0.185 -pillars" "13-ui -glow on" "21-streetlights -volumetric 1 -lampvolumetric 1 -skylamp"; do
           set -- $ex
           name=$1; shift
           shot 16.667ms $name a "$*"
