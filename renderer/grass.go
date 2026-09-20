@@ -129,6 +129,16 @@ type GrassSystem struct {
 	// visibleScratch, which each variant resets.
 	impostorScratch  []tileDraw
 	impostorVariants []variantTiles
+
+	// models is what InitGrass loaded to build Variants, set by InitGrass
+	// itself rather than by CreateGrassFromModels (a caller building a
+	// GrassSystem directly owns its own models and its own teardown). Recorded
+	// the way a Model records modelResources, so a replacing InitGrass call
+	// can give these back through DestroyModel instead of abandoning them the
+	// way the whole generation used to be abandoned (issue #87) -- see
+	// replaceGrass. Nil for a GrassSystem InitGrass never touches, which is
+	// exactly the set of GrassSystems that own nothing here to give back.
+	models []*Model
 }
 
 // GrassHeightmap is the minimal interface needed for grass instance placement.

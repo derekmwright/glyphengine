@@ -56,16 +56,25 @@ type grassImpostor struct {
 // enough here where it would not be for a tree: grass blades are thin and
 // near-symmetric about their vertical axis, and at the distance impostors take
 // over the parallax between one side and another is well under a pixel.
-func (r *Renderer) bakeGrassImpostors(cellSize int) error {
-	gs := r.grass
+//
+// Takes gs explicitly rather than reading r.grass: InitGrass calls this before
+// deciding whether to keep the previous generation's r.grass/r.grassImpostor
+// around (see replaceGrass), so at bake time the new GrassSystem is not yet
+// the live one and r.grass may still name the generation this call is about
+// to replace.
+//
+// Returns the built atlas rather than assigning r.grassImpostor itself, for
+// the same reason: only the caller knows whether this is the first bake or a
+// replacement, and only it can decide what to do with the previous one.
+func (r *Renderer) bakeGrassImpostors(gs *GrassSystem, cellSize int) (*grassImpostor, error) {
 	if gs == nil || len(gs.Variants) == 0 {
-		return nil
+		return nil, nil
 	}
 	// The cell index and count share one push-constant float, so the count is
 	// bounded by how they are packed. Failing here costs impostors and nothing
 	// else -- the caller logs and draws meshes at every distance.
 	if len(gs.Variants) > grassImpostorMaxCells {
-		return fmt.Errorf("grass impostor: %d variants exceeds the %d the atlas can index",
+		return nil, fmt.Errorf("grass impostor: %d variants exceeds the %d the atlas can index",
 			len(gs.Variants), grassImpostorMaxCells)
 	}
 
@@ -100,21 +109,21 @@ func (r *Renderer) bakeGrassImpostors(cellSize int) error {
 		}
 	}
 	if halfWidth <= 0 || tipHeight <= 0 {
-		return fmt.Errorf("grass impostor: variants have no bounds to frame")
+		return nil, fmt.Errorf("grass impostor: variants have no bounds to frame")
 	}
 	imp.worldHeight = tipHeight * grassBladeScale
 	imp.worldWidth = 2 * halfWidth * grassBladeScale
 
 	sampler, err := deviceSampler(r.deviceDriver)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	imp.sampler = sampler
 
 	img, mem, view, err := createOffscreenColor(r.instanceDriver, r.deviceDriver, r.physicalDevice, imp.extent)
 	if err != nil {
-		imp.destroy(r.deviceDriver)
-		return fmt.Errorf("grass impostor image: %w", err)
+		imp.destroy(r)
+		return nil, fmt.Errorf("grass impostor image: %w", err)
 	}
 	imp.image, imp.memory, imp.view = img, mem, view
 
@@ -122,8 +131,8 @@ func (r *Renderer) bakeGrassImpostors(cellSize int) error {
 	// the cutout rejects has to already be transparent black.
 	imp.renderPass, err = createGrassBakeRenderPass(r.deviceDriver)
 	if err != nil {
-		imp.destroy(r.deviceDriver)
-		return fmt.Errorf("grass impostor render pass: %w", err)
+		imp.destroy(r)
+		return nil, fmt.Errorf("grass impostor render pass: %w", err)
 	}
 
 	fb, _, err := r.deviceDriver.CreateFramebuffer(nil, core1_0.FramebufferCreateInfo{
@@ -134,15 +143,15 @@ func (r *Renderer) bakeGrassImpostors(cellSize int) error {
 		Layers:      1,
 	})
 	if err != nil {
-		imp.destroy(r.deviceDriver)
-		return fmt.Errorf("grass impostor framebuffer: %w", err)
+		imp.destroy(r)
+		return nil, fmt.Errorf("grass impostor framebuffer: %w", err)
 	}
 	imp.fb = fb
 
 	imp.pipeline, err = createGrassBakePipeline(r.deviceDriver, r.shaders, imp.renderPass, r.pipelineLayout)
 	if err != nil {
-		imp.destroy(r.deviceDriver)
-		return fmt.Errorf("grass impostor pipeline: %w", err)
+		imp.destroy(r)
+		return nil, fmt.Errorf("grass impostor pipeline: %w", err)
 	}
 
 	sets, _, err := r.deviceDriver.AllocateDescriptorSets(core1_0.DescriptorSetAllocateInfo{
@@ -150,10 +159,11 @@ func (r *Renderer) bakeGrassImpostors(cellSize int) error {
 		SetLayouts:     []core1_0.DescriptorSetLayout{r.descriptorSetLayout},
 	})
 	if err != nil {
-		imp.destroy(r.deviceDriver)
-		return fmt.Errorf("grass impostor descriptor set: %w", err)
+		imp.destroy(r)
+		return nil, fmt.Errorf("grass impostor descriptor set: %w", err)
 	}
 	imp.set = sets[0]
+	r.liveDescriptorSets++
 	if err := r.deviceDriver.UpdateDescriptorSets([]core1_0.WriteDescriptorSet{{
 		DstSet:         imp.set,
 		DstBinding:     0,
@@ -164,23 +174,25 @@ func (r *Renderer) bakeGrassImpostors(cellSize int) error {
 			ImageLayout: core1_0.ImageLayoutShaderReadOnlyOptimal,
 		}},
 	}}, nil); err != nil {
-		imp.destroy(r.deviceDriver)
-		return fmt.Errorf("grass impostor descriptor write: %w", err)
+		imp.destroy(r)
+		return nil, fmt.Errorf("grass impostor descriptor write: %w", err)
 	}
 
-	if err := r.recordGrassBake(imp, cellSize, halfWidth, tipHeight); err != nil {
-		imp.destroy(r.deviceDriver)
-		return err
+	if err := r.recordGrassBake(gs, imp, cellSize, halfWidth, tipHeight); err != nil {
+		imp.destroy(r)
+		return nil, err
 	}
 
-	r.grassImpostor = imp
 	log.Printf("Grass impostors: %dx%d atlas, %d cells, %.2f world units tall",
 		imp.extent.Width, imp.extent.Height, imp.cells, imp.worldHeight)
-	return nil
+	return imp, nil
 }
 
 // recordGrassBake draws every variant into its cell in one pass.
-func (r *Renderer) recordGrassBake(imp *grassImpostor, cellSize int, halfWidth, tipHeight float32) error {
+//
+// Takes gs for the same reason bakeGrassImpostors does: at bake time gs is
+// not necessarily r.grass yet.
+func (r *Renderer) recordGrassBake(gs *GrassSystem, imp *grassImpostor, cellSize int, halfWidth, tipHeight float32) error {
 	cmdBuf, err := r.beginSingleTimeCommands()
 	if err != nil {
 		return err
@@ -197,7 +209,7 @@ func (r *Renderer) recordGrassBake(imp *grassImpostor, cellSize int, halfWidth, 
 	}
 	r.deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, imp.pipeline)
 
-	for i, v := range r.grass.Variants {
+	for i, v := range gs.Variants {
 		if v.Mesh == nil {
 			continue
 		}
@@ -214,7 +226,7 @@ func (r *Renderer) recordGrassBake(imp *grassImpostor, cellSize int, halfWidth, 
 
 		tex := v.Texture
 		if tex == nil {
-			tex = r.grass.Texture
+			tex = gs.Texture
 		}
 		if tex == nil {
 			tex = r.fallbackTexture
@@ -274,30 +286,48 @@ func (r *Renderer) recordGrassBake(imp *grassImpostor, cellSize int, halfWidth, 
 	return r.endSingleTimeCommands(cmdBuf)
 }
 
-func (imp *grassImpostor) destroy(deviceDriver core1_0.DeviceDriver) {
+// destroy releases everything one bake allocated, including the descriptor
+// set it took from the pool -- the one addition issue #87 made. It takes *r*
+// rather than a bare device driver now, because giving the set back has to go
+// through r.freeDescriptorSets: that is the only place r.liveDescriptorSets
+// moves, and ResourceCounts.DescriptorSets is a lie the moment a set is freed
+// some other way.
+//
+// The set goes back FIRST, before the view and sampler it names, for the same
+// reason DestroyTexture orders itself that way: what the layer reports
+// otherwise is a sampler destroyed while a descriptor set still names it. Set
+// aside from that, the rest keeps the order it always had -- pipeline and
+// framebuffer before the render pass and view they were built against.
+//
+// Called both at bake-time error paths (before the atlas is ever live, so the
+// set may be its zero value; freeDescriptorSets skips that) and from
+// replaceGrass's deferred callback, once the frames that could still be
+// drawing this generation have retired.
+func (imp *grassImpostor) destroy(r *Renderer) {
 	if imp == nil {
 		return
 	}
+	r.freeDescriptorSets(imp.set)
 	if imp.pipeline.Handle() != 0 {
-		deviceDriver.DestroyPipeline(imp.pipeline, nil)
+		r.deviceDriver.DestroyPipeline(imp.pipeline, nil)
 	}
 	if imp.fb.Handle() != 0 {
-		deviceDriver.DestroyFramebuffer(imp.fb, nil)
+		r.deviceDriver.DestroyFramebuffer(imp.fb, nil)
 	}
 	if imp.renderPass.Handle() != 0 {
-		deviceDriver.DestroyRenderPass(imp.renderPass, nil)
+		r.deviceDriver.DestroyRenderPass(imp.renderPass, nil)
 	}
 	if imp.view.Handle() != 0 {
-		deviceDriver.DestroyImageView(imp.view, nil)
+		r.deviceDriver.DestroyImageView(imp.view, nil)
 	}
 	if imp.memory.Handle() != 0 {
-		deviceDriver.FreeMemory(imp.memory, nil)
+		r.deviceDriver.FreeMemory(imp.memory, nil)
 	}
 	if imp.image.Handle() != 0 {
-		deviceDriver.DestroyImage(imp.image, nil)
+		r.deviceDriver.DestroyImage(imp.image, nil)
 	}
 	if imp.sampler.Handle() != 0 {
-		deviceDriver.DestroySampler(imp.sampler, nil)
+		r.deviceDriver.DestroySampler(imp.sampler, nil)
 	}
 	*imp = grassImpostor{}
 }
