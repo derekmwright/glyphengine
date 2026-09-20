@@ -260,6 +260,7 @@ func (r *Renderer) CreateMaterial(opts MaterialOptions) (*Material, error) {
 		cleanup()
 		return nil, fmt.Errorf("allocate material descriptor set: %w", err)
 	}
+	r.liveDescriptorSets++
 	m.DescriptorSet = sets[0]
 
 	// Unsupplied slots get a neutral map rather than nothing. The shader skips
@@ -298,6 +299,7 @@ func (r *Renderer) CreateMaterial(opts MaterialOptions) (*Material, error) {
 		}},
 	})
 	if err := r.deviceDriver.UpdateDescriptorSets(writes, nil); err != nil {
+		r.freeDescriptorSets(m.DescriptorSet)
 		cleanup()
 		return nil, fmt.Errorf("update material descriptor set: %w", err)
 	}
@@ -307,8 +309,8 @@ func (r *Renderer) CreateMaterial(opts MaterialOptions) (*Material, error) {
 }
 
 // DestroyMaterial unregisters the material and defers releasing its uniform
-// buffer until every in-flight frame has finished referencing it. The
-// descriptor set goes back with the pool; the textures belong to the caller.
+// buffer and its descriptor set until every in-flight frame has finished
+// referencing them. The textures belong to the caller.
 func (r *Renderer) DestroyMaterial(m *Material) {
 	if m == nil || m.destroyed {
 		return
@@ -325,6 +327,14 @@ func (r *Renderer) DestroyMaterial(m *Material) {
 	}
 
 	r.DeferDestroy(func() {
+		// The set first: it names this buffer at binding 5 and the textures'
+		// views and samplers at 0..4, and it has to stop naming them before
+		// any of them go. Inside the deferral rather than freed above it for
+		// the reason the buffer is already deferred -- a submitted frame can
+		// still have this set bound, and unlike DestroyTexture there is
+		// nothing else here that is freed immediately for it to be safe
+		// alongside.
+		r.freeDescriptorSets(m.DescriptorSet)
 		r.deviceDriver.FreeMemory(m.uniformMemory, nil)
 		r.deviceDriver.DestroyBuffer(m.uniform, nil)
 	})

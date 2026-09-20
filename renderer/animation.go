@@ -77,6 +77,7 @@ func (r *Renderer) CreateJointBuffer() (*JointBuffer, error) {
 		cleanup()
 		return nil, fmt.Errorf("allocate joint descriptor sets: %w", err)
 	}
+	r.liveDescriptorSets += len(sets)
 	copy(jb.descriptorSets[:], sets)
 
 	writes := make([]core1_0.WriteDescriptorSet, maxFramesInFlight)
@@ -114,6 +115,13 @@ func (r *Renderer) DestroyJointBuffer(jb *JointBuffer) {
 		}
 	}
 	r.DeferDestroy(func() {
+		// The sets before the buffers they name, inside the same deferral, for
+		// the reasons DestroyMaterial does it: a submitted frame can still
+		// have this frame slot's set bound, and a set naming a freed buffer is
+		// the ordering the layer objects to. A skinned character created and
+		// released at runtime took maxFramesInFlight sets and gave none back
+		// before issue #82.
+		r.freeDescriptorSets(jb.descriptorSets[:]...)
 		for i := 0; i < maxFramesInFlight; i++ {
 			r.deviceDriver.UnmapMemory(jb.memories[i])
 			r.deviceDriver.FreeMemory(jb.memories[i], nil)

@@ -204,8 +204,28 @@ type Renderer struct {
 
 	descriptorSetLayout core1_0.DescriptorSetLayout
 	descriptorPool      core1_0.DescriptorPool
-	fallbackTexture     *Texture
-	textures            []*Texture
+
+	// liveDescriptorSets is how many sets the APPLICATION's resources hold
+	// from descriptorPool right now: one per Texture, one per Material, one
+	// per TerrainMaterial, maxFramesInFlight per JointBuffer. Kept by hand
+	// because Vulkan will not tell us -- there is no query for how much of a
+	// pool is spent, and the only signal it offers is the allocation that
+	// finally fails.
+	//
+	// It does NOT count the renderer's own pass sets (shadow, HDR, bloom,
+	// clouds, the scene-colour copy, the UI glow layer). Those are allocated
+	// in New and rebuilt on resize, so counting them would make this number
+	// move when a window is dragged, and what it exists for is the other
+	// thing entirely: it sits beside Meshes/Textures/Materials in
+	// ResourceCounts, which describe what the application created and can
+	// give back, and it is how a leak in that path reads as a number rather
+	// than as an out-of-pool-memory error 677 loads later. See
+	// freeDescriptorSets, and docs/agents/validation.md for what lives in the
+	// pool besides this.
+	liveDescriptorSets int
+
+	fallbackTexture *Texture
+	textures        []*Texture
 
 	// Material maps: set 0 = albedo/normal/metallic-roughness/occlusion
 	// samplers plus a per-material uniform buffer. fallbackNormal is the flat

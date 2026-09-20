@@ -72,6 +72,26 @@ type ResourceCounts struct {
 	Textures  int
 	Materials int
 
+	// DescriptorSets is how many sets those resources hold from the
+	// renderer's one descriptor pool: one per Texture, one per Material, one
+	// per TerrainMaterial, maxFramesInFlight per JointBuffer.
+	//
+	// It is not derivable from the three numbers above, which is the whole
+	// reason it is here. A set is the one thing a released model used to keep
+	// -- the pool was created without
+	// VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, so nothing could give
+	// one back, and the mesh, texture and material counts returned to their
+	// baseline on every reload while the pool drained anyway. It ran out on
+	// the 677th textured load, as an allocation failure a long way from the
+	// cause (issue #82).
+	//
+	// The renderer's own pass sets -- shadow, HDR, bloom, clouds, the
+	// scene-colour copy, the UI glow layer -- are not counted: they belong to
+	// the renderer's lifetime and its resizes, not to anything an application
+	// created. docs/agents/validation.md has the full list of what the pool
+	// holds.
+	DescriptorSets int
+
 	// Deferred is how many destruction callbacks are queued behind the frames
 	// in flight. DestroyModel routes everything through that queue, so a
 	// count taken immediately after it still includes the model: the
@@ -83,10 +103,11 @@ type ResourceCounts struct {
 // ResourceCounts returns the renderer's live GPU resource counts.
 func (r *Renderer) ResourceCounts() ResourceCounts {
 	return ResourceCounts{
-		Meshes:    len(r.meshes),
-		Textures:  len(r.textures),
-		Materials: len(r.materials),
-		Deferred:  len(r.deferredDestroys),
+		Meshes:         len(r.meshes),
+		Textures:       len(r.textures),
+		Materials:      len(r.materials),
+		DescriptorSets: r.liveDescriptorSets,
+		Deferred:       len(r.deferredDestroys),
 	}
 }
 
