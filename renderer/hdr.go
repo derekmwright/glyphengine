@@ -456,6 +456,9 @@ func createTonemapFramebuffers(deviceDriver core1_0.DeviceDriver, renderPass cor
 			Layers:      1,
 		})
 		if err != nil {
+			for _, made := range out[:i] {
+				deviceDriver.DestroyFramebuffer(made, nil)
+			}
 			return nil, fmt.Errorf("create tonemap framebuffer %d: %w", i, err)
 		}
 		out[i] = fb

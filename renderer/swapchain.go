@@ -1,6 +1,7 @@
 package renderer
 
 import (
+	"fmt"
 	"log"
 
 	"github.com/vkngwrapper/core/v3/core1_0"
@@ -182,7 +183,16 @@ func createSwapchain(
 			},
 		})
 		if err != nil {
-			return nil, nil, err
+			// The images themselves are the swapchain's, not ours to destroy,
+			// but the views already made in this loop are -- and so is the
+			// swapchain, since nothing else references it yet. Without this a
+			// failure here (recreateSwapchain can reach it on every rebuild,
+			// not just at startup) leaked both for the life of the process.
+			for _, made := range imageViews[:i] {
+				deviceDriver.DestroyImageView(made, nil)
+			}
+			swapchainExt.DestroySwapchain(swapchain, nil)
+			return nil, nil, fmt.Errorf("create swapchain image view %d: %w", i, err)
 		}
 		imageViews[i] = iv
 	}

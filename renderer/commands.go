@@ -1,6 +1,7 @@
 package renderer
 
 import (
+	"fmt"
 	"log"
 	"math"
 	"slices"
@@ -324,7 +325,14 @@ func createFramebuffers(deviceDriver core1_0.DeviceDriver, renderPass core1_0.Re
 			Layers:      1,
 		})
 		if err != nil {
-			return nil, err
+			// Give back whatever this call already made rather than leaving it
+			// for the caller: recreateSwapchain calls this on every rebuild, not
+			// just at startup, and it has nothing to destroy since a failure
+			// here means framebuffers is never assigned.
+			for _, made := range framebuffers[:i] {
+				deviceDriver.DestroyFramebuffer(made, nil)
+			}
+			return nil, fmt.Errorf("create framebuffer %d: %w", i, err)
 		}
 		framebuffers[i] = fb
 	}
