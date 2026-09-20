@@ -36,8 +36,12 @@ api:
   - renderer.ReadGLTFSkinned
   - renderer.Renderer.DestroyModel
   - renderer.Renderer.DestroySkinnedModel
+  - renderer.Renderer.DestroyTexture
+  - renderer.Renderer.DestroyMaterial
+  - renderer.Renderer.DestroyJointBuffer
   - renderer.ResourceCounts
   - renderer.Renderer.ResourceCounts
+  - renderer.ResourceCounts.DescriptorSets
 example: examples/08-grass
 run: task example:08-grass
 requires:
@@ -443,42 +447,92 @@ runs the same loop under the layer.
 ### Counting what is live
 
 ```go
-counts := r.ResourceCounts() // Meshes, Textures, Materials, Deferred
+counts := r.ResourceCounts() // Meshes, Textures, Materials, DescriptorSets, Deferred
 ```
 
-The renderer's own cleanup lists, plus how many destructions are still waiting
-out the frames in flight. It is exported because a check that teardown happened
-cannot otherwise be written from outside the package, and this repo has shipped
-a teardown test that reported zero leaks because teardown never ran.
+The renderer's own cleanup lists, the descriptor sets those resources hold, and
+how many destructions are still waiting out the frames in flight. It is
+exported because a check that teardown happened cannot otherwise be written
+from outside the package, and this repo has shipped a teardown test that
+reported zero leaks because teardown never ran.
 
 `Deferred` is not a detail: a count taken immediately after `DestroyModel`
 still includes the model, because those resources are genuinely still alive.
 
-### The limit: descriptor sets are not returned
+`DescriptorSets` is not derivable from the other three, which is why it is
+there — see the next section for what it cost to find that out. It counts one
+set per `Texture`, one per `Material`, one per `TerrainMaterial` and two (one
+per frame in flight) per `JointBuffer`. It does not count the renderer's own
+pass sets; `docs/agents/validation.md` lists what else lives in that pool.
 
-Measured on Windows 11 with `22-level -reload N -level
-renderer/testdata/blender/level.glb`, a level carrying one texture: **676
-reloads succeed and the 677th fails.**
+### The descriptor set goes back too — and the 676-reload wall is gone
+
+The set is returned now. Same measurement that found the wall,
+`22-level -reload 700 -level renderer/testdata/blender/level.glb` on Windows
+11 with an RX 7900 XTX, a level carrying one texture and no material: **700
+reloads, 50 seconds, and the set count identical at the top of every cycle.**
+
+```
+-reload: 700 swaps done; one level is 9 meshes, 1 textures, 0 materials,
+1 descriptor sets, and the renderer tracked the same 20/4/0/4 at the top of
+every cycle
+```
+
+Keep the history, because it is why the gate is 700 cycles and not 20. Before
+issue #82 the same command failed, and the shape of that failure is worth
+recognising:
 
 ```
 -reload: reloading the level: load level.glb: load gltf images:
 upload texture 0 (GroundTex): allocate descriptor set: vulkan error: out of pool memory
 ```
 
-Every `Texture` and every `Material` allocates a descriptor set from the
-renderer's single pool, and that pool is created without
-`VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT`, so nothing can give a set
-back short of resetting the whole pool. `DestroyModel` releases the image, the
-view, the sampler and the memory; the descriptor set is the one thing it
-cannot.
+**676 loads succeeded and the 677th failed.** Every `Texture` and every
+`Material` takes a set from the renderer's single pool, the pool was created
+without `VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT`, so
+`vkFreeDescriptorSets` was not a legal call on it and nothing could give a set
+back. `DestroyModel` released the image, the view, the sampler and the memory;
+the set was the one thing it could not. Nothing else about the model
+accumulated — the mesh, texture and material counts returned to identical
+numbers at the top of every cycle, all 676 of them — and a level with no
+textures (`22-level`'s built-in one) took no set and reloaded indefinitely,
+which is exactly why `task reload` watched this happen twenty times and
+reported nothing.
 
-Nothing else about the model accumulates: across those cycles the mesh, texture
-and material counts return to the identical numbers at the top of every one,
-and a level with no textures (`22-level`'s built-in one) consumes no set at all
-and reloads indefinitely. So this bounds how many TEXTURED models one process
-may load over its lifetime, not how long a reload loop can run. Fixing it means
-the pool flag plus a deferred `vkFreeDescriptorSets`, which changes behaviour
-for every texture in the engine and is deliberately not part of this.
+Where the set is freed, and why there:
+
+- **`DestroyTexture` frees it immediately**, before the view and sampler it
+  names. Everything else that function owns is freed immediately too, so the
+  set's exposure to a frame in flight is exactly the sampler's, and it is the
+  caller's to arrange — `DestroyModel` runs the whole call through
+  `DeferDestroy`, and `Renderer.Destroy` has already idled the device.
+- **`DestroyMaterial` and `DestroyJointBuffer` free it inside the deferral
+  they already queue** for the uniform buffers that set names. There is
+  nothing immediate in those for it to be safe alongside.
+
+In both cases the set is freed *before* the objects it names, which is the
+order `Renderer.Destroy` already sweeps in.
+
+**The validation layer will not tell you if you get that wrong.** Measured,
+both directions, on `22-level -reload 20` under the layer:
+
+- Set freed immediately, while only already-submitted frames still referenced
+  it (the despawn left in place): **zero messages over twenty cycles, exit 0.**
+  What caught it was `ResourceCounts` — the count dropped in the same tick as
+  the swap, and the reload loop asserts it does not.
+- Set freed while it was still in the live draw list (the despawn removed):
+  the layer does speak, with
+  `VUID-vkFreeDescriptorSets-pDescriptorSets-00309`, "pDescriptorSets[0]
+  VkDescriptorSet … is in use by VkCommandBuffer …". Free it immediately in
+  that state and the complaint moves to the next *bind* instead —
+  `VUID-vkCmdBindDescriptorSets-pDescriptorSets-parameter` ("Invalid
+  VkDescriptorSet Object"), `…-graphicsPipelineLibrary-06754` ("that does not
+  exist") and `VUID-vkCmdDrawIndexed-None-08600` ("uses set #0 but that set is
+  not bound").
+
+So the layer reports a set that is still being *drawn with*, and says nothing
+about one that is merely still in flight. That is the same blind spot #72
+recorded for the sampler, and the reason the count exists.
 
 ## Memory
 

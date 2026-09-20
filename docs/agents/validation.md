@@ -10,13 +10,14 @@ since: v0.2.0
 api:
   - glyphengine.WithValidation
   - renderer.WithValidation
+  - renderer.ResourceCounts.DescriptorSets
 run: task validate
 requires:
   - cgo
   - vulkan-runtime
   - vulkan-sdk
 assets: none
-verified: 2026-07-28
+verified: 2026-09-19
 ---
 
 # Enable Vulkan validation and find resource leaks
@@ -122,6 +123,46 @@ Two consequences worth knowing when adding a resource to `New`:
 Resources created *after* `New` — textures, meshes, the lazy diagnostic
 triangle pipeline — are owned by the application and destroyed by `Destroy`
 before the unwind.
+
+## What lives in the descriptor pool
+
+The renderer has exactly one `VkDescriptorPool`, sized in `createDescriptorPool`
+(`renderer/texture.go`), and it is created with
+`VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT` so that sets can be given
+back at all. Three lifetimes come out of it, and the difference is worth knowing
+before adding a fourth:
+
+- **Returned when the resource is released.** One set per `Texture`, one per
+  `Material`, one per `TerrainMaterial`, two (one per frame in flight) per
+  `JointBuffer`. These are what a game's own loads and releases move, they are
+  the ones `ResourceCounts().DescriptorSets` counts, and until issue #82 none of
+  them came back — a textured level could be reloaded 676 times and the 677th
+  load failed with `out of pool memory`. `docs/agents/models.md` has that
+  measurement and where each set is now freed.
+- **Returned when the swapchain is rebuilt.** The HDR target's scene and
+  tonemap sets, the bloom chain's (`bloomLevels` per swapchain image), the
+  cloud targets', the scene-colour copy's, and the UI glow layer's own colour
+  target and bloom chain. `recreateSwapchain` destroys and rebuilds all of
+  these — on any rebuild, not only a resize — and each target's `destroy` frees
+  its own sets. These are *not* counted in `ResourceCounts`: they belong to the
+  renderer, and a number that moved when a window was dragged would be no use
+  to the reload gate that watches the other kind. Before #82 they were not
+  freed either: `13-ui -glow on` with `GLYPHENGINE_PROVOKE_RECREATE_FRAMES`
+  every other frame died on the 16th rebuild with `allocate bloom descriptor
+  sets 1: vulkan error: out of pool memory`. It survives 96 rebuilds silently
+  now, as does `09-water`.
+- **Never returned before `vkDestroyDescriptorPool`.** The shadow pass's
+  per-frame sets, allocated in `New`, and the grass impostor atlas's one set,
+  allocated by `InitGrass`. Both live for the renderer's lifetime, so there is
+  nothing to give back until the pool itself goes; no leak, and nothing to
+  count. (A second `InitGrass` would abandon the whole atlas — images, views,
+  framebuffer and pipeline, not only the set — which is a different bug from
+  this one and not one anything here checks.)
+
+If you add a set to the pool, decide which of those three it is and say so
+where you allocate it. The pool is a fixed budget — `MaxSets` is 708 on the
+numbers in that file today — and the only signal Vulkan gives when a lifetime
+is wrong is the allocation that eventually fails, a long way from the cause.
 
 ## Failure modes
 
