@@ -124,6 +124,17 @@ Resources created *after* `New` — textures, meshes, the lazy diagnostic
 triangle pipeline — are owned by the application and destroyed by `Destroy`
 before the unwind.
 
+`recreateSwapchain` cannot reuse `initStack` for its own rebuild, even though
+it is the same creation-order-in-reverse-order-out shape: `initStack`'s
+closures already read every swapchain-dependent field through `r`, precisely
+so they find whatever the last successful rebuild left there without needing
+an entry of their own, and `Destroy` unwinds `initStack` exactly once, at the
+end of the renderer's life. Pushing a rebuild's own steps onto it would run
+that rebuild's teardown again at that point, once per resize the renderer
+ever survived. It gets its own scoped stack instead — `rebuildUndo`, pushed to
+and unwound the same way, but local to one `recreateSwapchain` call and
+discarded when that call returns. See the next section for what it is for.
+
 ## What lives in the descriptor pool
 
 The renderer has exactly one `VkDescriptorPool`, sized in `createDescriptorPool`
@@ -173,6 +184,87 @@ where you allocate it. The pool is a fixed budget — `MaxSets` is 708 on the
 numbers in that file today — and the only signal Vulkan gives when a lifetime
 is wrong is the allocation that eventually fails, a long way from the cause.
 
+## A failed rebuild does not draw with a half-built target
+
+Issue #86, found while measuring the pool exhaustion above: before this fix,
+`recreateSwapchain` destroyed everything it was about to replace
+unconditionally, then rebuilt each piece with a bare `return err` on failure.
+A step failing partway through left whatever it returned (`nil`, on every
+atomic constructor here) sitting in the corresponding field, with nothing
+before it torn back down either — some fields nil, others still pointing at
+handles the teardown a few lines above had already destroyed. `DrawFrame`
+returned that error correctly, but `app.go` has never stopped the loop on a
+draw error, so the next frame read straight through whichever of those was
+reached first and either panicked or corrupted a frame, depending on which
+step failed.
+
+`recreateSwapchain` now unwinds a failed rebuild the same shape `New` unwinds
+a failed construction: everything the attempt created is torn down again and
+the fields it touched go back to `nil`, through `rebuildSwapchainTargets`'s
+`rebuildUndo` stack. `acquireImage` checks for exactly that (`r.sc == nil`)
+before touching the swapchain and retries the rebuild instead of
+dereferencing it, so the next `DrawFrame` either succeeds once the rebuild can
+complete or returns the same wrapped error again — never a nil pointer.
+
+Proven two ways:
+
+- **GPU-free**, in `renderer/recreateswapchain_test.go`: a fake driver fails a
+  named call (`AllocateDescriptorSets`, `CreateImage`, `CreateFramebuffer`) on
+  the Nth invocation, and the test counts every Vulkan object kind created
+  against how many were destroyed.
+- **On the GPU**, by wrapping the real device driver so the Nth
+  `AllocateDescriptorSets` call fails regardless of how many the renderer's
+  own construction already made — a temporary, reverted test-only edit; a
+  smaller descriptor pool turned out not to reproduce this on its own, because
+  #82 already made a normal rebuild pool-neutral (old sets are freed before
+  new ones are allocated, so nothing here grows the way #82's own bug did).
+  Reproduced on `13-ui -glow on`, `GLYPHENGINE_PROVOKE_RECREATE_FRAMES=2`,
+  failing the first `AllocateDescriptorSets` call after construction (call
+  #17; construction itself takes exactly 16):
+
+  Before this fix, the process did not print a Go panic at all — the nil
+  read crossed into the driver's own state and Windows reported a heap
+  corruption rather than a clean `SIGSEGV`-shaped panic:
+
+  ```
+  BREAK-TEST: failing AllocateDescriptorSets call #17 on purpose
+  glyphengine: draw error: allocate hdr descriptor sets: vulkan error: out of pool memory
+  exit status 0xc0000374
+  ```
+
+  After this fix, same run, `GLYPHENGINE_VALIDATION=1` added: the error names
+  the step, the very next `DrawFrame` retries the rebuild and succeeds, and
+  the run finishes clean —
+
+  ```
+  BREAK-TEST: failing AllocateDescriptorSets call #17 on purpose
+  glyphengine: draw error: renderer: recreate HDR targets: allocate hdr descriptor sets: vulkan error: out of pool memory
+  Swapchain recreated: 1280x720
+  rendered 10 frames
+  Renderer destroyed
+  ```
+
+  with nothing matching `VULKAN ERROR`, `VULKAN WARNING` or `panic` anywhere
+  in the log. A second run left the failure permanent (every
+  `AllocateDescriptorSets` call from #17 on, three rebuilds provoked across
+  12 frames) to check the deterministic case — a resource that never
+  recovers, which is what the original pool exhaustion was — and every retry
+  produced the identical wrapped error, every frame still rendered, and
+  `Renderer destroyed` still completed with validation on and nothing
+  reported. That second run is also what caught two more nil derefs this fix
+  needed: `Aspect`/`Extent` (read by a game's own per-frame code, not only by
+  `DrawFrame`) and `New`'s own swapchain/depth teardown closures at `Destroy`
+  time, both fixed alongside this one — see the commits.
+
+The swapchain-recreation step itself (`createSwapchain`) is not reachable by
+the fake driver: it goes through
+`khr_swapchain.CreateExtensionDriverFromCoreDriver`, which dereferences a real
+device's function table, so a fake driver segfaults rather than returning an
+error. Its own partial-failure case (a `CreateImageView` failing partway
+through the per-image loop) is still fixed — the swapchain and the views made
+before the failure are given back — just checked under `task validate`
+instead of GPU-free.
+
 ## Failure modes
 
 - **"validation requested but VK_LAYER_KHRONOS_validation is not installed".**
@@ -185,3 +277,8 @@ is wrong is the allocation that eventually fails, a long way from the cause.
   per-call state tracking. Do not benchmark with it enabled.
 - **A flood of the same message every frame.** The layer does not deduplicate.
   Fix the first one; the rest are usually the same root cause.
+- **A construction failure inside a swapchain rebuild used to panic instead of
+  returning.** Fixed by issue #86 — see "A failed rebuild does not draw with a
+  half-built target" above. If you see a nil dereference on the frame after a
+  `renderer: recreate ...` draw error on a tree older than that fix, this is
+  it.
