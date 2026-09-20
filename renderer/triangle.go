@@ -127,6 +127,14 @@ func createTrianglePipeline(
 // The pipeline is built lazily on first call and torn down by Destroy, so
 // programs that never call this pay nothing for it.
 func (r *Renderer) DrawTriangle() error {
+	// A previous rebuild (triggered from here or from DrawFrame, if a
+	// program somehow drives both) failed partway through and left no live
+	// swapchain; see recreateSwapchain and issue #86. Retry it before
+	// touching r.sc rather than dereferencing what is not there.
+	if r.sc == nil {
+		return r.recreateSwapchain()
+	}
+
 	if r.trianglePipeline == nil {
 		pipeline, layout, err := createTrianglePipeline(r.deviceDriver, r.shaders, r.renderPass, r.sc.extent, r.msaaSamples)
 		if err != nil {

@@ -35,7 +35,18 @@ type Renderer struct {
 	graphicsQueue core1_0.Queue
 	presentQueue  core1_0.Queue
 
-	sc                     *swapchainDetails
+	sc *swapchainDetails
+	// lastExtent is the most recent extent a fully successful swapchain
+	// build (New or a completed recreateSwapchain) actually produced. Aspect
+	// and Extent read this rather than r.sc.extent directly: r.sc is nil
+	// while a rebuild attempt has failed and not yet been retried (see
+	// recreateSwapchain and issue #86), and a game's own per-frame Update
+	// calls those two -- 13-ui does, for its layout -- independently of
+	// whether the last DrawFrame succeeded. Answering with the last extent
+	// that actually existed is correct rather than merely safe: nothing
+	// about the picture has moved just because the next rebuild has not
+	// completed yet.
+	lastExtent             core1_0.Extent2D
 	renderPass             core1_0.RenderPass
 	pipelineLayout         core1_0.PipelineLayout // non-lit (sky, stars, overlay, msdf, ui)
 	litPipelineLayout      core1_0.PipelineLayout // lit static: set 0=tex, set 1=shadow
@@ -614,8 +625,15 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create swapchain: %w", err)
 	}
-	// Reads r.sc at unwind time: recreateSwapchain replaces it on resize.
+	r.lastExtent = r.sc.extent
+	// Reads r.sc at unwind time: recreateSwapchain replaces it on resize --
+	// and, since issue #86, can leave it nil if the renderer's last rebuild
+	// attempt failed and the program exits before a later one succeeds. Nil
+	// guarded here for the same reason msaa's step below already was.
 	r.onInit(func() {
+		if r.sc == nil {
+			return
+		}
 		for _, iv := range r.sc.imageViews {
 			r.deviceDriver.DestroyImageView(iv, nil)
 		}
@@ -627,7 +645,13 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create depth resources: %w", err)
 	}
-	r.onInit(func() { r.depth.destroy(r.deviceDriver, len(r.depth.views)) })
+	// Guarded for the same reason the swapchain step just above is: a failed
+	// rebuild (issue #86) can leave r.depth nil at Destroy time.
+	r.onInit(func() {
+		if r.depth != nil {
+			r.depth.destroy(r.deviceDriver, len(r.depth.views))
+		}
+	})
 
 	// Step 6b: MSAA color images (when MSAA is enabled). These are the scene
 	// pass's colour attachment and resolve into the HDR target, so they carry
@@ -1415,13 +1439,19 @@ func (r *Renderer) UpdateParticleInstances(instances []ParticleInstance) {
 }
 
 // Aspect returns the swapchain aspect ratio.
+//
+// Answers from the last successful build even mid-rebuild, when r.sc is
+// momentarily nil -- see lastExtent.
 func (r *Renderer) Aspect() float32 {
-	return float32(r.sc.extent.Width) / float32(r.sc.extent.Height)
+	return float32(r.lastExtent.Width) / float32(r.lastExtent.Height)
 }
 
 // Extent returns the swapchain pixel dimensions.
+//
+// Answers from the last successful build even mid-rebuild, when r.sc is
+// momentarily nil -- see lastExtent.
 func (r *Renderer) Extent() (int, int) {
-	return r.sc.extent.Width, r.sc.extent.Height
+	return r.lastExtent.Width, r.lastExtent.Height
 }
 
 // NotifyResize flags that the framebuffer was resized so the swapchain is
@@ -1602,6 +1632,11 @@ func (r *Renderer) recreateSwapchain() error {
 		undo.unwind()
 		return err
 	}
+
+	// Only now, on full success: Aspect and Extent read this rather than
+	// r.sc.extent directly, and must keep answering with whatever the last
+	// complete rebuild actually produced for as long as this one has not.
+	r.lastExtent = r.sc.extent
 
 	log.Printf("Swapchain recreated: %dx%d", r.sc.extent.Width, r.sc.extent.Height)
 	return nil
