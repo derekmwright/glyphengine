@@ -509,9 +509,13 @@ func TestMeshInstances(t *testing.T) {
 		{Name: "Empty", Mesh: -1}, // no mesh at all
 	}
 
-	// BROKEN this way: "doc mesh 0 instances = [0 1 2], want [0 1]" --
-	// Ground (node 2, doc mesh 1) leaking into doc mesh 0's group. Restored
-	// with `git checkout -- renderer/model.go`.
+	// BROKEN: changed meshInstances' equality test from `nodes[i].Mesh ==
+	// docMesh` to `nodes[i].Mesh >= 0` (matching any node with a mesh at
+	// all). FAILED with: "doc mesh 0 instances = [0 1 2], want [0 1] (LampA,
+	// LampB)" -- and the other two assertions below failed the same way,
+	// each returning every mesh-bearing node rather than the ones actually
+	// naming the doc mesh asked for. Restored with
+	// `git checkout -- renderer/model.go`.
 	if got := meshInstances(nodes, 0); len(got) != 2 || got[0] != 0 || got[1] != 1 {
 		t.Errorf("doc mesh 0 instances = %v, want [0 1] (LampA, LampB)", got)
 	}
