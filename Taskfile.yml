@@ -222,6 +222,19 @@ tasks:
         # instance -- that a hand-authored fixture never exercises. See
         # renderer/testdata/blender/README.md and docs/agents/blender-pipeline.md.
         check 22-level -level ../renderer/testdata/blender/level.glb
+        # -instanced (issue #71): batches every doc mesh shared by several
+        # static nodes into one renderer.InstanceSet instead of one entity
+        # per node. No stock run above takes this path at all -- the whole
+        # instancedGroupCandidate/spawnInstancedGroup/spawnInstancedCollider
+        # machinery in examples/22-level/main.go, and the InstanceSet upload
+        # it drives, is otherwise untested under the layer. Both level
+        # files: the built-in one instances two doc meshes (four buildings,
+        # four lamp posts), the Blender export instances one
+        # (Building/Building_Linked) through a different sharing mechanism
+        # (Alt-D rather than a hand-written duplicate) -- see
+        # docs/agents/instancing.md.
+        check 22-level -instanced
+        check 22-level -instanced -level ../renderer/testdata/blender/level.glb
         # Renderer.DestroyModel, which no stock run reaches: 22-level swaps the
         # level for a freshly loaded copy twenty times over, releasing each old
         # model while frames that drew it are still in flight. That is the case
