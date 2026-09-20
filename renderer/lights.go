@@ -48,6 +48,25 @@ const (
 	//
 	// Set by the caller that packs the lights, not derived in the shader:
 	// deriving it would mean the loop this exists to avoid.
+	//
+	// A PER-CELL "has volumetric" bit was considered and not built, and the
+	// reason is a measurement rather than a preference. 21-streetlights at
+	// 1920x1080, every light in the same places, three ways, means of three
+	// interleaved 200-frame runs of the opaque pass:
+	//
+	//	no light scatters (this flag clear)            0.121 ms
+	//	7 spots scatter, 20 lamps tested and skipped   0.973 ms
+	//	all 27 scatter and are evaluated               0.980 ms
+	//
+	// Fully evaluating twenty more lights costs 0.007 ms against loading and
+	// skipping them: the per-light test is already within 1% of free. What
+	// the march costs is the 0.85 ms between the first row and the other two,
+	// and that is the steps and the per-step cell lookup, which a per-cell
+	// bit does not touch for any cell that holds a volumetric light -- which
+	// is every cell a visible beam passes through. It could only help a scene
+	// where the marched cells mostly hold non-volumetric lights, and nothing
+	// measured here is that scene. If one turns up, this is the number to
+	// beat.
 	LightFlagVolumetric uint32 = 1 << 2
 )
 
