@@ -42,13 +42,14 @@ api:
   - renderer.ResourceCounts
   - renderer.Renderer.ResourceCounts
   - renderer.ResourceCounts.DescriptorSets
+  - renderer.ResourceCounts.InstanceSets
 example: examples/08-grass
 run: task example:08-grass
 requires:
   - cgo
   - vulkan-runtime
 assets: bundled
-verified: 2026-09-19
+verified: 2026-09-20
 ---
 
 # Treat a loaded model as geometry, not only as a draw call
@@ -447,7 +448,7 @@ runs the same loop under the layer.
 ### Counting what is live
 
 ```go
-counts := r.ResourceCounts() // Meshes, Textures, Materials, DescriptorSets, Deferred
+counts := r.ResourceCounts() // Meshes, Textures, Materials, DescriptorSets, InstanceSets, Deferred
 ```
 
 The renderer's own cleanup lists, the descriptor sets those resources hold, and
@@ -533,6 +534,28 @@ both directions, on `22-level -reload 20` under the layer:
 So the layer reports a set that is still being *drawn with*, and says nothing
 about one that is merely still in flight. That is the same blind spot #72
 recorded for the sampler, and the reason the count exists.
+
+### An instanced level's InstanceSets are released too
+
+`examples/22-level -instanced -reload N` (issue #84) is the same swap with
+the level's repeated props batched into `InstanceSet`s (see
+[`instancing.md`](instancing.md#turning-a-levels-repeated-nodes-into-instances))
+instead of one entity per node. `Renderer.DestroyInstanceSet` gives each
+set's buffer back the same way `DestroyModel` gives a model's resources back
+-- deferred past the frames in flight, because the harder case is the same
+one: the new level's sets are already in the draw list before the old ones
+are released, in the same tick.
+
+An `InstanceSet` holds no descriptor set of its own -- it is a plain vertex
+buffer of placements, not a pool allocation -- so it needed a count of its
+own rather than riding along on `DescriptorSets`: a `DestroyInstanceSet` that
+did nothing would leave all four numbers above at their baseline while an
+`InstanceSet`'s buffer leaked every cycle, silently, since nothing else here
+would move. `ResourceCounts.InstanceSets` is that count, kept the same way
+the others are -- not decremented until the deferred free actually runs. See
+[`instancing.md`](instancing.md#releasing-one) for the API, the measured
+`-reload -instanced` counts on both committed level files, and the three
+breaks recorded against it.
 
 ## Memory
 
