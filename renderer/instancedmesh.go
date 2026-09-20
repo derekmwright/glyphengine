@@ -216,11 +216,12 @@ func (s *InstanceSet) recomputeBounds(instances []MeshInstance) {
 // recordInstanced/recordInstancedShadow at the moment a game decides to give
 // it back -- the harder case, not the easier one, is a level's -reload swap,
 // where the set is replaced and released in the same tick the new one starts
-// drawing. Freeing now instead of deferring is silent, not caught by the
-// validation layer: the layer reports a buffer still named by the live draw
-// list (VUID-vkDestroyBuffer-buffer-00922), but has nothing to say about one
-// referenced only by a frame already submitted -- see the break recorded in
-// docs/agents/instancing.md.
+// drawing. Measured, not assumed: freeing now instead of deferring produced
+// zero validation-layer messages in every configuration tried, including
+// with the draw list still naming the freed set -- the nil Mesh below (and,
+// short of that, examples/22-level's own ResourceCounts assertion) always
+// wins the race to notice first, so the layer never gets a turn. See the
+// break recorded in docs/agents/instancing.md for exactly what was tried.
 //
 // Everything the deferred callback needs (buffer, memory, mapped pointer) is
 // captured into locals before this returns, and s's own copies are zeroed
