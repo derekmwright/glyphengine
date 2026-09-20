@@ -86,6 +86,7 @@ func runBlenderFixtureChecks(t *testing.T, path string) {
 	t.Run("ParentChain", func(t *testing.T) { checkParentChain(t, doc) })
 	t.Run("LoadedTilingAndAlpha", func(t *testing.T) { checkLoadedTilingAndAlpha(t, doc) })
 	t.Run("Instancing", func(t *testing.T) { checkInstancing(t, doc) })
+	t.Run("MeshInstances", func(t *testing.T) { checkMeshInstances(t, doc) })
 }
 
 // nodeIndexByName returns the index of the first doc.Nodes entry named
@@ -676,5 +677,70 @@ func checkInstancing(t *testing.T, doc *gltf.Document) {
 	}
 	if got := doc.Accessors[posAccessor].Count; got != 384 {
 		t.Errorf("GNSourcePoints POSITION accessor count = %d, want 384 (3 scattered copies of Cone's 128 vertices)", got)
+	}
+}
+
+// checkMeshInstances is issue #71's ground truth for Model.MeshInstances --
+// NodeMeshes' inverse -- against a REAL export rather than only the
+// in-memory documents TestMeshInstances (renderer/gltfnodes_test.go) builds
+// by hand. Two independent doc-mesh-sharing mechanisms in this file, so the
+// same accessor is checked against both:
+//
+//   - Building / Building_Linked (checkSharedMeshAndDuplicate's Alt-D pair)
+//     share ONE doc mesh through object.copy() -- ordinary duplication.
+//   - The two collection-instance Prop children (checkInstancing's
+//     PropCollectionInstance / PropCollectionInstance2) share a SECOND doc
+//     mesh through a completely different mechanism, an instancing empty
+//     gaining a child node per instance.
+//
+// Both must hand MeshInstances back BOTH node indices, in glTF node order --
+// the same thing ModelMesh.Node cannot do, since it only ever names the
+// first.
+//
+// BROKEN: changed meshInstances' equality test from `nodes[i].Mesh ==
+// docMesh` to `nodes[i].Mesh >= 0`. FAILED with: "Building doc mesh 1
+// instances = [0 1 2 3 4 5 9 10 12 14 16], want [1 2]" and "Prop doc mesh 7
+// instances = [0 1 2 3 4 5 9 10 12 14 16], want [12 14]" -- both checks
+// returning the identical list of every mesh-bearing node in the file
+// rather than the two that actually share each doc mesh, confirming they
+// read the real doc mesh boundary rather than passing regardless. Restored
+// with `git checkout -- renderer/model.go`.
+func checkMeshInstances(t *testing.T, doc *gltf.Document) {
+	nodes := extractNodes(doc)
+
+	buildingIdx := nodeIndexByName(doc, "Building")
+	dupIdx := nodeIndexByName(doc, "Building_Linked")
+	if buildingIdx < 0 || dupIdx < 0 {
+		t.Fatal("Building or Building_Linked node not found")
+	}
+	docMesh := nodes[buildingIdx].Mesh
+	if docMesh < 0 {
+		t.Fatal("Building carries no mesh")
+	}
+	if got := meshInstances(nodes, docMesh); len(got) != 2 || got[0] != buildingIdx || got[1] != dupIdx {
+		t.Errorf("Building doc mesh %d instances = %v, want [%d %d] (Building, Building_Linked, in node order)",
+			docMesh, got, buildingIdx, dupIdx)
+	}
+
+	inst1 := nodeIndexByName(doc, "PropCollectionInstance")
+	inst2 := nodeIndexByName(doc, "PropCollectionInstance2")
+	if inst1 < 0 || inst2 < 0 {
+		t.Fatal("PropCollectionInstance or PropCollectionInstance2 not found")
+	}
+	if len(doc.Nodes[inst1].Children) != 1 || len(doc.Nodes[inst2].Children) != 1 {
+		t.Fatal("collection instance nodes do not each carry exactly one child")
+	}
+	child1, child2 := doc.Nodes[inst1].Children[0], doc.Nodes[inst2].Children[0]
+	propDocMesh := nodes[child1].Mesh
+	if propDocMesh < 0 {
+		t.Fatal("Prop child carries no mesh")
+	}
+	wantFirst, wantSecond := child1, child2
+	if child2 < child1 {
+		wantFirst, wantSecond = child2, child1
+	}
+	if got := meshInstances(nodes, propDocMesh); len(got) != 2 || got[0] != wantFirst || got[1] != wantSecond {
+		t.Errorf("Prop doc mesh %d instances = %v, want [%d %d] (both collection instances' Prop children, in node order)",
+			propDocMesh, got, wantFirst, wantSecond)
 	}
 }
