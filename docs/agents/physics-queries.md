@@ -36,7 +36,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-09-19
+verified: 2026-09-21
 ---
 
 # Colliders, raycasts, overlap queries, and body integration
@@ -119,8 +119,13 @@ for _, ov := range scene.OverlapAABB(box, self) {
 }
 ```
 
-`OverlapAABB` allocates its result slice, which makes it safe to call from the
-parallel movement goroutines.
+`OverlapAABB` owns its result slice, so calls from parallel movement goroutines
+do not share scratch storage. The built-in queries visit frozen grid cells
+directly without allocating candidate lists. An AABB-only raycast or an overlap
+query with no hits therefore allocates nothing; overlap hits still allocate
+their returned results. `BenchmarkRaycastGrid` and `BenchmarkOverlapGridMiss`
+cover both grids populated with 64 colliders: each went from 6 allocations and
+1,792 bytes per query to zero.
 
 **Results are ordered by ascending entity id.** That is part of the contract,
 not an implementation detail: candidates come off the spatial grid, whose
@@ -211,9 +216,10 @@ way `colliderAABB` does.
 
 **A replacement must not keep scratch state shared across calls.** Raycast and
 OverlapAABB run concurrently from multiple goroutines during
-`MoveCharactersParallel` — the built-in implementation uses
-`SpatialGrid.QueryRadiusAlloc`, which allocates a fresh slice per call, rather
-than `QueryRadius`, which reuses one and is documented NOT safe for this.
+`MoveCharactersParallel` — the built-in implementation reads frozen grid cells
+directly and keeps query state local to each call. A backend collecting its own
+candidates can use `SpatialGrid.QueryRadiusAlloc`; `QueryRadius` reuses a shared
+buffer and is documented NOT safe for this.
 `controller_race_test.go`-style coverage with a custom backend installed is in
 `query_backend_test.go` (`TestMoveCharactersParallelRaceWithCustomQueryBackend`).
 

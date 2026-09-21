@@ -23,7 +23,7 @@ api:
   - renderer.RenderStats
 assets: none
 run: task bench
-verified: 2026-09-19
+verified: 2026-09-21
 ---
 
 # Measuring frame cost
@@ -168,6 +168,28 @@ everyone but its author. Run it before and after a change on the same machine.
 two commits yourself. `-repeat N` keeps the fastest of N runs, on the grounds
 that a slow run means something else interfered and there is no such thing as a
 spuriously fast one.
+
+## CPU allocations
+
+Use the GPU-free benchmarks to isolate a CPU path from presentation and frame
+pacing. `-benchmem` reports allocations and bytes per operation:
+
+```sh
+go test . -run '^$' -bench 'Benchmark(RaycastGrid|OverlapGridMiss|OverlapAABB|FindPath)$' -benchmem -count 3
+go test ./renderer -run '^$' -bench 'Benchmark(RecordCommandBuffer|MSDFGeometry)$' -benchmem -count 3
+go test ./renderer/lightcluster -run '^$' -bench BenchmarkBuild -benchmem -count 3
+```
+
+For allocation attribution, add `-memprofile alloc.prof` to one package's run,
+then use `go tool pprof -alloc_objects alloc.prof` or `-alloc_space`. These are
+CPU workload measurements, not whole-frame speedups. Compare the same fixtures
+on the same machine, interleave before/after runs, and check real fixed-clock
+renders after changing engine behavior.
+
+The physics and pathfinding allocation guards were verified by restoring the
+old implementations and watching them fail. A separate path fingerprint pins
+the original routes and budget-exhaustion results, so fewer allocations cannot
+pass by quietly doing less search work.
 
 ## Availability
 

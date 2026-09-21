@@ -26,7 +26,7 @@ api:
 requires:
   - cgo
 assets: none
-verified: 2026-07-28
+verified: 2026-09-21
 ---
 
 # A* pathfinding over a navigation grid
@@ -98,6 +98,16 @@ you at the right point. Do not call it from a worker.
 
 Internally `Tick` detaches its batch under the lock and solves outside it, so a
 callback that issues another `Request` does not deadlock.
+
+## Search cost
+
+`FindPath` keeps its search storage local to each call and returns an owned path.
+Its open set stores heap entries as values to avoid one allocation per queued
+node. On the 64×64 fixtures in `BenchmarkFindPath` (20,000-node budget), this
+reduced allocations from 324 to 14 for an open grid and from 5,710 to 36 for
+alternating wall gaps.
+The exact routes and node-budget outcomes are pinned against the previous
+implementation, including equal-priority heap ordering.
 
 ## Smoothing
 
