@@ -424,6 +424,12 @@ numbers. To change how the sky is *drawn*, replace `sky.frag` through
 directly. Neither forces the other. See
 [`game-loop.md`](game-loop.md#replacing-an-engine-shader).
 
+Custom sky shaders can read the directional shadow map at set 1 binding 1;
+see the [binding contract](game-loop.md#shadow-resources-in-custom-sky-shaders).
+For application-owned atmosphere or other parameters, use
+`Renderer.SetShaderParameters` ([uniform contract](game-loop.md#application-data-for-custom-shaders))
+instead of placing non-colour data in the palette.
+
 If what you want is a sky that is a different **colour**, do not replace the
 shader — see below.
 

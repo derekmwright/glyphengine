@@ -21,6 +21,8 @@ import "github.com/derekmwright/glyphengine/shaders"
 // push-constant ranges the engine's pipelines declare. A mismatch is a
 // pipeline-creation failure at startup, or — worse — a shader that links and
 // draws nothing. Run with WithValidation while developing one.
+// Application data can be supplied through Renderer.SetShaderParameters;
+// see ShaderParameterBytes for its separate, fixed descriptor contract.
 type ShaderSet struct {
 	TriangleVert, TriangleFrag []byte // diagnostic tri-color triangle
 	MeshVert, MeshFrag         []byte // unlit textured mesh

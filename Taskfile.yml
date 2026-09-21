@@ -62,6 +62,14 @@ tasks:
     cmds:
       - go run ./cmd/skyshadowcheck
 
+  shaderparameters:
+    desc: "Sky and lit shaders read the same application uniform snapshot, through resize"
+    env:
+      GLYPHENGINE_FIXED_FRAME_TIME: "16.667ms"
+      GLYPHENGINE_VALIDATION: "1"
+    cmds:
+      - go run ./cmd/skyshadowcheck -parameters
+
   normals:
     desc: "Check rough materials respect supplied normals (needs a GPU)"
     env:

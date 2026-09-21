@@ -39,7 +39,9 @@ type Texture struct {
 // Binding 1 is here, on a layout most of whose sets are a single texture,
 // because of where sky.frag and clouds.frag can be reached from. They have no
 // spare push constants -- the block is full at its 256-byte guaranteed minimum
-// -- and set 0 is the only descriptor set either pass binds. Putting the
+// -- and set 0 was originally the only descriptor set either pass bound. The
+// regular sky now also binds the shadow/light set; keep this alias for existing
+// custom shaders and for the cloud pass. Putting the
 // environment block on a set of its own would mean binding it too, and a set at
 // index 1 or above is disturbed by every lit, terrain, material and skinned
 // draw that precedes the sky in the command buffer, so it would have to be
@@ -217,7 +219,8 @@ func createDescriptorPool(deviceDriver core1_0.DeviceDriver, maxSets int) (core1
 				// It is counted anyway because allocation fails outright
 				// otherwise, which would be a startup error on the first scene
 				// with enough textures rather than anything visible here.
-				DescriptorCount: maxSets + uiLayerSetFactor*(maxHDRSets+maxBloomSets) + 36 + maxMaterials,
+				// One additional application UBO descriptor per shadow/light set.
+				DescriptorCount: maxSets + uiLayerSetFactor*(maxHDRSets+maxBloomSets) + 36 + maxMaterials + maxFramesInFlight,
 			},
 			{
 				Type: core1_0.DescriptorTypeStorageBuffer,

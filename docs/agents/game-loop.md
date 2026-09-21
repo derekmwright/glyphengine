@@ -42,6 +42,8 @@ api:
   - glyphengine.Engine.TimeScale
   - glyphengine.Engine.Paused
   - glyphengine.WithShaders
+  - renderer.Renderer.SetShaderParameters
+  - renderer.ShaderParameterBytes
   - renderer.Renderer.Shaders
 example: examples/02-cube
 run: task example:02-cube
@@ -368,6 +370,7 @@ are unchanged, and stock sky shaders render as before.
 | 1 | 1 | `sampler2DArrayShadow`, two directional cascades |
 | 1 | 2 | Point-shadow depth sampler (`samplerCube`, manual comparison) |
 | 1 | 3–5 | Clustered lights, grid, and light-index storage buffers; see `shaders/lights.inc` |
+| 1 | 6 | Application-owned std140 uniform block, 4096 bytes, vertex and fragment stages |
 
 Minimal declarations and a lookup, also exercised by `cmd/skyshadowcheck`:
 
@@ -396,6 +399,59 @@ their Vulkan handles. A game supplies its scattering model and sample points.
 on after resize, and off again under Vulkan validation.
 On RX 7900 XTX the paired diagnostic reads 89/255 in both passes with shadows,
 231/255 without, before and after resizing 400x300 to 640x480.
+
+### Application data for custom shaders
+
+`e.Renderer().SetShaderParameters(data)` supplies a fixed 4096-byte application
+block without repurposing the sky palette or rebuilding pipelines. The renderer
+copies the slice immediately, clears the unused tail, and uploads to the current
+frame slot only after its fence completes. Sky and lit shaders read the same
+frame's data. Call from `Init`, `Update` or `LateUpdate` on the frame thread;
+renderer-only consumers call before `DrawFrame`. It is not a concurrent API.
+
+```go
+// Two std140 vec4s. Pack explicitly; a Go struct is not a std140 layout.
+data := make([]byte, 32)
+values := [8]float32{cameraX, cameraY, cameraZ, radius, density, scaleHeight, 0, 1}
+for i, value := range values {
+    binary.LittleEndian.PutUint32(data[i*4:], math.Float32bits(value))
+}
+if err := e.Renderer().SetShaderParameters(data); err != nil { return err }
+```
+
+```glsl
+// SkyFrag, LitFrag, LitMaterialFrag, TerrainFrag, GrassFrag, WaterFrag:
+layout(set=1, binding=6, std140) uniform ApplicationParameters {
+    vec4 cameraRadius;
+    vec4 scattering;
+} app;
+// Skinned lit pipelines use set=2, binding=6 instead (set 1 holds joints).
+```
+
+The block is available in vertex and fragment stages of pipelines that bind the
+shadow/light set, including both sky passes. It is not bound to clouds, UI,
+particles, postprocessing or shadow-caster pipelines. Custom declarations may
+use any prefix up to 4096 bytes. Use std140 alignment (including 16-byte array
+strides), column-major GLSL matrices and little-endian scalars. The setter
+checks capacity and a 16-byte padded length; it cannot verify a shader's field
+semantics. Invalid input leaves the preceding data intact. Run custom layouts
+under Vulkan validation.
+
+The initial block is zero; nil clears it. Data persists until replaced and
+survives resize/recreation. The renderer owns two frame copies in its existing
+mapped uniform allocations (8192 extra bytes plus device alignment padding)
+and releases them with those allocations. No new per-update GPU allocation or
+descriptor replacement occurs. Existing environment offsets, push constants
+and bindings 0–5 are unchanged; stock shaders ignore binding 6. Unsupported
+uniform range/descriptor limits produce a startup error naming the requirement.
+
+`task shaderparameters` changes values every frame in paired custom sky/lit
+shaders, uses the last vec4 of the block, replaces a full block with a short
+one, clears it, and resizes with frames in flight. Unit tests check immediate
+copy ownership, validation errors, zero padding and isolation of frame slots.
+With the upload deliberately removed, the first GPU probe is 0/255 instead of
+137/255 and the check fails. The state trace hashes the uploaded slot as
+`shaderparams`, so custom data also participates in determinism diagnostics.
 
 ## Pausing, and slow motion
 

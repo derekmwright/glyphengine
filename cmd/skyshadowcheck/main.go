@@ -7,6 +7,8 @@ package main
 import (
 	"bytes"
 	_ "embed"
+	"encoding/binary"
+	"flag"
 	"fmt"
 	"image/png"
 	"io"
@@ -27,11 +29,19 @@ var sky []byte
 //go:embed lit.frag.spv
 var lit []byte
 
+//go:embed params_sky.frag.spv
+var paramsSky []byte
+
+//go:embed params_lit.frag.spv
+var paramsLit []byte
+
 func main() {
 	runtime.LockOSThread()
+	parameters := flag.Bool("parameters", false, "check application per-frame uniforms instead of shadows")
+	flag.Parse()
 	var messages bytes.Buffer
 	log.SetOutput(io.MultiWriter(os.Stderr, &messages))
-	err := run()
+	err := run(*parameters)
 	log.SetOutput(os.Stderr)
 	if err != nil {
 		log.Fatal(err)
@@ -44,7 +54,7 @@ func main() {
 	}
 }
 
-func run() error {
+func run(parameters bool) error {
 	w, err := window.New(400, 300, "Custom sky shadow sampling")
 	if err != nil {
 		return err
@@ -53,6 +63,10 @@ func run() error {
 	sh := renderer.DefaultShaders()
 	sh.SkyFrag = sky
 	sh.LitFrag = lit
+	if parameters {
+		sh.SkyFrag = paramsSky
+		sh.LitFrag = paramsLit
+	}
 	r, err := renderer.New(w, renderer.WithShaders(sh), renderer.WithValidation(true))
 	if err != nil {
 		return err
@@ -91,7 +105,37 @@ func run() error {
 			r.NotifyResize()
 		}
 		light.ShadowEnabled = enabled
+		var parameterValue float64
 		for frame := 0; frame < 8; frame++ {
+			if parameters {
+				// Every frame has a new value; alternating slot parity exposes
+				// a one-frame lag. Full -> short -> nil also tests tail clearing.
+				size := renderer.ShaderParameterBytes
+				if phase == 2 {
+					size = 16
+				}
+				if phase == 3 {
+					size = 0
+				}
+				data := make([]byte, size)
+				parameterValue = 0
+				if size > 0 {
+					v := float32(phase*8+frame+1) / 64
+					if phase == 2 {
+						v *= 0.5
+					}
+					binary.LittleEndian.PutUint32(data, math.Float32bits(v))
+					parameterValue = float64(v)
+					if size == renderer.ShaderParameterBytes {
+						binary.LittleEndian.PutUint32(data[size-16:], math.Float32bits(0.125))
+						parameterValue += 0.125
+					}
+				}
+				if err := r.SetShaderParameters(data); err != nil {
+					return err
+				}
+				clear(data) // caller's slice may be reused immediately
+			}
 			w.PollEvents()
 			if w.WasResized() {
 				r.NotifyResize()
@@ -128,8 +172,15 @@ func run() error {
 		if enabled {
 			want = 89
 		}
+		if parameters {
+			want = parameterValue * 12.92
+			if parameterValue > 0.0031308 {
+				want = 1.055*math.Pow(parameterValue, 1/2.4) - 0.055
+			}
+			want *= 255
+		}
 		if math.Abs(values[0]-want) > 3 || math.Abs(values[1]-want) > 3 || math.Abs(values[0]-values[1]) > 1 {
-			return fmt.Errorf("sky and lit shadow sampling disagree or control missing")
+			return fmt.Errorf("sky/lit probe differs from expected %.2f/255 (parameters=%v)", want, parameters)
 		}
 	}
 	return nil
