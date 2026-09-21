@@ -48,7 +48,7 @@ type Renderer struct {
 	// completed yet.
 	lastExtent             core1_0.Extent2D
 	renderPass             core1_0.RenderPass
-	pipelineLayout         core1_0.PipelineLayout // non-lit (sky, stars, overlay, msdf, ui)
+	pipelineLayout         core1_0.PipelineLayout // non-lit (stars, overlay, msdf, ui)
 	litPipelineLayout      core1_0.PipelineLayout // lit static: set 0=tex, set 1=shadow
 	pipeline               core1_0.Pipeline
 	litDoubleSidedPipeline core1_0.Pipeline
@@ -81,8 +81,8 @@ type Renderer struct {
 	celestialPipeline core1_0.Pipeline
 	skyPipeline       core1_0.Pipeline
 	// skyVolumetricPipeline draws in-scattering over the pixels the sky
-	// covers, and skyPipelineLayout is the non-lit layout plus the
-	// shadow/light set at set 1 that it needs to read the froxel grid. See
+	// covers. Both sky passes use skyPipelineLayout: the non-lit layout plus
+	// the shadow/light set at set 1 for directional shadows and the froxel grid. See
 	// createSkyVolumetricPipeline and shaders/skyvolumetric.frag.
 	skyVolumetricPipeline    core1_0.Pipeline
 	skyPipelineLayout        core1_0.PipelineLayout
@@ -843,25 +843,23 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	}
 	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.starsPipeline, nil) })
 
-	r.skyPipeline, err = createSkyPipeline(r.deviceDriver, r.shaders, r.renderPass, r.pipelineLayout, r.sc.extent, r.msaaSamples)
+	// The regular sky and additive volumetric sky share the light resources.
+	// Create their layout before either pipeline so teardown unwinds both first.
+	r.skyPipelineLayout, err = createSkyPipelineLayout(r.deviceDriver, r.descriptorSetLayout, r.shadow.descriptorSetLayout)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create sky pipeline layout: %w", err)
+	}
+	r.onInit(func() { r.deviceDriver.DestroyPipelineLayout(r.skyPipelineLayout, nil) })
+
+	r.skyPipeline, err = createSkyPipeline(r.deviceDriver, r.shaders, r.renderPass, r.skyPipelineLayout, r.sc.extent, r.msaaSamples)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create sky pipeline: %w", err)
 	}
 	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.skyPipeline, nil) })
 
 	// The in-scattering that fronts the sky -- a beam aimed at the night sky,
-	// which is the shot this whole feature exists for. It is the one non-lit
-	// pipeline that reads the clustered light buffers, so it gets a layout of
-	// its own; see createSkyPipelineLayout for why, and skyvolumetric.frag
+	// which is the shot this whole feature exists for. See skyvolumetric.frag
 	// for why it is a draw of its own rather than part of the dome.
-	//
-	// r.shadow must already exist for that layout, and it does: shadow
-	// resources are step 7b and this is step 8.
-	r.skyPipelineLayout, err = createSkyPipelineLayout(r.deviceDriver, r.descriptorSetLayout, r.shadow.descriptorSetLayout)
-	if err != nil {
-		return nil, fmt.Errorf("renderer: create sky pipeline layout: %w", err)
-	}
-	r.onInit(func() { r.deviceDriver.DestroyPipelineLayout(r.skyPipelineLayout, nil) })
 
 	r.skyVolumetricPipeline, err = createSkyVolumetricPipeline(r.deviceDriver, r.shaders, r.renderPass, r.skyPipelineLayout, r.sc.extent, r.msaaSamples)
 	if err != nil {

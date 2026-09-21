@@ -181,7 +181,10 @@ func benchName(n int) string {
 // skyPipelineLayout in the middle of buildFrame's struct literal renumbered
 // every handle after it and moved this hash by itself, with nothing else
 // changed. Both new handles are allocated after the literal, and that is why.
-const goldenStreamHash = Hasher(0x7f81990a07a357c6)
+// Issue #98 deliberately changes two arguments in the regular sky draw:
+// bind cloudSet+shadowDS with skyPipelineLayout, and push through that layout.
+// Calls stay at 3299; the old hash was 0x7f81990a07a357c6.
+const goldenStreamHash = Hasher(0x0db1df67cfc2a68b)
 
 // TestRecordCommandBufferStreamIsUnchanged is the GPU-free half of "nothing
 // changed": every driver call the recorder makes, folded in order with its
@@ -248,7 +251,8 @@ func withVolumetricLight(fx *frame) *frame {
 // volumetrics-off stream -- 3305 against 3299 -- which is bind pipeline, set
 // viewport, set scissor, bind descriptor sets, push constants, draw, and
 // nothing else.
-const goldenVolumetricStreamHash = Hasher(0x01e4b081132b7d26)
+// Same regular-sky binding change as goldenStreamHash (#98), still 3305 calls.
+const goldenVolumetricStreamHash = Hasher(0xa33167bca582b3df)
 
 // TestVolumetricSkyDrawIsRecorded is the volumetrics-on half of "nothing
 // changed": the extra draw reaches the driver, with the argument values it

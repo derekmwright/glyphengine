@@ -49,7 +49,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-09-19
+verified: 2026-09-21
 ---
 
 # Run a game loop with Engine and Game
@@ -353,6 +353,49 @@ Authoring is unchanged: write GLSL, run `task shaders`, commit the `.spv`, and
 
 `Renderer.Shaders()` reports what is actually in effect, defaults filled in, for
 a harness that wants to check rather than assume.
+
+### Shadow resources in custom sky shaders
+
+Regular `SkyFrag` now binds the same shadow/light set as `LitFrag` at **set 1**.
+No volumetric local light is required. Existing set 0 and push-constant offsets
+are unchanged, and stock sky shaders render as before.
+
+| Set | Binding | Fragment resource |
+|---|---|---|
+| 0 | 0 | Combined sampler for the half-resolution cloud result |
+| 0 | 1 | Shared environment UBO (same buffer as set 1 binding 0) |
+| 1 | 0 | `ShadowData` UBO, beginning with `mat4 cascadeVP[2]` |
+| 1 | 1 | `sampler2DArrayShadow`, two directional cascades |
+| 1 | 2 | Point-shadow depth sampler (`samplerCube`, manual comparison) |
+| 1 | 3–5 | Clustered lights, grid, and light-index storage buffers; see `shaders/lights.inc` |
+
+Minimal declarations and a lookup, also exercised by `cmd/skyshadowcheck`:
+
+```glsl
+layout(set=1, binding=0) uniform ShadowData { mat4 cascadeVP[2]; } shadow;
+layout(set=1, binding=1) uniform sampler2DArrayShadow shadowMap;
+vec3 p = (shadow.cascadeVP[cascade] * vec4(worldPoint, 1)).xyz;
+float visible = texture(shadowMap, vec4(p.xy * 0.5 + 0.5, cascade, p.z - bias));
+```
+
+Directional shadow depth is conventional 0..1, despite the main camera using
+reverse-Z. Select a cascade containing the sample (including its Z range),
+treat points outside both as lit, and leave a margin for filtering near the
+XY edges. Bias is in normalized shadow depth; custom shaders should account
+for configured depth coverage as described in [environment](environment.md#directional-shadow-coverage).
+
+The maps are cleared and rendered before opaque surfaces and the sky. The
+regular sky follows opaque geometry and clouds, at camera depth zero; stars,
+celestials and additive local-light sky scattering follow it. With shadows
+disabled, the maps are still cleared to 1 and available to sample. The engine
+may supply zero cascade matrices then: a zero matrix means no coverage, so
+treat it as fully lit. Never sample using stale matrices from an earlier frame.
+The renderer owns these resources through resize and shutdown; do not cache
+their Vulkan handles. A game supplies its scattering model and sample points.
+`task skyshadows` checks matched surface/sky visibility with shadows on, off,
+on after resize, and off again under Vulkan validation.
+On RX 7900 XTX the paired diagnostic reads 89/255 in both passes with shadows,
+231/255 without, before and after resizing 400x300 to 640x480.
 
 ## Pausing, and slow motion
 

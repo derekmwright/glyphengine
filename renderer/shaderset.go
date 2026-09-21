@@ -34,7 +34,7 @@ type ShaderSet struct {
 	ShadowVert, ShadowFrag     []byte // depth-only shadow pass
 	ShadowSkinnedVert          []byte // depth-only, skinned
 	ShadowInstancedVert        []byte // depth-only, model matrix per instance
-	SkyVert, SkyFrag           []byte // sky gradient
+	SkyVert, SkyFrag           []byte // sky; set 0=clouds/environment, set 1=shadow/lights (see docs/agents/game-loop.md)
 	// SkyVolumetricFrag is the in-scattering over the pixels nothing else
 	// covered -- a beam aimed at the night sky. It is a draw of its own and
 	// not four lines at the end of SkyFrag; skyvolumetric.frag records the

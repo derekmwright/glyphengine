@@ -47,6 +47,11 @@ func TestCommittedSPIRVMatchesGLSL(t *testing.T) {
 		t.Fatalf("glob: %v", err)
 	}
 	sources = append(sources, frags...)
+	probes, err := filepath.Glob("../cmd/skyshadowcheck/*.frag")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sources = append(sources, probes...)
 	if len(sources) == 0 {
 		t.Fatal("no shader sources found")
 	}
@@ -54,7 +59,7 @@ func TestCommittedSPIRVMatchesGLSL(t *testing.T) {
 	out := t.TempDir()
 	for _, src := range sources {
 		t.Run(src, func(t *testing.T) {
-			fresh := filepath.Join(out, src+".spv")
+			fresh := filepath.Join(out, filepath.Base(src)+".spv")
 			cmd := exec.Command(glslc, src, "-o", fresh)
 			if msg, err := cmd.CombinedOutput(); err != nil {
 				t.Fatalf("glslc failed: %v\n%s", err, msg)
