@@ -29,11 +29,16 @@ api:
   - glyphengine.DefaultSkyPalette
   - glyphengine.Scene.SetSkyPalette
   - glyphengine.Scene.SkyPalette
+  - glyphengine.Engine.SetShadowCoverage
+  - renderer.ShadowCoverage
+  - renderer.ShadowCascadeCoverage
+  - renderer.DefaultShadowCoverage
+  - renderer.ComputeCascadeVPsWithCoverage
 requires: []
 assets: none
 example: examples/09-water
 run: go run ./09-water -alien
-verified: 2026-09-19
+verified: 2026-09-21
 ---
 
 # Environment
@@ -86,6 +91,68 @@ Useful combinations:
 - `Cycle` without `Sky` — the engine's sun, moon and ambient driving *your*
   skybox. The light works; nothing is drawn.
 - `Sky` with `SunDisc: false` — sky colour and light without a visible sun.
+
+## Directional shadow coverage
+
+`CastShadows` enables the directional maps. Their default half-extents remain
+15 and 90 world units, at 2048 squared texels each. For larger scenes, call this
+on the frame thread (`Init` or `Update`):
+
+```go
+coverage := renderer.DefaultShadowCoverage()
+coverage.Cascades[0].TowardLight = 1500
+coverage.Cascades[1] = renderer.ShadowCascadeCoverage{
+    Radius: 2000, TowardLight: 3000, AwayFromLight: 3000,
+}
+if err := e.SetShadowCoverage(coverage); err != nil { return err }
+```
+
+The volumes are centred on the camera's **target**, as before. `Radius` is the
+light-space XY half-extent; `TowardLight` places the light eye ahead of the
+centre, with a 0.1-unit near plane, and `AwayFromLight` reaches behind it.
+Increasing caster depth alone preserves XY texel density. Increasing radius
+trades detail for coverage: radius 15 is 0.01465 units/texel, radius 90 is
+0.08789, and radius 2000 is 1.953125. Two maps cannot guarantee detailed shadows
+over arbitrary distances; measure your geometry and camera positions.
+
+All fields must be finite and positive, and `TowardLight` must exceed 0.1.
+An entirely zero `ShadowCoverage` restores defaults; partially specified
+volumes are rejected without changing the active setting. This allocates no
+new GPU resources and survives resize and scene replacement. Default shader
+bindings, map count, resolution and sampling remain unchanged.
+
+Casters outside the camera are kept if either cascade sees them, including
+non-nested volumes. Renderer-only consumers can call
+`ComputeCascadeVPsWithCoverage` and pass the returned matrices through
+`SceneLighting.CascadeVPs`; they must likewise cull against both volumes.
+`ComputeCascadeVPs` retains its original defaults. For camera-relative worlds,
+use the same rebased coordinates for the centre, camera and all geometry.
+Texel snapping operates in that coordinate system; changing the world origin
+can change its snapping phase, so this is not a promise of phase continuity
+across arbitrary rebases.
+
+`examples/23-shadow-coverage` places a caster one kilometre toward the sun.
+`-coverage=false` restores the old volumes; `-caster=false` removes the distant
+caster. `task shadowcoverage` checks the receiver and a nearby prop under a
+fixed clock. No planetary atmosphere or terrain policy is supplied.
+
+Measured on RX 7900 XTX, 800x600: the central receiver drops from 181.67 to
+119.33/255 (62.33, 1.52x) when extended coverage includes the caster; removing
+the caster restores 181.67. The nearby prop's shadow stays at 119.33. Depth bias
+is rescaled from the matrix's depth row to retain its historical world-space
+size: without that adjustment the nearby shadow disappears (181.67). The check
+fails with that adjustment removed, and the culling test fails when only the
+last cascade is considered. A fixed-clock `02-cube -frames 60` capture remained
+byte-identical to the preceding build with default coverage.
+
+For this deliberately small scene, three 200-frame GPU means after 30 warmup
+frames (validation off) measured default shadow-pass time at 0.0393–0.0407 ms
+and extended coverage at roughly 0.039 ms. That establishes no meaningful
+speed difference; a terrain scene can submit many more casters when enlarged.
+The map allocation remains two 2048-square layers per frame in flight.
+Custom shadow shaders must likewise scale normalized depth bias with their
+matrix depth range; the stock shader derives it from the Z row, without changing
+any descriptor layout.
 
 ## Clouds are a graphics setting
 

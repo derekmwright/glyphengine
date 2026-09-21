@@ -433,6 +433,7 @@ type Engine struct {
 	cameraUp     mgl32.Vec3
 
 	fov, near, far float32
+	shadowCoverage renderer.ShadowCoverage
 
 	overlays     []renderer.RenderObject
 	uiOverlays   []renderer.UIRenderObject
@@ -1498,8 +1499,7 @@ func (e *Engine) renderFrame() {
 	view, proj, vp := e.viewProjection()
 
 	// Compute cascade VPs first so buildDrawList can include shadow casters
-	// that are outside the camera frustum. The far cascade's frustum is a
-	// superset of the near one, so it alone decides shadow-only inclusion.
+	// outside the camera frustum, against the union of the configured volumes.
 	// Resolve the environment once for the whole frame. Asking it twice could
 	// return different answers -- a custom EnvironmentSource is free to be as
 	// stateful as it likes -- and half a frame lit by one sky and half by
@@ -1509,11 +1509,16 @@ func (e *Engine) renderFrame() {
 	shadowEnabled := env.CastShadows
 	var cascadeVPs [renderer.ShadowCascades]mgl32.Mat4
 	if shadowEnabled {
-		cascadeVPs = renderer.ComputeCascadeVPs(env.SunDir, e.cameraCenter)
+		var err error
+		cascadeVPs, err = renderer.ComputeCascadeVPsWithCoverage(env.SunDir, e.cameraCenter, e.shadowCoverage)
+		if err != nil {
+			log.Printf("glyphengine: directional shadows disabled this frame: %v", err)
+			shadowEnabled = false
+		}
 	}
 
 	e.cpu.begin(CPUDrawList)
-	draws := e.buildDrawList(vp, shadowEnabled, cascadeVPs[renderer.ShadowCascades-1])
+	draws := e.buildDrawList(vp, shadowEnabled, cascadeVPs[:]...)
 
 	// The sun and moon go in their own list rather than the draw list. There
 	// they wrote depth, which rejected the sky pass on those pixels and left
@@ -1670,11 +1675,24 @@ var identityModel = [16]float32{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1}
 //
 // When shadow mapping is active, objects outside the camera frustum but inside
 // the light frustum are included with ShadowOnly set, so they still cast.
-func (e *Engine) buildDrawList(vp mgl32.Mat4, shadowEnabled bool, lightVP mgl32.Mat4) []renderer.RenderObject {
+func (e *Engine) buildDrawList(vp mgl32.Mat4, shadowEnabled bool, lightVPs ...mgl32.Mat4) []renderer.RenderObject {
 	cameraFrustum := ExtractFrustum(vp)
-	var lightFrustum Frustum
+	var lightFrusta [renderer.ShadowCascades]Frustum
 	if shadowEnabled {
-		lightFrustum = ExtractFrustum(lightVP)
+		for i, lightVP := range lightVPs {
+			lightFrusta[i] = ExtractFrustum(lightVP)
+		}
+	}
+	inShadowVolume := func(x, y, z, radius float32) bool {
+		if !shadowEnabled {
+			return false
+		}
+		for i := range lightVPs {
+			if lightFrusta[i].SphereInFrustum(x, y, z, radius) {
+				return true
+			}
+		}
+		return false
 	}
 	c := e.Scene.C
 	interp := e.Scene.Interpolate
@@ -1708,7 +1726,7 @@ func (e *Engine) buildDrawList(vp mgl32.Mat4, shadowEnabled bool, lightVP mgl32.
 			sz := mgl32.Vec3{model[8], model[9], model[10]}.Len()
 			wr := mesh.BoundRadius * max32(sx, max32(sy, sz))
 			if !cameraFrustum.SphereInFrustum(wc[0], wc[1], wc[2], wr) {
-				if !shadowEnabled || !lightFrustum.SphereInFrustum(wc[0], wc[1], wc[2], wr) {
+				if !inShadowVolume(wc[0], wc[1], wc[2], wr) {
 					return
 				}
 				shadowOnly = true
@@ -1814,7 +1832,7 @@ func (e *Engine) buildDrawList(vp mgl32.Mat4, shadowEnabled bool, lightVP mgl32.
 		center, radius := im.Set.Bounds()
 		shadowOnly := false
 		if radius > 0 && !cameraFrustum.SphereInFrustum(center[0], center[1], center[2], radius) {
-			if !shadowEnabled || !lightFrustum.SphereInFrustum(center[0], center[1], center[2], radius) {
+			if !inShadowVolume(center[0], center[1], center[2], radius) {
 				return
 			}
 			shadowOnly = true

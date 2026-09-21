@@ -34,6 +34,16 @@ float calcShadow(vec3 shadowPos, float NdotL) {
         // The far cascade covers more world units per texel, so scale up.
         float biasScale = (c == 0) ? 1.0 : 4.0;
         float bias = max(0.008 * (1.0 - NdotL), 0.001) * biasScale;
+        // Keep the historical world-space bias as caster depth changes.
+        // The orthographic Z row has length 1/(far-near). Without this,
+        // 23-shadow-coverage with TowardLight=1500 loses the 2-unit prop's
+        // shadow: the old normalized bias grows with the depth range.
+        // task shadowcoverage, 800x600 fixed clock: near ROI 140,295,25,15
+        // is 181.67/255 without this, 119.33 with it (default 119.33).
+        float inverseDepth = length(vec3(shadow.cascadeVP[c][0][2],
+                                         shadow.cascadeVP[c][1][2],
+                                         shadow.cascadeVP[c][2][2]));
+        bias *= inverseDepth * ((c == 0) ? 37.4 : 224.9);
         float ref = proj.z - bias;
 
         // Four-tap PCF on a comparison sampler.
