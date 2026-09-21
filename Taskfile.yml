@@ -7,6 +7,8 @@ vars:
 
 env:
   CGO_ENABLED: "1"
+  # Automated checks must not interrupt typing in another application.
+  GLYPHENGINE_BACKGROUND: "1"
 
 tasks:
   default:
@@ -30,6 +32,8 @@ tasks:
     vars:
       NAME: '{{index .MATCH 0}}'
     dir: 'examples/{{.NAME}}'
+    env:
+      GLYPHENGINE_BACKGROUND: "0"
     cmds:
       - go run . {{.CLI_ARGS}}
 

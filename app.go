@@ -109,6 +109,7 @@ type config struct {
 	appVersion     common.Version
 	fullscreen     bool
 	resizable      bool
+	background     bool
 	validation     bool
 	vsync          bool
 	interp         bool
@@ -283,6 +284,14 @@ func WithFullscreen() Option {
 // Defaults to true.
 func WithResizable(resizable bool) Option {
 	return func(c *config) { c.resizable = resizable }
+}
+
+// WithBackgroundWindow opens a visible window without requesting input focus.
+// Use it for captures or tools running while another application is in use.
+// GLYPHENGINE_BACKGROUND=1 enables it for any engine or window.New caller.
+// It cannot be combined with WithFullscreen.
+func WithBackgroundWindow() Option {
+	return func(c *config) { c.background = true }
 }
 
 // WithTickRate sets the fixed simulation rate in ticks per second.
@@ -901,6 +910,9 @@ func New(g Game, opts ...Option) (*Engine, error) {
 		wOpts = append(wOpts, window.WithFullscreen())
 	}
 	wOpts = append(wOpts, window.WithResizable(cfg.resizable))
+	if cfg.background {
+		wOpts = append(wOpts, window.WithBackground())
+	}
 
 	w, err := window.New(cfg.width, cfg.height, cfg.title, wOpts...)
 	if err != nil {

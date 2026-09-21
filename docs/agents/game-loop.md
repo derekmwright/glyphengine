@@ -26,6 +26,7 @@ api:
   - glyphengine.WithWindowSize
   - glyphengine.WithFullscreen
   - glyphengine.WithResizable
+  - glyphengine.WithBackgroundWindow
   - glyphengine.WithMSAA
   - glyphengine.WithVSync
   - glyphengine.WithInterpolation
@@ -124,6 +125,25 @@ func main() {
 ```
 
 Full program: `examples/02-cube`.
+
+## Background captures
+
+Set `GLYPHENGINE_BACKGROUND=1` to launch a visible window without requesting
+input focus, or pass `glyph.WithBackgroundWindow()` in code. Direct window
+users can pass `window.WithBackground()`. Fullscreen is rejected in this mode
+because GLFW ignores the initial-focus hint for fullscreen windows.
+
+Automated tasks (`smoke`, `validate`, `determinism`, `bench`, and the image
+checks) enable this automatically. `task example:<name>` remains interactive.
+For an individual water/cloud capture, `09-water` also accepts `-background`:
+
+```sh
+go run -C examples ./09-water -background -frames 90 -screenshot sky.png
+```
+
+This keeps the window visible and renders normally; click it when you want to
+interact. It avoids pulling keyboard input away from another application during
+a batch of examples. The platform window manager ultimately controls focus.
 
 ## `runtime.LockOSThread` is mandatory
 

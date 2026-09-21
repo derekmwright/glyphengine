@@ -1,8 +1,11 @@
 package window
 
 import (
+	"fmt"
 	"runtime"
 	"testing"
+
+	"github.com/go-gl/glfw/v3.3/glfw"
 )
 
 // These tests create real GLFW windows, so they need a display. They skip when
@@ -33,6 +36,52 @@ func refs() int {
 	glfwMu.Lock()
 	defer glfwMu.Unlock()
 	return glfwRefs
+}
+
+// Setting FocusOnShow back to true fails before Show is called, so the negative
+// check proves the guard without taking focus from whoever is using the machine.
+func TestBackgroundWindowDoesNotRequestFocus(t *testing.T) {
+	for _, fromEnv := range []bool{false, true} {
+		t.Run(fmt.Sprint(fromEnv), func(t *testing.T) {
+			requireGLFW(t)
+			t.Setenv("GLYPHENGINE_BACKGROUND", "0")
+			var opts []Option
+			if fromEnv {
+				t.Setenv("GLYPHENGINE_BACKGROUND", "1")
+			} else {
+				opts = append(opts, WithBackground())
+			}
+			w, err := New(320, 240, "glyphengine background test", opts...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer w.Destroy()
+			if w.handle.GetAttrib(glfw.FocusOnShow) != glfw.False {
+				t.Fatal("background window requests focus when shown")
+			}
+			w.PollEvents()
+			if w.handle.GetAttrib(glfw.Focused) != glfw.False {
+				t.Fatal("background window took focus at creation")
+			}
+			w.handle.Hide()
+			w.handle.Show()
+			w.PollEvents()
+			if w.handle.GetAttrib(glfw.Focused) != glfw.False {
+				t.Fatal("background window took focus when shown again")
+			}
+		})
+	}
+}
+
+func TestBackgroundFullscreenRejectedBeforeGLFWInit(t *testing.T) {
+	t.Setenv("GLYPHENGINE_BACKGROUND", "1")
+	base := refs()
+	if w, err := New(320, 240, "incompatible", WithFullscreen()); err == nil || w != nil {
+		t.Fatal("background fullscreen must be rejected: GLFW ignores its focus hint")
+	}
+	if refs() != base {
+		t.Fatal("rejected configuration changed GLFW ownership")
+	}
 }
 
 // TestDestroyingOneWindowKeepsGLFWAliveForOthers is the regression this

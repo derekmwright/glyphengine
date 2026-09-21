@@ -3,6 +3,7 @@ package window
 import (
 	"fmt"
 	"log"
+	"os"
 	"sync"
 	"unsafe"
 
@@ -112,6 +113,7 @@ type Option func(*config)
 type config struct {
 	fullscreen bool
 	resizable  bool
+	background bool
 }
 
 // WithFullscreen creates the window fullscreen on the primary monitor at its
@@ -124,6 +126,14 @@ func WithFullscreen() Option {
 // Ignored in fullscreen. Defaults to true.
 func WithResizable(resizable bool) Option {
 	return func(c *config) { c.resizable = resizable }
+}
+
+// WithBackground creates a visible window without requesting input focus,
+// including when it is shown again. This is for automated captures and tools
+// running alongside another application. Fullscreen is incompatible.
+// GLYPHENGINE_BACKGROUND=1 enables the same behavior without code changes.
+func WithBackground() Option {
+	return func(c *config) { c.background = true }
 }
 
 // New initializes GLFW if needed and creates a window with a Vulkan-capable
@@ -140,6 +150,10 @@ func New(width, height int, title string, opts ...Option) (*Window, error) {
 	for _, o := range opts {
 		o(&cfg)
 	}
+	cfg.background = cfg.background || os.Getenv("GLYPHENGINE_BACKGROUND") == "1"
+	if cfg.background && cfg.fullscreen {
+		return nil, fmt.Errorf("background launch requires a windowed window")
+	}
 
 	glfwMu.Lock()
 	err := acquireGLFW()
@@ -149,6 +163,14 @@ func New(width, height int, title string, opts ...Option) (*Window, error) {
 	}
 
 	glfw.WindowHint(glfw.ClientAPI, glfw.NoAPI)
+	// Hints are process-global and survive window destruction. Set both sides
+	// so a background tool does not change how the next ordinary window opens.
+	focus := glfw.True
+	if cfg.background {
+		focus = glfw.False
+	}
+	glfw.WindowHint(glfw.Focused, focus)
+	glfw.WindowHint(glfw.FocusOnShow, focus)
 	if cfg.resizable {
 		glfw.WindowHint(glfw.Resizable, glfw.True)
 	} else {
