@@ -528,9 +528,8 @@ func recordCommandBuffer(
 	stats *RenderStats,
 	pipelineLayout core1_0.PipelineLayout,
 	// skyPipelineLayout is pipelineLayout plus the shadow/light set at set 1.
-	// Only the sky draw uses it, and only because sky.frag marches the froxel
-	// grid; the two are compatible for set 0 and for push constants, so the
-	// draws either side of it are unaffected.
+	// Both sky draws use it for directional shadows and clustered lights.
+	// It is compatible with pipelineLayout for set 0 and push constants.
 	skyPipelineLayout core1_0.PipelineLayout,
 	litPipelineLayout core1_0.PipelineLayout,
 	skinnedPipelineLayout core1_0.PipelineLayout,
@@ -1212,7 +1211,7 @@ func recordCommandBuffer(
 		scratch.setScissor(deviceDriver, cmdBuf, scissor)
 		// The half-resolution cloud target, which the sky composites over its
 		// dome. It is written earlier in this same command buffer.
-		scratch.bindDescriptorSets(deviceDriver, cmdBuf, core1_0.PipelineBindPointGraphics, pipelineLayout, 0, cloudSet)
+		scratch.bindDescriptorSets(deviceDriver, cmdBuf, core1_0.PipelineBindPointGraphics, skyPipelineLayout, 0, cloudSet, shadowDS)
 
 		scratch.resetPC()
 		copy(scratch.pc[:16], lighting.InvVP[:])
@@ -1235,7 +1234,7 @@ func recordCommandBuffer(
 		// convention rather than a per-shader packing to get wrong.
 		scratch.pc[62] = lighting.RealSunDir[0]
 		scratch.pc[63] = lighting.RealSunDir[2]
-		scratch.pushConstants(deviceDriver, cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment)
+		scratch.pushConstants(deviceDriver, cmdBuf, skyPipelineLayout, core1_0.StageVertex|core1_0.StageFragment)
 		deviceDriver.CmdDraw(cmdBuf, 3, 1, 0, 0)
 	}
 

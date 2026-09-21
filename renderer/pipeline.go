@@ -198,12 +198,13 @@ func createNonLitPipelineLayout(deviceDriver core1_0.DeviceDriver, texSetLayout 
 }
 
 // createSkyPipelineLayout is the non-lit layout plus the shadow/light set at
-// set 1, for the one non-lit pipeline that needs the clustered light data.
+// set 1, shared by regular and volumetric sky pipelines.
 //
-// sky.frag marches the froxel grid for in-scattering, so it needs lights.inc's
+// skyvolumetric.frag marches the froxel grid for in-scattering, so it needs lights.inc's
 // three storage buffers -- which live at bindings 3, 4 and 5 of the set the
 // shadow data owns, and only there. Three ways to give it those, and this is
 // the least invasive of them:
+// Custom SkyFrag can also sample the directional map from this same set.
 //
 //   - Add the bindings to the shared texture set layout at set 0. That layout
 //     backs EVERY texture in the engine, so it would put three storage-buffer

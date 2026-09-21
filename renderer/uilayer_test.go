@@ -123,7 +123,9 @@ func withUILayer(fx *frame, glow bool) *frame {
 // Captured once by logging d.h from the test below. Reproduce it the same way
 // if a deliberate change to the layer's recording moves it -- and if an
 // UNINTENDED change moves it, that is what this is for.
-const goldenUILayerStreamHash = Hasher(0xab0f60e975b26193)
+// #98 changes the regular sky's descriptor/layout arguments; UI work and
+// the 3379 calls are unchanged. Previous hash: 0xab0f60e975b26193.
+const goldenUILayerStreamHash = Hasher(0xdf477ab29db846b8)
 
 // TestUILayerStreamIsPinned is the layer-on half of "nothing changed": the
 // extra render pass, the two overlay pipelines bound inside it, the bloom chain

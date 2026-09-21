@@ -43,12 +43,24 @@ tasks:
     dir: shaders
     cmds:
       - for f in *.vert *.frag; do "${VULKAN_SDK}/bin/glslc{{.EXE}}" "$f" -o "$f.spv"; done
+      - for f in ../cmd/skyshadowcheck/*.frag; do "${VULKAN_SDK}/bin/glslc{{.EXE}}" "$f" -o "$f.spv"; done
     sources:
       - shaders/*.vert
       - shaders/*.frag
       - shaders/*.inc
+      - cmd/skyshadowcheck/*.frag
+      - cmd/skyshadowcheck/*.inc
     generates:
       - shaders/*.spv
+      - cmd/skyshadowcheck/*.spv
+
+  skyshadows:
+    desc: "Custom sky and lit shaders share directional shadows, through resize and disabling"
+    env:
+      GLYPHENGINE_FIXED_FRAME_TIME: "16.667ms"
+      GLYPHENGINE_VALIDATION: "1"
+    cmds:
+      - go run ./cmd/skyshadowcheck
 
   normals:
     desc: "Check rough materials respect supplied normals (needs a GPU)"
