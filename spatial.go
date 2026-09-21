@@ -73,6 +73,25 @@ func (g *SpatialGrid) QueryRadiusAlloc(x, z, radius float32) []ecs.Entity {
 }
 
 func (g *SpatialGrid) appendCells(dst *[]ecs.Entity, x, z, radius float32) {
+	g.eachCell(x, z, radius, func(entities []ecs.Entity) {
+		*dst = append(*dst, entities...)
+	})
+}
+
+// eachInRadius reads the cells directly, without copying candidates into a
+// temporary slice. Like QueryRadiusAlloc it has no shared query scratch, so
+// concurrent readers are safe while the grid is frozen.
+// BenchmarkRaycastGrid / BenchmarkOverlapGridMiss (64 colliders, both grids)
+// measure 6 allocations / 1792 bytes per query with copied candidates, 0 here.
+func (g *SpatialGrid) eachInRadius(x, z, radius float32, visit func(ecs.Entity)) {
+	g.eachCell(x, z, radius, func(entities []ecs.Entity) {
+		for _, entity := range entities {
+			visit(entity)
+		}
+	})
+}
+
+func (g *SpatialGrid) eachCell(x, z, radius float32, visit func([]ecs.Entity)) {
 	minCX := int((x - radius) / g.cellSize)
 	maxCX := int((x + radius) / g.cellSize)
 	minCZ := int((z - radius) / g.cellSize)
@@ -87,7 +106,7 @@ func (g *SpatialGrid) appendCells(dst *[]ecs.Entity, x, z, radius float32) {
 
 	for cx := minCX; cx <= maxCX; cx++ {
 		for cz := minCZ; cz <= maxCZ; cz++ {
-			*dst = append(*dst, g.cells[cellKey{cx, cz}]...)
+			visit(g.cells[cellKey{cx, cz}])
 		}
 	}
 }

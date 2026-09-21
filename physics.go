@@ -203,9 +203,9 @@ func (s *Scene) colliderAABB(entity ecs.Entity) (wb AABB, ok bool) {
 //
 // Concurrency: Raycast and OverlapAABB are called from multiple goroutines
 // during the parallel phase, so neither may keep scratch state shared across
-// calls — compare SpatialGrid.QueryRadius, which reuses a buffer and is NOT
-// safe for this, against QueryRadiusAlloc, which the built-in implementation
-// uses instead. Each call must be independent or internally synchronized.
+// calls. The built-in implementation visits the frozen grid cells directly;
+// SpatialGrid.QueryRadius reuses a buffer and is NOT safe for this. Each call
+// must be independent or internally synchronized.
 //
 // A replacement must never call Scene.Raycast or Scene.OverlapAABB on the scene
 // it is installed in: with Queries set those ARE the replacement, and the call
@@ -291,18 +291,13 @@ func (s *Scene) overlapAABBBuiltin(box AABB, exclude ecs.Entity) []OverlapResult
 	}
 
 	// Use spatial grids for nearby entities + scene objects.
-	// QueryRadiusAlloc is used (instead of QueryRadius) so this method is
-	// safe to call concurrently from parallel player movement goroutines.
+	// Direct visitation needs neither a candidate copy nor shared query scratch.
 	center := box.Min.Add(box.Max).Mul(0.5)
 	radius := box.Max.Sub(box.Min).Len()*0.5 + 5 // box half-diagonal + padding
 	if s.SpatialGrid != nil {
-		for _, entity := range s.SpatialGrid.QueryRadiusAlloc(center.X(), center.Z(), radius) {
-			testEntity(entity)
-		}
+		s.SpatialGrid.eachInRadius(center.X(), center.Z(), radius, testEntity)
 		if s.StaticGrid != nil {
-			for _, entity := range s.StaticGrid.QueryRadiusAlloc(center.X(), center.Z(), radius) {
-				testEntity(entity)
-			}
+			s.StaticGrid.eachInRadius(center.X(), center.Z(), radius, testEntity)
 		}
 	} else {
 		ecs.Query2(s.C.Transform, s.C.Collider, func(entity ecs.Entity, _ *Transform, _ *Collider) {
@@ -469,15 +464,11 @@ func (s *Scene) raycastBuiltin(origin, dir mgl32.Vec3, maxDist float32, exclude 
 	}
 
 	// Test entity colliders — use spatial grids for O(nearby) instead of O(all).
-	// QueryRadiusAlloc is used for concurrent safety (parallel player movement).
+	// Read the frozen cells without allocating candidate lists.
 	if s.SpatialGrid != nil {
-		for _, entity := range s.SpatialGrid.QueryRadiusAlloc(origin.X(), origin.Z(), maxDist) {
-			testEntity(entity)
-		}
+		s.SpatialGrid.eachInRadius(origin.X(), origin.Z(), maxDist, testEntity)
 		if s.StaticGrid != nil {
-			for _, entity := range s.StaticGrid.QueryRadiusAlloc(origin.X(), origin.Z(), maxDist) {
-				testEntity(entity)
-			}
+			s.StaticGrid.eachInRadius(origin.X(), origin.Z(), maxDist, testEntity)
 		}
 	} else {
 		ecs.Query2(s.C.Transform, s.C.Collider, func(entity ecs.Entity, _ *Transform, _ *Collider) {
