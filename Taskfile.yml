@@ -50,6 +50,15 @@ tasks:
     generates:
       - shaders/*.spv
 
+  normals:
+    desc: "Check rough materials respect supplied normals (needs a GPU)"
+    env:
+      GLYPHENGINE_FIXED_FRAME_TIME: "16.667ms"
+      GLYPHENGINE_VALIDATION: "1"
+    cmds:
+      - go run ./cmd/normalcheck
+      - go run ./cmd/normalcheck -rotated
+
   shaders:verify:
     desc: Assert the committed .spv match their GLSL (needs VULKAN_SDK)
     cmds:
