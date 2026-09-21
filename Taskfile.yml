@@ -59,6 +59,18 @@ tasks:
       - go run ./cmd/normalcheck
       - go run ./cmd/normalcheck -rotated
 
+  shadowcoverage:
+    desc: "A distant off-camera caster reaches a receiver without losing nearby shadows"
+    env:
+      GLYPHENGINE_FIXED_FRAME_TIME: "16.667ms"
+      GLYPHENGINE_VALIDATION: "1"
+    cmds:
+      - mkdir -p .shadowcoverage
+      - go run -C examples ./23-shadow-coverage -frames 60 -screenshot ../.shadowcoverage/on.png
+      - go run -C examples ./23-shadow-coverage -coverage=false -frames 60 -screenshot ../.shadowcoverage/off.png
+      - go run -C examples ./23-shadow-coverage -caster=false -frames 60 -screenshot ../.shadowcoverage/control.png
+      - go run ./cmd/shadowcheck -on .shadowcoverage/on.png -off .shadowcoverage/off.png -control .shadowcoverage/control.png
+
   shaders:verify:
     desc: Assert the committed .spv match their GLSL (needs VULKAN_SDK)
     cmds:
@@ -171,6 +183,7 @@ tasks:
       - go run ./20-screens -frames 60
       - go run ./21-streetlights -frames 60
       - go run ./22-level -frames 60
+      - go run ./23-shadow-coverage -frames 60
       - go run ./15-kitchen-sink -demo -frames 60
 
   validate:
@@ -215,6 +228,9 @@ tasks:
         for ex in 01-triangle 02-cube 03-physics 04-first-person 05-textures 06-skinned 07-terrain 08-grass 09-water 10-text 11-lights 12-particles 13-ui 16-materials 17-input 18-translucent 19-instanced 20-screens 21-streetlights 22-level 15-kitchen-sink; do
           check $ex
         done
+        check 23-shadow-coverage
+        check 23-shadow-coverage -coverage=false
+        check 23-shadow-coverage -caster=false
         # Render paths no example turns on by default. Everything above runs
         # with stock settings, so an opt-in path can rot for months with every
         # gate green -- the layer only ever sees the code that actually runs.

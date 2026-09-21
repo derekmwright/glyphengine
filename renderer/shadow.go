@@ -1155,6 +1155,11 @@ func ComputeCascadeVPs(sunDir [3]float32, cameraPos mgl32.Vec3) [ShadowCascades]
 // computeLightVP computes an orthographic light-space view-projection matrix
 // with the given half-extent radius, centered on the camera position.
 func computeLightVP(sunDir [3]float32, cameraPos mgl32.Vec3, shadowRadius float32) mgl32.Mat4 {
+	return computeLightVPCoverage(sunDir, cameraPos, ShadowCascadeCoverage{shadowRadius, shadowRadius, shadowRadius * 1.5})
+}
+
+func computeLightVPCoverage(sunDir [3]float32, cameraPos mgl32.Vec3, coverage ShadowCascadeCoverage) mgl32.Mat4 {
+	shadowRadius := coverage.Radius
 	// sunDir points TOWARD the sun. The light shines FROM the sun toward the scene.
 	lightDir := mgl32.Vec3{sunDir[0], sunDir[1], sunDir[2]}.Normalize()
 
@@ -1164,10 +1169,10 @@ func computeLightVP(sunDir [3]float32, cameraPos mgl32.Vec3, shadowRadius float3
 	}
 
 	const shadowNear = float32(0.1)
-	shadowFar := shadowRadius * 2.5
+	shadowFar := coverage.TowardLight + coverage.AwayFromLight
 
 	// Place the light toward the sun from the scene center, looking back at the scene.
-	lightPos := cameraPos.Add(lightDir.Mul(shadowRadius))
+	lightPos := cameraPos.Add(lightDir.Mul(coverage.TowardLight))
 	lightView := mgl32.LookAtV(lightPos, cameraPos, lightUp)
 
 	// Orthographic projection covering the shadow volume.
