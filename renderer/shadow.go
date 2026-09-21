@@ -254,9 +254,10 @@ type shadowResources struct {
 	framebuffers [maxFramesInFlight][ShadowCascades]core1_0.Framebuffer
 
 	// Per-frame UBOs for the light VP matrix (persistently mapped)
-	lightVPBuffers  [maxFramesInFlight]core1_0.Buffer
-	lightVPMemories [maxFramesInFlight]core1_0.DeviceMemory
-	lightVPMapped   [maxFramesInFlight][]byte
+	lightVPBuffers        [maxFramesInFlight]core1_0.Buffer
+	lightVPMemories       [maxFramesInFlight]core1_0.DeviceMemory
+	lightVPMapped         [maxFramesInFlight][]byte
+	shaderParameterMapped [maxFramesInFlight][]byte // aligned slice of the same UBO allocation
 
 	// Per-frame storage buffers for the clustered light data (points + spots,
 	// up to MaxLights), persistently mapped. Three buffers because the GPU
@@ -317,6 +318,15 @@ func createShadowResources(
 	jointSetLayout core1_0.DescriptorSetLayout,
 ) (*shadowResources, error) {
 	s := &shadowResources{}
+	props, err := instanceDriver.GetPhysicalDeviceProperties(physicalDevice)
+	if err != nil {
+		return nil, fmt.Errorf("shader parameter limits: %w", err)
+	}
+	parameterOffset, err := shaderParameterOffset(props.Limits)
+	if err != nil {
+		return nil, err
+	}
+	uniformAllocationSize := parameterOffset + ShaderParameterBytes
 
 	// Find depth format
 	format, err := findDepthFormat(instanceDriver, physicalDevice)
@@ -492,7 +502,7 @@ func createShadowResources(
 	// Per-frame UBOs (one mat4 light VP per cascade)
 	for i := 0; i < maxFramesInFlight; i++ {
 		s.lightVPBuffers[i], _, err = deviceDriver.CreateBuffer(nil, core1_0.BufferCreateInfo{
-			Size:        litUBOSize,
+			Size:        uniformAllocationSize,
 			Usage:       core1_0.BufferUsageUniformBuffer,
 			SharingMode: core1_0.SharingModeExclusive,
 		})
@@ -524,12 +534,15 @@ func createShadowResources(
 			return nil, fmt.Errorf("bind shadow UBO %d: %w", i, err)
 		}
 
-		ptr, _, err := deviceDriver.MapMemory(s.lightVPMemories[i], 0, litUBOSize, 0)
+		ptr, _, err := deviceDriver.MapMemory(s.lightVPMemories[i], 0, uniformAllocationSize, 0)
 		if err != nil {
 			s.destroy(deviceDriver)
 			return nil, fmt.Errorf("map shadow UBO %d: %w", i, err)
 		}
-		s.lightVPMapped[i] = unsafe.Slice((*byte)(ptr), litUBOSize)
+		mapped := unsafe.Slice((*byte)(ptr), uniformAllocationSize)
+		s.lightVPMapped[i] = mapped[:litUBOSize]
+		s.shaderParameterMapped[i] = mapped[parameterOffset:]
+		clear(s.shaderParameterMapped[i])
 	}
 
 	// Per-frame storage buffers for the clustered light data: LightBuffer,
@@ -646,6 +659,12 @@ func createShadowResources(
 				DescriptorType:  core1_0.DescriptorTypeStorageBuffer,
 				DescriptorCount: 1,
 				StageFlags:      core1_0.StageFragment,
+			},
+			{
+				Binding:         6,
+				DescriptorType:  core1_0.DescriptorTypeUniformBuffer,
+				DescriptorCount: 1,
+				StageFlags:      core1_0.StageVertex | core1_0.StageFragment,
 			},
 		},
 	})
@@ -842,6 +861,12 @@ func createShadowResources(
 	// Update descriptor sets now that all resources (UBO, sun shadow, cube shadow, light buffers) are ready.
 	for i := 0; i < maxFramesInFlight; i++ {
 		err = deviceDriver.UpdateDescriptorSets([]core1_0.WriteDescriptorSet{
+			{
+				DstSet:         s.descriptorSets[i],
+				DstBinding:     6,
+				DescriptorType: core1_0.DescriptorTypeUniformBuffer,
+				BufferInfo:     []core1_0.DescriptorBufferInfo{{Buffer: s.lightVPBuffers[i], Offset: parameterOffset, Range: ShaderParameterBytes}},
+			},
 			{
 				DstSet:         s.descriptorSets[i],
 				DstBinding:     0,
@@ -1392,6 +1417,7 @@ func (s *shadowResources) destroy(deviceDriver core1_0.DeviceDriver) {
 		if s.lightVPMapped[i] != nil {
 			deviceDriver.UnmapMemory(s.lightVPMemories[i])
 			s.lightVPMapped[i] = nil
+			s.shaderParameterMapped[i] = nil
 		}
 		if s.lightVPMemories[i].Handle() != 0 {
 			deviceDriver.FreeMemory(s.lightVPMemories[i], nil)

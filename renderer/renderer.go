@@ -114,7 +114,8 @@ type Renderer struct {
 	// A value field rather than a pointer: it holds no GPU handle, needs no
 	// teardown, and the zero value (every array zeroed) is already correct on
 	// the first frame.
-	cmdScratch commandScratch
+	cmdScratch       commandScratch
+	shaderParameters [ShaderParameterBytes]byte
 	// grassLOD is the distance tuning grass thins, fades and culls by.
 	// Defaulted at construction so a zero value never culls grass at zero.
 	grassLOD GrassLOD
@@ -715,7 +716,8 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	}
 	r.onInit(func() { r.deviceDriver.DestroyRenderPass(r.renderPass, nil) })
 
-	// Non-lit pipeline layout (set 0 = texture only) for sky, stars, overlay, msdf, ui
+	// Non-lit set-0 layout for stars, overlay, MSDF and UI. The sky's layout
+	// adds the shadow/light set below.
 	r.pipelineLayout, err = createNonLitPipelineLayout(r.deviceDriver, r.descriptorSetLayout)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create non-lit pipeline layout: %w", err)
@@ -1999,6 +2001,10 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 	// all fragments to project to the shadow map origin where depth=1.0
 	// (cleared) → fully lit.
 	r.shadow.uploadLitUBO(f, lighting.CascadeVPs, lighting.NightGrade, lighting.SkyPalette, lighting.Volumetrics)
+	r.flushShaderParameters(f)
+	if t := r.trace; t != nil {
+		t.Hash("shaderparams", NewHash.Bytes(r.shadow.shaderParameterMapped[f]))
+	}
 	r.shadow.uploadLights(f, lighting.Lights, lighting.Clusters, lighting.LightFlags, r.sc.extent)
 
 	// The water pass is optional: a device without TRANSFER_SRC on its
