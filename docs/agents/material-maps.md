@@ -21,7 +21,7 @@ api:
 assets: procedural
 example: examples/16-materials
 run: go run ./16-materials
-verified: 2026-09-19
+verified: 2026-09-21
 ---
 
 # Material maps
@@ -89,6 +89,15 @@ metallic  = MeshRef.Metallic  * texture(mr).b
 So a material with no metallic-roughness map still honours the per-object
 values, and one with a map uses them as an overall trim. A `MeshRef.Roughness`
 of zero is treated as unset and becomes 0.5, as it always has.
+
+Roughness changes the specular response, not the supplied normal. Ordinary lit
+meshes now retain their normals above 0.9 too (issue #93); older builds biased
+those normals toward world +Y. Games that compensated by using 0.9 can use their
+intended roughness again. Very rough ordinary meshes may consequently look
+darker on surfaces facing away from the light. The separate grass pipeline is
+unchanged. `task normals` checks perpendicular, downward and lit swatches at
+0.9, 0.98 and 1.0, with a lit control that rejects empty captures.
+It also checks actual rotated planes whose shading and geometric normals agree.
 
 ## Occlusion applies to ambient only
 

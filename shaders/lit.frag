@@ -115,11 +115,10 @@ void main() {
         if (dot(N, V) < 0.0) N = -N;
     } else {
         N = normalize(fragWorldNormal);
-        // For very rough materials (grass blades), bias normal toward vertical.
-        // Thin geometry has rapidly varying per-face normals that cause noisy
-        // lighting ("TV static"). Biasing toward up gives smooth, uniform lighting.
-        float upBias = smoothstep(0.9, 1.0, roughness);
-        N = normalize(mix(N, vec3(0.0, 1.0, 0.0), upBias * 0.7));
+        // Roughness changes the BRDF, never the supplied normal. In
+        // task normals (400x300, fixed lighting), the old world-up bias at
+        // roughness .98 lit perpendicular/downward swatches to 180.67/191.67
+        // out of 255; without it both are 0, with the lit control at 191.67.
     }
 
     vec3 lit = evalLighting(diffuseColor, F0, shininess, N, V, fragWorldPos, fragShadowPos);
