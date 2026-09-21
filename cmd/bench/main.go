@@ -199,6 +199,7 @@ func run(sc scene) (*result, error) {
 	cmd := exec.Command("go", args...)
 	cmd.Dir = "examples"
 	cmd.Env = append(os.Environ(),
+		"GLYPHENGINE_BACKGROUND=1",
 		"GLYPHENGINE_TIMING=tsv",
 		"GLYPHENGINE_BENCH_LABEL="+sc.name,
 	)

@@ -1008,6 +1008,7 @@ func main() {
 	width := flag.Int("width", 1280, "window width")
 	height := flag.Int("height", 720, "window height")
 	fullscreen := flag.Bool("fullscreen", false, "run fullscreen on the primary monitor")
+	background := flag.Bool("background", false, "open without requesting input focus (windowed only)")
 	frames := flag.Int("frames", 0, "render N frames then exit (0 = run until closed)")
 	seed := flag.Int64("seed", 1, "terrain generation seed")
 	refract := flag.Bool("refraction", true, "distort the lake bed through the surface (costs a second render pass)")
@@ -1058,6 +1059,9 @@ func main() {
 	}
 	if *fullscreen {
 		opts = append(opts, glyph.WithFullscreen())
+	}
+	if *background {
+		opts = append(opts, glyph.WithBackgroundWindow())
 	}
 	if *frames > 0 {
 		opts = append(opts, glyph.WithMaxFrames(*frames))
