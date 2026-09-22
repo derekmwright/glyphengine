@@ -87,16 +87,18 @@ func main() {
 	}
 	// A second independently rendered image must agree, including nonempty
 	// content; the visibility floor above prevents identical blank captures.
-	repeat := load("repeat")
-	var changed int
-	for y := 0; y < 720; y++ {
-		for x := 0; x < 1280; x++ {
-			if rgb(both, x, y) != rgb(repeat, x, y) {
-				changed++
+	for _, pair := range [][2]string{{"both", "repeat"}, {"paused1", "paused2"}} {
+		a, b := load(pair[0]), load(pair[1])
+		var changed int
+		for y := 0; y < 720; y++ {
+			for x := 0; x < 1280; x++ {
+				if rgb(a, x, y) != rgb(b, x, y) {
+					changed++
+				}
 			}
 		}
+		check(changed == 0, "%s/%s: %d changed pixels", pair[0], pair[1], changed)
 	}
-	check(changed == 0, "fixed-clock repeat: %d changed pixels", changed)
 	if failed {
 		os.Exit(1)
 	}

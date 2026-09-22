@@ -19,7 +19,7 @@ layout(location = 0) in vec2 fragUV;
 
 layout(push_constant) uniform PushConstants {
     mat4 invVP;    // inverse view-projection
-    mat4 model;    // [0].xyz = camera position
+    mat4 model;    // [0].xyz = camera position, [0].w = stationary clock/view
     vec4 tint;     // x = time, y = nightFactor, z = cloud raymarch steps, w = cirrus strength
     vec4 sunDir;   // xyz = direction toward the body lighting the scene
     vec4 sunColor; // rgb, w = the real sun's elevation
@@ -681,6 +681,17 @@ void main() {
     }
 
     vec4 current = vec4(cloudScatter, cloudTransmit);
+    // The direction-keyed jitter repeats when both time and view are fixed;
+    // history has no new samples to average. Resolve the current value rather
+    // than letting the filter continue settling while the world is paused.
+    // task determinism's 09-water -pauseat 30 (frames 60 vs 120): 1 pixel,
+    // 1/255 before -> 0 after. task clouds' sunset/cirrus case: 185 -> 0.
+    // Bypassing history changes the paused image by at most 1/255 per channel
+    // in that water view; moving views and advancing clocks still accumulate.
+    if (pc.model[0].w > 0.0) {
+        outColor = current;
+        return;
+    }
 
     // ----- Temporal accumulation -----
     //

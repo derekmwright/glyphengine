@@ -174,6 +174,7 @@ type Renderer struct {
 	// temporal reprojection.
 	cloudFrame      int
 	prevVP          [16]float32
+	prevCloudTime   float32
 	cloudRenderPass core1_0.RenderPass
 	cloudPipeline   core1_0.Pipeline
 
@@ -2071,6 +2072,7 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 	// frame before last -- a broken chain rather than merely a different one.
 	r.cloudFrame++
 	r.prevVP = lighting.VP
+	r.prevCloudTime = lighting.Time
 	r.currentFrame = (f + 1) % maxFramesInFlight
 
 	if presentResult == khr_swapchain.VKErrorOutOfDate || presentResult == khr_swapchain.VKSuboptimal || r.framebufferResized {

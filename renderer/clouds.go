@@ -317,6 +317,9 @@ func (r *Renderer) recordClouds(cmdBuf core1_0.CommandBuffer, lighting SceneLigh
 	pc[16] = lighting.CameraPos[0]
 	pc[17] = lighting.CameraPos[1]
 	pc[18] = lighting.CameraPos[2]
+	if r.cloudFrame > 0 && lighting.Time == r.prevCloudTime && lighting.VP == r.prevVP {
+		pc[19] = 1 // no temporal averaging when the sample itself is stationary
+	}
 	pc[32] = lighting.Time
 	pc[33] = lighting.NightFactor
 	pc[34] = float32(lighting.CloudSteps)

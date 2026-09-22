@@ -1702,6 +1702,8 @@ tasks:
         shot high -time 0.5 -pitch -0.55 -clouds 0 -cirrus 1
         shot both -time 0.5 -pitch -0.55 -clouds 32 -cirrus 1
         shot repeat -time 0.5 -pitch -0.55 -clouds 32 -cirrus 1
+        shot paused1 -time 0.755 -pitch -0.55 -yaw 1.771 -cirrus 1 -pauseat 30 -frames 60
+        shot paused2 -time 0.755 -pitch -0.55 -yaw 1.771 -cirrus 1 -pauseat 30 -frames 120
         go run ../cmd/cloudcheck -dir "$d"
         echo "captures kept in examples/$d"
 

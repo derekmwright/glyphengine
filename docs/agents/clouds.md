@@ -98,7 +98,12 @@ or `GLYPHENGINE_TIMING=tsv`; grass or other passes can dominate a real scene.
 
 ## History and limits
 
-The result blends 80% reprojected history with the current sample. Rotation
+The result blends 80% reprojected history with the current sample. When both
+shader time and view-projection are unchanged, it resolves the current sample
+directly: direction-keyed jitter supplies no new samples while stationary.
+Without this, paused captures 60 frames apart differed by 1 pixel in the water
+fixture and 185 with sunset cirrus, each by 1/255. Both now repeat exactly.
+Rotation
 uses the previous view-projection. Translation approximates depth with the
 middle of the marched cumulus span, or cirrus height when cumulus is disabled.
 A mixed pixel has only one history depth, so fast camera translation can
@@ -122,7 +127,7 @@ can change shape as well as quality and cost.
 
 `task clouds` checks gold and rose undersides, daytime/night controls, cirrus
 with the volume disabled, attenuation behind cumulus, and an independent
-fixed-clock repeat. It requires changes above 8/255 before counting visible
+fixed-clock repeat, including a paused sunset. It requires changes above 8/255 before counting visible
 wisps or overlap. Captures remain in `examples/.clouds` for inspection. The
 check is a regression gate, not a claim of photographic realism. Reverting
 only the lighting makes both colour checks fail. Removing cirrus attenuation
