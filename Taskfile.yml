@@ -1688,6 +1688,8 @@ tasks:
         go build -o "$d/water{{.EXE}}" ./09-water
         shot() {
           name=$1; shift
+          # A failed capture must not reuse the previous run's image.
+          rm -f "$d/$name.png"
           "./$d/water{{.EXE}}" -background -frames 120 -width 1280 -height 720 \
             -screenshot "$d/$name.png" "$@" >"$d/$name.log" 2>&1
         }
