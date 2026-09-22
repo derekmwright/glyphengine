@@ -52,8 +52,11 @@ type SceneLighting struct {
 	// StarDensity scales how many stars the sky draws, 1 being the default.
 	StarDensity float32
 
-	// CloudSteps is the volumetric cloud sample count; zero draws none.
+	// CloudSteps is the volumetric cloud sample count; zero disables cumulus.
 	CloudSteps int
+
+	// Cirrus is the high, thin cloud layer strength, 0 to 1; zero disables it.
+	Cirrus float32
 
 	// LightShafts is the god-ray strength this frame will actually draw with,
 	// and SunScreenPos is where the sun lands in UV space, which is what the

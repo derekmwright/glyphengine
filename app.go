@@ -1627,6 +1627,7 @@ func (e *Engine) renderFrame() {
 		MilkyWay:      env.MilkyWay,
 		StarDensity:   env.StarDensity,
 		CloudSteps:    env.CloudSteps,
+		Cirrus:        env.Cirrus,
 		LightShafts:   shaftStrength,
 		SunScreenPos:  sunScreen,
 		ShaftShape: renderer.LightShaftShape{

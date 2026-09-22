@@ -19,8 +19,8 @@ layout(location = 0) in vec2 fragUV;
 
 layout(push_constant) uniform PushConstants {
     mat4 invVP;    // inverse view-projection
-    mat4 model;    // [0].xyz = camera position
-    vec4 tint;     // x = time, y = nightFactor, z = cloud raymarch steps
+    mat4 model;    // [0].xyz = camera position, [0].w = stationary clock/view
+    vec4 tint;     // x = time, y = nightFactor, z = cloud raymarch steps, w = cirrus strength
     vec4 sunDir;   // xyz = direction toward the body lighting the scene
     vec4 sunColor; // rgb, w = the real sun's elevation
     // The previous frame's view-projection, occupying the four vec4s the march
@@ -139,12 +139,7 @@ float fbm3DDetail(vec3 p, float detail) {
     return v * (0.9375 / max(used, 1e-4));
 }
 
-// fbm3DLow is the two-octave version used for the light march.
-//
-// Shadowing inside a cloud does not need the detail the shape does: the fine
-// octaves only add high-frequency variation that reads as speckle once it is
-// sampled four times per step. Dropping them is both cheaper and smoother,
-// which is a rare direction for that trade to go.
+// Two-octave field used to vary the cumulus column height.
 float fbm3DLow(vec3 p) {
     float v = 0.5 * valueNoise3D(p);
     p = p * 2.03 + vec3(17.1, 9.7, 23.3);
@@ -321,10 +316,54 @@ float cloudDensity(vec3 p, float coverage, vec2 wind, float detail) {
     return remap(density, mix(0.14, 0.62, hn) * resolved * (1.0 - b));
 }
 
+// Warm direct light, still attenuated by the volume's light march: a sun below
+// the horizon reaches the underside while the core remains shaded. The palette
+// is artistic, not a spectral atmosphere. 09-water at 1280x720, fixed 16.667ms,
+// 120 frames, yaw 1.771, pitch -0.38: box (420,365)-(475,400), time .755,
+// mean R-G rises from 0.37 to 39.92 /255; at .765 B-G rises -30.05 to 15.33.
+// Noon is byte-identical. `task clouds` guards visible gold/rose, not just hue.
+vec3 cloudLight(float sunElevation) {
+    float day = atmDaylight(sunElevation);
+    float twi = atmTwilight(sunElevation);
+    float afterglow = 1.0 - smoothstep(-0.08, 0.025, sunElevation);
+    vec3 twilightLight = mix(vec3(1.0, 0.36, 0.10), vec3(0.92, 0.20, 0.30), afterglow);
+    return mix(mix(vec3(0.030, 0.036, 0.055), vec3(0.95, 0.93, 0.88), day), twilightLight, twi * 0.9);
+}
+
+// An opt-in thin layer above the cumulus volume, sampled once per ray. Domain
+// warping bends the anisotropic strands; a separate field breaks them into
+// patches. Optical path length thickens grazing views, with a finite-distance
+// fade. It shares the existing target and history; no extra pass or allocation.
+// RX 7900 XTX, 09-water 1280x720/MSAA4, fixed 16.667ms, 200 frames,
+// time .755, yaw 1.771, pitch -.38, three interleaved runs: cirrus 0 gives
+// 0.863-0.868ms for this pass, cirrus 1 gives 0.888-0.892ms.
+vec4 cirrusLayer(vec3 camPos, vec3 dir, float time, float sunElevation, vec3 lightDir, vec3 skyFill, float strength) {
+    const float HEIGHT = 8000.0;
+    // Keep derivatives outside per-pixel branches at the horizon.
+    float distance = max(HEIGHT - camPos.y, 0.0) / max(dir.y, 0.02);
+    vec2 uv = (camPos.xz + dir.xz * distance) * 0.00011 + vec2(time * 0.0008, time * 0.00025);
+    vec2 warp = vec2(valueNoise3D(vec3(uv * 0.45, 13.1)), valueNoise3D(vec3(uv * 0.45, 37.7)));
+    vec2 stretched = mat2(0.94, 0.342, -0.342, 0.94) * uv + warp * 1.6;
+    stretched.y += 0.18 * fbm3D(vec3(stretched * vec2(6.0, 2.0), 7.0));
+    vec3 p = vec3(stretched * vec2(2.5, 22.0), 31.0);
+    float footprint = max(length(dFdx(p)), length(dFdy(p)));
+    float detail = clamp(log(0.5 / max(footprint, 1e-5)) / log(2.03), 1.0, 4.0);
+    float patches = smoothstep(0.28, 0.62, fbm3D(vec3(uv * 0.7, 13.0)));
+    float strands = smoothstep(0.25, 0.72, fbm3DDetail(p, detail));
+    float breakup = smoothstep(0.32, 0.62, fbm3D(vec3(stretched * vec2(5.0, 2.0), 41.9)));
+    float opacity = 1.0 - exp(-0.22 * clamp(strength, 0.0, 1.0) * patches * strands * breakup / max(dir.y, 0.20));
+    opacity *= smoothstep(0.02, 0.12, dir.y) * (1.0 - smoothstep(90000.0, 180000.0, distance));
+    // Artistic altitude offset: upper clouds retain warm light a little later.
+    vec3 lit = cloudLight(sunElevation + 0.025) * mix(1.0, hg(dot(dir, lightDir), 0.25), 0.4) + skyFill * 0.10;
+    if (dir.y <= 0.02 || camPos.y >= HEIGHT) {
+        return vec4(0.0, 0.0, 0.0, 1.0);
+    }
+    return vec4(lit * opacity, 1.0 - opacity);
+}
+
 void main() {
     float time = pc.tint.x;
     float sunElevation = pc.sunColor.w;
-    vec3 realSunDir = atmSunDirFrom(sunElevation, pc.fog.zw);
     vec3 sunDir = normalize(pc.sunDir.xyz);
 
     vec3 camPos = pc.model[0].xyz;
@@ -368,7 +407,6 @@ void main() {
             // while an overhead one crosses it in hundreds of units.
             reprojectDist = (t0 + t1) * 0.5;
             float day = atmDaylight(sunElevation);
-            float twi = atmTwilight(sunElevation);
 
             // Sparse on purpose. Cumulus are individual clouds with sky
             // between them; raising the bar is what separates them, and the
@@ -412,8 +450,7 @@ void main() {
             // the sun, and at 1.0 it clipped across a tenth of the sky -- flat
             // white with no internal shape, and nothing to separate it from the
             // disc. Measured: clipped sky 10.7 percent to 3.2 percent.
-            vec3 sunLight = mix(vec3(0.030, 0.036, 0.055), vec3(0.95, 0.93, 0.88), day);
-            sunLight = mix(sunLight, vec3(1.0, 0.62, 0.34), twi * 0.8);
+            vec3 sunLight = cloudLight(sunElevation);
             vec3 skyFill = mix(zenith, horizon, 0.5) * 1.6;
 
             // Adaptive stepping: long strides through empty air, short ones
@@ -631,7 +668,30 @@ void main() {
         }
     }
 
+    if (pc.tint.w > 0.0) {
+        vec4 cirrus = cirrusLayer(camPos, dir, time, sunElevation, sunDir, mix(zenith, horizon, 0.5) * 1.6, pc.tint.w);
+        // task clouds: 732 visibly overlapping pixels, mean high-layer change
+        // 23.165/255 in open sky -> 4.224 behind cumulus (ratio .182). Removing
+        // this attenuation gives 25.317 (ratio 1.093) and fails the gate.
+        cloudScatter += cloudTransmit * cirrus.rgb;
+        cloudTransmit *= cirrus.a;
+        if (reprojectDist == 0.0 && dir.y > 0.02 && camPos.y < 8000.0) {
+            reprojectDist = (8000.0 - camPos.y) / dir.y;
+        }
+    }
+
     vec4 current = vec4(cloudScatter, cloudTransmit);
+    // The direction-keyed jitter repeats when both time and view are fixed;
+    // history has no new samples to average. Resolve the current value rather
+    // than letting the filter continue settling while the world is paused.
+    // task determinism's 09-water -pauseat 30 (frames 60 vs 120): 1 pixel,
+    // 1/255 before -> 0 after. task clouds' sunset/cirrus case: 185 -> 0.
+    // Bypassing history changes the paused image by at most 1/255 per channel
+    // in that water view; moving views and advancing clocks still accumulate.
+    if (pc.model[0].w > 0.0) {
+        outColor = current;
+        return;
+    }
 
     // ----- Temporal accumulation -----
     //
@@ -640,11 +700,9 @@ void main() {
     // frames converges it, which is a real fix rather than the amplitude
     // reduction sky.frag used to do -- that hid the noise by taking less of it.
     //
-    // Reprojection is direction-based, using the middle of the marched slab as
-    // a stand-in for where the cloud actually is. Clouds sit 620 to 1500 units
-    // out and the camera walks at a few units a second, so the parallax error
-    // over one frame is far below a half-resolution texel. Rotation is the
-    // motion that matters here and this handles it exactly.
+    // Rotation reprojects both layers with the same ray. Translation uses the
+    // cumulus slab midpoint (or cirrus height when the volume is disabled), so
+    // mixed layers are an approximation: fast travel can leave history trails.
     if (reprojectDist > 0.0) {
         vec3 worldPoint = camPos + dir * reprojectDist;
         vec4 prevClip = pc.prevVP * vec4(worldPoint, 1.0);
@@ -656,12 +714,9 @@ void main() {
             if (all(greaterThanEqual(prevUV, vec2(0.0))) && all(lessThanEqual(prevUV, vec2(1.0)))) {
                 vec4 history = texture(historyTex, prevUV);
 
-                // Neighbourhood clamp. The clouds drift under wind, so history
-                // is always slightly stale, and without a bound on how far it
-                // may differ the blend smears moving edges into ghosts.
-                // Clamping to the range of the current frame's neighbours keeps
-                // the convergence where the signal is stable and discards it
-                // where the picture is genuinely changing.
+                // Bound reprojected history by the current pixel and four
+                // HISTORY neighbours at the current UV. This is not a current-
+                // frame neighbourhood clamp; do not assume it removes trails.
                 vec2 texel = 1.0 / vec2(textureSize(historyTex, 0));
                 vec4 lo = current;
                 vec4 hi = current;

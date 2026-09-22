@@ -30,6 +30,7 @@ task nightlight # warm lamps stay warm on the ground at night
 task waterlight # a lamp beside a lake reaches the water, in the lamp's colour
 task reload    # reloading a level never shows a frame without it
 task volumetric # a light's beam is in the air inside its cone and nowhere else
+task clouds    # sunset colour, high cirrus, layer occlusion and repeatability
 task skypalette # the sky palette reaches the fog, the water and the clouds, not just the dome
 ```
 

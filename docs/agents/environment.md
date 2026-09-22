@@ -156,40 +156,21 @@ any descriptor layout.
 
 ## Clouds are a graphics setting
 
-`Sky.CloudSteps` controls the volumetric cloud raymarch and is the most
-expensive thing the engine draws per pixel. It exists to be wired to a settings
-menu, not left at a constant. Measured at 1280x720, MSAA 4x, on a Radeon RX
-7900 XTX, whole frame:
+`Sky.CloudSteps` controls volumetric cumulus. It sets a coarse sample budget:
+`CloudsOff` is 0, `CloudsLow` is 16, and `CloudsHigh` is 32. Occupied intervals
+use quarter-sized steps. Lower counts can change cloud shape because they also
+change which noise octaves resolve.
 
-| Setting | Frame | FPS |
-|---|---|---|
-| `CloudsOff` | 0.28 ms | 3593 |
-| `CloudsLow` (16) | 0.76 ms | 1323 |
-| `CloudsHigh` (32) | 1.11 ms | 898 |
+`Sky.Cirrus` independently adds a high, thin layer (0 disables, 1 is full
+strength; default 0). For clear sky, set both to zero. Both settings can change
+at runtime without rebuilding GPU resources.
 
-Those are one GPU's numbers; the ratios transfer better than the absolutes.
-Any integer works, not just the presets.
-
-Those are also **whole-frame differences**, taken before the engine could time a
-pass. `task bench` measures each pass directly now and broadly confirms them —
-the sky pass is 83–93% of GPU time in `02-cube`, `07-terrain`, `09-water`,
-`12-particles` and `16-materials`.
-
-The exception is flora, and it inverts the advice. Grass overdraws itself
-heavily while the sky is one layer deep and depth-rejected wherever terrain
-covers it, so in `08-grass` the split is grass 3.95 ms against sky 1.68 ms, and
-in `15-kitchen-sink` 4.30 against 1.20. In a scene with ground cover, clouds are
-no longer the first thing to reach for. Measure — in either direction. See
-[profiling](profiling.md).
-
-It is safe to change every frame — the value is read when the environment
-resolves, so a slider takes effect on the next frame with nothing to rebuild.
-
-The sky is drawn **after** opaque geometry and depth-tested against the far
-plane, so none of this runs for a pixel the terrain covers. That reordering is
-worth about 12% on its own and is what makes a raymarched sky affordable at
-all; before it, a fullscreen sky shaded every pixel and the world painted over
-most of them.
+The clouds render into a half-resolution target before the scene. The later
+sky composite is depth-tested against terrain; the cloud march itself is not.
+Measure the actual workload with `task bench` rather than assuming clouds or
+grass dominate. See [clouds.md](clouds.md) for layering, sunset lighting,
+current per-pass measurements and limits, and [profiling](profiling.md) for
+measurement tools.
 
 ## Light shafts are on, and only near the sun
 

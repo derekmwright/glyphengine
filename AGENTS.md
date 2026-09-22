@@ -170,6 +170,7 @@ are that pipeline's own real-Blender fixture, in the same spirit as
 | `task nightlight` | Warm lamps stay warm on the ground after the night shift (needs a GPU) |
 | `task waterlight` | A lamp beside a lake reaches the water, in the lamp's colour (needs a GPU) |
 | `task volumetric` | A light's beam is in the air inside its cone and nowhere else (needs a GPU) |
+| `task clouds` | Sunset gold/rose, independent cirrus, layer occlusion and repeatability (needs a GPU) |
 | `task skypalette` | The sky palette reaches the fog, the water and the clouds, not just the dome (needs a GPU) |
 | `task ci` | Lint, build, test, race |
 

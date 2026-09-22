@@ -50,6 +50,8 @@ var scenes = []scene{
 	{"terrain", "07-terrain", []string{"-frames", "200"}, "heightmap terrain, no flora"},
 	{"grass", "08-grass", []string{"-frames", "200"}, "instanced flora, the heaviest pass"},
 	{"water", "09-water", []string{"-frames", "200"}, "refraction pass and god rays"},
+	{"clouds-sunset", "09-water", []string{"-frames", "200", "-time", "0.755", "-pitch", "-0.38", "-yaw", "1.771"}, "sunset cumulus"},
+	{"clouds-cirrus", "09-water", []string{"-frames", "200", "-time", "0.755", "-pitch", "-0.38", "-yaw", "1.771", "-cirrus", "1"}, "same sunset with high cirrus"},
 	{"lights", "11-lights", []string{"-frames", "200"}, "one shadowed point light plus fills"},
 	{"particles", "12-particles", []string{"-frames", "200"}, "three additive emitters"},
 	{"materials", "16-materials", []string{"-frames", "200"}, "the material pipeline"},

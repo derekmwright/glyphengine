@@ -282,8 +282,8 @@ func (t *cloudTarget) destroy(deviceDriver core1_0.DeviceDriver) {
 // It runs every frame even when the layer is disabled, because a pass that
 // sometimes does not run leaves its target in an undefined layout while the sky
 // still binds it every frame. That is the trap the bloom chain and the sky-view
-// tables both fell into. With zero steps the shader early-outs to fully
-// transmissive and the composite is a no-op, at a cost of a quarter-resolution
+// tables both fell into. With both cloud controls at zero, the shader writes
+// fully transmissive pixels and the composite is a no-op, at a cost of a quarter-resolution
 // fullscreen triangle.
 func (r *Renderer) recordClouds(cmdBuf core1_0.CommandBuffer, lighting SceneLighting, frame int) error {
 	t := r.clouds
@@ -317,9 +317,13 @@ func (r *Renderer) recordClouds(cmdBuf core1_0.CommandBuffer, lighting SceneLigh
 	pc[16] = lighting.CameraPos[0]
 	pc[17] = lighting.CameraPos[1]
 	pc[18] = lighting.CameraPos[2]
+	if r.cloudFrame > 0 && lighting.Time == r.prevCloudTime && lighting.VP == r.prevVP {
+		pc[19] = 1 // no temporal averaging when the sample itself is stationary
+	}
 	pc[32] = lighting.Time
 	pc[33] = lighting.NightFactor
 	pc[34] = float32(lighting.CloudSteps)
+	pc[35] = lighting.Cirrus
 	pc[36] = lighting.SunDir[0]
 	pc[37] = lighting.SunDir[1]
 	pc[38] = lighting.SunDir[2]
