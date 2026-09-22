@@ -40,3 +40,6 @@ examples/.nightlight/
 examples/.skypalette/
 examples/.shafts/
 /.shadowcoverage/
+
+# task clouds keeps its captures for visual review.
+examples/.clouds/

@@ -209,6 +209,7 @@ type game struct {
 	pitch      float32
 	tod        float32
 	clouds     int
+	cirrus     float32
 	stars      float64
 	milkyway   string
 	band       float64
@@ -372,6 +373,7 @@ func (g *game) Init(e *glyph.Engine) error {
 	if env, ok := e.Scene.Env.(*glyph.Environment); ok {
 		if env.Sky != nil {
 			env.Sky.CloudSteps = g.clouds
+			env.Sky.Cirrus = g.cirrus
 			env.Sky.StarDensity = float32(g.stars)
 			env.Sky.MilkyWay = float32(g.band)
 			// Zero fields keep the engine's defaults, so passing the struct
@@ -1016,6 +1018,7 @@ func main() {
 	msaa := flag.Int("msaa", 4, "MSAA sample count (1 disables it)")
 	novsync := flag.Bool("novsync", false, "disable vsync, for measuring frame cost")
 	clouds := flag.Int("clouds", glyph.CloudsHigh, "volumetric cloud raymarch steps (0 disables)")
+	cirrus := flag.Float64("cirrus", 0, "high wispy cloud strength, 0 to 1; independent of -clouds")
 	stars := flag.Float64("stars", 1.0, "star density multiplier (0 = none)")
 	milkyway := flag.String("milkyway", "", "equirectangular sky panorama (PNG) to use as the galactic band")
 	band := flag.Float64("band", 1, "procedural galactic band strength, 0 to 1")
@@ -1077,7 +1080,7 @@ func main() {
 		opts = append(opts, glyph.WithUIGlow())
 	}
 
-	e, err := glyph.New(&game{seed: *seed, refract: *refract, pitch: float32(*pitch), tod: float32(*tod), clouds: *clouds, stars: *stars, milkyway: *milkyway, band: *band, fogHeight: float32(*fogHeight), yaw: float32(*yaw), shafts: float32(*shafts), shaftShape: glyph.LightShaftShape{Radius: float32(*shaftRadius), Decay: float32(*shaftDecay), Threshold: [2]float32{float32(*shaftLow), float32(*shaftHigh)}}, pillars: *pillars, pauseAt: *pauseAt, hud: *hud, bloom: float32(*bloom), bloomThres: float32(*bloomThreshold), plume: *plume, ghost: *ghost, marker: *marker, submerged: *submerged, lampCount: *lamps, spotCount: *spots, lampsOff: *lampsOff, volumetric: float32(*volumetric), lampPosts: *lampPosts, alien: *alien}, opts...)
+	e, err := glyph.New(&game{seed: *seed, refract: *refract, pitch: float32(*pitch), tod: float32(*tod), clouds: *clouds, cirrus: float32(*cirrus), stars: *stars, milkyway: *milkyway, band: *band, fogHeight: float32(*fogHeight), yaw: float32(*yaw), shafts: float32(*shafts), shaftShape: glyph.LightShaftShape{Radius: float32(*shaftRadius), Decay: float32(*shaftDecay), Threshold: [2]float32{float32(*shaftLow), float32(*shaftHigh)}}, pillars: *pillars, pauseAt: *pauseAt, hud: *hud, bloom: float32(*bloom), bloomThres: float32(*bloomThreshold), plume: *plume, ghost: *ghost, marker: *marker, submerged: *submerged, lampCount: *lamps, spotCount: *spots, lampsOff: *lampsOff, volumetric: float32(*volumetric), lampPosts: *lampPosts, alien: *alien}, opts...)
 	if err != nil {
 		log.Fatalf("create engine: %v", err)
 	}

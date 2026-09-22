@@ -156,6 +156,12 @@ any descriptor layout.
 
 ## Clouds are a graphics setting
 
+`Sky.CloudSteps` controls volumetric cumulus. `Sky.Cirrus` independently adds
+a high, thin layer (0 disables, 1 is full strength; default 0). For clear sky,
+set both to zero. See [clouds.md](clouds.md) for layering, sunset lighting,
+current per-pass measurements and limits.
+
+
 `Sky.CloudSteps` controls the volumetric cloud raymarch and is the most
 expensive thing the engine draws per pixel. It exists to be wired to a settings
 menu, not left at a constant. Measured at 1280x720, MSAA 4x, on a Radeon RX

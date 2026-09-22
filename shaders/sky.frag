@@ -95,24 +95,9 @@ void main() {
         skyColor = mix(skyColor, groundColor, belowFade);
     }
 
-    // ----- Volumetric clouds -----
-    //
-    // A slab of 3D noise, raymarched. The previous version sampled 2D noise on
-    // a single plane, which looks convincing straight up and falls apart at a
-    // shallow angle: a plane has no thickness, so clouds near the horizon are
-    // as thin as clouds overhead, when they should be the longest sightline in
-    // the sky. Marching a volume gets that for free, along with self-shadowing
-    // and edges that light up from behind.
-    //
-    // This is only affordable because the sky now draws last and depth-tested,
-    // so nothing here runs for a pixel the terrain covers.
-    // Composite the half-resolution cloud target over the dome.
-    //
-    // rgb is in-scattered radiance and alpha is transmittance, so this is a
-    // premultiplied over: what gets through the layer, plus what the layer
-    // itself sends toward the eye. Sampling bilinearly upscales it, which is
-    // acceptable precisely because clouds are soft -- there is no edge here for
-    // the interpolation to blur that was not already soft.
+    // Composite the half-resolution cumulus/cirrus target over the dome.
+    // RGB is in-scattered radiance and alpha is transmittance. Only this
+    // composite is terrain-depth-tested; the cloud pass draws its full target.
     vec4 clouds = texture(cloudTex, fragUV);
     float cloudTransmit = clouds.a;
     skyColor = skyColor * cloudTransmit + clouds.rgb;

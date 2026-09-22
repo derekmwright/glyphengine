@@ -101,8 +101,12 @@ type EnvironmentState struct {
 	SunDiscColor [3]float32
 	MoonDiscDir  [3]float32
 
-	// CloudSteps is the volumetric cloud sample count; zero draws none.
+	// CloudSteps is the volumetric cloud sample count; zero disables cumulus.
 	CloudSteps int
+
+	// Cirrus is the high, thin cloud layer strength, 0 to 1. Zero disables it.
+	// Independent of CloudSteps; DefaultSky keeps this at zero.
+	Cirrus float32
 
 	// LightShafts is the god-ray strength; zero disables them. It carries the
 	// fade with the sun disc's elevation already applied, so a sun on its way
@@ -164,10 +168,9 @@ type Environment struct {
 
 // Sky configures the procedural sky dome.
 //
-// This is about what gets drawn. The colours are derived from sun elevation in
-// shaders/atmosphere.inc; to change those, replace the sky shaders through
-// glyphengine.WithShaders, or renderer.WithShaders if you drive the renderer
-// directly.
+// This is about what gets drawn. Scene.SetSkyPalette controls the colours
+// shared by sky, fog, water and cloud ambient fill. WithShaders can replace
+// the procedural shaders when a palette is not enough.
 type Sky struct {
 	// Stars fade in as night falls.
 	Stars bool
@@ -203,7 +206,7 @@ type Sky struct {
 	FixedSunElevation float32
 
 	// CloudSteps is how many samples the volumetric cloud raymarch takes.
-	// Zero draws no clouds at all.
+	// Zero disables cumulus; Cirrus controls the high layer separately.
 	//
 	// This is the most expensive thing the engine draws per pixel, and it is
 	// meant to be a graphics setting a game exposes rather than a constant.
@@ -232,6 +235,10 @@ type Sky struct {
 	// when the environment resolves, so a settings slider takes effect on the
 	// next frame with nothing to rebuild.
 	CloudSteps int
+
+	// Cirrus is the high, thin cloud layer strength, 0 to 1. Zero disables it.
+	// Independent of CloudSteps; DefaultSky keeps this at zero.
+	Cirrus float32
 
 	// LightShafts is the strength of screen-space light shafts, or god rays:
 	// the smear of brightness radiating from the sun past whatever occludes
@@ -315,7 +322,7 @@ func DefaultLightShaftShape() LightShaftShape {
 
 // Cloud quality presets for Sky.CloudSteps.
 const (
-	// CloudsOff draws no clouds. The sky keeps its gradient and sun glow.
+	// CloudsOff disables volumetric cumulus. Cirrus is controlled separately.
 	CloudsOff = 0
 	// CloudsLow is a coarse march: cloud shapes read correctly, edges are
 	// softer and thin wisps can shimmer as the camera moves.
@@ -445,6 +452,7 @@ func (env *Environment) State() EnvironmentState {
 	if env.Sky != nil {
 		s.DrawSky = true
 		s.CloudSteps = env.Sky.CloudSteps
+		s.Cirrus = env.Sky.Cirrus
 		// Shafts come from the sun disc in the drawn sky, so they live and die
 		// with it rather than with the horizon.
 		//

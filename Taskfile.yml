@@ -394,6 +394,8 @@ tasks:
         # would surface here and nowhere else.
         check 09-water -alien -time 0.35
         check 09-water -alien -time 0.0
+        check 09-water -cirrus 1 -time 0.755 -pitch -0.55
+        check 09-water -cirrus 1 -clouds 0 -time 0 -pitch -0.55
         # The light shafts, which need the sun actually in frame -- and no
         # stock run of any example points at it, so every check above ran with
         # the shaft strength faded to zero and the pipeline unbound. The pass
@@ -1672,6 +1674,34 @@ tasks:
           rm -rf $d
         fi
         exit $status
+
+  clouds:
+    desc: "Check sunset cloud colour, cirrus, layer overlap and fixed-clock repeatability"
+    dir: examples
+    env:
+      GLYPHENGINE_FIXED_FRAME_TIME: "16.667ms"
+    cmds:
+      - |
+        set -eu
+        d=.clouds
+        mkdir -p "$d"
+        go build -o "$d/water{{.EXE}}" ./09-water
+        shot() {
+          name=$1; shift
+          "./$d/water{{.EXE}}" -background -frames 120 -width 1280 -height 720 \
+            -screenshot "$d/$name.png" "$@" >"$d/$name.log" 2>&1
+        }
+        shot gold -time 0.755 -pitch -0.38 -yaw 1.771
+        shot rose -time 0.765 -pitch -0.38 -yaw 1.771
+        shot noon -time 0.5 -pitch -0.38 -yaw 1.771
+        shot night -time 0 -pitch -0.38 -yaw 1.771
+        shot clear -time 0.5 -pitch -0.55 -clouds 0 -cirrus 0
+        shot low -time 0.5 -pitch -0.55 -clouds 32 -cirrus 0
+        shot high -time 0.5 -pitch -0.55 -clouds 0 -cirrus 1
+        shot both -time 0.5 -pitch -0.55 -clouds 32 -cirrus 1
+        shot repeat -time 0.5 -pitch -0.55 -clouds 32 -cirrus 1
+        go run ../cmd/cloudcheck -dir "$d"
+        echo "captures kept in examples/$d"
 
   skypalette:
     desc: "Check that the sky palette reaches the fog, the water and the clouds, not just the dome"

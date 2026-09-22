@@ -1,178 +1,135 @@
 ---
 id: clouds
-title: Volumetric clouds
+title: Volumetric clouds and high cirrus
 summary: >
-  A raymarched cloud slab rendered at half resolution and accumulated across
-  frames. It is the single most expensive thing the renderer draws, and the
-  knobs that control it are not the ones you would guess.
+  Adaptive raymarched cumulus and an optional thin cirrus layer, sharing a
+  half-resolution target and temporal history, with warm sunset lighting.
 capability: environment
 status: stable
 since: v0.4.0
 api:
   - glyphengine.Sky.CloudSteps
+  - glyphengine.Sky.Cirrus
+  - glyphengine.EnvironmentState.Cirrus
+  - renderer.SceneLighting.Cirrus
   - glyphengine.CloudsOff
   - glyphengine.CloudsLow
   - glyphengine.CloudsHigh
+requires:
+  - cgo
+  - vulkan-runtime
 assets: none
 example: examples/09-water
-run: go run ./09-water -clouds 32
-verified: 2026-09-19
+run: task example:09-water -- -background -time 0.755 -pitch -0.55 -yaw 1.771 -cirrus 0.5
+verified: 2026-09-21
 ---
 
-# Volumetric clouds
+# Clouds
 
 ```go
-env := glyph.DefaultEnvironment()
-env.Sky.CloudSteps = glyph.CloudsHigh // or CloudsLow, or CloudsOff
-scene.Env = env
+import glyph "github.com/derekmwright/glyphengine"
+
+func outdoorEnvironment() *glyph.Environment {
+    env := glyph.DefaultEnvironment()
+    env.Sky.CloudSteps = glyph.CloudsHigh
+    env.Sky.Cirrus = 0.5 // optional high wisps; 0 disables, 1 is full strength
+    return env
+}
 ```
 
-Three presets, and the count is the raymarch's sample count along each view ray.
-`CloudsOff` is 0 and skips the layer entirely — the sky keeps its gradient and
-sun glow.
+Assign that environment to `scene.Env`. `CloudSteps` controls the volumetric
+cumulus: `CloudsOff` is 0, `CloudsLow` is 16, and `CloudsHigh` is 32. The count
+sets the coarse ray stride; occupied intervals use quarter-sized steps, with a
+budget of four times the count. It is not a fixed total number of samples.
 
-## This is where the frame's time goes
+`Cirrus` is independent. Set `CloudSteps = CloudsOff` and `Cirrus > 0` for only
+high clouds, or set both to zero for clear sky. `DefaultSky` leaves cirrus at
+zero so existing games keep their cloud coverage. Both controls can change at
+runtime without rebuilding GPU resources. Custom `EnvironmentSource` users
+supply the same fields in `EnvironmentState`; direct renderer callers use
+`renderer.SceneLighting`.
 
-Not the sky dome. Measured on `09-water`, sky pass total:
+## Sunset and night
 
-| | cost |
-| --- | --- |
-| clouds on, 32 steps | 1.146 ms |
-| clouds off | **0.008 ms** |
+The volume's light march follows the directional light, including the sun
+below the horizon. This lights exposed undersides while leaving the interior
+shaded. Direct cloud light changes from daylight white through gold to rose
+as the sun sets. The colours are an artistic approximation, not a spectral
+atmosphere. The high layer uses a small elevation offset to retain warm light
+later than cumulus.
 
-Over **99 percent** of "the sky is the top GPU pass" is this march. The dome —
-gradient, sun glow, horizon falloff, the whole analytic sky — is free by
-comparison.
+`task clouds` measures a sunlit underside in `09-water` under a fixed 16.667 ms
+clock at 1280x720, frame 120, yaw 1.771, pitch -0.38. In the rectangle
+(420,365)-(475,400), the time .755 red-minus-green mean is 39.92/255, versus
+0.37 with the former washed-out lighting. At .765 blue-minus-green is
+15.33/255 versus -30.05, distinguishing rose from yellow. The check also
+requires visible brightness and contrast against the shaded core. Noon is
+byte-identical to the previous lighting with cirrus disabled.
 
-This is worth stating plainly because it has already misled someone once. A
-Hillaire-style LUT atmosphere was built on the assumption that replacing the
-dome would make the sky cheaper, and it changed the sky pass from 0.917 ms to
-0.918 ms. **If you want the sky cheaper, the march is the only thing that
-matters.** One command tells you the split: `-clouds 0`.
+Night direct light remains `(0.030, 0.036, 0.055)`, deliberately boosted for
+legibility. Ambient fill comes from `Scene.SetSkyPalette`, shared with the
+dome, fog and water. Changing direct cloud-light colours requires replacing
+`ShaderSet.CloudsFrag` through `WithShaders`.
 
-## Architecture
+## Rendering and cost
 
-The march runs in its **own pass at half resolution**, writing in-scattered
-radiance to rgb and transmittance to alpha. `sky.frag` composites it over the
-dome as a premultiplied over.
+Cumulus occupies a procedural slab from 700 to 3400 world units. Adaptive
+view steps sample a noise field with step-dependent octave fading; six
+geometrically spaced light samples estimate self-shadowing. High cirrus is
+an 8000-unit plane: domain-warped anisotropic noise, a separate breakup mask,
+and distance/horizon fades. It has no volumetric self-shadowing.
 
-Half resolution is where the win is — GPU totals went water 1.399 → 0.688 ms,
-terrain 1.296 → 0.591 ms, kitchensink 3.515 → 3.131 ms. And it is invisible:
-sky-region RMS between full and half resolution is 0.00079 against a
-run-to-run noise floor of 0.00067 on the same view, max difference 2 in 255.
-Clouds are soft, so a bilinear upscale blurs nothing that was sharp.
+Both layers draw into the same half-resolution target. RGB holds scattered
+radiance and alpha holds transmittance. Cirrus is composed behind cumulus;
+`sky.frag` then composites that result over the full-resolution dome. The
+cloud pass draws the full target; only the later sky composite is rejected
+by terrain depth. Cirrus adds no render pass, GPU resource or CPU allocation.
 
-The result is then **accumulated across frames**, each one blending with the
-previous reprojected through the previous view-projection. The march jitters
-every ray's start, so a single frame is a noisy sample; averaging converges it.
+Measured on a Radeon RX 7900 XTX, three interleaved 200-frame runs of
+`09-water -time 0.755 -pitch -0.38 -yaw 1.771` at 1280x720/MSAA 4, fixed clock:
 
-## Three noise fixes, and why the obvious one is wrong
+| Setting | Cloud pass | Whole GPU frame |
+| --- | --- | --- |
+| Cumulus, cirrus 0 | 0.863�0.868 ms | 1.249�1.264 ms |
+| Cumulus, cirrus 1 | 0.888�0.892 ms | 1.281�1.294 ms |
 
-The march produces grain. Measured over the night sky band against a clouds-off
-floor of 0.000054:
+These are one view and one GPU. Measure the game's workload with `task bench`
+or `GLYPHENGINE_TIMING=tsv`; grass or other passes can dominate a real scene.
 
-| | grain |
-| --- | --- |
-| original | 0.001374 |
-| + Nyquist octave fading | 0.000994 |
-| + world-anchored jitter | 0.000856 |
-| + half res and temporal accumulation | **0.000741** |
+## History and limits
 
-**Do not fix this by turning the jitter down.** Removing it entirely gives the
-best static number and brings back visible horizontal banding at the horizon; a
-partial amplitude is worse than either, because the residual banding beats
-against the hash into a structured dither that reads worse than smooth grain.
+The result blends 80% reprojected history with the current sample. Rotation
+uses the previous view-projection. Translation approximates depth with the
+middle of the marched cumulus span, or cirrus height when cumulus is disabled.
+A mixed pixel has only one history depth, so fast camera translation can
+leave trails. This is a ground-view sky: cirrus is omitted when the camera
+is at/above its plane, and neither layer supplies a downward view from above.
 
-**Octaves fade by Nyquist.** The finest fbm octave has features about 113 world
-units across and a step covers 30 to 170 units at ordinary elevations, so that
-octave sat at or under the sample spacing and could only alias. `fbm3DDetail`
-drops octaves the step length cannot resolve, renormalised by the amplitude
-actually used so coverage does not shift with them.
+Off-screen history is rejected. The clamp bounds history with the current
+pixel and four samples from the **history** texture; it is not a current-frame
+neighbourhood clamp. Still-image checks do not establish motion quality.
 
-**The jitter is keyed to world direction, not screen position.** It was
-`hash2D(fragUV)`, which nails the noise pattern to the display: turn the camera
-and the clouds slide through a stationary field, which reads as a Photoshop
-add-noise filter rather than as grain. `hash3D(dir * 4096)` gives a patch of sky
-its own jitter so the noise travels with the cloud. This one is invisible in any
-still frame and obvious the moment the camera moves.
+History buffers use a frame counter, not the swapchain image index, with
+`maxFramesInFlight + 1` targets. The pass runs every frame, including when both
+layers are disabled, so its sampled image always has a valid layout. Zero
+steps and zero cirrus write fully transmissive pixels.
 
-## Temporal accumulation
+There is no weather map, user-specified layer altitude or cloud shadow on the
+ground. Lowering `CloudSteps` also changes which noise octaves resolve, so it
+can change shape as well as quality and cost.
 
-Reprojection uses the **middle of the marched slab** as a stand-in for where the
-cloud is, taken from the geometry rather than a constant — a grazing ray crosses
-the slab tens of kilometres out while an overhead one crosses it in hundreds of
-units. Clouds are far enough away that one frame of camera translation is well
-under a half-resolution texel, so rotation is the motion that matters and this
-handles it exactly.
+## Verification
 
-Two guards stop it ghosting:
+`task clouds` checks gold and rose undersides, daytime/night controls, cirrus
+with the volume disabled, attenuation behind cumulus, and an independent
+fixed-clock repeat. It requires changes above 8/255 before counting visible
+wisps or overlap. Captures remain in `examples/.clouds` for inspection. The
+check is a regression gate, not a claim of photographic realism. Reverting
+only the lighting makes both colour checks fail. Removing cirrus attenuation
+raises its contribution behind cumulus from 4.224 to 25.317/255 (ratio 0.182
+to 1.093), failing the overlap check. These ablations were rendered and checked.
 
-- **History off screen last frame is rejected.** There is nothing behind the
-  edge to blend with, and sampling the clamped edge smears it inward.
-- **History is clamped to the current frame's neighbourhood.** The clouds drift
-  under wind so history is always slightly stale; clamping keeps convergence
-  where the signal is stable and discards it where the picture is genuinely
-  changing.
-
-Cost is free within noise — the history fetches hide behind the march's ALU
-work.
-
-**The history chain is indexed by a frame counter, not the swapchain image
-index.** The presentation engine may hand indices back in any order, and history
-has to be strictly the previous frame. It needs `maxFramesInFlight + 1` buffers;
-two would let a frame overwrite a buffer another frame in flight is still
-sampling.
-
-## Failure mode: a pass that sometimes does not run
-
-The cloud pass runs **every frame**, even with `CloudsOff`. A pass that
-sometimes does not run leaves its target in an undefined layout while the sky
-still binds it every frame, and Vulkan validates a descriptor's declared layout
-at submit whether or not the shader samples it. With zero steps the shader
-early-outs to fully transmissive and the composite is a no-op.
-
-This rule has now caught three separate targets — the bloom chain, the cloud
-history, and a sky-view table that no longer exists. `primeSampledImages` exists
-for it.
-
-## Night lighting is an artistic floor
-
-Moonlight in the march is `(0.085, 0.10, 0.145)` against daylight's
-`(1.0, 0.97, 0.92)`. Real moonlight is roughly a **millionth** of sunlight, so
-this is not a measurement — a physically honest night sky is a black one.
-
-It was `0.55`, two thirds of daylight, which made night clouds read as white: a
-lit cloud measured 0.507 luminance at midnight against 0.811 at noon. Night now
-measures 0.161 median.
-
-If night needs rebalancing, move the sky palette, the moon boost and this
-together — darkening the sky alone leaves the moon as a hole punched in it. And
-be careful with the palette specifically: its night endpoints —
-`SkyPalette.ZenithNight` and `HorizonNight`, which a game sets with
-`Scene.SetSkyPalette` and the engine defaults in `DefaultSkyPalette` — are read
-by the dome, by the fog distant geometry fades into, by this march's ambient
-fill and by the water's reflection, so lifting them to make the sky legible
-washes out the whole landscape. **Brighten the moon, not the air.**
-
-## Not done
-
-- **Step count is still 32 at `CloudsHigh`, and lowering it is not free.**
-  Temporal accumulation does remove the single-frame-noise constraint that
-  originally set it, but step length feeds the Nyquist octave rule, so fewer
-  steps means fewer octaves and the clouds change shape rather than just getting
-  noisier. Measured against a deterministic 0.00012 floor: steps 32 to 16 is
-  0.574 to 0.256 ms but moves the image by RMS 0.082.
-
-  The inner light march is the other lever and is independent of octave detail:
-  `LIGHT_STEPS` 4 to 2 is 0.574 to 0.365 ms, and 16 steps with 2 light steps
-  reaches 0.162 ms. That also moves the image by about RMS 0.085, through
-  flatter self-shadowing.
-
-  Both are available and neither is free. They were left alone because the pass
-  is already 0.34 ms in kitchensink after the half-resolution and temporal work,
-  and the remaining time is not worth visible cloud quality.
-
-- **No weather map.** Coverage is a single constant, slightly heavier at night
-  so the sky is not empty.
-- **The march is not distance-adaptive.** Step length is uniform along the ray,
-  so a grazing view spends the same samples on the near slab as the far one.
+Also run `task ci`, `task validate`, `task determinism`, `task sky`, and
+`task skypalette` after renderer changes. For visual review, the example accepts
+`-background` and all automated tasks set `GLYPHENGINE_BACKGROUND=1` to avoid
+requesting keyboard focus.
