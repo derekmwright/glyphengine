@@ -56,6 +56,11 @@ func TestBackgroundWindowDoesNotRequestFocus(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer w.Destroy()
+			// Asserted before any event is pumped: the hint has to hide the
+			// window at creation, not a later Hide.
+			if w.handle.GetAttrib(glfw.Visible) != glfw.False {
+				t.Fatal("background window is visible")
+			}
 			if w.handle.GetAttrib(glfw.FocusOnShow) != glfw.False {
 				t.Fatal("background window requests focus when shown")
 			}

@@ -52,7 +52,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-09-21
+verified: 2026-09-23
 ---
 
 # Run a game loop with Engine and Game
@@ -128,8 +128,12 @@ Full program: `examples/02-cube`.
 
 ## Background captures
 
-Set `GLYPHENGINE_BACKGROUND=1` to launch a visible window without requesting
-input focus, or pass `glyph.WithBackgroundWindow()` in code. Direct window
+Set `GLYPHENGINE_BACKGROUND=1` to launch the window hidden and without input
+focus, or pass `glyph.WithBackgroundWindow()` in code. Nothing appears on
+screen or in the taskbar; the hidden window still has a surface and a
+swapchain of the requested size, so frames render, present and capture as
+they do in a visible one. (Not requesting focus was tried first and was not
+enough: an unfocused window still opens on top of whatever the user is doing.) Direct window
 users can pass `window.WithBackground()`. Fullscreen is rejected in this mode
 because GLFW ignores the initial-focus hint for fullscreen windows.
 
