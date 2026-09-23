@@ -8,7 +8,7 @@ import (
 	"github.com/vkngwrapper/core/v3/core1_0"
 )
 
-func withAppFrame(fx *frame, passes bool) *frame {
+func withAppFrame(fx *frame, passes bool, compute ...bool) *frame {
 	h := &fakeHandles{next: 10000}
 	r := &Renderer{msaaSamples: core1_0.Samples4, depth: &depthResources{format: core1_0.FormatD32SignedFloat}, sc: &swapchainDetails{imageFormat: core1_0.FormatB8G8R8A8SRGB, imageViews: make([]core1_0.ImageView, 1), extent: fx.extent}}
 	r.fallbackTexture = fx.fallbackTexture
@@ -21,6 +21,15 @@ func withAppFrame(fx *frame, passes bool) *frame {
 		mesh.sets = []core1_0.DescriptorSet{h.descSet(), h.descSet()}
 		full := &AppPass{r: r, desc: AppPassDesc{Name: "fixture fullscreen", Stage: StageBeforeBloom, Load: true, Reads: []*Texture{t.Texture(), r.SceneDepth()}, Fullscreen: true}, enabled: true, pipeline: h.pipeline(), layout: h.layout(), sets: []core1_0.DescriptorSet{h.descSet(), h.descSet()}}
 		r.appPasses = []*AppPass{mesh, full}
+	}
+	if len(compute) > 0 && compute[0] {
+		target := &RenderTarget{r: r, desc: RenderTargetDesc{Name: "compute output", Format: TargetR32F, Scale: 1, History: true, Storage: true}, color: &appImages{extent: fx.extent}}
+		target.texture.target = target
+		r.appTargets = append(r.appTargets, target)
+		c := &AppCompute{desc: AppComputeDesc{Name: "fixture compute", Stage: StageBeforeScene, Reads: []*Texture{r.appTargets[0].Texture(), target.Texture()}, Writes: []*RenderTarget{target}}, dispatch: [3]uint32{80, 45, 1}}
+		p := &AppPass{r: r, desc: AppPassDesc{Name: c.desc.Name, Stage: c.desc.Stage, Reads: c.desc.Reads}, enabled: true, compute: c, pipeline: h.pipeline(), layout: h.layout(), sets: []core1_0.DescriptorSet{h.descSet(), h.descSet()}}
+		c.pass = p
+		r.appPasses = append(r.appPasses, p)
 	}
 	g, err := newFrameGraph(r.msaaSamples, r.depth.format, r.sc.imageFormat, 1, r)
 	if err != nil {

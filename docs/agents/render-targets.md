@@ -1,7 +1,7 @@
 ---
 id: render-targets
-title: Application render targets and graphics passes
-summary: Allocate floating-point images, schedule graphics work, and sample outputs through fixed shader bindings.
+title: Application render targets, graphics and compute passes
+summary: Allocate floating-point images, schedule graphics and compute work, and sample outputs through fixed shader bindings.
 capability: rendering
 status: experimental
 api:
@@ -16,21 +16,27 @@ api:
   - renderer.AppPass.SetEnabled
   - renderer.AppPass.SetDraws
   - renderer.AppPass.SetPushConstants
+  - renderer.AppComputeDesc
+  - renderer.CreateAppCompute
+  - renderer.DestroyAppCompute
+  - renderer.AppCompute.SetEnabled
+  - renderer.AppCompute.SetDispatch
+  - renderer.AppCompute.SetPushConstants
   - renderer.SetShaderTexture
   - renderer.SetShaderTarget
   - renderer.SceneColor
   - renderer.SceneDepth
   - renderer.GPUTimings
 example: cmd/apppasscheck
-run: go run ./cmd/apppasscheck -frames 300 -churn -provoke-recreate -validate
+run: go run ./cmd/apppasscheck -compute -frames 300 -churn -provoke-recreate -validate
 requires:
   - cgo
   - vulkan-runtime
 assets: procedural
-verified: 2026-09-23
+verified: 2026-09-23 # rechecked with compute dispatches
 ---
 
-# Application render targets and graphics passes
+# Application render targets, graphics and compute passes
 
 Call these APIs on the renderer thread, normally from `Game.Init` or
 `Game.Update`. The game supplies shaders and draws; the renderer owns images,
@@ -64,7 +70,11 @@ contents, including history, start at zero.
 | `StageBeforeBloom` | The completed HDR scene including water; scene depth and earlier outputs. Own target or loaded HDR. |
 | `StageBeforeTonemap` | After scene bloom and the UI glow chain. Earlier outputs, HDR and scene depth. Own target or loaded HDR; changes here do not feed this frame's bloom. |
 
-Passes at a stage execute in creation order. A nil `Target` writes the engine
+Graphics and compute passes at a stage interleave in creation order. The scene
+input availability in every row applies to both kinds. Compute always writes
+its own storage targets; only graphics can load the HDR destination.
+
+Graphics passes at a stage execute in creation order. A nil `Target` writes the engine
 HDR scene, requires `Load: true`, and is restricted to the last two stages.
 `BlendAdditive` adds source and destination. `BlendAlpha` uses premultiplied
 source-over. `BlendNone` replaces covered pixels. `DepthTest` requires a
@@ -91,6 +101,61 @@ renderer lifetime. It stores the scene's reverse-Z depth in R32F: 1 is near,
 0 is far/background. With MSAA it takes the maximum sample. It captures
 opaque scene depth before water, whose pipeline does not write depth.
 
+## Compute dispatches
+
+```go
+output, err := r.CreateRenderTarget(renderer.RenderTargetDesc{
+    Name: "computed field", Format: renderer.TargetR32F, Scale: 1,
+    Storage: true, History: true,
+})
+if err != nil { return err }
+compute, err := r.CreateAppCompute(renderer.AppComputeDesc{
+    Name: "update field", Stage: renderer.StageBeforeScene, Comp: computeSPV,
+    Reads: []*renderer.Texture{target.Texture(), output.Texture()},
+    Writes: []*renderer.RenderTarget{output}, Timed: true,
+})
+if err != nil { return err }
+w, h := output.Extent()
+compute.SetDispatch((w+7)/8, (h+7)/8, 1)
+```
+
+`RenderTargetDesc.Storage` adds storage-image usage without changing the resting
+`ShaderReadOnlyOptimal` layout. Creation checks the device's optimal-tiling
+storage format feature; an unsupported format returns an error naming that
+format and target. `Writes` accepts up to four distinct, live targets, each with
+`Storage`; a missing flag is an error naming the target. Reading an output in
+the same pass requires `History`, with the sampled previous instance distinct
+from the storage destination. Scene colour and depth can be sampled after the
+scene but cannot be storage outputs. `Reads` follows the graphics input rules.
+
+`SetDispatch` takes workgroup counts, initially zero. Any zero axis records no
+compute commands; both timing edges still execute. `SetEnabled(false)` also
+skips the node and its barriers. After a relative target resizes, update the
+counts from `Extent()` and bounds-check the shader's global invocation IDs.
+`SetPushConstants` uses the same 128 application bytes at offset 128 as graphics;
+offsets 0–127 carry scene VP and an identity model. Compute's full push range
+is visible to the compute stage.
+
+Compute set 0 binds the unused fallback texture set, set 1 binds the shared
+light set, and set 2 has four combined samplers at bindings 0–3 and four storage
+images at 4–7 in `General`. The application bindings 6–10 in set 1 are also
+visible to compute; engine bindings 0–5 retain their existing graphics-stage
+visibility. Unused sampled inputs hold the white fallback. Declare only the
+storage bindings provided in `Writes`.
+
+```glsl
+layout(set=2, binding=0) uniform sampler2D input0;            // Reads[0..3]
+layout(set=2, binding=4, r32f) uniform image2D output0;       // Writes[0..3]; format qualifier must match the target's format
+layout(push_constant) uniform ApplicationPush { layout(offset=128) vec4 data[8]; } pc;
+layout(local_size_x = 8, local_size_y = 8) in;
+```
+
+Use `r16f`, `rg16f`, `rgba16f`, `r32f`, or `rgba32f` to match the target.
+The device enables extended storage-image formats when supported. Compute
+executes on the existing graphics queue. There is no second queue and no async
+compute. The graph derives graphics-to-compute and compute-to-graphics barriers;
+a dispatch runs without a render pass.
+
 ## Fixed shader layouts
 
 As with `ShaderSet`, these are fixed layouts, not reflected material layouts.
@@ -114,7 +179,7 @@ layout(set=2, binding=3) uniform sampler2D input3; // Reads[3]
 
 Set 1 is the shared shadow/light set. It is also set 1 for custom sky, static
 lit, terrain and water shaders, and set 2 for skinned lit shaders. Existing
-bindings 0–5 retain their engine layouts and stage visibility; use the engine
+bindings 0â€“5 retain their engine layouts and stage visibility; use the engine
 `lit.frag`/`lights.inc` layouts for their complete block declarations.
 
 | Binding | Descriptor |
@@ -125,8 +190,8 @@ bindings 0–5 retain their engine layouts and stage visibility; use the engine
 | 3 | Light storage buffer; fragment |
 | 4 | Cluster grid storage buffer; fragment |
 | 5 | Cluster index storage buffer; fragment |
-| 6 | Application std140 uniform buffer, 4096 bytes; vertex and fragment |
-| 7–10 | Four application combined image samplers; vertex and fragment |
+| 6 | Application std140 uniform buffer, 4096 bytes; vertex, fragment and compute |
+| 7â€“10 | Four application combined image samplers; vertex and fragment |
 
 ```glsl
 // Application-pass set 1; change set to 2 for a skinned lit shader.
@@ -197,7 +262,8 @@ unbound slot returns the fallback, not uninitialized data. Pass inputs follow
 the same fence rule. A renderer resize waits for the GPU before replacing all
 affected descriptors.
 
-Destroy passes with `DestroyAppPass` and targets with `DestroyRenderTarget`.
+Destroy passes with `DestroyAppPass` or `DestroyAppCompute`, and targets with
+`DestroyRenderTarget`.
 Destroying a target also destroys passes writing it; other readers and slots
 fall back to white. GPU destruction is deferred across frames in flight.
 Descriptor sets retire before their owned image views. Undestroyed resources
@@ -210,7 +276,8 @@ replacement framebuffers. Old framebuffers retire through `DeferDestroy`;
 cached render passes survive until renderer destruction. Pipeline construction
 uses the same compiled description immediately at `CreateAppPass`.
 
-`Timed` reserves one of 16 application timing entries. A seventeenth active
+`Timed` reserves one of 16 application timing entries shared by graphics and
+compute. A seventeenth active
 timed pass is rejected. `GPUTimings.App` contains `{Name, Ms}` in creation
 order, with both timestamp edges written even for disabled passes. Existing
 `Pass` values and `GPUTimings.Pass` retain their meaning. Timing slices are
@@ -229,3 +296,16 @@ frames while resizing. `task determinism` repeats both ordinary and history
 runs. The recording fixture pins 3331 calls with application passes against
 3299 without them, and reports zero recording allocations at 7, 97 and 511
 engine draws.
+
+With `-compute`, a pre-scene dispatch reads the R16F pattern, applies a 3x3 box
+blur and accumulates half the previous output in an R32F history target. The
+custom lit shader samples that target. The edge probe must lie between the two
+band interiors. Runs of at least 260 frames without churn/resize additionally
+compare frames 2/60 (at least 4/255 visible change) and frames 200/260 (exact
+convergence across the whole capture). `task determinism` repeats both compute and compute-plus-history
+runs. Compute is included in churn and resize when the flag is set.
+
+The graphics-plus-compute recording fixture pins 3339 calls against 3331 for
+graphics alone: four compute commands, two incoming barrier groups, one layout
+return barrier and one additional scene-input barrier. Both kinds together
+still record zero allocations at 7, 97 and 511 engine draws.

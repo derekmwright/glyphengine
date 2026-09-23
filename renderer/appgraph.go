@@ -101,8 +101,12 @@ func (r *Renderer) extendAppGraph(f *frameGraph, g *framegraph.Graph) error {
 		return uses
 	}
 	stage := func(stage PassStage) {
-		for _, p := range r.appPasses {
+		for order, p := range r.appPasses {
 			if p.desc.Stage != stage {
+				continue
+			}
+			if p.compute != nil {
+				r.appendComputeGraph(f, p.compute, order+2, appendNode)
 				continue
 			}
 			d := p.desc
@@ -153,16 +157,32 @@ func (r *Renderer) extendAppGraph(f *frameGraph, g *framegraph.Graph) error {
 	// A persistent sampled image may have been written by the preceding
 	// submission. Declare that producer even though its final layout is already
 	// shader-readable; layout equality alone does not make vertex reads visible.
-	var previous []framegraph.Use
+	var previous, storagePrevious []framegraph.Use
 	for _, t := range r.appTargets {
 		ids := f.targets[t]
-		previous = append(previous, framegraph.Use{Resource: ids.write, Access: framegraph.ColorWrite, FinalLayout: core1_0.ImageLayoutShaderReadOnlyOptimal})
+		state := framegraph.Use{Resource: ids.write, Access: framegraph.ColorWrite, FinalLayout: core1_0.ImageLayoutShaderReadOnlyOptimal}
+		previous = append(previous, state)
+		if t.desc.Storage {
+			storage := state
+			storage.Access, storage.Stages = framegraph.StorageReadWrite, core1_0.PipelineStageAllCommands
+			storagePrevious = append(storagePrevious, storage)
+			if t.desc.History {
+				storage.Resource = ids.read
+				storagePrevious = append(storagePrevious, storage)
+			}
+		}
 		if t.desc.History {
-			previous = append(previous, framegraph.Use{Resource: ids.read, Access: framegraph.ColorWrite, FinalLayout: core1_0.ImageLayoutShaderReadOnlyOptimal})
+			state.Resource = ids.read
+			previous = append(previous, state)
 		}
 	}
 	if len(previous) > 0 {
 		appendNode(framegraph.Node{Name: "application previous-frame state", Kind: framegraph.Legacy, Uses: previous}, graphNode{name: "application previous-frame state", begin: -1, end: -1, resolve: -1})
+	}
+	if len(storagePrevious) > 0 {
+		// Join the possible storage producer with the graphics producer and
+		// readers from the preceding submission. Both leave sampled layouts.
+		appendNode(framegraph.Node{Name: "application previous-frame compute state", Kind: framegraph.Legacy, Optional: true, Uses: storagePrevious}, graphNode{name: "application previous-frame compute state", begin: -1, end: -1, resolve: -1})
 	}
 	for i, n := range decl {
 		switch i {
@@ -299,7 +319,7 @@ func (r *Renderer) rebuildAppTargets(undo *rebuildUndo) error {
 	for _, p := range r.appPasses {
 		if len(p.sets) == 0 {
 			var err error
-			p.sets, err = r.allocateAppSets(maxFramesInFlight)
+			p.sets, err = r.allocatePassSets(p, maxFramesInFlight)
 			if err != nil {
 				return err
 			}
@@ -359,6 +379,10 @@ func (r *Renderer) destroyAppResources() {
 		}
 	}
 	r.appTargets, r.retiredTargets = nil, nil
+	if r.computeSetLayout.Handle() != 0 {
+		r.deviceDriver.DestroyDescriptorSetLayout(r.computeSetLayout, nil)
+		r.computeSetLayout = core1_0.DescriptorSetLayout{}
+	}
 	if r.appSetLayout.Handle() != 0 {
 		r.deviceDriver.DestroyDescriptorSetLayout(r.appSetLayout, nil)
 		r.appSetLayout = core1_0.DescriptorSetLayout{}

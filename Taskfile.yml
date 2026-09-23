@@ -48,10 +48,11 @@ tasks:
     cmds:
       - for f in *.vert *.frag; do "${VULKAN_SDK}/bin/glslc{{.EXE}}" "$f" -o "$f.spv"; done
       - for f in ../cmd/skyshadowcheck/*.frag; do "${VULKAN_SDK}/bin/glslc{{.EXE}}" "$f" -o "$f.spv"; done
-      - for f in ../cmd/apppasscheck/*.vert ../cmd/apppasscheck/*.frag; do "${VULKAN_SDK}/bin/glslc{{.EXE}}" "$f" -o "$f.spv"; done
+      - for f in ../cmd/apppasscheck/*.vert ../cmd/apppasscheck/*.frag ../cmd/apppasscheck/*.comp; do "${VULKAN_SDK}/bin/glslc{{.EXE}}" "$f" -o "$f.spv"; done
     sources:
       - cmd/apppasscheck/*.vert
       - cmd/apppasscheck/*.frag
+      - cmd/apppasscheck/*.comp
       - shaders/*.vert
       - shaders/*.frag
       - shaders/*.inc
@@ -621,7 +622,7 @@ tasks:
       # open the POSIX path mktemp hands back.
       - |
         status=0
-        d=.determinism
+        d=../.task/determinism
         rm -rf $d && mkdir -p $d
         shot() { GLYPHENGINE_FIXED_FRAME_TIME=$1 go run ./$2 -frames 90 $4 -screenshot $d/$3.png >/dev/null 2>&1; }
         same() {
@@ -716,9 +717,11 @@ tasks:
 
         # Application graphics passes, including previous-frame history.
         # Run from the repository root so every harness scratch file stays in .task.
-        for mode in "" "-history"; do
-          (cd .. && GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./cmd/apppasscheck -frames 90 $mode -screenshot .task/app-determinism-a.png) >/dev/null 2>&1 || status=1
-          (cd .. && GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./cmd/apppasscheck -frames 90 $mode -screenshot .task/app-determinism-b.png) >/dev/null 2>&1 || status=1
+        for mode in "" "-history" "-compute" "-compute -history"; do
+          frames=90
+          case "$mode" in *compute*) frames=260;; esac
+          (cd .. && GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./cmd/apppasscheck -frames $frames $mode -screenshot .task/app-determinism-a.png) >/dev/null 2>&1 || status=1
+          (cd .. && GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./cmd/apppasscheck -frames $frames $mode -screenshot .task/app-determinism-b.png) >/dev/null 2>&1 || status=1
           if samefile ../.task/app-determinism-a.png ../.task/app-determinism-b.png; then
             echo "apppasscheck $mode: identical"
           else
@@ -963,7 +966,7 @@ tasks:
       # same frame with the HUD off. See cmd/hudcheck for the arithmetic.
       - |
         status=0
-        d=.hud
+        d=../.task/hud
         rm -rf $d && mkdir -p $d
         shot() { GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./09-water -frames 90 -hud $1 -screenshot $d/$2.png $3 >/dev/null 2>&1; }
         pair() {
@@ -1296,7 +1299,7 @@ tasks:
       # is for.
       - |
         status=0
-        d=.waterblend
+        d=../.task/waterblend
         rm -rf $d && mkdir -p $d
         shot() { GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./09-water -frames 150 "$@" >/dev/null 2>&1; }
         shot -plume -ghost -marker -submerged -screenshot $d/plume.png
@@ -1368,7 +1371,7 @@ tasks:
       # copy the scene". On and off have to be byte for byte the same file.
       - |
         status=0
-        d=.shafts
+        d=../.task/shafts
         rm -rf $d && mkdir -p $d
         shot() { GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./09-water -frames 150 "$@" >/dev/null 2>&1; }
         # Dusk, the sun rising over the ridge from behind a row of pillars.
@@ -1467,9 +1470,9 @@ tasks:
       # emit -- while far reads +0.00, because the leak is in both captures.
       - |
         status=0
-        d=examples/.uiglow
+        d=.task/uiglow
         rm -rf $d && mkdir -p $d
-        shot() { (cd examples && GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./13-ui -frames 90 -glow $1 -screenshot .uiglow/$1.png) >/dev/null 2>&1; }
+        shot() { (cd examples && GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./13-ui -frames 90 -glow $1 -screenshot ../.task/uiglow/$1.png) >/dev/null 2>&1; }
         shot direct
         shot layer
         shot on

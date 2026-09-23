@@ -212,6 +212,7 @@ func createDescriptorPool(deviceDriver core1_0.DeviceDriver, maxSets int) (core1
 		Flags:   core1_0.DescriptorPoolCreateFreeDescriptorSet,
 		MaxSets: maxSets + appPoolSets + 36 + maxMaterials + uiLayerSetFactor*(maxHDRSets+maxBloomSets),
 		PoolSizes: []core1_0.DescriptorPoolSize{
+			{Type: core1_0.DescriptorTypeStorageImage, DescriptorCount: appPoolSamplers},
 			{
 				Type: core1_0.DescriptorTypeCombinedImageSampler,
 				// +4 sun shadow + 2 cube shadow samplers, then four maps per material
@@ -776,7 +777,7 @@ func (r *Renderer) createTexture(pixels []byte, width, height int, opts textureO
 		}
 
 		r.deviceDriver.CmdPipelineBarrier(cmdBuf,
-			core1_0.PipelineStageTransfer, core1_0.PipelineStageFragmentShader,
+			core1_0.PipelineStageTransfer, core1_0.PipelineStageVertexShader|core1_0.PipelineStageFragmentShader|core1_0.PipelineStageComputeShader,
 			0, nil, nil,
 			[]core1_0.ImageMemoryBarrier{{
 				OldLayout:           core1_0.ImageLayoutTransferSrcOptimal,
@@ -800,7 +801,7 @@ func (r *Renderer) createTexture(pixels []byte, width, height int, opts textureO
 
 	// Final level (still TransferDst) → ShaderReadOnlyOptimal
 	r.deviceDriver.CmdPipelineBarrier(cmdBuf,
-		core1_0.PipelineStageTransfer, core1_0.PipelineStageFragmentShader,
+		core1_0.PipelineStageTransfer, core1_0.PipelineStageVertexShader|core1_0.PipelineStageFragmentShader|core1_0.PipelineStageComputeShader,
 		0, nil, nil,
 		[]core1_0.ImageMemoryBarrier{
 			{

@@ -28,6 +28,7 @@ type RenderTargetDesc struct {
 	Width, Height uint32
 	Depth         bool
 	History       bool
+	Storage       bool // allow compute storage-image writes
 }
 
 // RenderTarget is renderer-owned. Its texture pointer survives resize and swaps
@@ -89,6 +90,13 @@ func (r *Renderer) CreateRenderTarget(d RenderTargetDesc) (*RenderTarget, error)
 	if err := validateTarget(d); err != nil {
 		return nil, fmt.Errorf("render target %q: %w", d.Name, err)
 	}
+	if d.Storage {
+		format, _ := targetFormat(d.Format)
+		props := r.instanceDriver.GetPhysicalDeviceFormatProperties(r.physicalDevice, format)
+		if props.OptimalTilingFeatures&core1_0.FormatFeatureStorageImage == 0 {
+			return nil, fmt.Errorf("render target %q: format %v does not support storage images", d.Name, format)
+		}
+	}
 	t := &RenderTarget{r: r, desc: d, id: newResourceID()}
 	if err := r.allocateAppTarget(t); err != nil {
 		return nil, fmt.Errorf("render target %q: %w", d.Name, err)
@@ -122,7 +130,7 @@ func (r *Renderer) DestroyRenderTarget(t *RenderTarget) {
 	t.destroyed = true
 	t.texture.destroyed = true
 	for _, p := range slices.Clone(r.appPasses) {
-		if p.desc.Target == t {
+		if p.desc.Target == t || (p.compute != nil && slices.Contains(p.compute.desc.Writes, t)) {
 			r.DestroyAppPass(p)
 		}
 	}
@@ -142,7 +150,7 @@ func (r *Renderer) allocateAppTarget(t *RenderTarget) error {
 	}
 	f, _ := targetFormat(t.desc.Format)
 	var err error
-	t.color, err = r.newAppImages(f, core1_0.ImageAspectColor, e, n, true)
+	t.color, err = r.newAppImages(f, core1_0.ImageAspectColor, e, n, true, t.desc.Storage)
 	if err != nil {
 		return err
 	}
@@ -170,7 +178,7 @@ type appImages struct {
 	extent   core1_0.Extent2D
 }
 
-func (r *Renderer) newAppImages(format core1_0.Format, aspect core1_0.ImageAspectFlags, extent core1_0.Extent2D, count int, sampled bool) (_ *appImages, err error) {
+func (r *Renderer) newAppImages(format core1_0.Format, aspect core1_0.ImageAspectFlags, extent core1_0.Extent2D, count int, sampled bool, storage ...bool) (_ *appImages, err error) {
 	t := &appImages{extent: extent}
 	defer func() {
 		if err != nil {
@@ -183,6 +191,9 @@ func (r *Renderer) newAppImages(format core1_0.Format, aspect core1_0.ImageAspec
 	}
 	if sampled {
 		usage |= core1_0.ImageUsageSampled
+	}
+	if len(storage) > 0 && storage[0] {
+		usage |= core1_0.ImageUsageStorage
 	}
 	for range count {
 		var img core1_0.Image
@@ -263,7 +274,7 @@ func (r *Renderer) primeAppImages(t *appImages, aspect core1_0.ImageAspectFlags,
 		}
 		b.OldLayout, b.NewLayout = core1_0.ImageLayoutTransferDstOptimal, core1_0.ImageLayoutShaderReadOnlyOptimal
 		b.SrcAccessMask, b.DstAccessMask = core1_0.AccessTransferWrite, core1_0.AccessShaderRead
-		stage := core1_0.PipelineStageVertexShader | core1_0.PipelineStageFragmentShader
+		stage := core1_0.PipelineStageVertexShader | core1_0.PipelineStageFragmentShader | core1_0.PipelineStageComputeShader
 		if !sampled {
 			b.NewLayout = core1_0.ImageLayoutDepthStencilAttachmentOptimal
 			b.DstAccessMask = core1_0.AccessDepthStencilAttachmentRead | core1_0.AccessDepthStencilAttachmentWrite

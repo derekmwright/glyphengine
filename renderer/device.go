@@ -98,7 +98,8 @@ func createLogicalDevice(instanceDriver core1_0.CoreInstanceDriver, physicalDevi
 		QueueCreateInfos:      queueCreateInfos,
 		EnabledExtensionNames: deviceExtensions,
 		EnabledFeatures: &core1_0.PhysicalDeviceFeatures{
-			SamplerAnisotropy: supported.SamplerAnisotropy,
+			SamplerAnisotropy:                 supported.SamplerAnisotropy,
+			ShaderStorageImageExtendedFormats: supported.ShaderStorageImageExtendedFormats,
 		},
 	})
 	if err != nil {
