@@ -232,6 +232,8 @@ task ci        # lint, build, test, race
 
 ## Documentation
 
+- [`docs/adr/`](docs/adr/README.md) — architecture decisions, their rationale,
+  and the process for recording new ones
 - [`docs/agents/`](docs/agents) — one page per capability, with working code
   and the failure modes that matter
 - [`AGENTS.md`](AGENTS.md) — architecture, invariants, and the rules that are

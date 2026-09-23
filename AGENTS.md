@@ -20,10 +20,11 @@ engine in. There is no editor application and no runtime that loads your game.
 |---|---|---|
 | `/` | `glyphengine` | Engine root package plus subpackages |
 | `/examples` | `glyphengine/examples` | Runnable examples, one concept each |
+| `/docs/adr` | — | Architecture decision records and their index |
 | `/docs/agents` | — | Machine-readable capability docs (see below) |
 | `/shaders` | — | GLSL sources and **committed** SPIR-V |
 
-Three separate Go modules in one git repo, tied together by `go.work`. This is
+Two separate Go modules in one git repo, tied together by `go.work`. This is
 deliberate: `go get` of the engine never pulls example code or assets, while
 `git clone` still gets everything.
 
@@ -110,6 +111,20 @@ deliberate: `go get` of the engine never pulls example code or assets, while
     then having no focus traversal means the toolkit has to be abandoned
     wholesale for the first screen of most games. That is not unblocking, it is
     finishing.
+
+## Architecture decisions
+
+Read the relevant accepted records in [`docs/adr/README.md`](docs/adr/README.md)
+before changing an architectural boundary or contract. Add an ADR in the same
+change when making a significant decision about engine/game ownership, public
+contracts, resource lifetime, concurrency, rendering conventions, or dependency
+and asset distribution. Routine fixes and local refactors do not need one.
+
+Use the [template](docs/adr/template.md) and keep the index current. If a new
+decision replaces an accepted one, write a new record and link both directions;
+preserve the old rationale. Keep this guide's rules and the capability docs
+consistent with the accepted decision. The ADR records why; those docs remain
+the instructions for working with the current engine.
 
 ## Getting a window on screen
 
