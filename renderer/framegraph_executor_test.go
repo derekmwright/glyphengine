@@ -162,7 +162,7 @@ func (fx *frame) bindGraph() {
 		f.images[f.copy].images[0] = fx.sceneColor.image
 	}
 	bind := func(id int, pass core1_0.RenderPass, fb core1_0.Framebuffer, extent core1_0.Extent2D) {
-		n := &f.nodes[id]
+		n := &f.nodes[f.engine[id]]
 		n.pass, n.framebuffers[0], n.extent = pass, fb, extent
 	}
 	bind(graphWater, fx.waterRenderPass, fx.waterFramebuffer, fx.extent)

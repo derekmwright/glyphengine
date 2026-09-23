@@ -38,7 +38,7 @@ requires: []
 assets: none
 example: examples/09-water
 run: go run ./09-water -alien
-verified: 2026-09-21
+verified: 2026-09-23
 ---
 
 # Environment
@@ -410,6 +410,16 @@ see the [binding contract](game-loop.md#shadow-resources-in-custom-sky-shaders).
 For application-owned atmosphere or other parameters, use
 `Renderer.SetShaderParameters` ([uniform contract](game-loop.md#application-data-for-custom-shaders))
 instead of placing non-colour data in the palette.
+
+The shared shadow/light set has `ShadowData` at binding 0, directional and
+point shadow samplers at 1 and 2, light/cluster storage buffers at 3-5, the
+4096-byte application uniform block at 6, and four application image samplers
+at 7-10. `SetShaderTexture` and `SetShaderTarget` populate those samplers for
+vertex and fragment shaders; nil binds the white fallback. This is set 1 for
+sky, static lit, terrain, water and application passes, and set 2 for skinned
+lit. See [render targets](render-targets.md) for the fixed layouts, scheduling,
+resolved scene depth and history semantics.
+
 
 If what you want is a sky that is a different **colour**, do not replace the
 shader — see below.

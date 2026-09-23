@@ -207,6 +207,8 @@ func (d *resizeFakeDriver) CmdPipelineBarrier(core1_0.CommandBuffer, core1_0.Pip
 }
 func (d *resizeFakeDriver) CmdClearColorImage(core1_0.CommandBuffer, core1_0.Image, core1_0.ImageLayout, core1_0.ClearColorValue, ...core1_0.ImageSubresourceRange) {
 }
+func (d *resizeFakeDriver) CmdClearDepthStencilImage(core1_0.CommandBuffer, core1_0.Image, core1_0.ImageLayout, *core1_0.ClearValueDepthStencil, ...core1_0.ImageSubresourceRange) {
+}
 func (d *resizeFakeDriver) QueueSubmit(core1_0.Queue, *core1_0.Fence, ...core1_0.SubmitInfo) (common.VkResult, error) {
 	return core1_0.VKSuccess, nil
 }

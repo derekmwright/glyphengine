@@ -48,13 +48,17 @@ tasks:
     cmds:
       - for f in *.vert *.frag; do "${VULKAN_SDK}/bin/glslc{{.EXE}}" "$f" -o "$f.spv"; done
       - for f in ../cmd/skyshadowcheck/*.frag; do "${VULKAN_SDK}/bin/glslc{{.EXE}}" "$f" -o "$f.spv"; done
+      - for f in ../cmd/apppasscheck/*.vert ../cmd/apppasscheck/*.frag; do "${VULKAN_SDK}/bin/glslc{{.EXE}}" "$f" -o "$f.spv"; done
     sources:
+      - cmd/apppasscheck/*.vert
+      - cmd/apppasscheck/*.frag
       - shaders/*.vert
       - shaders/*.frag
       - shaders/*.inc
       - cmd/skyshadowcheck/*.frag
       - cmd/skyshadowcheck/*.inc
     generates:
+      - cmd/apppasscheck/*.spv
       - shaders/*.spv
       - cmd/skyshadowcheck/*.spv
 
@@ -706,6 +710,19 @@ tasks:
             echo "$name $*: identical"
           elif [ $? -eq 1 ] && [ -s $d/a.png ]; then
             echo "$name $*: TWO RUNS DIFFER under a fixed clock"
+            status=1
+          fi
+        done
+
+        # Application graphics passes, including previous-frame history.
+        # Run from the repository root so every harness scratch file stays in .task.
+        for mode in "" "-history"; do
+          (cd .. && GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./cmd/apppasscheck -frames 90 $mode -screenshot .task/app-determinism-a.png) >/dev/null 2>&1 || status=1
+          (cd .. && GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./cmd/apppasscheck -frames 90 $mode -screenshot .task/app-determinism-b.png) >/dev/null 2>&1 || status=1
+          if samefile ../.task/app-determinism-a.png ../.task/app-determinism-b.png; then
+            echo "apppasscheck $mode: identical"
+          else
+            echo "apppasscheck $mode: TWO RUNS DIFFER or missing capture"
             status=1
           fi
         done

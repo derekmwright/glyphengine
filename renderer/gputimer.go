@@ -128,6 +128,14 @@ func (p Pass) String() string {
 // frame, so the parts can be checked against the total rather than assumed to
 // account for it.
 const queriesPerFrame = (int(passCount) + 1) * 2
+const maxAppTimings = 16
+const appQueriesPerFrame = maxAppTimings * 2
+const queryPoolSize = (queriesPerFrame + appQueriesPerFrame) * maxFramesInFlight
+
+type AppTiming struct {
+	Name string
+	Ms   float32
+}
 
 // frameQuery is the index of the whole-frame pair, sitting just past the passes.
 const frameQuery = Pass(passCount)
@@ -140,6 +148,7 @@ const frameQuery = Pass(passCount)
 // is exactly how the original TopOfPipe/BottomOfPipe mismatch was found, so the
 // check is worth keeping.
 type GPUTimings struct {
+	App   []AppTiming
 	Pass  [passCount]float32
 	Total float32
 	Valid bool
@@ -158,9 +167,16 @@ type GPUTimings struct {
 // a fresh number would cost a pipeline flush to get, and would change what it was
 // measuring.
 type gpuTimer struct {
-	pool      core1_0.QueryPool
-	period    float32 // nanoseconds per tick
-	supported bool
+	apps        []*AppPass
+	appRecorded [maxFramesInFlight][maxAppTimings]*AppPass
+	appCount    [maxFramesInFlight]int
+	appScratch  [maxAppTimings * 16]byte
+	appLatest   [maxAppTimings]AppTiming
+	appMean     [maxAppTimings]AppTiming
+	appSums     map[*AppPass]appTimingSum
+	pool        core1_0.QueryPool
+	period      float32 // nanoseconds per tick
+	supported   bool
 
 	// scratch is reused for readback so a per-frame allocation does not show up
 	// in the CPU profile of the thing measuring cost.
@@ -213,7 +229,7 @@ func newGPUTimer(instanceDriver core1_0.CoreInstanceDriver, deviceDriver core1_0
 
 	pool, _, err := deviceDriver.CreateQueryPool(nil, core1_0.QueryPoolCreateInfo{
 		QueryType:  core1_0.QueryTypeTimestamp,
-		QueryCount: queriesPerFrame * maxFramesInFlight,
+		QueryCount: queryPoolSize,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create timestamp query pool: %w", err)
@@ -245,6 +261,16 @@ func (t *gpuTimer) reset(deviceDriver core1_0.DeviceDriver, cmdBuf core1_0.Comma
 		return
 	}
 	deviceDriver.CmdResetQueryPool(cmdBuf, t.pool, t.base(frame), queriesPerFrame)
+	t.appCount[frame] = 0
+	for _, p := range t.apps {
+		if p.desc.Timed {
+			t.appRecorded[frame][t.appCount[frame]] = p
+			t.appCount[frame]++
+		}
+	}
+	if n := t.appCount[frame]; n > 0 {
+		deviceDriver.CmdResetQueryPool(cmdBuf, t.pool, appQueryBase(frame), n*2)
+	}
 	t.recorded[frame] = true
 }
 
@@ -318,6 +344,7 @@ func (t *gpuTimer) collect(deviceDriver core1_0.DeviceDriver, frame int) {
 		out.Total = float32(stop-start) * scale
 	}
 	out.Valid = true
+	t.collectApps(deviceDriver, frame, &out)
 	t.latest = out
 
 	for p := range out.Pass {
@@ -337,6 +364,19 @@ func (t *gpuTimer) mean() GPUTimings {
 	for p := range t.sum.Pass {
 		out.Pass[p] = t.sum.Pass[p] / n
 	}
+	nApp := 0
+	for _, p := range t.apps {
+		if p.desc.Timed {
+			a := t.appSums[p]
+			ms := float32(0)
+			if a.frames > 0 {
+				ms = a.ms / float32(a.frames)
+			}
+			t.appMean[nApp] = AppTiming{Name: p.desc.Name, Ms: ms}
+			nApp++
+		}
+	}
+	out.App = t.appMean[:nApp]
 	return out
 }
 
@@ -390,4 +430,61 @@ func (r *Renderer) ResetGPUTimings() {
 		return
 	}
 	r.gpuTimer.sum, r.gpuTimer.frames = GPUTimings{}, 0
+	clear(r.gpuTimer.appSums)
+}
+
+type appTimingSum struct {
+	ms     float32
+	frames int
+}
+
+func appQueryBase(frame int) int { return queriesPerFrame*maxFramesInFlight + frame*appQueriesPerFrame }
+func (t *gpuTimer) appEdge(d core1_0.DeviceDriver, cmd core1_0.CommandBuffer, frame int, p *AppPass, edge int) {
+	if t == nil || !t.supported {
+		return
+	}
+	for i := 0; i < t.appCount[frame]; i++ {
+		if t.appRecorded[frame][i] == p {
+			d.CmdWriteTimestamp(cmd, core1_0.PipelineStageBottomOfPipe, t.pool, appQueryBase(frame)+i*2+edge)
+			return
+		}
+	}
+}
+func (t *gpuTimer) beginApp(d core1_0.DeviceDriver, cmd core1_0.CommandBuffer, frame int, p *AppPass) {
+	t.appEdge(d, cmd, frame, p, 0)
+}
+func (t *gpuTimer) endApp(d core1_0.DeviceDriver, cmd core1_0.CommandBuffer, frame int, p *AppPass) {
+	t.appEdge(d, cmd, frame, p, 1)
+}
+func (t *gpuTimer) collectApps(d core1_0.DeviceDriver, frame int, out *GPUTimings) {
+	n := t.appCount[frame]
+	if n == 0 {
+		return
+	}
+	res, err := d.GetQueryPoolResults(t.pool, appQueryBase(frame), n*2, t.appScratch[:n*16], 8, core1_0.QueryResult64Bit)
+	if err != nil || res != core1_0.VKSuccess {
+		return
+	}
+	count := 0
+	for i := 0; i < n; i++ {
+		p := t.appRecorded[frame][i]
+		if p.destroyed {
+			continue
+		}
+		start := binary.LittleEndian.Uint64(t.appScratch[i*16:])
+		stop := binary.LittleEndian.Uint64(t.appScratch[i*16+8:])
+		ms := float32(0)
+		if stop > start {
+			ms = float32(stop-start) * t.period / 1e6
+		}
+		t.appLatest[count] = AppTiming{Name: p.desc.Name, Ms: ms}
+		count++
+		if t.appSums != nil {
+			v := t.appSums[p]
+			v.ms += ms
+			v.frames++
+			t.appSums[p] = v
+		}
+	}
+	out.App = t.appLatest[:count]
 }

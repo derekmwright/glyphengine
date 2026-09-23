@@ -102,6 +102,9 @@ func (g *Graph) Build() (*Plan, error) {
 				after.layout = r.Resting
 				after.pass = true
 			}
+			if n.Kind == Legacy && u.FinalLayout != core1_0.ImageLayoutUndefined {
+				after.layout = u.FinalLayout
+			}
 			if n.Optional && n.OptionalGroup == 0 && before.layout != after.layout {
 				return nil, g.fail(n.Name, u.Resource, "optional node must be layout-neutral")
 			}

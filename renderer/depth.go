@@ -50,7 +50,7 @@ func createDepthResources(
 			ArrayLayers:   1,
 			Samples:       samples,
 			Tiling:        core1_0.ImageTilingOptimal,
-			Usage:         core1_0.ImageUsageDepthStencilAttachment,
+			Usage:         core1_0.ImageUsageDepthStencilAttachment | core1_0.ImageUsageSampled,
 			SharingMode:   core1_0.SharingModeExclusive,
 			InitialLayout: core1_0.ImageLayoutUndefined,
 		})

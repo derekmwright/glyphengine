@@ -124,3 +124,12 @@ var WaterFragSpv []byte
 
 //go:embed godray.frag.spv
 var GodRayFragSpv []byte
+
+//go:embed depthresolve.vert.spv
+var DepthResolveVertSpv []byte
+
+//go:embed depthresolve.frag.spv
+var DepthResolveFragSpv []byte
+
+//go:embed depthresolve_ms.frag.spv
+var DepthResolveMSFragSpv []byte
