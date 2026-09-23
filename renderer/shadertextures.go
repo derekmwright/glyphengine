@@ -118,6 +118,12 @@ func (r *Renderer) flushAppFrameBindings(frame, imageIndex int) error {
 		if err := r.flushAppInputs(p, p.sets[frame]); err != nil {
 			return err
 		}
+		if p.compute != nil {
+			if err := r.flushComputeOutputs(p.compute, p.sets[frame], frame); err != nil {
+				return err
+			}
+			continue
+		}
 		if p.desc.Fullscreen {
 			continue
 		}

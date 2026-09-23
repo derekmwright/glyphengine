@@ -12,6 +12,7 @@ api:
   - framegraph.Compatible
   - renderer.recordCommandBuffer
   - renderer.Pass
+  - renderer.AppComputeDesc
   - renderer.AppPassDesc
   - renderer.RenderTargetDesc
   - renderer.SceneDepth
@@ -23,7 +24,7 @@ requires:
   - vulkan-runtime
   - vulkan-sdk
 assets: procedural
-verified: 2026-09-23
+verified: 2026-09-23 # rechecked with compute dispatches
 ---
 
 # Record the renderer's frame graph
@@ -55,7 +56,8 @@ current readable graph instance (the previous write for history), while
 need no image declaration. Draw textures reuse set 0; the four pass inputs
 occupy set 2 and are independent of draw count.
 
-`CreateAppPass` adds `Graphics` nodes in creation order at a named stage:
+`CreateAppPass` adds `Graphics` nodes and `CreateAppCompute` adds `Compute`
+nodes. Both interleave in creation order at a named stage:
 
 | Stage | Position and readable scene inputs |
 |---|---|
@@ -64,8 +66,20 @@ occupy set 2 and are independent of draw count.
 | `StageBeforeBloom` | After water; complete HDR scene, resolved depth and prior application outputs. |
 | `StageBeforeTonemap` | After bloom and UI glow; HDR, resolved depth and prior application outputs. |
 
+Compute nodes bind a compute pipeline, fallback/light/input descriptor sets,
+push VP plus identity model and application data, then dispatch on the graphics
+queue. They have no render pass or framebuffer. Sampled inputs and storage
+outputs use the same target/scene identity mapping. History reads use the
+previous image, while `StorageReadWrite` describes the destination when the
+same target is also declared as an input; other destinations use `StorageWrite`.
+The compiler derives the barriers into `General` and back to sampled layout.
+A dispatch and its trailing synchronization node form one optional group, so
+disabling it or setting a zero workgroup axis skips both transitions while
+retaining timing edges. There is no async compute.
+
 A legacy declaration records the application images written by the preceding
-submission, including history. A pre-scene transfer-kind synchronization node
+submission, including history. Storage-capable targets join possible graphics and compute
+producers with preceding readers, since either kind can have written them. A pre-scene transfer-kind synchronization node
 derives sampled-read visibility
 for application textures used by ordinary scene draws. It copies nothing.
 The hand-recorded legacy body remains unchanged when there are no application

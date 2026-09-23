@@ -52,7 +52,7 @@ func TestCommittedSPIRVMatchesGLSL(t *testing.T) {
 		t.Fatal(err)
 	}
 	sources = append(sources, probes...)
-	for _, pattern := range []string{"../cmd/apppasscheck/*.vert", "../cmd/apppasscheck/*.frag"} {
+	for _, pattern := range []string{"../cmd/apppasscheck/*.vert", "../cmd/apppasscheck/*.frag", "../cmd/apppasscheck/*.comp"} {
 		app, err := filepath.Glob(pattern)
 		if err != nil {
 			t.Fatal(err)

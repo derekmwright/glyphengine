@@ -63,7 +63,7 @@ func (r *Renderer) ensureSceneDepth() error {
 		if err != nil {
 			return fmt.Errorf("scene depth target: %w", err)
 		}
-		s.sets, err = r.allocateAppSets(len(r.sc.imageViews))
+		s.sets, err = r.allocatePassSets(nil, len(r.sc.imageViews))
 		if err != nil {
 			s.releaseTargets()
 			return err

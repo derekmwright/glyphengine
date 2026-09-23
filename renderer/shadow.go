@@ -664,12 +664,12 @@ func createShadowResources(
 				Binding:         6,
 				DescriptorType:  core1_0.DescriptorTypeUniformBuffer,
 				DescriptorCount: 1,
-				StageFlags:      core1_0.StageVertex | core1_0.StageFragment,
+				StageFlags:      core1_0.StageVertex | core1_0.StageFragment | core1_0.StageCompute,
 			},
-			{Binding: 7, DescriptorType: core1_0.DescriptorTypeCombinedImageSampler, DescriptorCount: 1, StageFlags: core1_0.StageVertex | core1_0.StageFragment},
-			{Binding: 8, DescriptorType: core1_0.DescriptorTypeCombinedImageSampler, DescriptorCount: 1, StageFlags: core1_0.StageVertex | core1_0.StageFragment},
-			{Binding: 9, DescriptorType: core1_0.DescriptorTypeCombinedImageSampler, DescriptorCount: 1, StageFlags: core1_0.StageVertex | core1_0.StageFragment},
-			{Binding: 10, DescriptorType: core1_0.DescriptorTypeCombinedImageSampler, DescriptorCount: 1, StageFlags: core1_0.StageVertex | core1_0.StageFragment},
+			{Binding: 7, DescriptorType: core1_0.DescriptorTypeCombinedImageSampler, DescriptorCount: 1, StageFlags: core1_0.StageVertex | core1_0.StageFragment | core1_0.StageCompute},
+			{Binding: 8, DescriptorType: core1_0.DescriptorTypeCombinedImageSampler, DescriptorCount: 1, StageFlags: core1_0.StageVertex | core1_0.StageFragment | core1_0.StageCompute},
+			{Binding: 9, DescriptorType: core1_0.DescriptorTypeCombinedImageSampler, DescriptorCount: 1, StageFlags: core1_0.StageVertex | core1_0.StageFragment | core1_0.StageCompute},
+			{Binding: 10, DescriptorType: core1_0.DescriptorTypeCombinedImageSampler, DescriptorCount: 1, StageFlags: core1_0.StageVertex | core1_0.StageFragment | core1_0.StageCompute},
 		},
 	})
 	if err != nil {

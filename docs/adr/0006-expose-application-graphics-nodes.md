@@ -22,7 +22,7 @@ render passes, command scratch and deferred resource lifetime.
 Application passes reuse each draw texture's existing descriptor set at set 0,
 bind the engine's shared light set at set 1, and keep four input samplers at
 set 2. Mesh draw counts do not allocate descriptor sets. Extend that light set with four vertex/fragment sampler
-slots at bindings 7–10. Keep push constants fixed at 256 bytes: engine VP and
+slots at bindings 7â€“10. Keep push constants fixed at 256 bytes: engine VP and
 model matrices followed by 128 application bytes. The existing `RenderObject`
 field for the model transform is `Model`.
 
@@ -71,3 +71,17 @@ allocation checks and validation exercise this boundary.
 - `cmd/apppasscheck`: visible control comparison, history and runtime churn
 - Three existing stream hashes remain unchanged; new fixtures add 8 calls for
   scene depth and 32 for depth plus mesh/fullscreen application work.
+
+## Addendum — 2026-09-23: application compute nodes
+
+Extend the same decision with `AppComputeDesc` and storage-capable render
+targets. Graphics and compute share stage order, the sixteen application timing
+slots, sampled target/history identities and fence-scoped descriptor updates.
+Compute uses set 2 samplers at 0–3 and storage images at 4–7, plus the existing
+fallback and light-set layout shape; application light-set bindings also gain
+compute visibility. The 256-byte push block carries VP, identity model and 128
+application bytes. Dispatch and its compiler-derived return from `General` to
+the sampled resting layout form one optional group. Format support is checked
+before storage target allocation. Execution remains on the graphics queue with
+no async compute. Compute extends the existing resource lifetime and failure
+injection paths; a user-facing example and effect policy remain separate work.

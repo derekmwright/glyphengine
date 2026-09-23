@@ -239,7 +239,7 @@ func (resizeFakeInstanceDriver) GetPhysicalDeviceFormatProperties(pd core1_0.Phy
 	// findDepthFormat asks for FormatD32SignedFloat first and takes whatever
 	// answers with the bit it wants, so answering it for every format keeps
 	// the fixture from caring which candidate it lands on.
-	return &core1_0.FormatProperties{OptimalTilingFeatures: core1_0.FormatFeatureDepthStencilAttachment}
+	return &core1_0.FormatProperties{OptimalTilingFeatures: core1_0.FormatFeatureDepthStencilAttachment | core1_0.FormatFeatureStorageImage}
 }
 
 // The following fakeHandles methods are additive: fakedriver_test.go's

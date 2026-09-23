@@ -79,6 +79,7 @@ const (
 	opDrawIndexed
 	opBarrier
 	opCopyImage
+	opDispatch
 )
 
 func (d *fakeDriver) fold(op int) {
@@ -238,4 +239,11 @@ func (d *fakeDriver) CmdCopyImage(cb core1_0.CommandBuffer, srcImage core1_0.Ima
 		}
 	}
 	return nil
+}
+
+func (d *fakeDriver) CmdDispatch(cb core1_0.CommandBuffer, x, y, z int) {
+	d.fold(opDispatch)
+	if d.hashing {
+		d.h = d.h.Int(x).Int(y).Int(z)
+	}
 }

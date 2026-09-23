@@ -44,6 +44,7 @@ type AppPassDesc struct {
 }
 
 type AppPass struct {
+	compute            *AppCompute
 	r                  *Renderer
 	desc               AppPassDesc
 	enabled, destroyed bool
@@ -97,47 +98,16 @@ func (r *Renderer) validateAppPass(d AppPassDesc) error {
 			return fail("DepthTest", "Target has no depth attachment")
 		}
 	}
-	if len(d.Reads) > 4 {
-		return fail("Reads", "at most four inputs")
+	if err := r.validateAppReads(d.Reads, d.Stage, d.Target == nil, fail); err != nil {
+		return err
 	}
 	for _, t := range d.Reads {
-		if t == nil {
-			return fail("Reads", "nil texture")
-		}
-		if t.destroyed {
-			return fail("Reads", "destroyed texture")
-		}
-		if target := t.target; target != nil {
-			if target.r != r || target.destroyed {
-				return fail("Reads", "not a live target of this renderer")
-			}
-			if target == d.Target && !target.desc.History {
-				return fail("Reads", "cannot read Target without History")
-			}
-		}
-		if t.scene != nil {
-			if t.scene != r {
-				return fail("Reads", "scene texture belongs to another renderer")
-			}
-			if t.sceneDepth {
-				if d.Stage == StageBeforeScene {
-					return fail("Reads", "SceneDepth is available after the scene")
-				}
-			} else if d.Stage == StageBeforeScene || d.Target == nil {
-				return fail("Reads", "SceneColor requires an own target after the scene")
-			}
+		if t.target != nil && t.target == d.Target && !t.target.desc.History {
+			return fail("Reads", "cannot read Target without History")
 		}
 	}
-	if d.Timed {
-		n := 0
-		for _, p := range r.appPasses {
-			if p.desc.Timed {
-				n++
-			}
-		}
-		if n >= maxAppTimings {
-			return fail("Timed", "at most sixteen timed passes")
-		}
+	if err := r.validateAppTiming(d.Timed, fail); err != nil {
+		return err
 	}
 	for _, sh := range []struct {
 		name string
@@ -153,6 +123,52 @@ func (r *Renderer) validateAppPass(d AppPassDesc) error {
 	}
 	if mesh == d.Fullscreen {
 		return fail("Fullscreen", "must match the vertex shader's location inputs (mesh or fullscreen)")
+	}
+	return nil
+}
+
+func (r *Renderer) validateAppReads(inputs []*Texture, stage PassStage, hdr bool, fail func(string, string) error) error {
+	if len(inputs) > 4 {
+		return fail("Reads", "at most four inputs")
+	}
+	for _, t := range inputs {
+		if t == nil {
+			return fail("Reads", "nil texture")
+		}
+		if t.destroyed {
+			return fail("Reads", "destroyed texture")
+		}
+		if target := t.target; target != nil {
+			if target.r != r || target.destroyed {
+				return fail("Reads", "not a live target of this renderer")
+			}
+		}
+		if t.scene != nil {
+			if t.scene != r {
+				return fail("Reads", "scene texture belongs to another renderer")
+			}
+			if t.sceneDepth {
+				if stage == StageBeforeScene {
+					return fail("Reads", "SceneDepth is available after the scene")
+				}
+			} else if stage == StageBeforeScene || hdr {
+				return fail("Reads", "SceneColor requires an own target after the scene")
+			}
+		}
+	}
+	return nil
+}
+func (r *Renderer) validateAppTiming(timed bool, fail func(string, string) error) error {
+	if timed {
+		n := 0
+		for _, p := range r.appPasses {
+			if p.desc.Timed {
+				n++
+			}
+		}
+		if n >= maxAppTimings {
+			return fail("Timed", "at most sixteen timed passes")
+		}
 	}
 	return nil
 }
@@ -222,7 +238,7 @@ func (r *Renderer) CreateAppPass(d AppPassDesc) (_ *AppPass, err error) {
 	if err != nil {
 		return nil, fmt.Errorf("app pass %q: pipeline: %w", d.Name, err)
 	}
-	p.sets, err = r.allocateAppSets(maxFramesInFlight)
+	p.sets, err = r.allocatePassSets(p, maxFramesInFlight)
 	if err != nil {
 		return nil, err
 	}
@@ -269,10 +285,13 @@ func (r *Renderer) ensureAppLayout() error {
 	return err
 }
 
-func (r *Renderer) allocateAppSets(n int) ([]core1_0.DescriptorSet, error) {
+func (r *Renderer) allocatePassSets(p *AppPass, n int) ([]core1_0.DescriptorSet, error) {
 	l := make([]core1_0.DescriptorSetLayout, n)
 	for i := range l {
 		l[i] = r.appSetLayout
+		if p != nil && p.compute != nil {
+			l[i] = r.computeSetLayout
+		}
 	}
 	s, _, err := r.deviceDriver.AllocateDescriptorSets(core1_0.DescriptorSetAllocateInfo{DescriptorPool: r.descriptorPool, SetLayouts: l})
 	return s, err

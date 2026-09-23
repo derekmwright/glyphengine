@@ -15,7 +15,7 @@ func appResizeFixture(d *resizeFakeDriver) *Renderer {
 	r.sc.captureCapable = true
 	r.appSetLayout = d.h.descriptorSetLayout()
 	r.depthResolve = &sceneDepthResources{r: r, pipeline: d.h.pipeline(), layout: d.h.layout()}
-	for _, desc := range []RenderTargetDesc{{Name: "fixed", Format: TargetR16F, Width: 32, Height: 24}, {Name: "history", Format: TargetRGBA16F, Scale: 0.5, Depth: true, History: true}} {
+	for _, desc := range []RenderTargetDesc{{Name: "fixed", Format: TargetR16F, Width: 32, Height: 24}, {Name: "history", Format: TargetRGBA16F, Scale: 0.5, Depth: true, History: true, Storage: true}} {
 		t := &RenderTarget{r: r, desc: desc}
 		t.texture.target = t
 		r.appTargets = append(r.appTargets, t)
@@ -25,6 +25,10 @@ func appResizeFixture(d *resizeFakeDriver) *Renderer {
 		}
 		r.appPasses = append(r.appPasses, p)
 	}
+	r.computeSetLayout = d.h.descriptorSetLayout()
+	c := &AppCompute{desc: AppComputeDesc{Name: "resize compute", Stage: StageBeforeScene, Reads: []*Texture{r.appTargets[1].Texture()}, Writes: []*RenderTarget{r.appTargets[1]}}}
+	c.pass = &AppPass{r: r, desc: AppPassDesc{Name: c.desc.Name, Stage: c.desc.Stage, Reads: c.desc.Reads}, compute: c, enabled: true}
+	r.appPasses = append(r.appPasses, c.pass)
 	r.graphDirty = true
 	return r
 }

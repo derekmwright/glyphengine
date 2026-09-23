@@ -105,7 +105,8 @@ type Renderer struct {
 	graphDirty                    bool
 	appTargets                    []*RenderTarget
 	retiredTargets                []*RenderTarget
-	appPasses                     []*AppPass
+	appPasses                     []*AppPass // graphics and compute, in creation order
+	computeSetLayout              core1_0.DescriptorSetLayout
 	appSetLayout                  core1_0.DescriptorSetLayout
 	shaderTextures                [ShaderTextureSlots]*Texture
 	shaderTargets                 [ShaderTextureSlots]*RenderTarget
