@@ -1,0 +1,159 @@
+package renderer
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/derekmwright/glyphengine/shaders"
+	"github.com/vkngwrapper/core/v3/core1_0"
+)
+
+func withAppFrame(fx *frame, passes bool) *frame {
+	h := &fakeHandles{next: 10000}
+	r := &Renderer{msaaSamples: core1_0.Samples4, depth: &depthResources{format: core1_0.FormatD32SignedFloat}, sc: &swapchainDetails{imageFormat: core1_0.FormatB8G8R8A8SRGB, imageViews: make([]core1_0.ImageView, 1), extent: fx.extent}}
+	r.fallbackTexture = fx.fallbackTexture
+	r.depthResolve = &sceneDepthResources{r: r, pipeline: h.pipeline(), layout: h.layout(), sets: []core1_0.DescriptorSet{h.descSet()}}
+	if passes {
+		t := &RenderTarget{r: r, desc: RenderTargetDesc{Name: "fixture target", Format: TargetR16F, Scale: 1}, color: &appImages{extent: fx.extent}}
+		t.texture.target = t
+		r.appTargets = []*RenderTarget{t}
+		mesh := &AppPass{r: r, desc: AppPassDesc{Name: "fixture mesh", Stage: StageBeforeScene, Target: t}, enabled: true, pipeline: h.pipeline(), layout: h.layout(), draws: fx.draws[:2]}
+		mesh.sets = []core1_0.DescriptorSet{h.descSet(), h.descSet()}
+		full := &AppPass{r: r, desc: AppPassDesc{Name: "fixture fullscreen", Stage: StageBeforeBloom, Load: true, Reads: []*Texture{t.Texture(), r.SceneDepth()}, Fullscreen: true}, enabled: true, pipeline: h.pipeline(), layout: h.layout(), sets: []core1_0.DescriptorSet{h.descSet(), h.descSet()}}
+		r.appPasses = []*AppPass{mesh, full}
+	}
+	g, err := newFrameGraph(r.msaaSamples, r.depth.format, r.sc.imageFormat, 1, r)
+	if err != nil {
+		panic(err)
+	}
+	fx.graph = g
+	for i := range g.nodes {
+		n := &g.nodes[i]
+		n.framebuffers = []core1_0.Framebuffer{h.framebuffer()}
+		n.extent = fx.extent
+		if n.app != nil || i == g.depthNode {
+			n.pass = h.renderPass()
+		}
+	}
+	for i := range g.images {
+		g.images[i].images = []core1_0.Image{h.image()}
+	}
+	g.sizeScratch(&fx.scratch)
+	return fx
+}
+
+// Depth adds one barrier, begin/end and five draw calls: 3307 versus 3299.
+// The app fixture adds 15 calls for two mesh draws, one visibility barrier,
+// and eight for the fullscreen pass: 3331 total. Counts assert the direction
+// independently of the hashes so an omitted pass cannot be repinned as success.
+// Three-set bindings reuse draw textures at set 0 and add pass inputs at set 2:
+// the app hash moved from 0xee218de19dd3548f without adding a driver call. The
+// fixture now allocates two pass-input handles instead of four per-draw handles.
+const goldenSceneDepthStreamHash Hasher = 0x944b6fa19f8b37dc
+const goldenAppPassStreamHash Hasher = 0x68c983caf624e51d
+
+func TestAppPassStreams(t *testing.T) {
+	base := &fakeDriver{hashing: true}
+	if err := buildFrame(97).record(base, 1); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name   string
+		passes bool
+		hash   Hasher
+		extra  int
+	}{{"scene-depth", false, goldenSceneDepthStreamHash, 8}, {"app-passes", true, goldenAppPassStreamHash, 32}} {
+		t.Run(test.name, func(t *testing.T) {
+			d := &fakeDriver{hashing: true}
+			if err := withAppFrame(buildFrame(97), test.passes).record(d, 1); err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("base: %d calls, hash %#x; %s: %d calls, hash %#x; added %d calls", base.calls, base.h, test.name, d.calls, d.h, d.calls-base.calls)
+			if d.h != test.hash {
+				t.Errorf("hash %#x want %#x", d.h, test.hash)
+			}
+			if d.calls-base.calls != test.extra {
+				t.Fatalf("added %d driver calls, want %d", d.calls-base.calls, test.extra)
+			}
+		})
+	}
+}
+
+func TestAppPassAllocs(t *testing.T) {
+	for _, n := range []int{7, 97, 511} {
+		fx := withAppFrame(buildFrame(n), true)
+		d := &fakeDriver{}
+		if err := fx.record(d, 1); err != nil {
+			t.Fatal(err)
+		}
+		a := testing.AllocsPerRun(50, func() {
+			if err := fx.record(d, 1); err != nil {
+				panic(err)
+			}
+		})
+		t.Logf("%d engine draws plus mesh and fullscreen/depth passes: %.0f allocs/frame", n, a)
+		if a != 0 {
+			t.Errorf("%.0f allocations", a)
+		}
+	}
+}
+
+func TestAppPassDescriptions(t *testing.T) {
+	r := &Renderer{}
+	target := &RenderTarget{r: r, desc: RenderTargetDesc{Format: TargetR16F, Scale: 1}}
+	target.texture.target = target
+	good := AppPassDesc{Name: "test", Stage: StageBeforeScene, Target: target, Fullscreen: true, Vert: shaders.DepthResolveVertSpv, Frag: shaders.DepthResolveFragSpv}
+	for _, test := range []struct {
+		field string
+		edit  func(*AppPassDesc)
+	}{
+		{"Stage", func(d *AppPassDesc) { d.Stage = 0 }},
+		{"Target", func(d *AppPassDesc) { d.Target = nil }},
+		{"Load", func(d *AppPassDesc) { d.Target = nil; d.Stage = StageBeforeBloom }},
+		{"DepthTest", func(d *AppPassDesc) { d.DepthTest = true }},
+		{"Reads", func(d *AppPassDesc) { d.Reads = []*Texture{target.Texture()} }},
+		{"Reads", func(d *AppPassDesc) { d.Reads = make([]*Texture, 5) }},
+		{"Reads", func(d *AppPassDesc) { d.Reads = []*Texture{r.SceneDepth()} }},
+		{"Fullscreen", func(d *AppPassDesc) { d.Fullscreen = false }},
+		{"Vert", func(d *AppPassDesc) { d.Vert = nil }},
+		{"Blend", func(d *AppPassDesc) { d.Blend = 99 }},
+	} {
+		d := good
+		test.edit(&d)
+		if err := r.validateAppPass(d); err == nil || !strings.Contains(err.Error(), test.field) {
+			t.Errorf("%s: %v", test.field, err)
+		}
+	}
+	target.desc.History = true
+	good.Reads = []*Texture{target.Texture()}
+	if err := r.validateAppPass(good); err != nil {
+		t.Fatal(err)
+	}
+	for range maxAppTimings {
+		r.appPasses = append(r.appPasses, &AppPass{desc: AppPassDesc{Timed: true}})
+	}
+	good.Timed = true
+	if err := r.validateAppPass(good); err == nil || !strings.Contains(err.Error(), "Timed") {
+		t.Fatalf("17th timing: %v", err)
+	}
+	for _, d := range []RenderTargetDesc{{Format: 99, Scale: 1}, {Format: TargetR16F}, {Format: TargetR16F, Width: 1}} {
+		if validateTarget(d) == nil {
+			t.Errorf("accepted %+v", d)
+		}
+	}
+	p := &AppPass{}
+	data := make([]byte, 128)
+	data[3] = 63
+	if err := p.SetPushConstants(data); err != nil {
+		t.Fatal(err)
+	}
+	old := p.push
+	for _, n := range []int{1, 127, 144} {
+		if p.SetPushConstants(make([]byte, n)) == nil || p.push != old {
+			t.Fatalf("bad push size %d", n)
+		}
+	}
+	if err := p.SetPushConstants(nil); err != nil || p.push != [32]float32{} {
+		t.Fatal("nil did not clear push block")
+	}
+}

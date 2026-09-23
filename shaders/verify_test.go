@@ -52,6 +52,13 @@ func TestCommittedSPIRVMatchesGLSL(t *testing.T) {
 		t.Fatal(err)
 	}
 	sources = append(sources, probes...)
+	for _, pattern := range []string{"../cmd/apppasscheck/*.vert", "../cmd/apppasscheck/*.frag"} {
+		app, err := filepath.Glob(pattern)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sources = append(sources, app...)
+	}
 	if len(sources) == 0 {
 		t.Fatal("no shader sources found")
 	}

@@ -12,6 +12,10 @@ api:
   - framegraph.Compatible
   - renderer.recordCommandBuffer
   - renderer.Pass
+  - renderer.AppPassDesc
+  - renderer.RenderTargetDesc
+  - renderer.SceneDepth
+  - renderer.SceneColor
 example: examples/09-water
 run: task validate
 requires:
@@ -43,6 +47,48 @@ the scene-colour copy, water, nine bloom stages, the optional UI layer and its
 nine glow stages, and tonemap with the composite inside its render pass. A
 final declaration marks the swapchain image presented; it records no command.
 
+## Application nodes
+
+`AppPassDesc.Reads` accepts texture pointers. Target textures map to their
+current readable graph instance (the previous write for history), while
+`SceneColor()` and `SceneDepth()` map to engine outputs. Ordinary textures
+need no image declaration. Draw textures reuse set 0; the four pass inputs
+occupy set 2 and are independent of draw count.
+
+`CreateAppPass` adds `Graphics` nodes in creation order at a named stage:
+
+| Stage | Position and readable scene inputs |
+|---|---|
+| `StageBeforeScene` | After the legacy clouds/shadows and before scene geometry; prior application outputs and history. |
+| `StageAfterScene` | After the legacy scene and optional depth resolve, before water's colour copy; HDR and resolved scene depth. |
+| `StageBeforeBloom` | After water; complete HDR scene, resolved depth and prior application outputs. |
+| `StageBeforeTonemap` | After bloom and UI glow; HDR, resolved depth and prior application outputs. |
+
+A legacy declaration records the application images written by the preceding
+submission, including history. A pre-scene transfer-kind synchronization node
+derives sampled-read visibility
+for application textures used by ordinary scene draws. It copies nothing.
+The hand-recorded legacy body remains unchanged when there are no application
+nodes. With them, its pre-scene boundary executes graph steps after shadows
+and before the main render pass begins. The engine depth-resolve node is a
+fullscreen `Graphics` step immediately after the legacy scene. The legacy use
+explicitly declares its depth attachment exit layout; the compiler derives
+the sampling barrier and water's subsequent attachment initial layout.
+
+Creating or destroying a pass, changing target slot dependencies, and the first
+`SceneDepth()` request mark the graph dirty. After the next frame fence wait,
+the renderer rebuilds the plan and framebuffers while retaining its render-pass
+cache. Previous framebuffers retire through `DeferDestroy`. `CreateAppPass`
+also builds the pure plan immediately to create its pipeline against the exact
+render-pass description. Enabling or disabling an existing pass needs no
+rebuild: optional nodes are layout-neutral and both timing edges still execute.
+
+Relative targets and per-swapchain resolved depth are rebuilt under the resize
+undo stack; fixed targets survive. Application input sets are per frame slot
+and rewritten only after its fence wait, or while the device is idle on resize.
+History binds distinct read/write instances chosen by frame index. See
+[render targets](render-targets.md) for the public and shader contracts.
+
 ## Layouts and optional work
 
 A sampled resource rests in `ShaderReadOnlyOptimal`; storage rests in
@@ -55,7 +101,8 @@ The compiler emits explicit barriers for non-attachment uses. Each adjacent
 run with identical source and destination stages becomes one
 `commandScratch.pipelineBarrier` call. Undefined sources already carry the
 group's source stage in the plan. Scratch is allocated once to fit the widest
-group: two barriers for the scene-colour copy. Final barriers execute after
+group: two barriers for the scene-colour copy on the engine-only path, or the widest
+application dependency group when targets are registered. Final barriers execute after
 the last step if present; `TestFrameGraphTailLayoutsAndCache` requires this
 tail to produce none.
 
@@ -100,8 +147,9 @@ the actual legacy render-pass constructor.
 
 ## Resize and teardown
 
-`Renderer.New` compiles the graph after allocating its tail targets. The plan,
-closures, cache and pipelines survive resize. `bindGraphTargets` reconnects
+`Renderer.New` compiles the graph after allocating its tail targets. The current plan,
+closures, cache and pipelines survive resize unless application declarations
+also changed. `bindGraphTargets` reconnects
 the newly allocated images and makes framebuffers per node and swapchain
 image; the scene-colour copy is a single physical image. Relative extents are
 evaluated again at the new size.

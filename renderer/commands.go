@@ -781,6 +781,12 @@ func recordCommandBuffer(
 	}
 
 	// ── Main render pass ──
+	if graph.engine[graphLegacy] > 0 {
+		graph.frame = graphFrame{driver: deviceDriver, cmd: cmdBuf, imageIndex: imageIndex, frame: frame, extent: extent, scratch: scratch, timer: timer, stats: stats, shadowDS: shadow.descriptorSets[frame], lighting: lighting}
+		if err := graph.executeSteps(0, graph.engine[graphLegacy]); err != nil {
+			return err
+		}
+	}
 	mainArea := core1_0.Rect2D{Offset: core1_0.Offset2D{X: 0, Y: 0}, Extent: extent}
 	scratch.colorClear = core1_0.ClearValueFloat{lighting.SkyColor[0], lighting.SkyColor[1], lighting.SkyColor[2], lighting.SkyColor[3]}
 	mainDepthClear := core1_0.ClearValueDepthStencil{Depth: 0.0, Stencil: 0}

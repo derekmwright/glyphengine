@@ -102,6 +102,17 @@ type Renderer struct {
 	waterPipeline                 core1_0.Pipeline
 	godRayPipeline                core1_0.Pipeline
 	frameGraph                    *frameGraph
+	graphDirty                    bool
+	appTargets                    []*RenderTarget
+	retiredTargets                []*RenderTarget
+	appPasses                     []*AppPass
+	appSetLayout                  core1_0.DescriptorSetLayout
+	shaderTextures                [ShaderTextureSlots]*Texture
+	shaderTargets                 [ShaderTextureSlots]*RenderTarget
+	hdrReadTexture                Texture
+	appWrites                     [1]core1_0.WriteDescriptorSet
+	appInfos                      [1]core1_0.DescriptorImageInfo
+	depthResolve                  *sceneDepthResources
 	waterRenderPass               core1_0.RenderPass
 	waterFramebuffers             []core1_0.Framebuffer
 	sceneColor                    *sceneColorTarget
@@ -116,6 +127,7 @@ type Renderer struct {
 	// teardown, and the zero value (every array zeroed) is already correct on
 	// the first frame.
 	cmdScratch       commandScratch
+	shaderSlotImages [maxFramesInFlight][ShaderTextureSlots]core1_0.DescriptorImageInfo
 	shaderParameters [ShaderParameterBytes]byte
 	// grassLOD is the distance tuning grass thins, fades and culls by.
 	// Defaulted at construction so a zero value never culls grass at zero.
@@ -1253,6 +1265,7 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	if err := r.bindGraphTargets(); err != nil {
 		return nil, fmt.Errorf("renderer: create graph framebuffers: %w", err)
 	}
+	r.onInit(func() { r.destroyAppResources() })
 	r.onInit(func() { r.releaseGraphFramebuffers() })
 
 	cmdBufs, err := createCommandBuffers(r.deviceDriver, r.commandPool, maxFramesInFlight)
@@ -1542,6 +1555,7 @@ func (r *Renderer) recreateSwapchain() error {
 	}
 
 	r.deviceDriver.DeviceWaitIdle()
+	r.flushAllDeferred()
 
 	// Destroy old resources. Every step here is rebuilt unconditionally below
 	// (clouds and the UI glow layer are the two exceptions, and each guards
@@ -1556,6 +1570,7 @@ func (r *Renderer) recreateSwapchain() error {
 	}
 	r.framebuffers = nil
 	r.releaseGraphFramebuffers()
+	r.releaseAppResizeTargets()
 	r.uiLayer.destroy(r.deviceDriver)
 	r.uiLayer = nil
 	r.sceneColor.destroy(r.deviceDriver)
@@ -1756,6 +1771,14 @@ func (r *Renderer) rebuildSwapchainTargets(oldExtent core1_0.Extent2D, undo *reb
 		undo.push(func() { r.sceneColor.destroy(r.deviceDriver); r.sceneColor = nil })
 
 	}
+	if err := r.rebuildAppTargets(undo); err != nil {
+		return err
+	}
+	if r.graphDirty {
+		if err := r.replaceAppGraph(false); err != nil {
+			return err
+		}
+	}
 	if err := r.bindGraphTargets(); err != nil {
 		return fmt.Errorf("renderer: recreate graph framebuffers: %w", err)
 	}
@@ -1912,6 +1935,9 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 
 	// Both the fence and the acquire are waits on the presentation pipeline, so
 	// they count together: with vsync on it is the acquire that blocks.
+	if err := r.prepareAppFrame(f, imageIndex); err != nil {
+		return err
+	}
 	r.lastFenceWait = time.Since(waitStart)
 
 	// Only reset the fence after a successful acquire
@@ -2027,6 +2053,9 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 	r.prevVP = lighting.VP
 	r.prevCloudTime = lighting.Time
 	r.currentFrame = (f + 1) % maxFramesInFlight
+	for _, t := range r.appTargets {
+		t.selectTexture(r.currentFrame)
+	}
 
 	if presentResult == khr_swapchain.VKErrorOutOfDate || presentResult == khr_swapchain.VKSuboptimal || r.framebufferResized {
 		// The frame WAS drawn and presented here, unlike the acquire path, so
@@ -2135,6 +2164,10 @@ func (r *Renderer) Destroy() {
 
 	// Flush deferred destroys now that the GPU is idle.
 	r.flushAllDeferred()
+
+	for _, p := range r.appPasses {
+		p.releaseSets()
+	}
 
 	// Application-owned resources, which are created after New and so are not
 	// on the init stack.

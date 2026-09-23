@@ -19,11 +19,15 @@ const (
 )
 
 type graphImage struct {
-	images []core1_0.Image
-	views  []core1_0.ImageView
+	images        []core1_0.Image
+	views         []core1_0.ImageView
+	frameInstance bool
+	previous      bool
 }
 
 type graphNode struct {
+	app                 *AppPass
+	byFrame             bool
 	name                string
 	pass                core1_0.RenderPass
 	framebuffers        []core1_0.Framebuffer
@@ -38,6 +42,11 @@ type graphNode struct {
 // The compiler owns only declarations. Vulkan objects and recording closures
 // stay here, with indexed bindings so execution never looks up a cache key.
 type frameGraph struct {
+	declarations                           []framegraph.Node
+	engine                                 [graphTonemap + 2]int
+	targets                                map[*RenderTarget]appGraphTarget
+	resolvedDepth                          framegraph.ResourceID
+	depthNode                              int
 	plan                                   *framegraph.Plan
 	nodes                                  []graphNode
 	cache                                  map[framegraph.RenderPassKey]core1_0.RenderPass
@@ -71,7 +80,7 @@ type graphFrame struct {
 	water, ui                                               bool
 }
 
-func newFrameGraph(samples core1_0.SampleCountFlags, depthFormat, swapchainFormat core1_0.Format, instances int) (*frameGraph, error) {
+func newFrameGraph(samples core1_0.SampleCountFlags, depthFormat, swapchainFormat core1_0.Format, instances int, owner ...*Renderer) (*frameGraph, error) {
 	f := &frameGraph{cache: make(map[framegraph.RenderPassKey]core1_0.RenderPass)}
 	g := framegraph.New()
 	image := func(name string, scale float32) framegraph.ImageDesc {
@@ -102,7 +111,8 @@ func newFrameGraph(samples core1_0.SampleCountFlags, depthFormat, swapchainForma
 		legacy = append(legacy, framegraph.Use{Resource: g.AddImage(d), Access: framegraph.SampledRead})
 	}
 	add := func(n framegraph.Node, record func(*graphFrame)) int {
-		id := g.AddNode(n)
+		id := len(f.nodes)
+		f.declarations = append(f.declarations, n)
 		f.nodes = append(f.nodes, graphNode{name: n.Name, record: record, begin: -1, end: -1, resolve: -1})
 		return int(id)
 	}
@@ -290,6 +300,18 @@ func newFrameGraph(samples core1_0.SampleCountFlags, depthFormat, swapchainForma
 		})
 	f.nodes[graphTonemap].begin = PassTonemap
 	add(framegraph.Node{Name: "present", Kind: framegraph.Legacy, Uses: []framegraph.Use{{Resource: f.swapchain, Access: framegraph.Present}}}, nil)
+	for i := range f.engine {
+		f.engine[i] = i
+	}
+	f.depthNode = -1
+	if len(owner) > 0 {
+		if err := owner[0].extendAppGraph(f, g); err != nil {
+			return nil, err
+		}
+	}
+	for _, n := range f.declarations {
+		g.AddNode(n)
+	}
 	var err error
 	f.plan, err = g.Build()
 	if err != nil {
@@ -307,7 +329,11 @@ func newFrameGraph(samples core1_0.SampleCountFlags, depthFormat, swapchainForma
 				for len(f.nodes[i].clears) <= j {
 					f.nodes[i].clears = append(f.nodes[i].clears, core1_0.ClearValueFloat{})
 				}
-				f.nodes[i].clears[j] = core1_0.ClearValueFloat(step.RenderPass.Clears[j].Color)
+				if a.SubpassLayout == core1_0.ImageLayoutDepthStencilAttachmentOptimal {
+					f.nodes[i].clears[j] = core1_0.ClearValueDepthStencil{Depth: step.RenderPass.Clears[j].Depth, Stencil: step.RenderPass.Clears[j].Stencil}
+				} else {
+					f.nodes[i].clears[j] = core1_0.ClearValueFloat(step.RenderPass.Clears[j].Color)
+				}
 			}
 		}
 	}
@@ -396,6 +422,12 @@ func (f *frameGraph) barriers(c *graphFrame, bs []framegraph.Barrier) error {
 			b := bs[j]
 			images := f.images[b.Resource].images
 			instance := c.imageIndex
+			if f.images[b.Resource].frameInstance {
+				instance = c.frame % 2
+				if f.images[b.Resource].previous {
+					instance = 1 - instance
+				}
+			}
 			if len(images) == 1 {
 				instance = 0
 			}
@@ -415,11 +447,20 @@ func (f *frameGraph) barriers(c *graphFrame, bs []framegraph.Barrier) error {
 }
 
 func (f *frameGraph) executeGraph() error {
+	if err := f.executeSteps(f.engine[graphLegacy]+1, len(f.plan.Steps)); err != nil {
+		return err
+	}
+	return f.barriers(&f.frame, f.plan.FinalBarriers)
+}
+func (f *frameGraph) executeSteps(first, last int) error {
 	c := &f.frame
-	for _, step := range f.plan.Steps[1:] {
+	for _, step := range f.plan.Steps[first:last] {
 		n := &f.nodes[step.Node]
 		if n.begin >= 0 {
 			c.timer.begin(c.driver, c.cmd, c.frame, n.begin)
+		}
+		if n.app != nil && n.app.desc.Timed {
+			c.timer.beginApp(c.driver, c.cmd, c.frame, n.app)
 		}
 		run := n.enabled == nil || n.enabled(c)
 		if run {
@@ -428,7 +469,7 @@ func (f *frameGraph) executeGraph() error {
 			}
 			if step.RenderPass != nil {
 				if err := c.scratch.beginRenderPass(c.driver, c.cmd, core1_0.SubpassContentsInline, n.pass,
-					n.framebuffers[c.imageIndex], core1_0.Rect2D{Extent: n.extent}, n.clears...); err != nil {
+					n.framebuffer(c), core1_0.Rect2D{Extent: n.extent}, n.clears...); err != nil {
 					return err
 				}
 			}
@@ -447,9 +488,20 @@ func (f *frameGraph) executeGraph() error {
 		if n.resolve >= 0 {
 			c.timer.end(c.driver, c.cmd, c.frame, n.resolve)
 		}
+		if n.app != nil && n.app.desc.Timed {
+			c.timer.endApp(c.driver, c.cmd, c.frame, n.app)
+		}
 		if n.end >= 0 {
 			c.timer.end(c.driver, c.cmd, c.frame, n.end)
 		}
 	}
-	return f.barriers(c, f.plan.FinalBarriers)
+	return nil
+}
+
+func (n *graphNode) framebuffer(c *graphFrame) core1_0.Framebuffer {
+	i := c.imageIndex
+	if n.byFrame {
+		i = c.frame % len(n.framebuffers)
+	}
+	return n.framebuffers[i]
 }

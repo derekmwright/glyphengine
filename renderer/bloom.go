@@ -84,11 +84,12 @@ func createBloomTargets(
 	t.sampler = sampler
 
 	for i := 0; i < count; i++ {
-		var (
-			images []core1_0.Image
-			mems   []core1_0.DeviceMemory
-			views  []core1_0.ImageView
-		)
+		// Track each partial row immediately. Failure injection at image
+		// 8 of a three-image chain used to leak its first mip (one image,
+		// view and allocation); TestAppTargetRebuildFailures covers every mip.
+		t.images = append(t.images, nil)
+		t.memory = append(t.memory, nil)
+		t.views = append(t.views, nil)
 		for lvl := 0; lvl < bloomLevels; lvl++ {
 			ext := t.extents[lvl]
 			img, _, err := deviceDriver.CreateImage(nil, core1_0.ImageCreateInfo{
@@ -109,12 +110,11 @@ func createBloomTargets(
 				t.destroy(deviceDriver)
 				return nil, fmt.Errorf("create bloom image %d/%d: %w", i, lvl, err)
 			}
-			images = append(images, img)
+			t.images[i] = append(t.images[i], img)
 
 			reqs := deviceDriver.GetImageMemoryRequirements(img)
 			memType, err := findMemoryType(instanceDriver, physicalDevice, reqs.MemoryTypeBits, core1_0.MemoryPropertyDeviceLocal)
 			if err != nil {
-				t.images = append(t.images, images)
 				t.destroy(deviceDriver)
 				return nil, err
 			}
@@ -123,13 +123,11 @@ func createBloomTargets(
 				MemoryTypeIndex: memType,
 			})
 			if err != nil {
-				t.images = append(t.images, images)
 				t.destroy(deviceDriver)
 				return nil, fmt.Errorf("allocate bloom memory %d/%d: %w", i, lvl, err)
 			}
-			mems = append(mems, mem)
+			t.memory[i] = append(t.memory[i], mem)
 			if _, err := deviceDriver.BindImageMemory(img, mem, 0); err != nil {
-				t.images, t.memory = append(t.images, images), append(t.memory, mems)
 				t.destroy(deviceDriver)
 				return nil, fmt.Errorf("bind bloom memory %d/%d: %w", i, lvl, err)
 			}
@@ -145,11 +143,10 @@ func createBloomTargets(
 				},
 			})
 			if err != nil {
-				t.images, t.memory = append(t.images, images), append(t.memory, mems)
 				t.destroy(deviceDriver)
 				return nil, fmt.Errorf("create bloom view %d/%d: %w", i, lvl, err)
 			}
-			views = append(views, view)
+			t.views[i] = append(t.views[i], view)
 
 		}
 
@@ -162,7 +159,6 @@ func createBloomTargets(
 			SetLayouts:     layouts,
 		})
 		if err != nil {
-			t.images, t.memory, t.views = append(t.images, images), append(t.memory, mems), append(t.views, views)
 			t.destroy(deviceDriver)
 			return nil, fmt.Errorf("allocate bloom descriptor sets %d: %w", i, err)
 		}
@@ -175,21 +171,17 @@ func createBloomTargets(
 				DescriptorType: core1_0.DescriptorTypeCombinedImageSampler,
 				ImageInfo: []core1_0.DescriptorImageInfo{{
 					Sampler:     sampler,
-					ImageView:   views[lvl],
+					ImageView:   t.views[i][lvl],
 					ImageLayout: core1_0.ImageLayoutShaderReadOnlyOptimal,
 				}},
 			}
 		}
 		if err := deviceDriver.UpdateDescriptorSets(writes, nil); err != nil {
-			t.images, t.memory, t.views = append(t.images, images), append(t.memory, mems), append(t.views, views)
 			t.sets = append(t.sets, sets)
 			t.destroy(deviceDriver)
 			return nil, fmt.Errorf("update bloom descriptor sets %d: %w", i, err)
 		}
 
-		t.images = append(t.images, images)
-		t.memory = append(t.memory, mems)
-		t.views = append(t.views, views)
 		t.sets = append(t.sets, sets)
 	}
 

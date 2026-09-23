@@ -23,6 +23,33 @@ func depthImage(name string) ImageDesc {
 	return d
 }
 
+// Verified break: replacing the explicit exit with the resting layout makes
+// explicit=true report OldLayout ShaderReadOnly (5), wanted DepthAttachment (3).
+// The omitted-override control continues to use ShaderReadOnly in the same graph.
+func TestLegacyFinalLayout(t *testing.T) {
+	for _, explicit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("explicit=%v", explicit), func(t *testing.T) {
+			g := New()
+			depth := g.AddImage(depthImage("legacy scene depth"))
+			u := Use{Resource: depth, Access: DepthWrite}
+			wantOld := core1_0.ImageLayoutShaderReadOnlyOptimal
+			if explicit {
+				u.FinalLayout = core1_0.ImageLayoutDepthStencilAttachmentOptimal
+				wantOld = u.FinalLayout
+			}
+			g.AddNode(Node{Name: "scene", Kind: Legacy, Uses: []Use{u}})
+			g.AddNode(Node{Name: "depth resolve", Kind: Graphics, Uses: []Use{{Resource: depth, Access: SampledRead}}})
+			p := mustBuild(t, g)
+			equal(t, "resting layout", p.Resources[depth].Resting, core1_0.ImageLayoutShaderReadOnlyOptimal)
+			equal(t, "sampling barriers", len(p.Steps[1].Barriers), 1)
+			b := p.Steps[1].Barriers[0]
+			equal(t, "barrier old layout", b.OldLayout, wantOld)
+			equal(t, "barrier new layout", b.NewLayout, core1_0.ImageLayoutShaderReadOnlyOptimal)
+			t.Logf("explicit=%v: resting=%v, barrier %v -> %v", explicit, p.Resources[depth].Resting, b.OldLayout, b.NewLayout)
+		})
+	}
+}
+
 func mustBuild(t *testing.T, g *Graph) *Plan {
 	t.Helper()
 	p, err := g.Build()

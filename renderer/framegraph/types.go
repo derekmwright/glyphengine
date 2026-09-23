@@ -69,9 +69,13 @@ const (
 )
 
 type Use struct {
-	Resource ResourceID
-	Access   Access
-	Clear    *Clear // Only ColorWrite or DepthWrite.
+	// FinalLayout declares a Legacy attachment's actual exit layout instead of
+	// its resting layout. The hand-recorded scene leaves depth in attachment
+	// layout even when later nodes sample it. Undefined keeps the resting layout.
+	FinalLayout core1_0.ImageLayout
+	Resource    ResourceID
+	Access      Access
+	Clear       *Clear // Only ColorWrite or DepthWrite.
 	// HasResolve disambiguates an omitted resolve from a resolve to resource 0.
 	// ColorLoadWrite also supports resolves: water reloads multisample colour.
 	ResolveTo  ResourceID

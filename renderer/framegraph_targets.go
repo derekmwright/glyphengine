@@ -9,16 +9,17 @@ import (
 
 // bindGraphTargets runs after allocation and on every swapchain rebuild. The
 // plan and cached render passes survive a resize; only physical bindings change.
-func (r *Renderer) bindGraphTargets() error {
+func (r *Renderer) bindGraphTargets() error { return r.bindGraphTargetsMode(true) }
+func (r *Renderer) bindGraphTargetsMode(primeLayouts bool) error {
 	f := r.frameGraph
-	f.images[f.hdr] = graphImage{r.hdr.images, r.hdr.views}
-	f.images[f.depth] = graphImage{r.depth.images, r.depth.views}
+	f.images[f.hdr] = graphImage{images: r.hdr.images, views: r.hdr.views}
+	f.images[f.depth] = graphImage{images: r.depth.images, views: r.depth.views}
 	if r.msaa != nil {
-		f.images[f.color] = graphImage{r.msaa.images, r.msaa.views}
+		f.images[f.color] = graphImage{images: r.msaa.images, views: r.msaa.views}
 	}
-	f.images[f.swapchain] = graphImage{r.sc.images, r.sc.imageViews}
+	f.images[f.swapchain] = graphImage{images: r.sc.images, views: r.sc.imageViews}
 	if r.sceneColor != nil {
-		f.images[f.copy] = graphImage{[]core1_0.Image{r.sceneColor.image}, []core1_0.ImageView{r.sceneColor.texture.view}}
+		f.images[f.copy] = graphImage{images: []core1_0.Image{r.sceneColor.image}, views: []core1_0.ImageView{r.sceneColor.texture.view}}
 	}
 	bindBloom := func(t *bloomTarget, ids [bloomLevels]framegraph.ResourceID) {
 		for level, id := range ids {
@@ -31,24 +32,32 @@ func (r *Renderer) bindGraphTargets() error {
 	}
 	bindBloom(r.bloom, f.bloom)
 	if r.uiLayer != nil {
-		f.images[f.ui] = graphImage{r.uiLayer.color.images, r.uiLayer.color.views}
+		f.images[f.ui] = graphImage{images: r.uiLayer.color.images, views: r.uiLayer.color.views}
 		bindBloom(r.uiLayer.bloom, f.uiBloom)
 	}
+	r.bindAppGraphImages()
 	for i, step := range f.plan.Steps {
-		if step.RenderPass == nil || (i == graphWater && r.sceneColor == nil) ||
-			(i >= graphUILayer && i < graphTonemap && r.uiLayer == nil) {
+		if step.RenderPass == nil || (i == f.engine[graphWater] && r.sceneColor == nil) ||
+			(i >= f.engine[graphUILayer] && i < f.engine[graphTonemap] && f.nodes[i].app == nil && r.uiLayer == nil) {
 			continue
 		}
 		n := &f.nodes[i]
 		var err error
 		n.pass, err = f.renderPass(r.deviceDriver, i)
 		if err != nil {
-			r.releaseGraphFramebuffers()
+			f.destroyFramebuffers(r.deviceDriver)
 			return err
 		}
 		size := step.RenderPass.Extent.Size(uint32(r.sc.extent.Width), uint32(r.sc.extent.Height))
 		n.extent = core1_0.Extent2D{Width: int(size[0]), Height: int(size[1])}
-		for instance := range r.sc.imageViews {
+		count := len(r.sc.imageViews)
+		if n.byFrame {
+			count = 1
+			if n.app.desc.Target.desc.History {
+				count = 2
+			}
+		}
+		for instance := range count {
 			views := make([]core1_0.ImageView, len(step.RenderPass.Attachments))
 			for j, a := range step.RenderPass.Attachments {
 				binding := f.images[a.Resource].views
@@ -61,16 +70,19 @@ func (r *Renderer) bindGraphTargets() error {
 			fb, _, err := r.deviceDriver.CreateFramebuffer(nil, core1_0.FramebufferCreateInfo{
 				RenderPass: n.pass, Attachments: views, Width: n.extent.Width, Height: n.extent.Height, Layers: 1})
 			if err != nil {
-				r.releaseGraphFramebuffers()
+				f.destroyFramebuffers(r.deviceDriver)
 				return fmt.Errorf("frame graph framebuffer %s/%d: %w", n.name, instance, err)
 			}
 			n.framebuffers = append(n.framebuffers, fb)
 		}
 	}
-	r.tonemapFramebuffers = f.nodes[graphTonemap].framebuffers
-	r.waterFramebuffers = f.nodes[graphWater].framebuffers
+	r.tonemapFramebuffers = f.nodes[f.engine[graphTonemap]].framebuffers
+	r.waterFramebuffers = f.nodes[f.engine[graphWater]].framebuffers
 	// These two targets can be skipped before their first use. Establish only
 	// their resting layout: copy and UI clear overwrite all pixels before reads.
+	if !primeLayouts {
+		return nil
+	}
 	var prime []core1_0.ImageMemoryBarrier
 	for _, id := range []framegraph.ResourceID{f.copy, f.ui} {
 		for _, img := range f.images[id].images {
@@ -83,17 +95,17 @@ func (r *Renderer) bindGraphTargets() error {
 	if len(prime) > 0 {
 		cmd, err := r.beginSingleTimeCommands()
 		if err != nil {
-			r.releaseGraphFramebuffers()
+			f.destroyFramebuffers(r.deviceDriver)
 			return err
 		}
 		err = r.deviceDriver.CmdPipelineBarrier(cmd, core1_0.PipelineStageTopOfPipe, core1_0.PipelineStageFragmentShader, 0, nil, nil, prime)
 		if err != nil {
 			r.deviceDriver.FreeCommandBuffers(cmd)
-			r.releaseGraphFramebuffers()
+			f.destroyFramebuffers(r.deviceDriver)
 			return err
 		}
 		if err = r.endSingleTimeCommands(cmd); err != nil {
-			r.releaseGraphFramebuffers()
+			f.destroyFramebuffers(r.deviceDriver)
 			return err
 		}
 	}

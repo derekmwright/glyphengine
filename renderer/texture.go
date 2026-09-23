@@ -28,7 +28,10 @@ type Texture struct {
 	// the order is the same in every process.
 	id uint32
 
-	destroyed bool
+	target     *RenderTarget
+	scene      *Renderer // Borrowed scene colour/depth; owned by the renderer.
+	sceneDepth bool
+	destroyed  bool
 }
 
 // createDescriptorSetLayout creates the set-0 layout every non-lit pipeline and
@@ -171,6 +174,18 @@ const maxBloomSets = maxHDRSets * bloomLevels
 // it -- on a machine with more swapchain images than the one it was tried on.
 const uiLayerSetFactor = 2
 
+// Application descriptor capacity includes resources awaiting deferred release.
+// 64 passes * 2 frame slots, plus 8 depth-resolve input sets, each with 4 samplers.
+// 64 targets * 2 history instances, plus 8 resolved-depth textures, each with one
+// sampler and the unused UBO declared by the ordinary texture layout. SceneColor
+// reuses HDR's existing sceneSets. Mesh draws reuse their Texture's existing set.
+// Thus 272 sets, 680 samplers and 136 UBOs, independent of draw count. As with
+// material/texture capacity, exhaustion is returned as a descriptor allocation error.
+const appPoolInputSets = 64*maxFramesInFlight + maxHDRSets
+const appPoolTextureSets = 64*2 + maxHDRSets
+const appPoolSets = appPoolInputSets + appPoolTextureSets
+const appPoolSamplers = 4*appPoolInputSets + appPoolTextureSets
+
 // createDescriptorPool creates a pool that can allocate combined image sampler and
 // uniform buffer descriptor sets. Extra capacity for shadow mapping descriptors.
 func createDescriptorPool(deviceDriver core1_0.DeviceDriver, maxSets int) (core1_0.DescriptorPool, error) {
@@ -195,13 +210,13 @@ func createDescriptorPool(deviceDriver core1_0.DeviceDriver, maxSets int) (core1
 		// and the pass targets allocate at startup and on resize -- so that
 		// buys back a bound this renderer would otherwise keep walking into.
 		Flags:   core1_0.DescriptorPoolCreateFreeDescriptorSet,
-		MaxSets: maxSets + 36 + maxMaterials + uiLayerSetFactor*(maxHDRSets+maxBloomSets),
+		MaxSets: maxSets + appPoolSets + 36 + maxMaterials + uiLayerSetFactor*(maxHDRSets+maxBloomSets),
 		PoolSizes: []core1_0.DescriptorPoolSize{
 			{
 				Type: core1_0.DescriptorTypeCombinedImageSampler,
 				// +4 sun shadow + 2 cube shadow samplers, then four maps per material
 				// The tonemap's sets take two samplers each, hence the doubling.
-				DescriptorCount: maxSets + 6 + maxMaterials*materialTextureBindings + uiLayerSetFactor*(maxHDRSets*2+maxBloomSets),
+				DescriptorCount: maxSets + appPoolSamplers + ShaderTextureSlots*maxFramesInFlight + 6 + maxMaterials*materialTextureBindings + uiLayerSetFactor*(maxHDRSets*2+maxBloomSets),
 			},
 			{
 				Type: core1_0.DescriptorTypeUniformBuffer,
@@ -220,7 +235,7 @@ func createDescriptorPool(deviceDriver core1_0.DeviceDriver, maxSets int) (core1
 				// otherwise, which would be a startup error on the first scene
 				// with enough textures rather than anything visible here.
 				// One additional application UBO descriptor per shadow/light set.
-				DescriptorCount: maxSets + uiLayerSetFactor*(maxHDRSets+maxBloomSets) + 36 + maxMaterials + maxFramesInFlight,
+				DescriptorCount: maxSets + appPoolTextureSets + uiLayerSetFactor*(maxHDRSets+maxBloomSets) + 36 + maxMaterials + maxFramesInFlight,
 			},
 			{
 				Type: core1_0.DescriptorTypeStorageBuffer,
@@ -922,6 +937,13 @@ func (r *Renderer) createFallbackTexture() (*Texture, error) {
 // DestroyTexture releases GPU resources for a texture, including the
 // descriptor set it took from the pool at upload.
 func (r *Renderer) DestroyTexture(t *Texture) {
+	if t != nil && t.scene != nil {
+		return // Borrowed scene images are released with their renderer targets.
+	}
+	if t != nil && t.target != nil {
+		r.DestroyRenderTarget(t.target)
+		return
+	}
 	if t == nil || t.destroyed {
 		return
 	}
