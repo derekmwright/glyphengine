@@ -14,7 +14,7 @@ api:
   - renderer.Renderer.UIExposure
 assets: none
 run: task bench
-verified: 2026-09-19
+verified: 2026-09-23
 ---
 
 # HDR rendering and the tonemap resolve
@@ -108,9 +108,10 @@ This is not hypothetical. `Renderer.DrawTriangle` has its own record-and-present
 loop separate from `recordCommandBuffer`, and it was missed on the first pass.
 Nothing in `task ci` caught it — the frame still presented, the example still
 exited zero. `task validate` caught it immediately, as
-`VUID-VkPresentInfoKHR-pImageIndices-01430`. Use `recordTonemap` rather than
-open-coding the pass, and run `task validate` on anything that adds a present
-path.
+`VUID-VkPresentInfoKHR-pImageIndices-01430`. The normal frame now executes the
+graph's tonemap node; the diagnostic triangle still uses `recordTonemap`.
+Both use the cached render pass and `recordTonemapDraw`. Run `task validate`
+on anything that adds a present path.
 
 ## What it costs
 
@@ -170,9 +171,9 @@ is ALU-bound rather than fill-bound.
   is the tonemapped result.
 
 - **Screen-space overlays are composited inside this pass, after the resolve.**
-  `recordTonemap` takes a `composite` callback and calls it between the
-  fullscreen draw and `vkCmdEndRenderPass`; `recordUIComposite` fills it with
-  the UI panel and MSDF text channels. They used to be recorded in the scene
+  The graph's tonemap closure calls the composite between the fullscreen draw
+  and `vkCmdEndRenderPass`; `recordUIComposite` fills it with the UI panel and
+  MSDF text channels. They used to be recorded in the scene
   pass, which put a HUD in the HDR target where water refraction, this resolve
   and bloom all ran over it. Consequence for this page: overlay colours are not
   tonemapped, so exposure and the curve move the scene without moving the UI.

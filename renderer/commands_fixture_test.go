@@ -32,6 +32,7 @@ func fixtureReverseZProjection(fovDegrees, aspect, near, far float32) mgl32.Mat4
 // a small and a large n is what TestRecordCommandBufferAllocsAreConstant needs
 // to tell "zero per draw" apart from "zero because there were only a few".
 type frame struct {
+	graph                                                                                          *frameGraph
 	cmdBuf                                                                                         core1_0.CommandBuffer
 	renderPass, waterRenderPass                                                                    core1_0.RenderPass
 	framebuffer, waterFramebuffer                                                                  core1_0.Framebuffer

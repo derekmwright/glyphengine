@@ -2,7 +2,6 @@ package renderer
 
 import (
 	"fmt"
-	"log"
 
 	"github.com/vkngwrapper/core/v3/core1_0"
 )
@@ -168,146 +167,11 @@ func (s *sceneColorTarget) destroy(deviceDriver core1_0.DeviceDriver) {
 	// DestroyTexture is not what frees this Texture -- see the comment above
 	// -- so the set has to be given back here or nowhere, and a swapchain
 	// rebuild builds a fresh target every time.
-	freeSets(deviceDriver, []core1_0.DescriptorSet{s.texture.DescriptorSet})
+	if s.texture.DescriptorSet.Handle() != 0 {
+		freeSets(deviceDriver, []core1_0.DescriptorSet{s.texture.DescriptorSet})
+	}
 	deviceDriver.DestroySampler(s.texture.sampler, nil)
 	deviceDriver.DestroyImageView(s.texture.view, nil)
 	deviceDriver.FreeMemory(s.memory, nil)
 	deviceDriver.DestroyImage(s.image, nil)
-}
-
-// createWaterRenderPass builds the second pass.
-//
-// Every attachment loads rather than clears: the opaque scene and its depth are
-// already there and must survive, since water is composited over one and
-// occluded by the other.
-func createWaterRenderPass(deviceDriver core1_0.DeviceDriver, imageFormat core1_0.Format, depthFormat core1_0.Format, samples core1_0.SampleCountFlags) (core1_0.RenderPass, error) {
-	msaa := samples != core1_0.Samples1
-
-	var attachments []core1_0.AttachmentDescription
-	var subpasses []core1_0.SubpassDescription
-
-	depthAttachment := core1_0.AttachmentDescription{
-		Format:         depthFormat,
-		Samples:        samples,
-		LoadOp:         core1_0.AttachmentLoadOpLoad,
-		StoreOp:        core1_0.AttachmentStoreOpDontCare,
-		StencilLoadOp:  core1_0.AttachmentLoadOpDontCare,
-		StencilStoreOp: core1_0.AttachmentStoreOpDontCare,
-		InitialLayout:  core1_0.ImageLayoutDepthStencilAttachmentOptimal,
-		FinalLayout:    core1_0.ImageLayoutDepthStencilAttachmentOptimal,
-	}
-
-	if msaa {
-		attachments = []core1_0.AttachmentDescription{
-			// 0: the multisample colour the first pass left behind.
-			{
-				Format:         imageFormat,
-				Samples:        samples,
-				LoadOp:         core1_0.AttachmentLoadOpLoad,
-				StoreOp:        core1_0.AttachmentStoreOpDontCare,
-				StencilLoadOp:  core1_0.AttachmentLoadOpDontCare,
-				StencilStoreOp: core1_0.AttachmentStoreOpDontCare,
-				InitialLayout:  core1_0.ImageLayoutColorAttachmentOptimal,
-				FinalLayout:    core1_0.ImageLayoutColorAttachmentOptimal,
-			},
-			depthAttachment,
-			// 2: resolve to the HDR target. This resolves a second time in the
-			// frame, which is the price of drawing water at full MSAA rather
-			// than aliasing every wave crest against the sky.
-			{
-				Format:         imageFormat,
-				Samples:        core1_0.Samples1,
-				LoadOp:         core1_0.AttachmentLoadOpDontCare,
-				StoreOp:        core1_0.AttachmentStoreOpStore,
-				StencilLoadOp:  core1_0.AttachmentLoadOpDontCare,
-				StencilStoreOp: core1_0.AttachmentStoreOpDontCare,
-				InitialLayout:  core1_0.ImageLayoutUndefined,
-				FinalLayout:    core1_0.ImageLayoutShaderReadOnlyOptimal,
-			},
-		}
-		subpasses = []core1_0.SubpassDescription{{
-			PipelineBindPoint: core1_0.PipelineBindPointGraphics,
-			ColorAttachments: []core1_0.AttachmentReference{
-				{Attachment: 0, Layout: core1_0.ImageLayoutColorAttachmentOptimal},
-			},
-			DepthStencilAttachment: &core1_0.AttachmentReference{
-				Attachment: 1, Layout: core1_0.ImageLayoutDepthStencilAttachmentOptimal,
-			},
-			ResolveAttachments: []core1_0.AttachmentReference{
-				{Attachment: 2, Layout: core1_0.ImageLayoutColorAttachmentOptimal},
-			},
-		}}
-	} else {
-		attachments = []core1_0.AttachmentDescription{
-			// Without MSAA the first pass drew straight into the HDR target, so
-			// water blends directly onto it. It arrives in TransferSrc from the
-			// copy that fed the refraction source.
-			{
-				Format:         imageFormat,
-				Samples:        core1_0.Samples1,
-				LoadOp:         core1_0.AttachmentLoadOpLoad,
-				StoreOp:        core1_0.AttachmentStoreOpStore,
-				StencilLoadOp:  core1_0.AttachmentLoadOpDontCare,
-				StencilStoreOp: core1_0.AttachmentStoreOpDontCare,
-				InitialLayout:  core1_0.ImageLayoutTransferSrcOptimal,
-				FinalLayout:    core1_0.ImageLayoutShaderReadOnlyOptimal,
-			},
-			depthAttachment,
-		}
-		subpasses = []core1_0.SubpassDescription{{
-			PipelineBindPoint: core1_0.PipelineBindPointGraphics,
-			ColorAttachments: []core1_0.AttachmentReference{
-				{Attachment: 0, Layout: core1_0.ImageLayoutColorAttachmentOptimal},
-			},
-			DepthStencilAttachment: &core1_0.AttachmentReference{
-				Attachment: 1, Layout: core1_0.ImageLayoutDepthStencilAttachmentOptimal,
-			},
-		}}
-	}
-
-	renderPass, _, err := deviceDriver.CreateRenderPass(nil, core1_0.RenderPassCreateInfo{
-		Attachments: attachments,
-		Subpasses:   subpasses,
-		// Waits for the copy that produced the refraction source before any
-		// fragment shader here samples it — and is shared with the scene pass
-		// rather than written here, because the blended pipelines are created
-		// against that pass and bound inside this one. See sceneEntryDependency.
-		SubpassDependencies: []core1_0.SubpassDependency{sceneEntryDependency()},
-	})
-	if err != nil {
-		return core1_0.RenderPass{}, err
-	}
-
-	log.Println("Water render pass created")
-	return renderPass, nil
-}
-
-// createWaterFramebuffers mirrors createFramebuffers for the second pass. The
-// attachments are the same images; only the load and store behaviour differs,
-// and that lives in the render pass rather than here.
-func createWaterFramebuffers(deviceDriver core1_0.DeviceDriver, renderPass core1_0.RenderPass, imageViews []core1_0.ImageView, depthViews []core1_0.ImageView, msaaViews []core1_0.ImageView, extent core1_0.Extent2D) ([]core1_0.Framebuffer, error) {
-	framebuffers := make([]core1_0.Framebuffer, len(imageViews))
-	for i, view := range imageViews {
-		var attachments []core1_0.ImageView
-		if msaaViews != nil {
-			attachments = []core1_0.ImageView{msaaViews[i], depthViews[i], view}
-		} else {
-			attachments = []core1_0.ImageView{view, depthViews[i]}
-		}
-		fb, _, err := deviceDriver.CreateFramebuffer(nil, core1_0.FramebufferCreateInfo{
-			RenderPass:  renderPass,
-			Attachments: attachments,
-			Width:       extent.Width,
-			Height:      extent.Height,
-			Layers:      1,
-		})
-		if err != nil {
-			for _, made := range framebuffers[:i] {
-				deviceDriver.DestroyFramebuffer(made, nil)
-			}
-			return nil, fmt.Errorf("create water framebuffer %d: %w", i, err)
-		}
-		framebuffers[i] = fb
-	}
-	return framebuffers, nil
 }

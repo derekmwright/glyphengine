@@ -77,35 +77,44 @@ func withUILayer(fx *frame, glow bool) *frame {
 		downFB[i] = h.framebuffer()
 		upFB[i] = h.framebuffer()
 	}
+	if fx.graph == nil {
+		fx.initGraph()
+	}
+	layer := &fx.graph.nodes[graphUILayer]
+	layer.pass, layer.framebuffers[0], layer.extent = h.renderPass(), h.framebuffer(), fx.extent
+	uiPipeline, msdfPipeline, layout := h.pipeline(), h.pipeline(), h.layout()
+	downPass, upPass := h.renderPass(), h.renderPass()
 	fx.tonemap.ui = &uiLayerPass{
-		renderPass:   h.renderPass(),
-		framebuffer:  h.framebuffer(),
-		uiPipeline:   h.pipeline(),
-		msdfPipeline: h.pipeline(),
-		layout:       h.layout(),
+		uiPipeline:   uiPipeline,
+		msdfPipeline: msdfPipeline,
+		layout:       layout,
 		bloom: bloomPass{
-			enabled:        strength > 0,
-			downRenderPass: h.renderPass(),
-			upRenderPass:   h.renderPass(),
-			prefilter:      h.pipeline(),
-			down:           h.pipeline(),
-			up:             h.pipeline(),
-			layout:         h.layout(),
-			sceneSet:       h.descSet(),
-			sets:           sets,
-			downFB:         downFB,
-			upFB:           upFB,
-			extents:        bloomExtents(fx.extent),
-			sceneExtent:    fx.extent,
-			threshold:      1.2,
-			knee:           0.2,
-			radius:         1.0,
+			enabled:     strength > 0,
+			prefilter:   h.pipeline(),
+			down:        h.pipeline(),
+			up:          h.pipeline(),
+			layout:      h.layout(),
+			sceneSet:    h.descSet(),
+			sets:        sets,
+			extents:     bloomExtents(fx.extent),
+			sceneExtent: fx.extent,
+			threshold:   1.2,
+			knee:        0.2,
+			radius:      1.0,
 		},
 		resolve:       h.pipeline(),
 		resolveSet:    h.descSet(),
 		resolveLayout: h.layout(),
 		exposure:      1,
 		strength:      strength,
+	}
+	for level := range bloomLevels {
+		n := &fx.graph.nodes[graphUIGlow+level]
+		n.pass, n.framebuffers[0], n.extent = downPass, downFB[level], fx.tonemap.ui.bloom.extents[level]
+	}
+	for level := bloomLevels - 2; level >= 0; level-- {
+		n := &fx.graph.nodes[graphUIGlow+bloomLevels+(bloomLevels-2-level)]
+		n.pass, n.framebuffers[0], n.extent = upPass, upFB[level], fx.tonemap.ui.bloom.extents[level]
 	}
 	return fx
 }

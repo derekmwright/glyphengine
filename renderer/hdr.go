@@ -5,7 +5,6 @@ import (
 	"log"
 
 	"github.com/vkngwrapper/core/v3/core1_0"
-	"github.com/vkngwrapper/extensions/v3/khr_swapchain"
 )
 
 // hdrFormat is what the scene renders into before tonemapping.
@@ -221,8 +220,7 @@ func (t *hdrTarget) destroy(deviceDriver core1_0.DeviceDriver) {
 	// already idled the device. recreateSwapchain waits before it destroys
 	// anything, and Destroy waits before it unwinds the init stack this sits
 	// on.
-	freeSets(deviceDriver, t.sceneSets)
-	freeSets(deviceDriver, t.tonemapSets)
+	t.releaseSets(deviceDriver)
 	if t.sampler.Handle() != 0 {
 		deviceDriver.DestroySampler(t.sampler, nil)
 		t.sampler = core1_0.Sampler{}
@@ -320,47 +318,6 @@ func writeTonemapSets(
 	return nil
 }
 
-// createTonemapRenderPass writes the swapchain from the HDR scene.
-//
-// Single sample and no depth: MSAA was already resolved into the HDR target, and
-// a fullscreen triangle has nothing to depth-test against. LoadOp is DontCare
-// because every pixel is written.
-func createTonemapRenderPass(deviceDriver core1_0.DeviceDriver, swapchainFormat core1_0.Format) (core1_0.RenderPass, error) {
-	renderPass, _, err := deviceDriver.CreateRenderPass(nil, core1_0.RenderPassCreateInfo{
-		Attachments: []core1_0.AttachmentDescription{{
-			Format:         swapchainFormat,
-			Samples:        core1_0.Samples1,
-			LoadOp:         core1_0.AttachmentLoadOpDontCare,
-			StoreOp:        core1_0.AttachmentStoreOpStore,
-			StencilLoadOp:  core1_0.AttachmentLoadOpDontCare,
-			StencilStoreOp: core1_0.AttachmentStoreOpDontCare,
-			InitialLayout:  core1_0.ImageLayoutUndefined,
-			FinalLayout:    khr_swapchain.ImageLayoutPresentSrc,
-		}},
-		Subpasses: []core1_0.SubpassDescription{{
-			PipelineBindPoint: core1_0.PipelineBindPointGraphics,
-			ColorAttachments: []core1_0.AttachmentReference{
-				{Attachment: 0, Layout: core1_0.ImageLayoutColorAttachmentOptimal},
-			},
-		}},
-		SubpassDependencies: []core1_0.SubpassDependency{{
-			// Wait for the scene's writes to the HDR target to be visible to the
-			// sampler before reading it.
-			SrcSubpass:    core1_0.SubpassExternal,
-			DstSubpass:    0,
-			SrcStageMask:  core1_0.PipelineStageColorAttachmentOutput,
-			DstStageMask:  core1_0.PipelineStageFragmentShader,
-			SrcAccessMask: core1_0.AccessColorAttachmentWrite,
-			DstAccessMask: core1_0.AccessShaderRead,
-		}},
-	})
-	if err != nil {
-		return core1_0.RenderPass{}, fmt.Errorf("create tonemap render pass: %w", err)
-	}
-	log.Println("Tonemap render pass created")
-	return renderPass, nil
-}
-
 // createResolvePipeline builds a fullscreen resolve into the swapchain image.
 // It reuses sky.vert, which is already the fullscreen triangle, and a pipeline
 // layout whose set 0 pairs a colour target with its bloom chain -- exactly what
@@ -443,30 +400,6 @@ func createResolvePipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, frag
 	return pipelines[0], nil
 }
 
-// createTonemapFramebuffers makes one framebuffer per swapchain image. The
-// tonemap pass has no depth attachment, so this is simpler than the scene's.
-func createTonemapFramebuffers(deviceDriver core1_0.DeviceDriver, renderPass core1_0.RenderPass, imageViews []core1_0.ImageView, extent core1_0.Extent2D) ([]core1_0.Framebuffer, error) {
-	out := make([]core1_0.Framebuffer, len(imageViews))
-	for i, view := range imageViews {
-		fb, _, err := deviceDriver.CreateFramebuffer(nil, core1_0.FramebufferCreateInfo{
-			RenderPass:  renderPass,
-			Attachments: []core1_0.ImageView{view},
-			Width:       extent.Width,
-			Height:      extent.Height,
-			Layers:      1,
-		})
-		if err != nil {
-			for _, made := range out[:i] {
-				deviceDriver.DestroyFramebuffer(made, nil)
-			}
-			return nil, fmt.Errorf("create tonemap framebuffer %d: %w", i, err)
-		}
-		out[i] = fb
-	}
-	return out, nil
-}
-
-// tonemapFor bundles the resolve state for one swapchain image.
 func (r *Renderer) tonemapFor(imageIndex int) tonemapPass {
 	return tonemapPass{
 		renderPass:  r.tonemapRenderPass,
@@ -536,6 +469,27 @@ func recordTonemap(
 	}); err != nil {
 		return err
 	}
+	recordTonemapDraw(deviceDriver, cmdBuf, tonemap, pipelineLayout, extent, scratch)
+	timer.end(deviceDriver, cmdBuf, frame, PassTonemap)
+
+	if composite != nil {
+		timer.begin(deviceDriver, cmdBuf, frame, PassComposite)
+		composite(cmdBuf)
+		timer.end(deviceDriver, cmdBuf, frame, PassComposite)
+	}
+
+	deviceDriver.CmdEndRenderPass(cmdBuf)
+	return nil
+}
+
+// Tonemap returns the current exposure, curve and white point, as last set by
+// SetTonemap. Exposed so a harness can toggle a curve and put it back.
+func (r *Renderer) Tonemap() (exposure, curve, whitePoint float32) {
+	return r.exposure, r.tonemapCurve, r.tonemapWhite
+}
+
+func recordTonemapDraw(deviceDriver core1_0.DeviceDriver, cmdBuf core1_0.CommandBuffer, tonemap tonemapPass,
+	pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, scratch *commandScratch) {
 	deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, tonemap.pipeline)
 	scratch.setViewport(deviceDriver, cmdBuf, core1_0.Viewport{
 		Width: float32(extent.Width), Height: float32(extent.Height), MinDepth: 0, MaxDepth: 1,
@@ -553,20 +507,13 @@ func recordTonemap(
 	scratch.pushConstants(deviceDriver, cmdBuf, pipelineLayout, core1_0.StageVertex|core1_0.StageFragment)
 
 	deviceDriver.CmdDraw(cmdBuf, 3, 1, 0, 0)
-	timer.end(deviceDriver, cmdBuf, frame, PassTonemap)
-
-	if composite != nil {
-		timer.begin(deviceDriver, cmdBuf, frame, PassComposite)
-		composite(cmdBuf)
-		timer.end(deviceDriver, cmdBuf, frame, PassComposite)
-	}
-
-	deviceDriver.CmdEndRenderPass(cmdBuf)
-	return nil
 }
 
-// Tonemap returns the current exposure, curve and white point, as last set by
-// SetTonemap. Exposed so a harness can toggle a curve and put it back.
-func (r *Renderer) Tonemap() (exposure, curve, whitePoint float32) {
-	return r.exposure, r.tonemapCurve, r.tonemapWhite
+func (t *hdrTarget) releaseSets(d core1_0.DeviceDriver) {
+	if t == nil {
+		return
+	}
+	freeSets(d, t.sceneSets)
+	freeSets(d, t.tonemapSets)
+	t.sceneSets, t.tonemapSets = nil, nil
 }

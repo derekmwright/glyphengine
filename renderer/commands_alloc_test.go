@@ -17,13 +17,17 @@ func noClouds(core1_0.CommandBuffer) error { return nil }
 // the two in-flight slots (joints, shadow descriptor sets, particle buffers)
 // the call reads, matching how the real Renderer cycles it.
 func (fx *frame) record(d core1_0.DeviceDriver, frameIndex int) error {
+	if fx.graph == nil {
+		fx.initGraph()
+	}
+	fx.bindGraph()
 	return recordCommandBuffer(
 		d, fx.cmdBuf, fx.renderPass, fx.framebuffer, fx.pipeline, fx.litDoubleSidedPipeline,
 		fx.translucentPipeline, fx.translucentDoubleSidedPipeline, fx.skinnedTranslucentPipel,
 		fx.instancedPipeline, fx.instancedDoubleSidedPipeline, fx.overlayPipeline, fx.skyPipeline, fx.skyVolumetricPipeline,
 		fx.starsPipeline, fx.celestialPipeline, fx.uiPipeline, fx.msdfPipeline, fx.skinnedPipeline,
-		fx.grassPipeline, fx.waterPipeline, fx.godRayPipeline, fx.waterRenderPass, fx.waterFramebuffer,
-		fx.sceneColor, fx.sceneImage, noClouds, fx.cloudSet, fx.bloom, fx.tonemap, fx.particlePipeline,
+		fx.grassPipeline, fx.waterPipeline, fx.godRayPipeline, fx.graph, 0,
+		fx.sceneColor, noClouds, fx.cloudSet, fx.bloom, fx.tonemap, fx.particlePipeline,
 		fx.terrainPipeline, fx.mat, &fx.stats, fx.pipelineLayout, fx.skyPipelineLayout, fx.litPipelineLayout,
 		fx.skinnedPipelineLayout, fx.terrainPipeLayout, fx.extent, fx.draws, fx.overlays, fx.celestials,
 		fx.uiOverlays, fx.msdfOverlays, fx.lighting, fx.split, fx.fallbackTexture, fx.milkyWayTex,
@@ -73,7 +77,7 @@ func TestRecordCommandBufferAllocsAreConstant(t *testing.T) {
 		}
 	})
 	t.Logf("allocs/op: %v draws=%d, %v draws=%d", allocsSmall, len(small.draws), allocsBig, len(big.draws))
-	if allocsSmall != allocsBig {
+	if allocsSmall != 0 || allocsBig != 0 {
 		t.Errorf("allocations scale with draw count: %v allocs/op at %d draws, %v at %d draws",
 			allocsSmall, len(small.draws), allocsBig, len(big.draws))
 	}

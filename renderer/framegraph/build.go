@@ -31,10 +31,11 @@ type resourceUses struct {
 }
 
 type imageState struct {
-	layout core1_0.ImageLayout
-	stage  core1_0.PipelineStageFlags
-	access core1_0.AccessFlags
-	pass   bool
+	layout     core1_0.ImageLayout
+	stage      core1_0.PipelineStageFlags
+	access     core1_0.AccessFlags
+	pass       bool
+	writeStage core1_0.PipelineStageFlags
 }
 
 // Build validates declarations first, then walks them in order. It owns every
@@ -182,11 +183,12 @@ func (g *Graph) validateReads(uses [][]compiledUse) error {
 }
 
 func optionalState(before, after imageState) imageState {
-	// Later barriers must cover both paths. Preserve render-pass visibility only
-	// when both the executed path and the skipped path ended in a render pass.
+	// Retain every reader for a later writer. A later sampler only needs the
+	// writers made available; a skipped path containing reads adds no RAW hazard.
+	after.pass = (after.pass || after.writeStage == 0) && (before.pass || before.writeStage == 0)
+	after.writeStage |= before.writeStage
 	after.stage |= before.stage
 	after.access |= before.access
-	after.pass = after.pass && before.pass
 	return after
 }
 

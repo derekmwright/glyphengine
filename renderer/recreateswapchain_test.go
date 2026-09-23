@@ -166,6 +166,18 @@ func (d *resizeFakeDriver) DestroyFramebuffer(core1_0.Framebuffer, *loader.Alloc
 	d.destroyed["Framebuffer"]++
 }
 
+func (d *resizeFakeDriver) CreateRenderPass(_ *loader.AllocationCallbacks, _ core1_0.RenderPassCreateInfo) (core1_0.RenderPass, common.VkResult, error) {
+	if d.shouldFail("CreateRenderPass") {
+		return core1_0.RenderPass{}, core1_0.VKErrorUnknown, errInjected
+	}
+	d.created["RenderPass"]++
+	return d.h.renderPass(), core1_0.VKSuccess, nil
+}
+
+func (d *resizeFakeDriver) DestroyRenderPass(core1_0.RenderPass, *loader.AllocationCallbacks) {
+	d.destroyed["RenderPass"]++
+}
+
 func (d *resizeFakeDriver) DeviceWaitIdle() (common.VkResult, error) { return core1_0.VKSuccess, nil }
 
 // AllocateCommandBuffers/BeginCommandBuffer/EndCommandBuffer/CmdPipelineBarrier/
@@ -302,6 +314,18 @@ func newResizeFixture(d *resizeFakeDriver, count int) *Renderer {
 		commandPool:         h.commandPool(),
 		graphicsQueue:       h.queue(),
 	}
+	var err error
+	r.frameGraph, err = newFrameGraph(r.msaaSamples, core1_0.FormatD32SignedFloat, core1_0.FormatB8G8R8A8SRGB, count)
+	if err != nil {
+		panic(err)
+	}
+	// These passes predate the rebuild, just like the fixture's pipelines.
+	// Cache creation and destruction are counted separately below.
+	for _, step := range r.frameGraph.plan.Steps {
+		if step.RenderPass != nil {
+			r.frameGraph.cache[step.RenderPass.Key()] = h.renderPass()
+		}
+	}
 	return r
 }
 
@@ -316,7 +340,7 @@ func newResizeFixture(d *resizeFakeDriver, count int) *Renderer {
 // without failing itself.
 func assertBalanced(t testing.TB, d *resizeFakeDriver) {
 	t.Helper()
-	for _, kind := range []string{"Image", "ImageView", "DeviceMemory", "Sampler", "DescriptorSet", "Framebuffer"} {
+	for _, kind := range []string{"Image", "ImageView", "DeviceMemory", "Sampler", "DescriptorSet", "Framebuffer", "RenderPass"} {
 		if d.created[kind] != d.destroyed[kind] {
 			t.Errorf("%s: created %d, destroyed %d (leaked or double-freed %d)",
 				kind, d.created[kind], d.destroyed[kind], d.created[kind]-d.destroyed[kind])
@@ -396,17 +420,18 @@ func TestRebuildSwapchainTargetsUnwindsOnFailure(t *testing.T) {
 			wantStep: "recreate HDR targets",
 		},
 		{
-			// bloom uses CreateFramebuffer calls 1..count*bloomLevels*2 (down
-			// and up per level per image). The plain scene framebuffers
-			// (createFramebuffers) start right after, at count*bloomLevels*2+1,
-			// and create `count` of their own. Failing the SECOND of those
-			// exercises createFramebuffers' own partial-failure cleanup (it
-			// must destroy the framebuffer made for image 0) on top of the
-			// outer unwind of depth, HDR and bloom.
+			// Scene framebuffers precede all graph framebuffers. Fail the
+			// second to exercise the constructor's partial unwind as well.
 			name:     "CreateFramebuffer fails inside the scene framebuffers",
 			failCall: "CreateFramebuffer",
-			failAt:   count*bloomLevels*2 + 2,
+			failAt:   2,
 			wantStep: "recreate framebuffers",
+		},
+		{
+			name:     "CreateFramebuffer fails inside the graph",
+			failCall: "CreateFramebuffer",
+			failAt:   count + 3,
+			wantStep: "recreate graph framebuffers",
 		},
 	}
 
