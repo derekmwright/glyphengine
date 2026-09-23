@@ -128,10 +128,14 @@ func WithResizable(resizable bool) Option {
 	return func(c *config) { c.resizable = resizable }
 }
 
-// WithBackground creates a visible window without requesting input focus,
-// including when it is shown again. This is for automated captures and tools
-// running alongside another application. Fullscreen is incompatible.
-// GLYPHENGINE_BACKGROUND=1 enables the same behavior without code changes.
+// WithBackground creates the window hidden and without input focus, so an
+// automated capture or gate neither takes focus nor appears over whatever the
+// user is doing. A hidden window still owns a surface and a swapchain of its
+// requested size, so rendering, presenting and screenshots work unchanged;
+// the process shows nothing and has no taskbar entry. The focus hints are set
+// as well, so a window a tool later shows still does not take focus.
+// Fullscreen is incompatible. GLYPHENGINE_BACKGROUND=1 enables the same
+// behavior without code changes.
 func WithBackground() Option {
 	return func(c *config) { c.background = true }
 }
@@ -171,6 +175,9 @@ func New(width, height int, title string, opts ...Option) (*Window, error) {
 	}
 	glfw.WindowHint(glfw.Focused, focus)
 	glfw.WindowHint(glfw.FocusOnShow, focus)
+	// Not focused was not enough: an unfocused window still opens on top of
+	// the user's work, which is what a batch of gate runs did all afternoon.
+	glfw.WindowHint(glfw.Visible, focus)
 	if cfg.resizable {
 		glfw.WindowHint(glfw.Resizable, glfw.True)
 	} else {
