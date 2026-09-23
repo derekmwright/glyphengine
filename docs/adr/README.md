@@ -12,6 +12,7 @@ Start with the index below; use [the template](template.md) for a new record.
 | [0002](0002-keep-game-ownership-outside-the-engine.md) | Keep game ownership outside the engine | Accepted | 2026-09-22 |
 | [0003](0003-isolate-examples-in-a-separate-module.md) | Isolate examples in a separate Go module | Accepted | 2026-09-22 |
 | [0004](0004-ship-runtime-assets-in-the-module.md) | Ship runtime assets in the Go module | Accepted | 2026-09-22 |
+| [0005](0005-schedule-the-frame-through-a-frame-graph.md) | Schedule the frame through a frame graph | Accepted | 2026-09-23 |
 
 Records 0002–0004 document existing decisions retrospectively. Their recorded
 date is when the ADR was written, not an assertion about when the original
