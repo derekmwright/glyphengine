@@ -116,7 +116,7 @@ type waterPlane struct {
 // appendWaterPlanes reduces the frame's water draws to their still surfaces,
 // reusing dst's storage so a frame that draws water does not allocate for it.
 //
-// The draws it accepts are exactly the ones recordWaterPass draws, so
+// The draws it accepts are exactly the ones recordWaterDraws draws, so
 // len(result) > 0 and hasWater(draws) cannot disagree: a surface counted here
 // but not drawn would push blended geometry behind water that is not there.
 func appendWaterPlanes(dst []waterPlane, draws []RenderObject) []waterPlane {

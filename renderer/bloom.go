@@ -34,12 +34,6 @@ type bloomTarget struct {
 	// reads that level as its source.
 	sets [][]core1_0.DescriptorSet
 
-	// downFB writes a level with LoadOp DontCare; upFB writes it with LoadOp
-	// Load and additive blending. Same images, different render passes, so they
-	// need separate framebuffers.
-	downFB [][]core1_0.Framebuffer
-	upFB   [][]core1_0.Framebuffer
-
 	extents []core1_0.Extent2D
 	sampler core1_0.Sampler
 }
@@ -68,7 +62,6 @@ func createBloomTargets(
 	physicalDevice core1_0.PhysicalDevice,
 	descriptorPool core1_0.DescriptorPool,
 	texSetLayout core1_0.DescriptorSetLayout,
-	downPass, upPass core1_0.RenderPass,
 	full core1_0.Extent2D,
 	count int,
 ) (*bloomTarget, error) {
@@ -95,8 +88,6 @@ func createBloomTargets(
 			images []core1_0.Image
 			mems   []core1_0.DeviceMemory
 			views  []core1_0.ImageView
-			downs  []core1_0.Framebuffer
-			ups    []core1_0.Framebuffer
 		)
 		for lvl := 0; lvl < bloomLevels; lvl++ {
 			ext := t.extents[lvl]
@@ -160,25 +151,6 @@ func createBloomTargets(
 			}
 			views = append(views, view)
 
-			for _, fb := range []struct {
-				pass core1_0.RenderPass
-				dst  *[]core1_0.Framebuffer
-			}{{downPass, &downs}, {upPass, &ups}} {
-				f, _, err := deviceDriver.CreateFramebuffer(nil, core1_0.FramebufferCreateInfo{
-					RenderPass:  fb.pass,
-					Attachments: []core1_0.ImageView{view},
-					Width:       ext.Width,
-					Height:      ext.Height,
-					Layers:      1,
-				})
-				if err != nil {
-					t.images, t.memory, t.views = append(t.images, images), append(t.memory, mems), append(t.views, views)
-					t.downFB, t.upFB = append(t.downFB, downs), append(t.upFB, ups)
-					t.destroy(deviceDriver)
-					return nil, fmt.Errorf("create bloom framebuffer %d/%d: %w", i, lvl, err)
-				}
-				*fb.dst = append(*fb.dst, f)
-			}
 		}
 
 		layouts := make([]core1_0.DescriptorSetLayout, bloomLevels)
@@ -191,7 +163,6 @@ func createBloomTargets(
 		})
 		if err != nil {
 			t.images, t.memory, t.views = append(t.images, images), append(t.memory, mems), append(t.views, views)
-			t.downFB, t.upFB = append(t.downFB, downs), append(t.upFB, ups)
 			t.destroy(deviceDriver)
 			return nil, fmt.Errorf("allocate bloom descriptor sets %d: %w", i, err)
 		}
@@ -211,7 +182,6 @@ func createBloomTargets(
 		}
 		if err := deviceDriver.UpdateDescriptorSets(writes, nil); err != nil {
 			t.images, t.memory, t.views = append(t.images, images), append(t.memory, mems), append(t.views, views)
-			t.downFB, t.upFB = append(t.downFB, downs), append(t.upFB, ups)
 			t.sets = append(t.sets, sets)
 			t.destroy(deviceDriver)
 			return nil, fmt.Errorf("update bloom descriptor sets %d: %w", i, err)
@@ -220,8 +190,6 @@ func createBloomTargets(
 		t.images = append(t.images, images)
 		t.memory = append(t.memory, mems)
 		t.views = append(t.views, views)
-		t.downFB = append(t.downFB, downs)
-		t.upFB = append(t.upFB, ups)
 		t.sets = append(t.sets, sets)
 	}
 
@@ -240,22 +208,10 @@ func (t *bloomTarget) destroy(deviceDriver core1_0.DeviceDriver) {
 	// consumer in the pool -- bloomLevels sets per swapchain image, and twice
 	// that with the UI glow layer on. It was also the allocation that failed
 	// first when the pool ran dry after fifteen rebuilds.
-	for _, sets := range t.sets {
-		freeSets(deviceDriver, sets)
-	}
+	t.releaseSets(deviceDriver)
 	if t.sampler.Handle() != 0 {
 		deviceDriver.DestroySampler(t.sampler, nil)
 		t.sampler = core1_0.Sampler{}
-	}
-	for _, fbs := range t.downFB {
-		for _, fb := range fbs {
-			deviceDriver.DestroyFramebuffer(fb, nil)
-		}
-	}
-	for _, fbs := range t.upFB {
-		for _, fb := range fbs {
-			deviceDriver.DestroyFramebuffer(fb, nil)
-		}
 	}
 	for _, vs := range t.views {
 		for _, v := range vs {
@@ -272,7 +228,7 @@ func (t *bloomTarget) destroy(deviceDriver core1_0.DeviceDriver) {
 			deviceDriver.DestroyImage(i, nil)
 		}
 	}
-	t.downFB, t.upFB, t.views, t.memory, t.images, t.sets = nil, nil, nil, nil, nil, nil
+	t.views, t.memory, t.images = nil, nil, nil
 }
 
 // primeBloomLayouts clears every level once and leaves it in
@@ -359,58 +315,6 @@ func (r *Renderer) primeSampledImages(images []core1_0.Image) error {
 	return r.endSingleTimeCommands(cmdBuf)
 }
 
-// createBloomRenderPass builds either the downsample pass (load == false) or the
-// upsample pass (load == true).
-//
-// The two differ in exactly two ways: the downsample overwrites its target and
-// so can discard whatever was there, while the upsample adds into a level the
-// downsample already wrote and so must load it. That means the upsample's target
-// arrives in SHADER_READ_ONLY -- it was a sampled source a moment ago -- rather
-// than in an undefined state.
-//
-// Both carry the same external dependency, which is what orders the chain: each
-// pass's colour writes must be visible to the next pass's sampling. Without it
-// the levels are written and read with no synchronisation at all, which on some
-// drivers looks correct and on others produces a glow one frame stale.
-func createBloomRenderPass(deviceDriver core1_0.DeviceDriver, load bool) (core1_0.RenderPass, error) {
-	att := core1_0.AttachmentDescription{
-		Format:         hdrFormat,
-		Samples:        core1_0.Samples1,
-		LoadOp:         core1_0.AttachmentLoadOpDontCare,
-		StoreOp:        core1_0.AttachmentStoreOpStore,
-		StencilLoadOp:  core1_0.AttachmentLoadOpDontCare,
-		StencilStoreOp: core1_0.AttachmentStoreOpDontCare,
-		InitialLayout:  core1_0.ImageLayoutUndefined,
-		FinalLayout:    core1_0.ImageLayoutShaderReadOnlyOptimal,
-	}
-	if load {
-		att.LoadOp = core1_0.AttachmentLoadOpLoad
-		att.InitialLayout = core1_0.ImageLayoutShaderReadOnlyOptimal
-	}
-
-	renderPass, _, err := deviceDriver.CreateRenderPass(nil, core1_0.RenderPassCreateInfo{
-		Attachments: []core1_0.AttachmentDescription{att},
-		Subpasses: []core1_0.SubpassDescription{{
-			PipelineBindPoint: core1_0.PipelineBindPointGraphics,
-			ColorAttachments: []core1_0.AttachmentReference{
-				{Attachment: 0, Layout: core1_0.ImageLayoutColorAttachmentOptimal},
-			},
-		}},
-		SubpassDependencies: []core1_0.SubpassDependency{{
-			SrcSubpass:    core1_0.SubpassExternal,
-			DstSubpass:    0,
-			SrcStageMask:  core1_0.PipelineStageColorAttachmentOutput,
-			DstStageMask:  core1_0.PipelineStageFragmentShader | core1_0.PipelineStageColorAttachmentOutput,
-			SrcAccessMask: core1_0.AccessColorAttachmentWrite,
-			DstAccessMask: core1_0.AccessShaderRead | core1_0.AccessColorAttachmentRead,
-		}},
-	})
-	if err != nil {
-		return core1_0.RenderPass{}, fmt.Errorf("create bloom render pass (load=%v): %w", load, err)
-	}
-	return renderPass, nil
-}
-
 // createBloomPipeline builds one fullscreen bloom stage. additive turns on the
 // blend the upsample accumulates through.
 func createBloomPipeline(
@@ -487,23 +391,19 @@ func createBloomPipeline(
 	return pipelines[0], nil
 }
 
-// bloomPass is everything recordBloom needs for one frame.
+// bloomPass is the draw state recordBloomStage needs for one frame.
 type bloomPass struct {
 	enabled bool
 
-	downRenderPass core1_0.RenderPass
-	upRenderPass   core1_0.RenderPass
-	prefilter      core1_0.Pipeline
-	down           core1_0.Pipeline
-	up             core1_0.Pipeline
-	layout         core1_0.PipelineLayout
+	prefilter core1_0.Pipeline
+	down      core1_0.Pipeline
+	up        core1_0.Pipeline
+	layout    core1_0.PipelineLayout
 
 	// sceneSet samples the HDR scene at set 0 binding 0, for the prefilter.
 	sceneSet core1_0.DescriptorSet
 
 	sets    []core1_0.DescriptorSet
-	downFB  []core1_0.Framebuffer
-	upFB    []core1_0.Framebuffer
 	extents []core1_0.Extent2D
 
 	sceneExtent core1_0.Extent2D
@@ -512,90 +412,53 @@ type bloomPass struct {
 	radius      float32
 }
 
-// recordBloom runs the prefilter, the downsample chain, and the upsample chain.
-//
-// Nothing here is recorded when bloom is off, so a scene that does not use it
-// pays only the tonemap's uniform branch.
-func recordBloom(deviceDriver core1_0.DeviceDriver, cmdBuf core1_0.CommandBuffer, b bloomPass, scratch *commandScratch) error {
-	if !b.enabled {
-		return nil
+// recordBloomStage is one prefilter, downsample or upsample draw. Its node
+// supplies the render pass; level is the destination level in either direction.
+func recordBloomStage(deviceDriver core1_0.DeviceDriver, cmdBuf core1_0.CommandBuffer, b bloomPass, level int, up bool, scratch *commandScratch) {
+	dst := b.extents[level]
+	source := b.sceneExtent
+	pipeline, src := b.prefilter, b.sceneSet
+	pc := [4]float32{b.threshold, b.knee}
+	if up {
+		source, pipeline, src = b.extents[level+1], b.up, b.sets[level+1]
+		pc = [4]float32{b.radius, 0}
+	} else if level > 0 {
+		source, pipeline, src = b.extents[level-1], b.down, b.sets[level-1]
+		pc = [4]float32{}
 	}
+	// One texel of the SOURCE being sampled. Every kernel offsets in source
+	// texels, so passing the destination's size here would scale the blur by two
+	// at each level and produce a glow that grows with resolution.
+	pc[2], pc[3] = 1/float32(source.Width), 1/float32(source.Height)
+	deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, pipeline)
+	scratch.setViewport(deviceDriver, cmdBuf, core1_0.Viewport{
+		Width: float32(dst.Width), Height: float32(dst.Height), MinDepth: 0, MaxDepth: 1,
+	})
+	scratch.setScissor(deviceDriver, cmdBuf, core1_0.Rect2D{Offset: core1_0.Offset2D{X: 0, Y: 0}, Extent: dst})
+	scratch.bindDescriptorSets(deviceDriver, cmdBuf, core1_0.PipelineBindPointGraphics, b.layout, 0, src)
 
-	// texel returns one texel of the source being sampled. Every kernel offsets
-	// in source texels, so passing the destination's size here would scale the
-	// blur by two at each level and produce a glow that grows with resolution.
-	texel := func(e core1_0.Extent2D) (float32, float32) {
-		return 1 / float32(e.Width), 1 / float32(e.Height)
-	}
+	scratch.resetPC()
+	copy(scratch.pc[32:36], pc[:])
+	scratch.pushConstants(deviceDriver, cmdBuf, b.layout, core1_0.StageVertex|core1_0.StageFragment)
 
-	stage := func(pass core1_0.RenderPass, fb core1_0.Framebuffer, dst core1_0.Extent2D,
-		pipeline core1_0.Pipeline, src core1_0.DescriptorSet, pc [4]float32) error {
-		if err := scratch.beginRenderPass(deviceDriver, cmdBuf, core1_0.SubpassContentsInline, pass, fb,
-			core1_0.Rect2D{Offset: core1_0.Offset2D{X: 0, Y: 0}, Extent: dst}); err != nil {
-			return err
-		}
-		deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, pipeline)
-		scratch.setViewport(deviceDriver, cmdBuf, core1_0.Viewport{
-			Width: float32(dst.Width), Height: float32(dst.Height), MinDepth: 0, MaxDepth: 1,
-		})
-		scratch.setScissor(deviceDriver, cmdBuf, core1_0.Rect2D{Offset: core1_0.Offset2D{X: 0, Y: 0}, Extent: dst})
-		scratch.bindDescriptorSets(deviceDriver, cmdBuf, core1_0.PipelineBindPointGraphics, b.layout, 0, src)
-
-		scratch.resetPC()
-		copy(scratch.pc[32:36], pc[:])
-		scratch.pushConstants(deviceDriver, cmdBuf, b.layout, core1_0.StageVertex|core1_0.StageFragment)
-
-		deviceDriver.CmdDraw(cmdBuf, 3, 1, 0, 0)
-		deviceDriver.CmdEndRenderPass(cmdBuf)
-		return nil
-	}
-
-	// Prefilter: full-resolution scene into level 0, thresholded.
-	tx, ty := texel(b.sceneExtent)
-	if err := stage(b.downRenderPass, b.downFB[0], b.extents[0], b.prefilter, b.sceneSet,
-		[4]float32{b.threshold, b.knee, tx, ty}); err != nil {
-		return err
-	}
-
-	// Down the chain.
-	for lvl := 1; lvl < len(b.extents); lvl++ {
-		tx, ty := texel(b.extents[lvl-1])
-		if err := stage(b.downRenderPass, b.downFB[lvl], b.extents[lvl], b.down, b.sets[lvl-1],
-			[4]float32{0, 0, tx, ty}); err != nil {
-			return err
-		}
-	}
-
-	// Back up it, adding each level into the one below.
-	for lvl := len(b.extents) - 1; lvl > 0; lvl-- {
-		tx, ty := texel(b.extents[lvl])
-		if err := stage(b.upRenderPass, b.upFB[lvl-1], b.extents[lvl-1], b.up, b.sets[lvl],
-			[4]float32{b.radius, 0, tx, ty}); err != nil {
-			return err
-		}
-	}
-	return nil
+	deviceDriver.CmdDraw(cmdBuf, 3, 1, 0, 0)
 }
 
 // bloomFor bundles the bloom state for one swapchain image.
 func (r *Renderer) bloomFor(imageIndex int) bloomPass {
 	return bloomPass{
-		enabled:        r.bloomIntensity > 0,
-		downRenderPass: r.bloomDownRenderPass,
-		upRenderPass:   r.bloomUpRenderPass,
-		prefilter:      r.bloomPrefilterPipeline,
-		down:           r.bloomDownPipeline,
-		up:             r.bloomUpPipeline,
-		layout:         r.pipelineLayout,
-		sceneSet:       r.hdr.sceneSets[imageIndex],
-		sets:           r.bloom.sets[imageIndex],
-		downFB:         r.bloom.downFB[imageIndex],
-		upFB:           r.bloom.upFB[imageIndex],
-		extents:        r.bloom.extents,
-		sceneExtent:    r.sc.extent,
-		threshold:      r.bloomThreshold,
-		knee:           r.bloomKnee,
-		radius:         r.bloomRadius,
+		enabled:     r.bloomIntensity > 0,
+		prefilter:   r.bloomPrefilterPipeline,
+		down:        r.bloomDownPipeline,
+		up:          r.bloomUpPipeline,
+		layout:      r.pipelineLayout,
+		sceneSet:    r.hdr.sceneSets[imageIndex],
+		sets:        r.bloom.sets[imageIndex],
+		extents:     r.bloom.extents,
+		sceneExtent: r.sc.extent,
+		threshold:   r.bloomThreshold,
+		knee:        r.bloomKnee,
+		radius:      r.bloomRadius,
 	}
 }
 
@@ -637,4 +500,14 @@ func (r *Renderer) SetBloom(intensity, threshold, knee, radius float32) {
 // settings rather than guessing them.
 func (r *Renderer) Bloom() (intensity, threshold, knee, radius float32) {
 	return r.bloomIntensity, r.bloomThreshold, r.bloomKnee, r.bloomRadius
+}
+
+func (t *bloomTarget) releaseSets(d core1_0.DeviceDriver) {
+	if t == nil {
+		return
+	}
+	for _, sets := range t.sets {
+		freeSets(d, sets)
+	}
+	t.sets = nil
 }

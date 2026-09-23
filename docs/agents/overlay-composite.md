@@ -33,7 +33,7 @@ api:
   - shaders.UIResolveFragSpv
 example: examples/13-ui
 run: task hud
-verified: 2026-09-19
+verified: 2026-09-23
 ---
 
 # Where screen-space overlays are drawn
@@ -55,7 +55,7 @@ affecting your HUD.
 They are composited onto the swapchain image once the scene is finished and
 resolved, which means:
 
-- **Water cannot touch them.** `recordWaterPass` copies the HDR scene to refract
+- **Water cannot touch them.** The graph's copy node copies the HDR scene to refract
   through. The HUD is not in that image any more, so it cannot end up inside the
   refraction and cannot be drawn over by the surface.
 - **Their colours are literal.** A UI colour is an sRGB value that reaches the
@@ -308,8 +308,8 @@ gpu tonemap     0.0120 ms
 
 Nesting the two would have been the easy mistake — passes that contain each
 other sum to more than the frame they sit in, which is the exact mismatch that
-caught `gputimer.go`'s first version. `recordTonemap` writes both intervals
-itself so they stay adjacent.
+caught `gputimer.go`'s first version. The graph's tonemap node writes the two
+intervals adjacently; the diagnostic triangle retains the `recordTonemap` helper.
 
 ## Giving the UI its own HDR layer
 
@@ -496,7 +496,7 @@ Three things worth reading off that table:
 
 - **The glow itself is free; the chain is not.** Whether anything actually
   clears the threshold changes nothing — the last two rows are the same within
-  noise. `recordBloom` runs whenever the strength is positive, because the
+  noise. The graph's bloom stages run whenever the strength is positive, because the
   recorder cannot tell whether anything will clear it: text carries its emission
   per vertex, where the recorder cannot see it. A game that wants the layer
   without the glow should set the strength to 0, which skips recording the chain

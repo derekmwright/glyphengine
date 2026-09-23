@@ -1511,7 +1511,7 @@ tasks:
         if diff -q $d/layer.png $d/on.png >/dev/null 2>&1; then
           echo "FAIL: the glowing and non-glowing captures are byte identical."
           echo "  Either no element is emitting or the finished layer never reaches the swapchain."
-          echo "  Check that recordUIResolve still draws, that recordBloom runs over the UI layer,"
+          echo "  Check that recordUIResolve still draws, that the graph's bloom stages run over the UI layer,"
           echo "  and that SetUIGlow's threshold is still below what an element can reach."
           status=1
         fi

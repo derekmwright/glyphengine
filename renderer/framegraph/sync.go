@@ -40,6 +40,9 @@ func accessState(kind NodeKind, u Use) imageState {
 	if u.Stages != 0 {
 		s.stage = u.Stages
 	}
+	if writes(u.Access) {
+		s.writeStage = s.stage
+	}
 	return s
 }
 
@@ -67,6 +70,9 @@ func stateForLayout(layout core1_0.ImageLayout) imageState {
 	if a == SampledRead || a == StorageReadWrite {
 		s.stage |= core1_0.PipelineStageComputeShader
 	}
+	if writes(a) {
+		s.writeStage = s.stage
+	}
 	return s
 }
 
@@ -74,10 +80,16 @@ func needsBarrier(n Node, u compiledUse, before, after imageState) bool {
 	if u.Access == Present && before.layout == after.layout {
 		return false
 	}
-	if u.Access == SampledRead && before.pass && before.layout == after.layout && n.Kind == Graphics && incomingCovers(n.Dependencies, before, after) {
+	if u.Access == SampledRead && before.pass && before.layout == after.layout && n.Kind == Graphics {
 		// Bloom's visibility comes from the READER's incoming dependency.
-		// There is no outgoing dependency in createBloomRenderPass.
-		return false
+		// Optional joins can include earlier readers. Read-after-read needs no
+		// ordering, but keep those stages in the tracked state for later writers.
+		producer := before
+		producer.stage = before.writeStage
+		producer.access &= core1_0.AccessColorAttachmentWrite | core1_0.AccessDepthStencilAttachmentWrite
+		if incomingCovers(n.Dependencies, producer, after) {
+			return false
+		}
 	}
 	const writeAccess = core1_0.AccessShaderWrite | core1_0.AccessTransferWrite |
 		core1_0.AccessColorAttachmentWrite | core1_0.AccessDepthStencilAttachmentWrite

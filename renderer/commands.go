@@ -517,10 +517,9 @@ func recordCommandBuffer(
 	grassPipeline core1_0.Pipeline,
 	waterPipeline core1_0.Pipeline,
 	godRayPipeline core1_0.Pipeline,
-	waterRenderPass core1_0.RenderPass,
-	waterFramebuffer core1_0.Framebuffer,
+	graph *frameGraph,
+	imageIndex int,
 	sceneColor *sceneColorTarget,
-	sceneImage core1_0.Image,
 	recordCloudsFn func(core1_0.CommandBuffer) error,
 	cloudSet core1_0.DescriptorSet,
 	bloom bloomPass,
@@ -1388,99 +1387,25 @@ func recordCommandBuffer(
 	deviceDriver.CmdEndRenderPass(cmdBuf)
 	timer.end(deviceDriver, cmdBuf, frame, PassSceneResolve)
 
-	// Water needs the finished scene as a texture, so it runs in a second pass.
-	//
-	// The LightShafts arm is why a shafts-and-no-water frame enters it too:
-	// godray.frag samples the same copy the water refracts through, so the copy
-	// is the whole reason the pass exists for it. LightShafts arrives already
-	// faded (see SceneLighting), so a frame that could not draw a shaft pixel
-	// reads zero here and pays for neither the copy nor the pass.
-
-	timer.begin(deviceDriver, cmdBuf, frame, PassWater)
-	if sceneColor != nil && (hasWater(draws) || lighting.LightShafts > 0) {
-		if err := recordWaterPass(deviceDriver, stats, cmdBuf, waterRenderPass, waterFramebuffer,
-			waterPipeline, godRayPipeline, pipelineLayout, litPipelineLayout, extent, draws, lighting,
-			sceneColor, sceneImage, shadowDS, msaaEnabled, overWater{
-				translucent:        translucentPipeline,
-				translucentDouble:  translucentDoubleSidedPipeline,
-				skinnedTranslucent: skinnedTranslucentPipeline,
-				particlePipeline:   particlePipeline,
-				overlayPipeline:    overlayPipeline,
-				skinnedLayout:      skinnedPipelineLayout,
-				overlays:           overlays,
-				particles:          particles,
-				fallback:           fallbackTexture,
-				split:              split,
-				frame:              frame,
-			}, timer, scratch); err != nil {
-			return err
-		}
-	} else {
-		// Every pass has to write both of its timestamps every frame. A query
-		// that is reset and never written is not "not ready", it makes the
-		// whole frame's readback come back NotReady and the timings vanish.
-		timer.end(deviceDriver, cmdBuf, frame, PassWater)
-		timer.begin(deviceDriver, cmdBuf, frame, PassShafts)
-		timer.end(deviceDriver, cmdBuf, frame, PassShafts)
-		timer.begin(deviceDriver, cmdBuf, frame, PassOverWater)
-		timer.end(deviceDriver, cmdBuf, frame, PassOverWater)
-		timer.begin(deviceDriver, cmdBuf, frame, PassWaterResolve)
-		timer.end(deviceDriver, cmdBuf, frame, PassWaterResolve)
+	graph.frame = graphFrame{
+		driver: deviceDriver, cmd: cmdBuf, imageIndex: imageIndex, frame: frame,
+		extent: extent, scratch: scratch, timer: timer, stats: stats,
+		sceneColor: sceneColor, sceneImage: graph.images[graph.hdr].images[imageIndex],
+		waterPipeline: waterPipeline, godRayPipeline: godRayPipeline,
+		uiPipeline: uiPipeline, msdfPipeline: msdfPipeline,
+		pipelineLayout: pipelineLayout, litPipelineLayout: litPipelineLayout, shadowDS: shadowDS,
+		draws: draws, lighting: lighting, uiOverlays: uiOverlays, msdfOverlays: msdfOverlays,
+		bloom: bloom, tonemap: tonemap,
+		water: sceneColor != nil && (hasWater(draws) || lighting.LightShafts > 0),
+		ui:    tonemap.ui != nil && (len(uiOverlays) > 0 || len(msdfOverlays) > 0),
+		ow: overWater{
+			translucent: translucentPipeline, translucentDouble: translucentDoubleSidedPipeline,
+			skinnedTranslucent: skinnedTranslucentPipeline, particlePipeline: particlePipeline,
+			overlayPipeline: overlayPipeline, skinnedLayout: skinnedPipelineLayout,
+			overlays: overlays, particles: particles, fallback: fallbackTexture, split: split, frame: frame,
+		},
 	}
-
-	timer.begin(deviceDriver, cmdBuf, frame, PassBloom)
-	if err := recordBloom(deviceDriver, cmdBuf, bloom, scratch); err != nil {
-		return err
-	}
-	timer.end(deviceDriver, cmdBuf, frame, PassBloom)
-
-	// The screen-space UI's own HDR layer and the glow chain over it, both of
-	// which only exist when a game asked for them. They are recorded here
-	// because they have to be outside the tonemap render pass -- a render pass
-	// cannot begin inside another -- and because the composite that reads them
-	// is the last thing in the frame.
-	//
-	// A frame with no UI at all skips both AND skips the composite, so it
-	// presents exactly what a layer-off frame presents: a layer that was never
-	// written must not be composited over the scene.
-	//
-	// Both brackets are written unconditionally; see the water arm above for
-	// what a query that is reset and never written costs.
-	useUILayer := tonemap.ui != nil && (len(uiOverlays) > 0 || len(msdfOverlays) > 0)
-	timer.begin(deviceDriver, cmdBuf, frame, PassUILayer)
-	if useUILayer {
-		if err := recordUILayer(deviceDriver, stats, cmdBuf, tonemap.ui, extent,
-			uiOverlays, msdfOverlays, fallbackTexture, scratch); err != nil {
-			return err
-		}
-	}
-	timer.end(deviceDriver, cmdBuf, frame, PassUILayer)
-
-	timer.begin(deviceDriver, cmdBuf, frame, PassUIGlow)
-	if useUILayer {
-		if err := recordBloom(deviceDriver, cmdBuf, tonemap.ui.bloom, scratch); err != nil {
-			return err
-		}
-	}
-	timer.end(deviceDriver, cmdBuf, frame, PassUIGlow)
-
-	// Screen-space UI is composited inside this pass, after the resolve. The
-	// tonemap owns its own timing now that two intervals live in it.
-	//
-	// With the layer on the composite REPLACES those draws with one fullscreen
-	// triangle of the finished layer rather than stacking on them. Drawing both
-	// would put the UI on screen twice, once blended into a float layer and
-	// once straight onto the swapchain, which reads as the HUD having gained
-	// contrast rather than as a double draw.
-	if err := recordTonemap(deviceDriver, cmdBuf, tonemap, tonemap.layout, extent, timer, frame,
-		func(cmdBuf core1_0.CommandBuffer) {
-			if useUILayer {
-				recordUIResolve(deviceDriver, cmdBuf, tonemap.ui, extent, scratch)
-				return
-			}
-			recordUIComposite(deviceDriver, stats, cmdBuf, uiPipeline, msdfPipeline,
-				pipelineLayout, extent, uiOverlays, msdfOverlays, fallbackTexture, false, scratch)
-		}, scratch); err != nil {
+	if err := graph.executeGraph(); err != nil {
 		return err
 	}
 
@@ -1610,7 +1535,7 @@ func recordOverlays(
 // overWater is everything the water pass needs to draw after the surface.
 //
 // Grouped rather than passed loose for the same reason materialPipelines is:
-// recordWaterPass's parameter list is long enough already, and five more
+// recordWaterDraws's parameter list is long enough already, and five more
 // positional handles of two repeated types would be easy to transpose in a way
 // only the validation layer would catch.
 //
@@ -1648,25 +1573,12 @@ func hasWater(draws []RenderObject) bool {
 	return false
 }
 
-// recordWaterPass copies the opaque scene into a sampled image, draws the water
-// surfaces against it in a second render pass, and then draws the blended
-// geometry that belongs in front of the water.
-//
-// The copy is the only way a fragment shader can read what is already on
-// screen; the alternative, an input attachment, can only read the pixel being
-// written, and refraction is precisely a read of a *different* pixel.
-//
-// The blended group after it is issue #45. Water does not write depth, so those
-// draws depth-test against the opaque scene exactly as they did in the scene
-// pass — a flame behind a hill is still behind the hill — and they composite
-// over the surface rather than under it. What decides which draws come here and
-// which stay before the copy is blendSplit; see waterorder.go.
-func recordWaterPass(
+// recordWaterDraws records the surface, shafts and blended draws inside the
+// graph's water pass. The executor owns the copy, barriers and resolve bracket.
+func recordWaterDraws(
 	deviceDriver core1_0.DeviceDriver,
 	stats *RenderStats,
 	cmdBuf core1_0.CommandBuffer,
-	waterRenderPass core1_0.RenderPass,
-	framebuffer core1_0.Framebuffer,
 	waterPipeline core1_0.Pipeline,
 	godRayPipeline core1_0.Pipeline,
 	pipelineLayout core1_0.PipelineLayout,
@@ -1675,84 +1587,11 @@ func recordWaterPass(
 	draws []RenderObject,
 	lighting SceneLighting,
 	sceneColor *sceneColorTarget,
-	sceneImage core1_0.Image,
 	shadowDS core1_0.DescriptorSet,
-	msaa bool,
 	ow overWater,
 	timer *gpuTimer,
 	scratch *commandScratch,
-) error {
-	colorRange := core1_0.ImageSubresourceRange{
-		AspectMask: core1_0.ImageAspectColor,
-		LevelCount: 1, LayerCount: 1,
-	}
-
-	// The first pass left the HDR target in ShaderReadOnlyOptimal. Borrow it as a
-	// transfer source, copy it, and put it back so the water pass can render into
-	// it and the tonemap pass can sample it afterwards.
-	//
-	// Copying the HDR image rather than the swapchain is what keeps refraction
-	// working: the swapchain no longer holds the scene at this point in the
-	// frame -- nothing has been tonemapped into it yet.
-	scratch.pipelineBarrier(deviceDriver, cmdBuf,
-		core1_0.PipelineStageColorAttachmentOutput, core1_0.PipelineStageTransfer,
-		core1_0.ImageMemoryBarrier{
-			OldLayout:           core1_0.ImageLayoutShaderReadOnlyOptimal,
-			NewLayout:           core1_0.ImageLayoutTransferSrcOptimal,
-			SrcQueueFamilyIndex: -1, DstQueueFamilyIndex: -1,
-			Image:            sceneImage,
-			SubresourceRange: colorRange,
-			SrcAccessMask:    core1_0.AccessColorAttachmentWrite,
-			DstAccessMask:    core1_0.AccessTransferRead,
-		},
-		core1_0.ImageMemoryBarrier{
-			// Previous contents are irrelevant; the whole image is rewritten.
-			OldLayout:           core1_0.ImageLayoutUndefined,
-			NewLayout:           core1_0.ImageLayoutTransferDstOptimal,
-			SrcQueueFamilyIndex: -1, DstQueueFamilyIndex: -1,
-			Image:            sceneColor.image,
-			SubresourceRange: colorRange,
-			SrcAccessMask:    0,
-			DstAccessMask:    core1_0.AccessTransferWrite,
-		})
-
-	layers := core1_0.ImageSubresourceLayers{
-		AspectMask: core1_0.ImageAspectColor,
-		LayerCount: 1,
-	}
-	scratch.copyImage(deviceDriver, cmdBuf,
-		sceneImage, core1_0.ImageLayoutTransferSrcOptimal,
-		sceneColor.image, core1_0.ImageLayoutTransferDstOptimal,
-		core1_0.ImageCopy{
-			SrcSubresource: layers,
-			DstSubresource: layers,
-			Extent:         core1_0.Extent3D{Width: extent.Width, Height: extent.Height, Depth: 1},
-		})
-
-	scratch.pipelineBarrier(deviceDriver, cmdBuf,
-		core1_0.PipelineStageTransfer, core1_0.PipelineStageFragmentShader,
-		core1_0.ImageMemoryBarrier{
-			OldLayout:           core1_0.ImageLayoutTransferDstOptimal,
-			NewLayout:           core1_0.ImageLayoutShaderReadOnlyOptimal,
-			SrcQueueFamilyIndex: -1, DstQueueFamilyIndex: -1,
-			Image:            sceneColor.image,
-			SubresourceRange: colorRange,
-			SrcAccessMask:    core1_0.AccessTransferWrite,
-			DstAccessMask:    core1_0.AccessShaderRead,
-		})
-
-	// No barrier back for the HDR scene image. With MSAA the water pass
-	// declares its resolve target Undefined and rewrites it wholesale; without
-	// MSAA it declares TransferSrc, matching the copy. Either way the render
-	// pass performs the transition, and a manual barrier to Undefined is not a
-	// legal layout transition to ask for.
-	_ = msaa
-
-	err := scratch.beginRenderPass(deviceDriver, cmdBuf, core1_0.SubpassContentsInline, waterRenderPass, framebuffer,
-		core1_0.Rect2D{Offset: core1_0.Offset2D{X: 0, Y: 0}, Extent: extent})
-	if err != nil {
-		return err
-	}
+) {
 
 	viewport := core1_0.Viewport{
 		Width: float32(extent.Width), Height: float32(extent.Height),
@@ -1859,17 +1698,6 @@ func recordWaterPass(
 
 	timer.end(deviceDriver, cmdBuf, ow.frame, PassOverWater)
 
-	// The water pass resolves its MSAA colour on the way out, the same as the
-	// scene pass, and it gets the same treatment: a bracket of its own. It was
-	// briefly charged to PassOverWater instead, on the argument that otherwise
-	// 0.021 ms belonged to nobody -- true, and the wrong cure, because it made
-	// "overwater" read 0.021 ms on a lake with nothing in front of it, which is
-	// the very thing PassOverlay was criticised for. PassWater + PassOverWater +
-	// PassWaterResolve is what PassWater alone used to be.
-	timer.begin(deviceDriver, cmdBuf, ow.frame, PassWaterResolve)
-	deviceDriver.CmdEndRenderPass(cmdBuf)
-	timer.end(deviceDriver, cmdBuf, ow.frame, PassWaterResolve)
-	return nil
 }
 
 // The light shafts' default shape. These were compile-time constants when the

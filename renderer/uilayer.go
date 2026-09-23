@@ -1,9 +1,6 @@
 package renderer
 
 import (
-	"fmt"
-	"log"
-
 	"github.com/vkngwrapper/core/v3/core1_0"
 )
 
@@ -38,104 +35,24 @@ import (
 // chain's finest level at binding 1) written by the same writeTonemapSets, for
 // the same reason.
 //
-// framebuffers are not part of hdrTarget because the scene's target is used
-// through the scene render pass's framebuffers, which also carry depth and MSAA.
-// This layer is single-sampled with no depth, so it needs its own.
+// The graph owns this single-sample, depth-free layer's framebuffers and
+// retires them before these image owners destroy their views.
 type uiLayerTarget struct {
 	color *hdrTarget
 	bloom *bloomTarget
-
-	framebuffers []core1_0.Framebuffer
 }
 
 func (t *uiLayerTarget) destroy(deviceDriver core1_0.DeviceDriver) {
 	if t == nil {
 		return
 	}
-	for _, fb := range t.framebuffers {
-		deviceDriver.DestroyFramebuffer(fb, nil)
-	}
-	t.framebuffers = nil
 	t.bloom.destroy(deviceDriver)
 	t.color.destroy(deviceDriver)
 	t.bloom, t.color = nil, nil
 }
 
-// createUILayerRenderPass writes the UI layer's half-float target.
-//
-// LoadOp Clear rather than the bloom pass's DontCare, and the clear value is
-// (0,0,0,0) rather than anything opaque. That is the whole premultiplied-alpha
-// contract in one attachment: the layer starts as "no coverage anywhere", the UI
-// accumulates premultiplied "over" into it, and whatever is still at alpha zero
-// composites as the scene showing through untouched. A DontCare load would leave
-// the previous frame's HUD under this one, and an opaque clear would paint a
-// black rectangle over the whole scene at composite time.
-//
-// Single sample and no depth, exactly like the tonemap pass: UI antialiasing is
-// computed in the shader (ui.frag's edgeCoverage, and the distance field for
-// text), and screen position is the only thing that decides what covers what.
-func createUILayerRenderPass(deviceDriver core1_0.DeviceDriver) (core1_0.RenderPass, error) {
-	renderPass, _, err := deviceDriver.CreateRenderPass(nil, core1_0.RenderPassCreateInfo{
-		Attachments: []core1_0.AttachmentDescription{{
-			Format:         hdrFormat,
-			Samples:        core1_0.Samples1,
-			LoadOp:         core1_0.AttachmentLoadOpClear,
-			StoreOp:        core1_0.AttachmentStoreOpStore,
-			StencilLoadOp:  core1_0.AttachmentLoadOpDontCare,
-			StencilStoreOp: core1_0.AttachmentStoreOpDontCare,
-			InitialLayout:  core1_0.ImageLayoutUndefined,
-			FinalLayout:    core1_0.ImageLayoutShaderReadOnlyOptimal,
-		}},
-		Subpasses: []core1_0.SubpassDescription{{
-			PipelineBindPoint: core1_0.PipelineBindPointGraphics,
-			ColorAttachments: []core1_0.AttachmentReference{
-				{Attachment: 0, Layout: core1_0.ImageLayoutColorAttachmentOptimal},
-			},
-		}},
-		// The same shape both bloom passes carry, and it is here for the same
-		// reason: this image was a sampled source a moment ago -- the previous
-		// frame's composite and bloom prefilter both read it -- and the clear
-		// must not start before those reads have finished.
-		SubpassDependencies: []core1_0.SubpassDependency{{
-			SrcSubpass:    core1_0.SubpassExternal,
-			DstSubpass:    0,
-			SrcStageMask:  core1_0.PipelineStageFragmentShader | core1_0.PipelineStageColorAttachmentOutput,
-			DstStageMask:  core1_0.PipelineStageColorAttachmentOutput,
-			SrcAccessMask: core1_0.AccessShaderRead | core1_0.AccessColorAttachmentWrite,
-			DstAccessMask: core1_0.AccessColorAttachmentWrite | core1_0.AccessColorAttachmentRead,
-		}},
-	})
-	if err != nil {
-		return core1_0.RenderPass{}, fmt.Errorf("create UI layer render pass: %w", err)
-	}
-	log.Println("UI layer render pass created")
-	return renderPass, nil
-}
-
-// createUILayerFramebuffers makes one framebuffer per layer image.
-func createUILayerFramebuffers(deviceDriver core1_0.DeviceDriver, renderPass core1_0.RenderPass, views []core1_0.ImageView, extent core1_0.Extent2D) ([]core1_0.Framebuffer, error) {
-	out := make([]core1_0.Framebuffer, len(views))
-	for i, view := range views {
-		fb, _, err := deviceDriver.CreateFramebuffer(nil, core1_0.FramebufferCreateInfo{
-			RenderPass:  renderPass,
-			Attachments: []core1_0.ImageView{view},
-			Width:       extent.Width,
-			Height:      extent.Height,
-			Layers:      1,
-		})
-		if err != nil {
-			for _, made := range out[:i] {
-				deviceDriver.DestroyFramebuffer(made, nil)
-			}
-			return nil, fmt.Errorf("create UI layer framebuffer %d: %w", i, err)
-		}
-		out[i] = fb
-	}
-	return out, nil
-}
-
-// createUILayerTargets allocates the layer, its bloom chain, its framebuffers
-// and its resolve sets, at the current swapchain extent.
+// createUILayerTargets allocates the layer, its bloom chain and its resolve
+// sets at the current swapchain extent. The graph binds framebuffers afterwards.
 //
 // Called from New when the option is on and again from recreateSwapchain, which
 // is why it is one function rather than a sequence inlined in both: a resize
@@ -154,14 +71,8 @@ func (r *Renderer) createUILayerTargets() (*uiLayerTarget, error) {
 	}
 
 	t.bloom, err = createBloomTargets(r.instanceDriver, r.deviceDriver, r.physicalDevice,
-		r.descriptorPool, r.descriptorSetLayout, r.bloomDownRenderPass, r.bloomUpRenderPass,
+		r.descriptorPool, r.descriptorSetLayout,
 		r.sc.extent, count)
-	if err != nil {
-		t.destroy(r.deviceDriver)
-		return nil, err
-	}
-
-	t.framebuffers, err = createUILayerFramebuffers(r.deviceDriver, r.uiLayerRenderPass, t.color.views, r.sc.extent)
 	if err != nil {
 		t.destroy(r.deviceDriver)
 		return nil, err
@@ -174,14 +85,9 @@ func (r *Renderer) createUILayerTargets() (*uiLayerTarget, error) {
 	// layout against the image's actual layout at submit whether or not the
 	// shader samples it, so a chain left in UNDEFINED reports on every frame.
 	//
-	// The layer's own images are NOT primed, and do not need to be: the
-	// composite is recorded only on a frame that recorded the layer pass, and
-	// that pass leaves them in SHADER_READ_ONLY. It is also not possible --
-	// an hdrTarget carries TRANSFER_SRC and not TRANSFER_DST, so the clear
-	// primeSampledImages does is rejected outright. Checked by doing it: nine
-	// validation errors at startup, one per image for each of the two barriers
-	// and the clear between them, VUID-VkImageMemoryBarrier-oldLayout-01213 and
-	// VUID-vkCmdClearColorImage-image-00002.
+	// The graph primes the layer's resting layout after binding all targets.
+	// It does not clear: the optional layer node clears before any consumer.
+
 	if err := r.primeBloomLayouts(t.bloom); err != nil {
 		t.destroy(r.deviceDriver)
 		return nil, err
@@ -194,12 +100,10 @@ func (r *Renderer) createUILayerTargets() (*uiLayerTarget, error) {
 	return t, nil
 }
 
-// uiLayerPass is everything recordUILayer and recordUIResolve need for one
+// uiLayerPass is everything the layer draw closure and recordUIResolve need for one
 // frame. Nil on the tonemapPass means the layer was never created and the UI
 // draws straight onto the swapchain, exactly as it always has.
 type uiLayerPass struct {
-	renderPass   core1_0.RenderPass
-	framebuffer  core1_0.Framebuffer
 	uiPipeline   core1_0.Pipeline
 	msdfPipeline core1_0.Pipeline
 	layout       core1_0.PipelineLayout
@@ -223,28 +127,22 @@ func (r *Renderer) uiLayerFor(imageIndex int) *uiLayerPass {
 		return nil
 	}
 	return &uiLayerPass{
-		renderPass:   r.uiLayerRenderPass,
-		framebuffer:  r.uiLayer.framebuffers[imageIndex],
 		uiPipeline:   r.uiLayerUIPipeline,
 		msdfPipeline: r.uiLayerMSDFPipeline,
 		layout:       r.pipelineLayout,
 		bloom: bloomPass{
-			enabled:        r.uiGlowStrength > 0,
-			downRenderPass: r.bloomDownRenderPass,
-			upRenderPass:   r.bloomUpRenderPass,
-			prefilter:      r.bloomPrefilterPipeline,
-			down:           r.bloomDownPipeline,
-			up:             r.bloomUpPipeline,
-			layout:         r.pipelineLayout,
-			sceneSet:       r.uiLayer.color.sceneSets[imageIndex],
-			sets:           r.uiLayer.bloom.sets[imageIndex],
-			downFB:         r.uiLayer.bloom.downFB[imageIndex],
-			upFB:           r.uiLayer.bloom.upFB[imageIndex],
-			extents:        r.uiLayer.bloom.extents,
-			sceneExtent:    r.sc.extent,
-			threshold:      r.uiGlowThreshold,
-			knee:           r.uiGlowKnee,
-			radius:         r.uiGlowRadius,
+			enabled:     r.uiGlowStrength > 0,
+			prefilter:   r.bloomPrefilterPipeline,
+			down:        r.bloomDownPipeline,
+			up:          r.bloomUpPipeline,
+			layout:      r.pipelineLayout,
+			sceneSet:    r.uiLayer.color.sceneSets[imageIndex],
+			sets:        r.uiLayer.bloom.sets[imageIndex],
+			extents:     r.uiLayer.bloom.extents,
+			sceneExtent: r.sc.extent,
+			threshold:   r.uiGlowThreshold,
+			knee:        r.uiGlowKnee,
+			radius:      r.uiGlowRadius,
 		},
 		resolve:       r.uiResolvePipeline,
 		resolveSet:    r.uiLayer.color.tonemapSets[imageIndex],
@@ -252,45 +150,6 @@ func (r *Renderer) uiLayerFor(imageIndex int) *uiLayerPass {
 		exposure:      r.uiExposure,
 		strength:      r.uiGlowStrength,
 	}
-}
-
-// recordUILayer draws the two screen-space overlay channels into the UI layer.
-//
-// It is recordUIComposite with a different destination and premultiplied output,
-// which is deliberate: the same function records both paths so that the panels,
-// the nine-slice fill, the texture mode and the text all keep behaving
-// identically whichever one is on. The only differences are the render pass the
-// pipelines were built against and the one push-constant float that tells the
-// shaders to scale by their own alpha before writing.
-//
-// The clear is where the premultiplied contract starts. (0,0,0,0) is "nothing
-// has covered this pixel", and every UI colour in the layer from then on is
-// already scaled by its coverage.
-func recordUILayer(
-	deviceDriver core1_0.DeviceDriver,
-	stats *RenderStats,
-	cmdBuf core1_0.CommandBuffer,
-	p *uiLayerPass,
-	extent core1_0.Extent2D,
-	uiOverlays []UIRenderObject,
-	msdfOverlays []RenderObject,
-	fallbackTexture *Texture,
-	scratch *commandScratch,
-) error {
-	// The clear value is a constant composite literal, so boxing it into the
-	// ClearValue interface costs no allocation -- the compiler puts it in static
-	// data. commandScratch.colorClear exists because the sky colour changes every
-	// frame and cannot be folded that way; this one never changes.
-	if err := scratch.beginRenderPass(deviceDriver, cmdBuf, core1_0.SubpassContentsInline,
-		p.renderPass, p.framebuffer,
-		core1_0.Rect2D{Offset: core1_0.Offset2D{X: 0, Y: 0}, Extent: extent},
-		core1_0.ClearValueFloat{0, 0, 0, 0}); err != nil {
-		return err
-	}
-	recordUIComposite(deviceDriver, stats, cmdBuf, p.uiPipeline, p.msdfPipeline,
-		p.layout, extent, uiOverlays, msdfOverlays, fallbackTexture, true, scratch)
-	deviceDriver.CmdEndRenderPass(cmdBuf)
-	return nil
 }
 
 // recordUIResolve composites the finished layer onto the swapchain, inside the

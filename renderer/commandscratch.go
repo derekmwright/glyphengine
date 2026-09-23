@@ -82,9 +82,8 @@ type commandScratch struct {
 	// fresh core1_0.ClearValueFloat{...} passed by value here instead,
 	// TestRecordCommandBufferAllocsAreConstant reports 1 alloc/op instead of 0.
 	colorClear core1_0.ClearValueFloat
-	// barriers is sized for recordWaterPass's widest barrier call (the HDR
-	// scene image plus the refraction copy target).
-	barriers [2]core1_0.ImageMemoryBarrier
+	// barriers is allocated once from the plan's widest barrier group.
+	barriers []core1_0.ImageMemoryBarrier
 
 	imageCopy [1]core1_0.ImageCopy
 
@@ -182,7 +181,7 @@ func (s *commandScratch) pipelineBarrier(d core1_0.DeviceDriver, cmdBuf core1_0.
 }
 
 // copyImage issues a single-region image copy, which is the only shape
-// recordWaterPass needs -- the whole HDR image, once.
+// the graph's copy node needs -- the whole HDR image, once.
 func (s *commandScratch) copyImage(d core1_0.DeviceDriver, cmdBuf core1_0.CommandBuffer, srcImage core1_0.Image, srcLayout core1_0.ImageLayout, dstImage core1_0.Image, dstLayout core1_0.ImageLayout, region core1_0.ImageCopy) error {
 	s.imageCopy[0] = region
 	return d.CmdCopyImage(cmdBuf, srcImage, srcLayout, dstImage, dstLayout, s.imageCopy[:]...)

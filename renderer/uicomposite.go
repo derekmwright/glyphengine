@@ -26,7 +26,7 @@ func packUIFill(pc *[64]float32, fill *PanelFill) {
 
 // recordUIComposite draws the screen-space overlay channels: onto the swapchain
 // inside the tonemap pass and after its resolve triangle, which is the default,
-// or into the UI glow layer when a game asked for one (recordUILayer calls this
+// or into the UI glow layer when a game asked for one (its graph node calls this
 // with premultiply set, and the composite of the finished layer then replaces
 // these draws in the tonemap pass).
 //
@@ -36,7 +36,7 @@ func packUIFill(pc *[64]float32, fill *PanelFill) {
 //
 // They used to be recorded in the scene pass with everything else, and that put
 // them in the HDR target before three passes that are meant to operate on the
-// scene ran over it. Water was the one that showed: recordWaterPass copies the
+// scene ran over it. Water was the one that showed: the refraction pass copies the
 // HDR image to refract through, so the copy contained the HUD, and the water
 // surface then drew straight over text that writes no depth. A block of debug
 // lines crossing the waterline in 09-water lost five of them outright and got

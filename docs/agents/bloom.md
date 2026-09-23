@@ -15,7 +15,7 @@ api:
 assets: none
 example: examples/16-materials
 run: go run ./16-materials
-verified: 2026-09-19
+verified: 2026-09-23
 ---
 
 # Bloom
@@ -144,11 +144,12 @@ also needs `TRANSFER_DST` usage on the images, used only for that one clear.
 
 ## The same chain, a second time, over the UI
 
-`createBloomTargets`, `recordBloom` and the three pipelines are parameterized by
+`createBloomTargets`, `recordBloomStage` and the three pipelines are parameterized by
 the image they run over, so the screen-space UI's own HDR layer instantiates all
 of them a second time at the same resolution. `SetUIGlow` is `SetBloom` for that
 chain and takes the same four numbers; `renderer.WithUIGlowLayer` is what
-allocates it. See
+allocates it. Each prefilter/down/up draw is a graph node, with cached render
+passes shared between both chains and graph-owned framebuffers. See
 [`overlay-composite.md`](overlay-composite.md#giving-the-ui-its-own-hdr-layer).
 
 The one rule that is stricter there: **keep threshold minus knee at or above 1**

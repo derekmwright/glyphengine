@@ -101,6 +101,7 @@ type Renderer struct {
 	grassImpostorPipeline         core1_0.Pipeline
 	waterPipeline                 core1_0.Pipeline
 	godRayPipeline                core1_0.Pipeline
+	frameGraph                    *frameGraph
 	waterRenderPass               core1_0.RenderPass
 	waterFramebuffers             []core1_0.Framebuffer
 	sceneColor                    *sceneColorTarget
@@ -942,11 +943,90 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 		r.deviceDriver.DestroyPipeline(r.grassPipeline, nil)
 	})
 
-	r.waterRenderPass, err = createWaterRenderPass(r.deviceDriver, hdrFormat, r.depth.format, r.msaaSamples)
+	// Allocate the tail targets before compiling their graph and pipelines.
+	if !hdrSupported(r.instanceDriver, r.physicalDevice) {
+		// A mandatory format per the Vulkan spec, so this should be
+		// unreachable -- but silently rendering somewhere else would be worse
+		// than saying so.
+		return nil, fmt.Errorf("renderer: device cannot use R16G16B16A16_SFLOAT as a sampleable colour attachment")
+	}
+	r.hdr, err = createHDRTargets(r.instanceDriver, r.deviceDriver, r.physicalDevice,
+		r.descriptorPool, r.descriptorSetLayout, r.sc.extent, len(r.sc.imageViews), r.maxAnisotropy, "HDR target")
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create HDR targets: %w", err)
+	}
+	r.onInit(func() { r.hdr.destroy(r.deviceDriver) })
+
+	r.bloom, err = createBloomTargets(r.instanceDriver, r.deviceDriver, r.physicalDevice,
+		r.descriptorPool, r.descriptorSetLayout,
+		r.sc.extent, len(r.sc.imageViews))
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create bloom targets: %w", err)
+	}
+	r.onInit(func() { r.bloom.destroy(r.deviceDriver) })
+
+	r.tonemapSetLayout, err = createTonemapSetLayout(r.deviceDriver)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create tonemap set layout: %w", err)
+	}
+	r.onInit(func() { r.deviceDriver.DestroyDescriptorSetLayout(r.tonemapSetLayout, nil) })
+
+	r.tonemapPipelineLayout, err = createNonLitPipelineLayout(r.deviceDriver, r.tonemapSetLayout)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create tonemap pipeline layout: %w", err)
+	}
+	r.onInit(func() { r.deviceDriver.DestroyPipelineLayout(r.tonemapPipelineLayout, nil) })
+
+	if err := writeTonemapSets(r.deviceDriver, r.descriptorPool, r.tonemapSetLayout, r.hdr, r.bloom); err != nil {
+		return nil, fmt.Errorf("renderer: %w", err)
+	}
+
+	// Water pass targets. Refraction needs the presented image as a copy
+	// source, so a device that cannot mark its swapchain images TRANSFER_SRC
+	// simply does not get refraction — the water shader falls back to alpha
+	// blending, which is why this is a warning rather than an error.
+	if r.sc.captureCapable {
+		r.sceneColor, err = createSceneColorTarget(r.instanceDriver, r.deviceDriver, r.physicalDevice,
+			r.descriptorPool, r.descriptorSetLayout, r.sc.extent, hdrFormat, r.maxAnisotropy)
+		if err != nil {
+			return nil, fmt.Errorf("renderer: create scene color target: %w", err)
+		}
+	} else {
+		log.Println("Swapchain images are not transfer-capable: water refraction disabled")
+	}
+	r.onInit(func() {
+		r.sceneColor.destroy(r.deviceDriver)
+		r.sceneColor = nil
+	})
+
+	r.commandPool, err = createCommandPool(r.deviceDriver, r.indices.graphicsFamily)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create command pool: %w", err)
+	}
+	// Destroying the pool frees the command buffers allocated from it.
+	r.onInit(func() { r.deviceDriver.DestroyCommandPool(r.commandPool, nil) })
+
+	if r.uiGlowRequested {
+		r.uiLayer, err = r.createUILayerTargets()
+		if err != nil {
+			return nil, fmt.Errorf("renderer: create UI glow layer: %w", err)
+		}
+		// Read through r rather than captured: recreateSwapchain swaps this out
+		// on every resize, and a closure holding the old pointer would free an
+		// already-freed target and leak the live one. Rule 10.
+		r.onInit(func() { r.uiLayer.destroy(r.deviceDriver) })
+	}
+
+	r.frameGraph, err = newFrameGraph(r.msaaSamples, r.depth.format, r.sc.imageFormat, len(r.sc.imageViews))
+	if err != nil {
+		return nil, fmt.Errorf("renderer: build frame graph: %w", err)
+	}
+	r.onInit(func() { r.frameGraph.destroyPasses(r.deviceDriver) })
+	r.frameGraph.sizeScratch(&r.cmdScratch)
+	r.waterRenderPass, err = r.frameGraph.renderPass(r.deviceDriver, graphWater)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create water render pass: %w", err)
 	}
-	r.onInit(func() { r.deviceDriver.DestroyRenderPass(r.waterRenderPass, nil) })
 
 	r.waterPipeline, err = createWaterPipeline(r.deviceDriver, r.shaders, r.waterRenderPass, r.litPipelineLayout, r.sc.extent, r.msaaSamples)
 	if err != nil {
@@ -977,40 +1057,17 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	if r.msaa != nil {
 		msaaViews = r.msaa.views
 	}
-	if !hdrSupported(r.instanceDriver, r.physicalDevice) {
-		// A mandatory format per the Vulkan spec, so this should be
-		// unreachable -- but silently rendering somewhere else would be worse
-		// than saying so.
-		return nil, fmt.Errorf("renderer: device cannot use R16G16B16A16_SFLOAT as a sampleable colour attachment")
-	}
-	r.hdr, err = createHDRTargets(r.instanceDriver, r.deviceDriver, r.physicalDevice,
-		r.descriptorPool, r.descriptorSetLayout, r.sc.extent, len(r.sc.imageViews), r.maxAnisotropy, "HDR target")
-	if err != nil {
-		return nil, fmt.Errorf("renderer: create HDR targets: %w", err)
-	}
-	r.onInit(func() { r.hdr.destroy(r.deviceDriver) })
 
-	// Bloom's render passes come before its targets, because the framebuffers
-	// are created alongside the images and need a pass to be compatible with.
-	r.bloomDownRenderPass, err = createBloomRenderPass(r.deviceDriver, false)
+	// Migrated pipelines use descriptions from the graph's render pass cache.
+	r.bloomDownRenderPass, err = r.frameGraph.renderPass(r.deviceDriver, graphBloom)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create bloom downsample render pass: %w", err)
 	}
-	r.onInit(func() { r.deviceDriver.DestroyRenderPass(r.bloomDownRenderPass, nil) })
 
-	r.bloomUpRenderPass, err = createBloomRenderPass(r.deviceDriver, true)
+	r.bloomUpRenderPass, err = r.frameGraph.renderPass(r.deviceDriver, graphBloom+bloomLevels)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create bloom upsample render pass: %w", err)
 	}
-	r.onInit(func() { r.deviceDriver.DestroyRenderPass(r.bloomUpRenderPass, nil) })
-
-	r.bloom, err = createBloomTargets(r.instanceDriver, r.deviceDriver, r.physicalDevice,
-		r.descriptorPool, r.descriptorSetLayout, r.bloomDownRenderPass, r.bloomUpRenderPass,
-		r.sc.extent, len(r.sc.imageViews))
-	if err != nil {
-		return nil, fmt.Errorf("renderer: create bloom targets: %w", err)
-	}
-	r.onInit(func() { r.bloom.destroy(r.deviceDriver) })
 
 	for _, p := range []struct {
 		dst      *core1_0.Pipeline
@@ -1032,11 +1089,10 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 
 	// The cloud pass reuses the bloom downsample pass's shape: one half-float
 	// colour attachment, contents discarded, ending sampleable.
-	r.cloudRenderPass, err = createBloomRenderPass(r.deviceDriver, false)
+	r.cloudRenderPass, err = r.frameGraph.renderPass(r.deviceDriver, graphBloom)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create cloud render pass: %w", err)
 	}
-	r.onInit(func() { r.deviceDriver.DestroyRenderPass(r.cloudRenderPass, nil) })
 
 	r.clouds, err = createCloudTargets(r.instanceDriver, r.deviceDriver, r.physicalDevice,
 		r.descriptorPool, r.descriptorSetLayout, r.cloudRenderPass, r.sc.extent, cloudBufferCount,
@@ -1058,27 +1114,10 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	}
 	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.cloudPipeline, nil) })
 
-	r.tonemapSetLayout, err = createTonemapSetLayout(r.deviceDriver)
-	if err != nil {
-		return nil, fmt.Errorf("renderer: create tonemap set layout: %w", err)
-	}
-	r.onInit(func() { r.deviceDriver.DestroyDescriptorSetLayout(r.tonemapSetLayout, nil) })
-
-	r.tonemapPipelineLayout, err = createNonLitPipelineLayout(r.deviceDriver, r.tonemapSetLayout)
-	if err != nil {
-		return nil, fmt.Errorf("renderer: create tonemap pipeline layout: %w", err)
-	}
-	r.onInit(func() { r.deviceDriver.DestroyPipelineLayout(r.tonemapPipelineLayout, nil) })
-
-	if err := writeTonemapSets(r.deviceDriver, r.descriptorPool, r.tonemapSetLayout, r.hdr, r.bloom); err != nil {
-		return nil, fmt.Errorf("renderer: %w", err)
-	}
-
-	r.tonemapRenderPass, err = createTonemapRenderPass(r.deviceDriver, r.sc.imageFormat)
+	r.tonemapRenderPass, err = r.frameGraph.renderPass(r.deviceDriver, graphTonemap)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create tonemap render pass: %w", err)
 	}
-	r.onInit(func() { r.deviceDriver.DestroyRenderPass(r.tonemapRenderPass, nil) })
 
 	r.tonemapPipeline, err = createResolvePipeline(r.deviceDriver, r.shaders, r.shaders.TonemapFrag, "Tonemap",
 		r.tonemapRenderPass, r.tonemapPipelineLayout, r.sc.extent, false)
@@ -1143,11 +1182,10 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	// DRAW time, not at creation, and the frame still presents; see
 	// docs/agents/overlay-composite.md.
 	if r.uiGlowRequested {
-		r.uiLayerRenderPass, err = createUILayerRenderPass(r.deviceDriver)
+		r.uiLayerRenderPass, err = r.frameGraph.renderPass(r.deviceDriver, graphUILayer)
 		if err != nil {
 			return nil, fmt.Errorf("renderer: %w", err)
 		}
-		r.onInit(func() { r.deviceDriver.DestroyRenderPass(r.uiLayerRenderPass, nil) })
 
 		r.uiLayerUIPipeline, err = createUIPipeline(r.deviceDriver, r.shaders, r.uiLayerRenderPass, r.pipelineLayout, r.sc.extent, core1_0.Samples1, true)
 		if err != nil {
@@ -1171,10 +1209,6 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 		r.onInit(func() { r.deviceDriver.DestroyPipeline(r.uiResolvePipeline, nil) })
 	}
 
-	// The layer's own targets are created further down, after the command pool:
-	// they have to be primed into a legal layout before the first frame binds
-	// them, and priming submits a clear.
-
 	// The scene draws into the HDR views; only the tonemap pass touches the
 	// swapchain.
 	r.framebuffers, err = createFramebuffers(r.deviceDriver, r.renderPass, r.hdr.views, r.depth.views, msaaViews, r.sc.extent)
@@ -1187,54 +1221,11 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 		}
 	})
 
-	r.tonemapFramebuffers, err = createTonemapFramebuffers(r.deviceDriver, r.tonemapRenderPass, r.sc.imageViews, r.sc.extent)
-	if err != nil {
-		return nil, fmt.Errorf("renderer: create tonemap framebuffers: %w", err)
-	}
-	r.onInit(func() {
-		for _, fb := range r.tonemapFramebuffers {
-			r.deviceDriver.DestroyFramebuffer(fb, nil)
-		}
-	})
-
-	// Water pass targets. Refraction needs the presented image as a copy
-	// source, so a device that cannot mark its swapchain images TRANSFER_SRC
-	// simply does not get refraction — the water shader falls back to alpha
-	// blending, which is why this is a warning rather than an error.
-	if r.sc.captureCapable {
-		r.sceneColor, err = createSceneColorTarget(r.instanceDriver, r.deviceDriver, r.physicalDevice,
-			r.descriptorPool, r.descriptorSetLayout, r.sc.extent, hdrFormat, r.maxAnisotropy)
-		if err != nil {
-			return nil, fmt.Errorf("renderer: create scene color target: %w", err)
-		}
-		r.waterFramebuffers, err = createWaterFramebuffers(r.deviceDriver, r.waterRenderPass, r.hdr.views, r.depth.views, msaaViews, r.sc.extent)
-		if err != nil {
-			return nil, fmt.Errorf("renderer: create water framebuffers: %w", err)
-		}
-	} else {
-		log.Println("Swapchain images are not transfer-capable: water refraction disabled")
-	}
-	r.onInit(func() {
-		for _, fb := range r.waterFramebuffers {
-			r.deviceDriver.DestroyFramebuffer(fb, nil)
-		}
-		r.waterFramebuffers = nil
-		r.sceneColor.destroy(r.deviceDriver)
-		r.sceneColor = nil
-	})
-
 	r.gpuTimer, err = newGPUTimer(r.instanceDriver, r.deviceDriver, r.physicalDevice, r.indices.graphicsFamily)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create GPU timer: %w", err)
 	}
 	r.onInit(func() { r.gpuTimer.destroy(r.deviceDriver) })
-
-	r.commandPool, err = createCommandPool(r.deviceDriver, r.indices.graphicsFamily)
-	if err != nil {
-		return nil, fmt.Errorf("renderer: create command pool: %w", err)
-	}
-	// Destroying the pool frees the command buffers allocated from it.
-	r.onInit(func() { r.deviceDriver.DestroyCommandPool(r.commandPool, nil) })
 
 	// Step 9b: the cube shadow maps are sampled every frame but only rendered
 	// when a point light casts, so give them defined contents and a legal
@@ -1259,20 +1250,10 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 		return nil, fmt.Errorf("renderer: prime bloom layouts: %w", err)
 	}
 
-	// The UI glow layer's images and bloom chain, here rather than beside its
-	// render pass and pipelines above for exactly the reason the two priming
-	// calls above are here: createUILayerTargets primes what it allocates, and
-	// priming submits a clear, which needs the command pool.
-	if r.uiGlowRequested {
-		r.uiLayer, err = r.createUILayerTargets()
-		if err != nil {
-			return nil, fmt.Errorf("renderer: create UI glow layer: %w", err)
-		}
-		// Read through r rather than captured: recreateSwapchain swaps this out
-		// on every resize, and a closure holding the old pointer would free an
-		// already-freed target and leak the live one. Rule 10.
-		r.onInit(func() { r.uiLayer.destroy(r.deviceDriver) })
+	if err := r.bindGraphTargets(); err != nil {
+		return nil, fmt.Errorf("renderer: create graph framebuffers: %w", err)
 	}
+	r.onInit(func() { r.releaseGraphFramebuffers() })
 
 	cmdBufs, err := createCommandBuffers(r.deviceDriver, r.commandPool, maxFramesInFlight)
 	if err != nil {
@@ -1574,14 +1555,9 @@ func (r *Renderer) recreateSwapchain() error {
 		r.deviceDriver.DestroyFramebuffer(fb, nil)
 	}
 	r.framebuffers = nil
-	for _, fb := range r.tonemapFramebuffers {
-		r.deviceDriver.DestroyFramebuffer(fb, nil)
-	}
-	r.tonemapFramebuffers = nil
-	for _, fb := range r.waterFramebuffers {
-		r.deviceDriver.DestroyFramebuffer(fb, nil)
-	}
-	r.waterFramebuffers = nil
+	r.releaseGraphFramebuffers()
+	r.uiLayer.destroy(r.deviceDriver)
+	r.uiLayer = nil
 	r.sceneColor.destroy(r.deviceDriver)
 	r.sceneColor = nil
 	// The sets come from the pool, which is not reset here -- each target's
@@ -1692,7 +1668,7 @@ func (r *Renderer) rebuildSwapchainTargets(oldExtent core1_0.Extent2D, undo *reb
 	undo.push(func() { r.hdr.destroy(r.deviceDriver); r.hdr = nil })
 
 	r.bloom, err = createBloomTargets(r.instanceDriver, r.deviceDriver, r.physicalDevice,
-		r.descriptorPool, r.descriptorSetLayout, r.bloomDownRenderPass, r.bloomUpRenderPass,
+		r.descriptorPool, r.descriptorSetLayout,
 		r.sc.extent, len(r.sc.imageViews))
 	if err != nil {
 		return fmt.Errorf("renderer: recreate bloom targets: %w", err)
@@ -1743,9 +1719,7 @@ func (r *Renderer) rebuildSwapchainTargets(oldExtent core1_0.Extent2D, undo *reb
 	// specific views and would otherwise sample freed ones. Its render pass and
 	// its three pipelines survive: the extent reaches them through dynamic
 	// viewport and scissor state, exactly as it does for the tonemap pass's.
-	if r.uiLayer != nil {
-		r.uiLayer.destroy(r.deviceDriver)
-		r.uiLayer = nil
+	if r.uiGlowRequested {
 		r.uiLayer, err = r.createUILayerTargets()
 		if err != nil {
 			return fmt.Errorf("renderer: recreate UI glow layer: %w", err)
@@ -1773,17 +1747,6 @@ func (r *Renderer) rebuildSwapchainTargets(oldExtent core1_0.Extent2D, undo *reb
 		r.framebuffers = nil
 	})
 
-	r.tonemapFramebuffers, err = createTonemapFramebuffers(r.deviceDriver, r.tonemapRenderPass, r.sc.imageViews, r.sc.extent)
-	if err != nil {
-		return fmt.Errorf("renderer: recreate tonemap framebuffers: %w", err)
-	}
-	undo.push(func() {
-		for _, fb := range r.tonemapFramebuffers {
-			r.deviceDriver.DestroyFramebuffer(fb, nil)
-		}
-		r.tonemapFramebuffers = nil
-	})
-
 	if r.sc.captureCapable {
 		r.sceneColor, err = createSceneColorTarget(r.instanceDriver, r.deviceDriver, r.physicalDevice,
 			r.descriptorPool, r.descriptorSetLayout, r.sc.extent, hdrFormat, r.maxAnisotropy)
@@ -1792,17 +1755,11 @@ func (r *Renderer) rebuildSwapchainTargets(oldExtent core1_0.Extent2D, undo *reb
 		}
 		undo.push(func() { r.sceneColor.destroy(r.deviceDriver); r.sceneColor = nil })
 
-		r.waterFramebuffers, err = createWaterFramebuffers(r.deviceDriver, r.waterRenderPass, r.hdr.views, r.depth.views, msaaViews, r.sc.extent)
-		if err != nil {
-			return fmt.Errorf("renderer: recreate water framebuffers: %w", err)
-		}
-		undo.push(func() {
-			for _, fb := range r.waterFramebuffers {
-				r.deviceDriver.DestroyFramebuffer(fb, nil)
-			}
-			r.waterFramebuffers = nil
-		})
 	}
+	if err := r.bindGraphTargets(); err != nil {
+		return fmt.Errorf("renderer: recreate graph framebuffers: %w", err)
+	}
+	undo.push(func() { r.releaseGraphFramebuffers() })
 
 	return nil
 }
@@ -2011,10 +1968,6 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 	// The water pass is optional: a device without TRANSFER_SRC on its
 	// swapchain images cannot supply the refraction source, and scenes with no
 	// water never begin the pass at all.
-	var waterFB core1_0.Framebuffer
-	if r.sceneColor != nil && imageIndex < len(r.waterFramebuffers) {
-		waterFB = r.waterFramebuffers[imageIndex]
-	}
 
 	// Reset and record this frame's command buffer
 	cmdBuf := r.commandBuffers[f]
@@ -2024,7 +1977,7 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 		return err
 	}
 	recordStart := time.Now()
-	err = recordCommandBuffer(r.deviceDriver, cmdBuf, r.renderPass, r.framebuffers[imageIndex], r.pipeline, r.litDoubleSidedPipeline, r.translucentPipeline, r.translucentDoubleSidedPipeline, r.skinnedTranslucentPipeline, r.instancedPipeline, r.instancedDoubleSidedPipeline, r.overlayPipeline, r.skyPipeline, r.skyVolumetricPipeline, r.starsPipeline, r.celestialPipeline, r.uiPipeline, r.msdfPipeline, r.skinnedPipeline, r.grassPipeline, r.waterPipeline, r.godRayPipeline, r.waterRenderPass, waterFB, r.sceneColor, r.hdr.images[imageIndex],
+	err = recordCommandBuffer(r.deviceDriver, cmdBuf, r.renderPass, r.framebuffers[imageIndex], r.pipeline, r.litDoubleSidedPipeline, r.translucentPipeline, r.translucentDoubleSidedPipeline, r.skinnedTranslucentPipeline, r.instancedPipeline, r.instancedDoubleSidedPipeline, r.overlayPipeline, r.skyPipeline, r.skyVolumetricPipeline, r.starsPipeline, r.celestialPipeline, r.uiPipeline, r.msdfPipeline, r.skinnedPipeline, r.grassPipeline, r.waterPipeline, r.godRayPipeline, r.frameGraph, imageIndex, r.sceneColor,
 		func(cb core1_0.CommandBuffer) error { return r.recordClouds(cb, lighting, f) },
 		r.cloudSetFor(f),
 		r.bloomFor(imageIndex), r.tonemapFor(imageIndex), r.particlePipeline, r.terrainPipeline, r.materialPipelines(), &r.stats, r.pipelineLayout, r.skyPipelineLayout, r.litPipelineLayout, r.skinnedPipelineLayout, r.terrainPipelineLayout, r.sc.extent, draws, overlays, celestials, uiOverlays, msdfOverlays, lighting, split, r.fallbackTexture, r.milkyWayTex, r.shadow, r.grass, r.grassLOD, r.grassImpostor, r.grassImpostorPipeline, r.particles, f, r.msaa != nil, r.gpuTimer, r.trace, &r.cmdScratch)
