@@ -243,6 +243,7 @@ tasks:
         check 19-instanced
         check 25-lod-forest
         check 26-mesh-ranges
+        check 27-streaming -count 40
         check 20-screens
         check 21-streetlights
         check 22-level
@@ -286,6 +287,12 @@ tasks:
         check 26-mesh-ranges -count 100 -mode ranges
         check 26-mesh-ranges -count 100 -mode indirect
         check 26-mesh-ranges -count 100 -mode indirect -index32=false
+        # The streamed uploader, against the two paths it replaces. 20
+        # patches at two a frame fits inside CHECK_FRAMES with room for
+        # the last one to land and its staging to retire.
+        check 27-streaming -count 20 -mode async
+        check 27-streaming -count 20 -mode sync
+        check 27-streaming -count 20 -mode dynamic
         check 23-shadow-coverage
         check 23-shadow-coverage -coverage=false
         check 23-shadow-coverage -caster=false
@@ -2266,6 +2273,17 @@ tasks:
     desc: Verify startup classification, one retry, and validation failure handling
     cmds:
       - . tools/check-example-test.sh
+  stream:
+    desc: "A patch grid streamed in over 100 frames matches one built synchronously"
+    env:
+      GLYPHENGINE_FIXED_FRAME_TIME: 16.667ms
+    cmds:
+      # Standalone meshes and arena ranges, each built both ways, must end
+      # the run byte for byte identical. The control is a frame the stream
+      # has not caught up with: without it, a comparator that matched two
+      # empty frames would pass every case above.
+      - go run ./cmd/streamcheck {{.CLI_ARGS}}
+
   ranges:
     desc: Compare mesh ranges and indirect batches against separate meshes
     env:

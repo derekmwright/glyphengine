@@ -34,6 +34,7 @@ task reload    # reloading a level never shows a frame without it
 task volumetric # a light's beam is in the air inside its cone and nowhere else
 task clouds    # sunset colour, high cirrus, layer occlusion and repeatability
 task skypalette # the sky palette reaches the fog, the water and the clouds, not just the dome
+task stream    # streamed patches land, and the frame they land in matches a synchronous one
 ```
 
 `task ci` is the minimum. Run `task validate` for anything touching the

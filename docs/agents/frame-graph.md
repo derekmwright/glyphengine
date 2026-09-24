@@ -8,6 +8,7 @@ capability: rendering
 status: experimental
 api:
   - framegraph.Graph.AddBuffer
+  - framegraph.Transfer
   - framegraph.BufferDesc
   - framegraph.Graph.Build
   - framegraph.Step.AfterBarriers
@@ -26,7 +27,7 @@ requires:
   - VK_KHR_dynamic_rendering
   - vulkan-sdk
 assets: procedural
-verified: 2026-09-24 # dynamic rendering and explicit attachment barriers
+verified: 2026-09-24 # dynamic rendering, attachment barriers and the streamed upload node
 ---
 
 # Record the renderer's frame graph
@@ -129,6 +130,23 @@ reads become explicit barriers **before** CmdBeginRendering. A stage-pair group 
 buffer and image barriers. The executor allocates both scratch arrays from the
 plan at build time and emits one CmdPipelineBarrier per adjacent stage pair.
 Draw-side pinned streams retain their original calls and arguments.
+
+An engine-owned `Transfer` node named "streamed uploads" heads every graph a
+renderer builds, ahead of GPU LOD selection and the legacy body. It is optional
+and runs only on a frame that has copies queued, so a program that never
+streams records the command buffer it always did. It carries the batch of
+staged buffer copies the asynchronous mesh and storage-buffer constructors
+enqueue; see [models](models.md#streaming-geometry-in-while-frames-render).
+
+Its declared uses are the streamed storage buffers, as `TransferDst`, and only
+those a `UploadStorageBufferAsync` has actually targeted -- the first such
+upload marks the graph dirty so the next rebuild declares it. The compiler
+derives those barriers to the real consumers on both sides. Mesh and arena
+buffers are not graph resources and cannot be without a rebuild per created
+mesh, so the node records their trailing transfer-to-vertex-input group itself,
+plus a leading group for destinations a frame in flight may still be reading.
+The node is timed like an application pass, under the name `upload`, once the
+renderer has streamed anything.
 
 GPU LOD adds engine-owned classify/prefix/scatter nodes before shadows and
 before application StageBeforeScene work. A trailing copy obtains diagnostic

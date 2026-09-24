@@ -84,7 +84,8 @@ type commandScratch struct {
 	barriers       []core1_0.ImageMemoryBarrier
 	bufferBarriers []core1_0.BufferMemoryBarrier
 
-	imageCopy [1]core1_0.ImageCopy
+	imageCopy  [1]core1_0.ImageCopy
+	bufferCopy [1]core1_0.BufferCopy
 
 	// cubeCasters is the point-light shadow pass's pre-culled caster list,
 	// rebuilt once per frame (not per face) and sized by draw count -- the one
@@ -172,4 +173,13 @@ func (s *commandScratch) pipelineBarrier(d core1_0.DeviceDriver, cmdBuf core1_0.
 func (s *commandScratch) copyImage(d core1_0.DeviceDriver, cmdBuf core1_0.CommandBuffer, srcImage core1_0.Image, srcLayout core1_0.ImageLayout, dstImage core1_0.Image, dstLayout core1_0.ImageLayout, region core1_0.ImageCopy) error {
 	s.imageCopy[0] = region
 	return d.CmdCopyImage(cmdBuf, srcImage, srcLayout, dstImage, dstLayout, s.imageCopy[:]...)
+}
+
+// copyBuffer issues a single-region buffer copy, the shape the streamed
+// upload node needs: one staged range into one device-local destination,
+// repeated per range. Spreading a fresh literal into the driver's variadic
+// regions would allocate per copy, for the reason setViewport records.
+func (s *commandScratch) copyBuffer(d core1_0.DeviceDriver, cmdBuf core1_0.CommandBuffer, src, dst core1_0.Buffer, region core1_0.BufferCopy) error {
+	s.bufferCopy[0] = region
+	return d.CmdCopyBuffer(cmdBuf, src, dst, s.bufferCopy[:]...)
 }

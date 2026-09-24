@@ -34,6 +34,7 @@ Each is a complete, self-contained `main()` — copy one and start editing.
 | 24 | `24-custom-passes` | Additive light target, compute history smoothing, custom lit sampling, and depth-aware half-resolution fog; `-passes off` is the control, `-timings` prints GPU brackets | none |
 | 25 | `25-lod-forest` | 3,600 trees over the terrain heightmap: per-instance culling, distance levels, dithered transitions, an eight-view impostor, and a single-level control | procedural |
 | 26 | `26-mesh-ranges` | 400 distinct procedural patches drawn three ways: one mesh each, ranges of one shared arena, and the same ranges through indirect batches; `-mode` and `-count` select, `-index32=false` stores uint16 indices | procedural |
+| 27 | `27-streaming` | 400 procedural patches published two per rendered frame while the scene draws, three ways: synchronous device-local meshes, host-visible dynamic meshes, and the batched asynchronous uploader; `-mode`, `-count` and `-per-frame` select | procedural |
 
 More land as the extraction proceeds — glTF loading, skinned animation,
 shadows, MSDF text, YAML UI, audio, and particles. Numbering has gaps on

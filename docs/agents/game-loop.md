@@ -52,7 +52,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-09-24
+verified: 2026-09-24 # streamed uploads from a worker
 ---
 
 # Run a game loop with Engine and Game
@@ -154,6 +154,22 @@ a batch of examples. The platform window manager ultimately controls focus.
 GLFW must be called from the thread that initialized it. Without the `init`
 above, the Go scheduler will eventually move the goroutine and window or input
 calls start failing — usually intermittently, on someone else's machine.
+
+## Uploading from a worker
+
+GPU resource creation belongs to the frame thread, always. A game that
+generates geometry on a worker -- terrain patches, a streamed world -- sends
+the finished vertex and index slices over a channel and calls the constructor
+in `Update` or `LateUpdate`, on this thread. There is no second queue and no
+second thread inside the renderer.
+
+What the worker buys is the *generation*. What the renderer's asynchronous
+constructors buy is the *stall*: `CreateIndexedMesh32Async` and friends queue
+their copy into the next frame's command buffer instead of submitting one and
+waiting for the graphics queue to drain. See
+[streaming geometry in](models.md#streaming-geometry-in-while-frames-render)
+for the constructors, the readiness ticket and the rule that an unfinished
+mesh is simply not drawn.
 
 ## Two clocks, on purpose
 

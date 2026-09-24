@@ -129,7 +129,12 @@ func (p Pass) String() string {
 // account for it.
 const queriesPerFrame = (int(passCount) + 1) * 2
 const maxAppTimings = 16
-const appQueriesPerFrame = (maxAppTimings + 1) * 2
+
+// engineTimings is the engine's own timed passes -- GPU LOD selection and the
+// streamed upload batch -- which share the application timing pool without
+// spending an application's budget.
+const engineTimings = 2
+const appQueriesPerFrame = (maxAppTimings + engineTimings) * 2
 const queryPoolSize = (queriesPerFrame + appQueriesPerFrame) * maxFramesInFlight
 
 type AppTiming struct {
@@ -168,11 +173,11 @@ type GPUTimings struct {
 // measuring.
 type gpuTimer struct {
 	apps        []*AppPass
-	appRecorded [maxFramesInFlight][maxAppTimings + 1]*AppPass
+	appRecorded [maxFramesInFlight][maxAppTimings + engineTimings]*AppPass
 	appCount    [maxFramesInFlight]int
-	appScratch  [(maxAppTimings + 1) * 16]byte
-	appLatest   [maxAppTimings + 1]AppTiming
-	appMean     [maxAppTimings + 1]AppTiming
+	appScratch  [(maxAppTimings + engineTimings) * 16]byte
+	appLatest   [maxAppTimings + engineTimings]AppTiming
+	appMean     [maxAppTimings + engineTimings]AppTiming
 	appSums     map[*AppPass]appTimingSum
 	pool        core1_0.QueryPool
 	period      float32 // nanoseconds per tick

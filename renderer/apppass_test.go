@@ -38,6 +38,16 @@ func withAppFrame(fx *frame, passes bool, compute ...bool) *frame {
 	fx.graph = g
 	for i := range g.nodes {
 		n := &g.nodes[i]
+		// The streamed upload node takes no fixture handle. fakeHandles is a
+		// monotonic counter, so spending one here would renumber every image
+		// below it and move the pinned hashes for a reason that has nothing to
+		// do with what is recorded -- and those hashes being UNCHANGED is the
+		// evidence that a frame with nothing queued records what it always did.
+		// Verified: spending one here leaves the call counts at 3353 and 3382
+		// and moves both hashes (0x4b9e77888c85b5ff, 0x629f25430c127a68).
+		if n.name == "streamed uploads" {
+			continue
+		}
 		h.n() // Preserve the old fixture's subsequent draw handles.
 		n.extent = fx.extent
 		if n.app != nil || i == g.depthNode {

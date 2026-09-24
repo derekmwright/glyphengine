@@ -8,6 +8,8 @@
 //
 //	task bench                    # every scene
 //	task bench -- -scene grass    # one of them
+//	task bench -- -scene patches  # interleaved distinct-geometry submission
+//	task bench -- -scene stream   # interleaved streamed uploads
 //	task bench -- -json out.json  # for diffing between commits
 //
 // What it does not do is compare against a stored baseline. Frame cost depends
@@ -151,7 +153,7 @@ type result struct {
 func main() {
 	only := flag.String("scene", "", "run only the named scene")
 	jsonOut := flag.String("json", "", "also write results as JSON to this path")
-	repeat := flag.Int("repeat", 1, "run N times; patches retains interleaved samples, other scenes keep the fastest")
+	repeat := flag.Int("repeat", 1, "run N times; patches and stream retain interleaved samples, other scenes keep the fastest")
 	// extra exists so a sweep -- a resolution, a step count, a light count --
 	// can be measured with this tool's parsing and this tool's table instead
 	// of a one-off script that reports something subtly different. It is
@@ -162,6 +164,13 @@ func main() {
 	flag.Parse()
 	if *only == "patches" {
 		if err := runPatches(*repeat, *jsonOut, *extra); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+	if *only == "stream" {
+		if err := runStream(*repeat, *jsonOut, *extra); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
@@ -218,7 +227,7 @@ func run(sc scene) (*result, error) {
 		"GLYPHENGINE_BENCH_LABEL="+sc.name,
 	)
 
-	if strings.HasPrefix(sc.name, "lod") || strings.HasPrefix(sc.name, "patches") {
+	if strings.HasPrefix(sc.name, "lod") || strings.HasPrefix(sc.name, "patches") || strings.HasPrefix(sc.name, "stream") {
 		cmd.Env = append(cmd.Env, "GLYPHENGINE_FIXED_FRAME_TIME=16.667ms")
 	}
 
@@ -246,7 +255,14 @@ func run(sc scene) (*result, error) {
 		}
 		r.Values[fields[i]] = v
 	}
-	if p := regexp.MustCompile(`PATCHES\t([^\r\n]+)`).FindSubmatch(out); p != nil {
+	// PATCHES and STREAM are the same shape: one tab-separated line of
+	// key/value pairs a scene prints for columns the BENCH line has no name
+	// for. Both fold into the same map.
+	for _, tag := range []string{"PATCHES", "STREAM"} {
+		p := regexp.MustCompile(tag + `\t([^\r\n]+)`).FindSubmatch(out)
+		if p == nil {
+			continue
+		}
 		fields := strings.Split(string(p[1]), "\t")
 		for i := 0; i+1 < len(fields); i += 2 {
 			if v, err := strconv.ParseFloat(fields[i+1], 64); err == nil {
@@ -255,6 +271,49 @@ func run(sc scene) (*result, error) {
 		}
 	}
 	return r, nil
+}
+
+// runStream publishes 400 patches of 2048 triangles two per rendered frame,
+// three ways, interleaved A/B/C/A/B/C. A is the synchronous device-local path
+// the engine has always had, B the dynamic host-visible path a consumer uses
+// to avoid it, and C the batched asynchronous uploader.
+//
+// Interleaved with every sample retained, for the reason runPatches is: the
+// claim being tested is that batching removes a per-mesh stall, and keeping
+// the fastest run of each mode would let the machine decide which mode won.
+// The numbers that matter are the upload phase's CPU cost and the frame-time
+// spikes, not the mean frame time -- with vsync on a paced frame is 16.7 ms
+// whatever the upload did, and a stall shows up as the frames that are not.
+func runStream(repeat int, jsonOut, extra string) error {
+	if repeat < 2 {
+		repeat = 2
+	}
+	var results []result
+	for trial := 0; trial < repeat; trial++ {
+		for _, mode := range []string{"sync", "dynamic", "async"} {
+			if err := patchesGPUIdle(); err != nil {
+				return err
+			}
+			sc := scene{name: fmt.Sprintf("stream-%s-%d", mode, trial+1), dir: "27-streaming",
+				args: []string{"-mode", mode, "-count", "400", "-per-frame", "2", "-frames", "300"}}
+			sc.args = append(sc.args, strings.Fields(extra)...)
+			r, err := run(sc)
+			if err != nil {
+				return err
+			}
+			if err := patchesGPUIdle(); err != nil {
+				return fmt.Errorf("discard %s: %w", sc.name, err)
+			}
+			results = append(results, *r)
+			fmt.Printf("%s: upload %.3f ms/frame  frame max %.3f ms  p99 %.3f ms  median %.3f ms  cpu %.3f ms  gpu %.3f ms  gpu upload %.3f ms  buffers %.0f  skipped %.0f\n",
+				r.Scene, r.Values["upload_ms"], r.Values["frame_max_ms"], r.Values["frame_p99_ms"], r.Values["frame_median_ms"],
+				r.Values["cpu_total"], r.Values["gpu_total"], r.Values["gpu_upload"], r.Values["geometry_buffers"], r.Values["n_skipped"])
+		}
+	}
+	if jsonOut != "" {
+		writeJSON(jsonOut, results)
+	}
+	return nil
 }
 
 // A/B/C/A/B/C preserves all samples instead of selecting a favourable fastest

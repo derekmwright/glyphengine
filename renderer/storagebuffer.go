@@ -22,6 +22,11 @@ type StorageBuffer struct {
 	buffers   []core1_0.Buffer
 	memory    []core1_0.DeviceMemory
 	destroyed bool
+	// streamed records that this buffer has been the destination of an
+	// asynchronous upload. The frame graph's transfer node declares
+	// TransferDst only on buffers that have, so a program that never streams
+	// keeps the barriers it always had; see appendUploadGraph.
+	streamed bool
 }
 
 func (r *Renderer) CreateStorageBuffer(d StorageBufferDesc) (*StorageBuffer, error) {
@@ -72,6 +77,37 @@ func (r *Renderer) UploadStorageBuffer(b *StorageBuffer, data []byte) error {
 		return nil
 	}
 	return r.uploadBuffers(b.buffers, data)
+}
+
+// UploadStorageBufferAsync replaces a whole buffer or its prefix in every
+// history instance without waiting for the queue. The copy is recorded in the
+// next DrawFrame's batch, and the destination is a frame-graph resource, so
+// the compiler derives the barriers to whatever reads it.
+//
+// The ticket says when the data is actually there. Nothing stops a compute
+// pass from running against the buffer before then -- unlike a mesh, a storage
+// buffer has no draw to skip -- so a game that needs the new contents must
+// check it.
+func (r *Renderer) UploadStorageBufferAsync(b *StorageBuffer, data []byte) (*UploadTicket, error) {
+	if b == nil || b.r != r || b.destroyed {
+		return nil, fmt.Errorf("storage buffer: upload requires a live buffer of this renderer")
+	}
+	if len(data) > b.desc.Size {
+		return nil, fmt.Errorf("storage buffer %q: upload exceeds Size", b.desc.Name)
+	}
+	if len(data) == 0 {
+		return nil, fmt.Errorf("storage buffer %q: streamed upload is empty", b.desc.Name)
+	}
+	uploads := make([]bufferUpload, len(b.buffers))
+	for i, buf := range b.buffers {
+		uploads[i] = bufferUpload{buffer: buf, data: data}
+	}
+	// The declaration this buffer needs only exists after a rebuild, which
+	// prepareAppFrame does before the frame that records this copy.
+	if !b.streamed {
+		b.streamed, r.graphDirty = true, true
+	}
+	return r.queueUpload(uploads, nil, true, true)
 }
 
 func (r *Renderer) uploadBuffers(buffers []core1_0.Buffer, data []byte) error {

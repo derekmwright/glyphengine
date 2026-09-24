@@ -62,6 +62,9 @@ func (r *Renderer) extendAppGraph(f *frameGraph, g *framegraph.Graph) error {
 		f.declarations = append(f.declarations, n)
 		f.nodes = append(f.nodes, b)
 	}
+	// Ahead of GPU LOD selection, shadows and the scene: every streamed copy
+	// is in place before anything in this frame can read it.
+	r.appendUploadGraph(f, g, appendNode)
 	r.appendGPULODGraph(f, g, appendNode)
 	read := func(uses []framegraph.Use, id framegraph.ResourceID) []framegraph.Use {
 		for _, u := range uses {
@@ -228,9 +231,11 @@ func (r *Renderer) replaceAppGraph(deferOld bool) error {
 	}
 	f.sizeScratch(&r.cmdScratch)
 	if r.gpuTimer != nil {
-		r.gpuTimer.apps = r.appPasses
+		// The engine's own timed passes ride beside the application's; see
+		// engineTimings for the query slots they are budgeted.
+		r.gpuTimer.apps = append(append([]*AppPass{}, r.appPasses...), f.uploadTimer)
 		if f.lodTimer != nil {
-			r.gpuTimer.apps = append(append([]*AppPass{}, r.appPasses...), f.lodTimer)
+			r.gpuTimer.apps = append(r.gpuTimer.apps, f.lodTimer)
 		}
 		if r.gpuTimer.appSums == nil {
 			r.gpuTimer.appSums = make(map[*AppPass]appTimingSum)

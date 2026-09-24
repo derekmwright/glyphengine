@@ -111,6 +111,13 @@ type ResourceCounts struct {
 	LODSets         int
 	ImpostorAtlases int
 
+	// PendingUploads is how many staging buffers the streamed upload path is
+	// holding: copies enqueued, recorded, or waiting out the fence of the
+	// submission that carried them. It is the steady memory a streaming game
+	// pays over the synchronous path, and it should return to zero a few
+	// frames after the last AllocAsync.
+	PendingUploads int
+
 	// Deferred is how many destruction callbacks are queued behind the frames
 	// in flight. DestroyModel routes everything through that queue, so a
 	// count taken immediately after it still includes the model: the
@@ -136,6 +143,7 @@ func (r *Renderer) ResourceCounts() ResourceCounts {
 		InstanceSets:    len(r.instanceSets),
 		LODSets:         len(r.lodSets),
 		ImpostorAtlases: len(r.impostorAtlases),
+		PendingUploads:  r.stagingBuffers,
 		Deferred:        len(r.deferredDestroys),
 	}
 }

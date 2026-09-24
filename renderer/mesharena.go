@@ -92,12 +92,31 @@ func (r *Renderer) CreateMeshArena(d MeshArenaDesc) (*MeshArena, error) {
 
 // Alloc uploads both slices in one synchronous staged submission. It waits for
 // earlier graphics queue work and completion before returning, so callers may
-// discard the slices. Per-frame streaming should use the future #95 uploader.
+// discard the slices. Per-frame streaming should use AllocAsync.
 func (a *MeshArena) Alloc(vertices []Vertex, indices []uint32) (*Mesh, error) {
+	m, _, err := a.alloc(vertices, indices, false)
+	return m, err
+}
+
+// AllocAsync is Alloc without the queue wait: the range is reserved and the
+// data is copied into staging immediately, but the copy into the arena's
+// storage is recorded in the next DrawFrame's batch. The range is not drawn
+// until its ticket is ready. The caller may discard the slices on return.
+//
+// The arena's buffers are being read by the frames still in flight, so this
+// upload also carries the leading barrier that orders the copy after those
+// reads. See recordUploads.
+func (a *MeshArena) AllocAsync(vertices []Vertex, indices []uint32) (*Mesh, *UploadTicket, error) {
+	return a.alloc(vertices, indices, true)
+}
+
+func (a *MeshArena) alloc(vertices []Vertex, indices []uint32, async bool) (*Mesh, *UploadTicket, error) {
 	if a == nil {
-		return nil, fmt.Errorf("mesh arena: nil arena")
+		return nil, nil, fmt.Errorf("mesh arena: nil arena")
 	}
-	fail := func(reason string) (*Mesh, error) { return nil, fmt.Errorf("mesh arena %q: %s", a.desc.Name, reason) }
+	fail := func(reason string) (*Mesh, *UploadTicket, error) {
+		return nil, nil, fmt.Errorf("mesh arena %q: %s", a.desc.Name, reason)
+	}
 	if a.destroyed {
 		return fail("destroyed")
 	}
@@ -134,17 +153,25 @@ func (a *MeshArena) Alloc(vertices []Vertex, indices []uint32) (*Mesh, error) {
 		}
 	}
 	vdata := unsafe.Slice((*byte)(unsafe.Pointer(&vertices[0])), len(vertices)*sizeOf[Vertex]())
-	if err := a.r.uploadBufferRanges([]bufferUpload{{a.vertices.buffer, v.first * sizeOf[Vertex](), vdata}, {a.indices.buffer, i.first * width, idata}}); err != nil {
-		a.freeVertices.free(v)
-		a.freeIndices.free(i)
-		return nil, fmt.Errorf("mesh arena %q: upload: %w", a.desc.Name, err)
-	}
+	uploads := []bufferUpload{{a.vertices.buffer, v.first * sizeOf[Vertex](), vdata}, {a.indices.buffer, i.first * width, idata}}
 	center, radius := computeBoundingSphere(vertices)
 	m := &Mesh{vertexBuffer: a.vertices.buffer, indexBuffer: a.indices.buffer, VertexCount: len(vertices), IndexCount: len(indices), indexType: kind, firstIndex: uint32(i.first), vertexOffset: v.first, owner: a, BoundCenter: center, BoundRadius: radius}
+	var ticket *UploadTicket
+	var err error
+	if async {
+		ticket, err = a.r.queueUpload(uploads, m, false, true)
+	} else {
+		err = a.r.uploadBufferRanges(uploads)
+	}
+	if err != nil {
+		a.freeVertices.free(v)
+		a.freeIndices.free(i)
+		return nil, nil, fmt.Errorf("mesh arena %q: upload: %w", a.desc.Name, err)
+	}
 	a.live[m] = meshAllocation{v, i}
 	a.usedVertices += v.count
 	a.usedIndices += i.count
-	return m, nil
+	return m, ticket, nil
 }
 
 // Free retires a range after all frames in flight. Stats includes retiring
@@ -164,6 +191,12 @@ func (a *MeshArena) Free(m *Mesh) {
 		panic(fmt.Sprintf("mesh arena %q: unknown range", a.desc.Name))
 	}
 	m.destroyed = true
+	// A queued copy into this range is dropped if it has not been recorded;
+	// one already recorded still lands inside the span, which the free list
+	// does not hand back until after this same deferred countdown.
+	if m.upload != nil {
+		a.r.cancelUpload(m)
+	}
 	a.r.DeferDestroy(func() {
 		a.freeVertices.free(allocation.vertex)
 		a.freeIndices.free(allocation.index)

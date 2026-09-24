@@ -309,6 +309,23 @@ type Renderer struct {
 	// see ProvokeSkipNextFrame. False in every run that did not ask for it.
 	provokeSkip bool
 
+	// The streamed upload path (issue #95). uploadQueue holds copies enqueued
+	// since the last frame, uploadBatch the ones recorded into the frame being
+	// built, and uploadRetiring[f] the ones the submission in slot f carried,
+	// released when that slot's fence is next waited on. uploadBarriers and
+	// uploadRetirers are retained so a streaming frame allocates nothing; see
+	// upload.go.
+	uploadQueue      []pendingUpload
+	uploadBatch      []pendingUpload
+	uploadRetiring   [maxFramesInFlight][]pendingUpload
+	uploadRetirers   [maxFramesInFlight]func()
+	uploadBarriers   []core1_0.BufferMemoryBarrier
+	uploadTimer      *AppPass
+	streamDraws      []RenderObject
+	streamOverlays   []RenderObject
+	uploadPending    int // meshes whose upload has not landed; zero skips the draw filter
+	stagingBuffers   int // staging buffers the uploader is holding, for ResourceCounts
+	streaming        bool
 	meshes           []*Mesh
 	meshArenas       []*MeshArena
 	rangeBatching    bool
@@ -1943,6 +1960,13 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 	// done reading them).
 	r.flushJointUploads(f)
 
+	// Drop draws whose streamed geometry has not arrived, before anything
+	// reads the lists: the water split, LOD selection and range batching all
+	// walk them, and a half-uploaded buffer must not reach any of them.
+	skipped := 0
+	draws = r.dropStreaming(draws, &r.streamDraws, &skipped)
+	overlays = r.dropStreaming(overlays, &r.streamOverlays, &skipped)
+
 	// Which side of the water each blended draw is on, worked out once. The
 	// recorder needs it to decide where to record, and the particle instance
 	// buffer has to be partitioned on the same answer BEFORE it is uploaded --
@@ -2002,6 +2026,9 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 		r.trace.Str("outcome", "reset-error")
 		return err
 	}
+	// Claim the queued copies only now that the command buffer they will be
+	// recorded into exists and has been reset.
+	r.beginUploadBatch()
 	recordStart := time.Now()
 	err = recordCommandBuffer(r.deviceDriver, cmdBuf, r.sceneTargets[imageIndex], r.pipeline, r.litDoubleSidedPipeline, r.translucentPipeline, r.translucentDoubleSidedPipeline, r.skinnedTranslucentPipeline, r.instancedPipeline, r.instancedDoubleSidedPipeline, r.overlayPipeline, r.skyPipeline, r.skyVolumetricPipeline, r.starsPipeline, r.celestialPipeline, r.uiPipeline, r.msdfPipeline, r.skinnedPipeline, r.grassPipeline, r.waterPipeline, r.godRayPipeline, r.frameGraph, imageIndex, r.sceneColor,
 		func(cb core1_0.CommandBuffer) error { return r.recordClouds(cb, lighting, f) },
@@ -2011,6 +2038,9 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 		r.trace.Str("outcome", "record-error")
 		return err
 	}
+	// After the recorder, not before: recordCommandBuffer resets the counters
+	// at its start, so a count written earlier would be zeroed.
+	r.stats.UploadsSkipped = skipped
 
 	// Submit
 	fence := r.sync.inFlight[f]
@@ -2026,6 +2056,9 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 		r.trace.Str("outcome", "submit-error")
 		return err
 	}
+	// The batch is now the submission's; its staging and tickets retire with
+	// this slot's fence.
+	r.finishUploadBatch(f)
 
 	// Present
 	r.lastPresented = imageIndex
@@ -2264,6 +2297,7 @@ func (r *Renderer) Destroy() {
 	// is already idle, so run anything queued during the loop above.
 	r.flushAllDeferred()
 
+	r.destroyPendingUploads()
 	r.destroyMeshArenas()
 	for f := range r.rangeBatchFrames {
 		r.rangeBatchFrames[f].destroy(r)
