@@ -282,3 +282,16 @@ instead of GPU-free.
   half-built target" above. If you see a nil dereference on the frame after a
   `renderer: recreate ...` draw error on a tree older than that fix, this is
   it.
+
+## Comparing captures across toolchains
+
+`task determinism` and the visual gates compare PNG bytes, which is exact
+within one build. Across Go toolchains it is not: Go 1.27's PNG encoder
+writes different bytes than 1.26's for identical pixels, and the dependency
+bump that moved this repository to 1.27 (#121) rewrote all 22 documentation
+images with zero pixel differences. When a before/after comparison spans a
+toolchain change, compare pixels:
+
+```sh
+go run ./cmd/pngsame old.png new.png   # exit 0 only when every pixel matches
+```
