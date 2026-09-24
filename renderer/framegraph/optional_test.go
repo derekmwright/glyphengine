@@ -49,12 +49,12 @@ func TestOptionalWaterGroup(t *testing.T) {
 					SrcAccess: 0, DstAccess: core1_0.AccessTransferWrite,
 					OldLayout: core1_0.ImageLayoutUndefined, NewLayout: core1_0.ImageLayoutTransferDstOptimal},
 			})
-			equal(t, "copy becomes sampled", p.Steps[2].Barriers, []Barrier{{Resource: 2,
+			equal(t, "copy becomes sampled", p.Steps[2].Barriers[len(p.Steps[2].Barriers)-1:], []Barrier{{Resource: 2,
 				SrcStage: core1_0.PipelineStageTransfer, DstStage: core1_0.PipelineStageFragmentShader,
 				SrcAccess: core1_0.AccessTransferWrite, DstAccess: core1_0.AccessShaderRead,
 				OldLayout: core1_0.ImageLayoutTransferDstOptimal, NewLayout: core1_0.ImageLayoutShaderReadOnlyOptimal}})
 			equal(t, "water pass unchanged", p.Steps[2].RenderPass, mustBuild(t, waterGraph(msaa, false)).Steps[2].RenderPass)
-			equal(t, "prefilter needs no barrier", len(p.Steps[3].Barriers), 0)
+			equal(t, "prefilter entry and skipped scene visibility", len(p.Steps[3].Barriers), 2)
 			equal(t, "group restores resting layouts", len(p.FinalBarriers), 0)
 			equal(t, "repeat build", mustBuild(t, g), p)
 		})

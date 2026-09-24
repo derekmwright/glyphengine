@@ -300,18 +300,13 @@ func newResizeFixture(d *resizeFakeDriver, count int) *Renderer {
 		physicalDevice: h.physicalDevice(),
 		sc: &swapchainDetails{
 			imageViews: views,
+			images:     make([]core1_0.Image, count),
 			extent:     core1_0.Extent2D{Width: 640, Height: 360},
 		},
 		msaaSamples:         core1_0.Samples1,
 		descriptorPool:      h.descriptorPool(),
 		descriptorSetLayout: h.descriptorSetLayout(),
 		tonemapSetLayout:    h.descriptorSetLayout(),
-		bloomDownRenderPass: h.renderPass(),
-		bloomUpRenderPass:   h.renderPass(),
-		cloudRenderPass:     h.renderPass(),
-		renderPass:          h.renderPass(),
-		tonemapRenderPass:   h.renderPass(),
-		waterRenderPass:     h.renderPass(),
 		shadow:              shadow,
 		commandPool:         h.commandPool(),
 		graphicsQueue:       h.queue(),
@@ -320,13 +315,6 @@ func newResizeFixture(d *resizeFakeDriver, count int) *Renderer {
 	r.frameGraph, err = newFrameGraph(r.msaaSamples, core1_0.FormatD32SignedFloat, core1_0.FormatB8G8R8A8SRGB, count)
 	if err != nil {
 		panic(err)
-	}
-	// These passes predate the rebuild, just like the fixture's pipelines.
-	// Cache creation and destruction are counted separately below.
-	for _, step := range r.frameGraph.plan.Steps {
-		if step.RenderPass != nil {
-			r.frameGraph.cache[step.RenderPass.Key()] = h.renderPass()
-		}
 	}
 	return r
 }
@@ -375,7 +363,7 @@ func TestRebuildSwapchainTargetsSucceeds(t *testing.T) {
 	if err := attemptRebuild(r, r.sc.extent); err != nil {
 		t.Fatalf("rebuildSwapchainTargets: %v", err)
 	}
-	if r.depth == nil || r.hdr == nil || r.bloom == nil || r.framebuffers == nil || r.tonemapFramebuffers == nil {
+	if r.depth == nil || r.hdr == nil || r.bloom == nil || r.sceneTargets == nil || r.frameGraph.nodes[r.frameGraph.engine[graphTonemap]].targets == nil {
 		t.Fatal("a successful rebuild left a target nil")
 	}
 	if d.created["Image"] == 0 || d.destroyed["Image"] != 0 {
@@ -421,20 +409,6 @@ func TestRebuildSwapchainTargetsUnwindsOnFailure(t *testing.T) {
 			failAt:   count + 2,
 			wantStep: "recreate HDR targets",
 		},
-		{
-			// Scene framebuffers precede all graph framebuffers. Fail the
-			// second to exercise the constructor's partial unwind as well.
-			name:     "CreateFramebuffer fails inside the scene framebuffers",
-			failCall: "CreateFramebuffer",
-			failAt:   2,
-			wantStep: "recreate framebuffers",
-		},
-		{
-			name:     "CreateFramebuffer fails inside the graph",
-			failCall: "CreateFramebuffer",
-			failAt:   count + 3,
-			wantStep: "recreate graph framebuffers",
-		},
 	}
 
 	for _, tc := range tests {
@@ -458,9 +432,9 @@ func TestRebuildSwapchainTargetsUnwindsOnFailure(t *testing.T) {
 			// Destroy must be safe to call (nothing left half-built), and a
 			// later DrawFrame/recreateSwapchain must retry cleanly rather than
 			// read through a stale pointer.
-			if r.depth != nil || r.hdr != nil || r.bloom != nil || r.framebuffers != nil || r.tonemapFramebuffers != nil {
+			if r.depth != nil || r.hdr != nil || r.bloom != nil || r.sceneTargets != nil || r.frameGraph.nodes[r.frameGraph.engine[graphTonemap]].targets != nil {
 				t.Errorf("a field survived the unwind: depth=%v hdr=%v bloom=%v framebuffers=%v tonemapFramebuffers=%v",
-					r.depth, r.hdr, r.bloom, r.framebuffers, r.tonemapFramebuffers)
+					r.depth, r.hdr, r.bloom, r.sceneTargets, r.frameGraph.nodes[r.frameGraph.engine[graphTonemap]].targets)
 			}
 
 			assertBalanced(t, d)

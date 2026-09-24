@@ -30,8 +30,7 @@ type graphNode struct {
 	app                 *AppPass
 	byFrame             bool
 	name                string
-	pass                core1_0.RenderPass
-	framebuffers        []core1_0.Framebuffer
+	targets             []*renderingTarget
 	extent              core1_0.Extent2D
 	clears              []core1_0.ClearValue
 	record              func(*graphFrame)
@@ -54,7 +53,6 @@ type frameGraph struct {
 	depthNode                              int
 	plan                                   *framegraph.Plan
 	nodes                                  []graphNode
-	cache                                  map[framegraph.RenderPassKey]core1_0.RenderPass
 	images                                 []graphImage
 	hdr, depth, copy, color, ui, swapchain framegraph.ResourceID
 	bloom, uiBloom                         [bloomLevels]framegraph.ResourceID
@@ -86,7 +84,7 @@ type graphFrame struct {
 }
 
 func newFrameGraph(samples core1_0.SampleCountFlags, depthFormat, swapchainFormat core1_0.Format, instances int, owner ...*Renderer) (*frameGraph, error) {
-	f := &frameGraph{cache: make(map[framegraph.RenderPassKey]core1_0.RenderPass)}
+	f := &frameGraph{}
 	g := framegraph.New()
 	image := func(name string, scale float32) framegraph.ImageDesc {
 		return framegraph.ImageDesc{Name: name, Format: hdrFormat, Extent: framegraph.Extent{Scale: scale},
@@ -144,25 +142,15 @@ func newFrameGraph(samples core1_0.SampleCountFlags, depthFormat, swapchainForma
 		})
 	f.nodes[graphCopy].begin = PassWater
 	f.nodes[graphCopy].enabled = func(c *graphFrame) bool { return c.water }
-	order := []framegraph.ResourceID{f.color, f.depth}
-	if msaa {
-		order = append(order, f.hdr)
-	}
-	// No barrier puts the HDR image back after the copy. With MSAA the water
-	// pass declares its resolve target Undefined and rewrites it wholesale;
-	// without MSAA it loads from TransferSrc, matching the copy. Either way the
-	// render pass performs the transition, which is the compiler's rule for
-	// attachments and also the only legal option: a barrier to Undefined is not
-	// a transition Vulkan accepts. Every attachment loads rather than clears
-	// because the opaque scene and its depth are already there and must
-	// survive -- water composites over one and is occluded by the other.
+	// Water's entry barriers return copied HDR to its attachment layout and
+	// preserve the loaded scene color/depth. Its exit barriers restore the
+	// sampled HDR layout, keeping the copy/water optional group neutral.
 	//
 	// The blended draws after the surface are issue #45. Water writes no depth,
 	// so they depth-test against the opaque scene exactly as they did in the
 	// scene pass and composite over the surface rather than under it; blendSplit
 	// decides which draws come here and which stay before the copy (waterorder.go).
 	add(framegraph.Node{Name: "water", Kind: framegraph.Graphics, OptionalGroup: 1, Timed: true,
-		Dependencies: sceneEntryDependency(), AttachmentOrder: order,
 		Uses: []framegraph.Use{{Resource: f.color, Access: framegraph.ColorLoadWrite, HasResolve: msaa, ResolveTo: f.hdr},
 			{Resource: f.depth, Access: framegraph.DepthLoadWrite}, {Resource: f.copy, Access: framegraph.SampledRead}}},
 		func(c *graphFrame) {
@@ -173,7 +161,7 @@ func newFrameGraph(samples core1_0.SampleCountFlags, depthFormat, swapchainForma
 	f.nodes[graphWater].enabled = f.nodes[graphCopy].enabled
 	// The water pass resolves its MSAA colour on the way out, the same as the
 	// scene pass, and gets the same treatment: a bracket of its own around
-	// CmdEndRenderPass. It was briefly charged to PassOverWater instead, on the
+	// CmdEndRendering. It was briefly charged to PassOverWater instead, on the
 	// argument that otherwise 0.021 ms belonged to nobody -- true, and the wrong
 	// cure, because it made "overwater" read 0.021 ms on a lake with nothing in
 	// front of it. PassWater + PassOverWater + PassWaterResolve is what PassWater
@@ -248,13 +236,9 @@ func newFrameGraph(samples core1_0.SampleCountFlags, depthFormat, swapchainForma
 	// A DontCare load would leave the previous frame's HUD under this one, and
 	// an opaque clear would paint a black rectangle over the whole scene.
 	//
-	// The compiler includes the previous composite/prefilter reads in the
-	// incoming dependency and exposes this pass's writes on exit. 13-ui -glow on,
-	// 60 fixed frames: the old incoming-only override produced 60 RAW reports;
-	// deriving both dependencies produces none. The draw closure is
-	// recordUIComposite with a different destination and premultiplied output, the same
-	// function as the swapchain path so panels, nine-slice fills, texture mode
-	// and text keep behaving identically whichever one is on.
+	// Entry barriers wait for preceding composite/prefilter reads; exit barriers
+	// expose color writes to those consumers. TestUILayerAttachmentBarriers pins
+	// both directions. The draw closure is shared with the swapchain UI path.
 	add(framegraph.Node{Name: "UI layer", Kind: framegraph.Graphics, Optional: true, Timed: true,
 		Uses: []framegraph.Use{{Resource: f.ui, Access: framegraph.ColorWrite, Clear: &framegraph.Clear{}, Discard: true}}},
 		func(c *graphFrame) {
@@ -338,62 +322,6 @@ func newFrameGraph(samples core1_0.SampleCountFlags, depthFormat, swapchainForma
 	return f, nil
 }
 
-func (f *frameGraph) renderPass(d core1_0.DeviceDriver, node int) (core1_0.RenderPass, error) {
-	desc := f.plan.Steps[node].RenderPass
-	key := desc.Key()
-	if pass, ok := f.cache[key]; ok {
-		f.nodes[node].pass = pass
-		return pass, nil
-	}
-	info := graphRenderPassInfo(desc)
-	pass, _, err := d.CreateRenderPass(nil, info)
-	if err != nil {
-		return core1_0.RenderPass{}, fmt.Errorf("frame graph render pass %s: %w", f.nodes[node].name, err)
-	}
-	f.cache[key], f.nodes[node].pass = pass, pass
-	return pass, nil
-}
-
-func graphRenderPassInfo(desc *framegraph.RenderPassDesc) core1_0.RenderPassCreateInfo {
-	info := core1_0.RenderPassCreateInfo{SubpassDependencies: desc.Dependencies}
-	for _, a := range desc.Attachments {
-		info.Attachments = append(info.Attachments, core1_0.AttachmentDescription{
-			Format: a.Format, Samples: a.Samples, LoadOp: a.LoadOp, StoreOp: a.StoreOp,
-			StencilLoadOp: a.StencilLoadOp, StencilStoreOp: a.StencilStoreOp,
-			InitialLayout: a.InitialLayout, FinalLayout: a.FinalLayout})
-	}
-	sub := core1_0.SubpassDescription{PipelineBindPoint: core1_0.PipelineBindPointGraphics}
-	ref := func(i int) core1_0.AttachmentReference {
-		if i < 0 {
-			return core1_0.AttachmentReference{Attachment: -1}
-		}
-		return core1_0.AttachmentReference{Attachment: i, Layout: desc.Attachments[i].SubpassLayout}
-	}
-	resolve := false
-	for _, i := range desc.Resolve {
-		resolve = resolve || i >= 0
-	}
-	for i, color := range desc.Color {
-		sub.ColorAttachments = append(sub.ColorAttachments, ref(color))
-		if resolve {
-			sub.ResolveAttachments = append(sub.ResolveAttachments, ref(desc.Resolve[i]))
-		}
-	}
-	if desc.Depth >= 0 {
-		depth := ref(desc.Depth)
-		sub.DepthStencilAttachment = &depth
-	}
-	info.Subpasses = []core1_0.SubpassDescription{sub}
-	return info
-}
-
-func (f *frameGraph) destroyPasses(d core1_0.DeviceDriver) {
-	for key, pass := range f.cache {
-		d.DestroyRenderPass(pass, nil)
-		delete(f.cache, key)
-	}
-}
-
 func (f *frameGraph) sizeScratch(s *commandScratch) {
 	width := 0
 	scan := func(bs []framegraph.Barrier) {
@@ -408,6 +336,7 @@ func (f *frameGraph) sizeScratch(s *commandScratch) {
 	}
 	for _, step := range f.plan.Steps {
 		scan(step.Barriers)
+		scan(step.AfterBarriers)
 	}
 	scan(f.plan.FinalBarriers)
 	s.barriers = make([]core1_0.ImageMemoryBarrier, width)
@@ -445,9 +374,13 @@ func (f *frameGraph) barriers(c *graphFrame, bs []framegraph.Barrier) error {
 				instance = 0
 			}
 			desc := f.plan.Resources[b.Resource].Desc
+			aspect := desc.Aspect
+			if aspect&core1_0.ImageAspectDepth != 0 {
+				aspect |= depthAspect(desc.Format)
+			}
 			c.scratch.barriers[imageCount] = core1_0.ImageMemoryBarrier{OldLayout: b.OldLayout, NewLayout: b.NewLayout,
 				SrcQueueFamilyIndex: -1, DstQueueFamilyIndex: -1, Image: images[instance],
-				SubresourceRange: core1_0.ImageSubresourceRange{AspectMask: desc.Aspect, LevelCount: 1, LayerCount: int(desc.Layers)},
+				SubresourceRange: core1_0.ImageSubresourceRange{AspectMask: aspect, LevelCount: 1, LayerCount: int(desc.Layers)},
 				SrcAccessMask:    b.SrcAccess, DstAccessMask: b.DstAccess}
 			imageCount++
 			j++
@@ -486,8 +419,7 @@ func (f *frameGraph) executeSteps(first, last int) error {
 				return err
 			}
 			if step.RenderPass != nil {
-				if err := c.scratch.beginRenderPass(c.driver, c.cmd, core1_0.SubpassContentsInline, n.pass,
-					n.framebuffer(c), core1_0.Rect2D{Extent: n.extent}, n.clears...); err != nil {
+				if err := c.scratch.dynamic.CmdBeginRendering(c.cmd, n.target(c).info); err != nil {
 					return err
 				}
 			}
@@ -501,10 +433,15 @@ func (f *frameGraph) executeSteps(first, last int) error {
 			c.timer.begin(c.driver, c.cmd, c.frame, n.resolve)
 		}
 		if run && step.RenderPass != nil {
-			c.driver.CmdEndRenderPass(c.cmd)
+			c.scratch.dynamic.CmdEndRendering(c.cmd)
 		}
 		if n.resolve >= 0 {
 			c.timer.end(c.driver, c.cmd, c.frame, n.resolve)
+		}
+		if run {
+			if err := f.barriers(c, step.AfterBarriers); err != nil {
+				return err
+			}
 		}
 		if n.app != nil && n.app.desc.Timed {
 			c.timer.endApp(c.driver, c.cmd, c.frame, n.app)
@@ -516,10 +453,10 @@ func (f *frameGraph) executeSteps(first, last int) error {
 	return nil
 }
 
-func (n *graphNode) framebuffer(c *graphFrame) core1_0.Framebuffer {
+func (n *graphNode) target(c *graphFrame) *renderingTarget {
 	i := c.imageIndex
 	if n.byFrame {
-		i = c.frame % len(n.framebuffers)
+		i = c.frame % len(n.targets)
 	}
-	return n.framebuffers[i]
+	return n.targets[i]
 }

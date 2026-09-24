@@ -313,7 +313,7 @@ func createBloomPipeline(
 	deviceDriver core1_0.DeviceDriver,
 	sh ShaderSet,
 	frag []byte,
-	renderPass core1_0.RenderPass,
+	formats renderingFormats,
 	pipelineLayout core1_0.PipelineLayout,
 	additive bool,
 ) (core1_0.Pipeline, error) {
@@ -373,9 +373,8 @@ func createBloomPipeline(
 		DynamicState: &core1_0.PipelineDynamicStateCreateInfo{
 			DynamicStates: []core1_0.DynamicState{core1_0.DynamicStateViewport, core1_0.DynamicStateScissor},
 		},
-		Layout:     pipelineLayout,
-		RenderPass: renderPass,
-		Subpass:    0,
+		Layout:      pipelineLayout,
+		NextOptions: renderingOptions(formats),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, fmt.Errorf("create bloom pipeline: %w", err)
@@ -405,7 +404,7 @@ type bloomPass struct {
 }
 
 // recordBloomStage is one prefilter, downsample or upsample draw. Its node
-// supplies the render pass; level is the destination level in either direction.
+// supplies the rendering attachment; level is the destination level in either direction.
 func recordBloomStage(deviceDriver core1_0.DeviceDriver, cmdBuf core1_0.CommandBuffer, b bloomPass, level int, up bool, scratch *commandScratch) {
 	dst := b.extents[level]
 	source := b.sceneExtent

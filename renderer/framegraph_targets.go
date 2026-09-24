@@ -1,14 +1,14 @@
 package renderer
 
 import (
-	"fmt"
-
 	"github.com/derekmwright/glyphengine/renderer/framegraph"
 	"github.com/vkngwrapper/core/v3/core1_0"
+	"github.com/vkngwrapper/extensions/v3/khr_depth_stencil_resolve"
+	"github.com/vkngwrapper/extensions/v3/khr_dynamic_rendering"
 )
 
 // bindGraphTargets runs after allocation and on every swapchain rebuild. The
-// plan and cached render passes survive a resize; only physical bindings change.
+// plan and pipeline formats survive a resize; only physical bindings change.
 func (r *Renderer) bindGraphTargets() error { return r.bindGraphTargetsMode(true) }
 func (r *Renderer) bindGraphTargetsMode(primeLayouts bool) error {
 	f := r.frameGraph
@@ -42,12 +42,6 @@ func (r *Renderer) bindGraphTargetsMode(primeLayouts bool) error {
 			continue
 		}
 		n := &f.nodes[i]
-		var err error
-		n.pass, err = f.renderPass(r.deviceDriver, i)
-		if err != nil {
-			f.destroyFramebuffers(r.deviceDriver)
-			return err
-		}
 		size := step.RenderPass.Extent.Size(uint32(r.sc.extent.Width), uint32(r.sc.extent.Height))
 		n.extent = core1_0.Extent2D{Width: int(size[0]), Height: int(size[1])}
 		count := len(r.sc.imageViews)
@@ -57,27 +51,17 @@ func (r *Renderer) bindGraphTargetsMode(primeLayouts bool) error {
 				count = 2
 			}
 		}
+		n.targets = make([]*renderingTarget, count)
 		for instance := range count {
-			views := make([]core1_0.ImageView, len(step.RenderPass.Attachments))
-			for j, a := range step.RenderPass.Attachments {
-				binding := f.images[a.Resource].views
-				index := instance
-				if len(binding) == 1 {
-					index = 0
-				}
-				views[j] = binding[index]
+			t := f.bindRenderingTarget(i, instance)
+			if i == f.engine[graphTonemap] {
+				t.transition(r.sc.images[instance], core1_0.ImageAspectColor, 0, core1_0.ImageLayoutUndefined, framegraph.ImageLayoutPresentSrc)
 			}
-			fb, _, err := r.deviceDriver.CreateFramebuffer(nil, core1_0.FramebufferCreateInfo{
-				RenderPass: n.pass, Attachments: views, Width: n.extent.Width, Height: n.extent.Height, Layers: 1})
-			if err != nil {
-				f.destroyFramebuffers(r.deviceDriver)
-				return fmt.Errorf("frame graph framebuffer %s/%d: %w", n.name, instance, err)
-			}
-			n.framebuffers = append(n.framebuffers, fb)
+			n.targets[instance] = t
 		}
 	}
-	r.tonemapFramebuffers = f.nodes[f.engine[graphTonemap]].framebuffers
-	r.waterFramebuffers = f.nodes[f.engine[graphWater]].framebuffers
+	r.bindSceneTargets()
+
 	// These two targets can be skipped before their first use. Establish only
 	// their resting layout: copy and UI clear overwrite all pixels before reads.
 	if !primeLayouts {
@@ -95,27 +79,24 @@ func (r *Renderer) bindGraphTargetsMode(primeLayouts bool) error {
 	if len(prime) > 0 {
 		cmd, err := r.beginSingleTimeCommands()
 		if err != nil {
-			f.destroyFramebuffers(r.deviceDriver)
 			return err
 		}
 		err = r.deviceDriver.CmdPipelineBarrier(cmd, core1_0.PipelineStageTopOfPipe, core1_0.PipelineStageFragmentShader, 0, nil, nil, prime)
 		if err != nil {
 			r.deviceDriver.FreeCommandBuffers(cmd)
-			f.destroyFramebuffers(r.deviceDriver)
 			return err
 		}
 		if err = r.endSingleTimeCommands(cmd); err != nil {
-			f.destroyFramebuffers(r.deviceDriver)
 			return err
 		}
 	}
 	return nil
 }
 
-// Descriptor sets name the target views. Return them before framebuffers, and
-// framebuffers before image owners destroy those views. Each owner's destroy
-// also calls releaseSets so both constructor failure and normal teardown work.
-func (r *Renderer) releaseGraphFramebuffers() {
+// Descriptor sets name the target views. Return them before image owners
+// destroy those views, then discard the Go-side rendering bindings. Each owner
+// also calls releaseSets so constructor failure and normal teardown both work.
+func (r *Renderer) releaseGraphBindings() {
 	r.hdr.releaseSets(r.deviceDriver)
 	r.bloom.releaseSets(r.deviceDriver)
 	if r.uiLayer != nil {
@@ -127,12 +108,42 @@ func (r *Renderer) releaseGraphFramebuffers() {
 		r.sceneColor.texture.DescriptorSet = core1_0.DescriptorSet{}
 	}
 	for i := range r.frameGraph.nodes {
-		n := &r.frameGraph.nodes[i]
-		for _, fb := range n.framebuffers {
-			r.deviceDriver.DestroyFramebuffer(fb, nil)
-		}
-		n.framebuffers = nil
+		r.frameGraph.nodes[i].targets = nil
 	}
 	clear(r.frameGraph.images)
-	r.tonemapFramebuffers, r.waterFramebuffers = nil, nil
+	r.sceneTargets = nil
+}
+
+func (f *frameGraph) bindRenderingTarget(node, instance int) *renderingTarget {
+	n := &f.nodes[node]
+	t := newRenderingTarget(n.extent)
+	desc := f.plan.Steps[node].RenderPass
+	attachment := func(index int) khr_dynamic_rendering.RenderingAttachmentInfo {
+		a := desc.Attachments[index]
+		views := f.images[a.Resource].views
+		vi := instance
+		if len(views) == 1 {
+			vi = 0
+		}
+		var clear core1_0.ClearValue
+		if index < len(n.clears) {
+			clear = n.clears[index]
+		}
+		return attachmentInfo(views[vi], index == desc.Depth, a.LoadOp, a.StoreOp, clear)
+	}
+	for j, index := range desc.Color {
+		a := attachment(index)
+		if resolve := desc.Resolve[j]; resolve >= 0 {
+			a.ResolveMode = khr_depth_stencil_resolve.ResolveModeAverage
+			a.ResolveImageView = attachment(resolve).ImageView
+			a.ResolveImageLayout = desc.Attachments[resolve].SubpassLayout
+		}
+		t.info.ColorAttachments = append(t.info.ColorAttachments, a)
+	}
+	if desc.Depth >= 0 {
+		a := attachment(desc.Depth)
+		t.info.DepthAttachment = &a
+	}
+
+	return t
 }

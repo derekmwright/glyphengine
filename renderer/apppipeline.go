@@ -2,7 +2,7 @@ package renderer
 
 import "github.com/vkngwrapper/core/v3/core1_0"
 
-func createAppPipeline(deviceDriver core1_0.DeviceDriver, desc AppPassDesc, renderPass core1_0.RenderPass, set0Layout, shadowSetLayout, inputSetLayout core1_0.DescriptorSetLayout, samples core1_0.SampleCountFlags) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
+func createAppPipeline(deviceDriver core1_0.DeviceDriver, desc AppPassDesc, formats renderingFormats, set0Layout, shadowSetLayout, inputSetLayout core1_0.DescriptorSetLayout, samples core1_0.SampleCountFlags) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
 	vertSpv, fragSpv := desc.Vert, desc.Frag
 	extent := core1_0.Extent2D{Width: 1, Height: 1}
 	var bindings []core1_0.VertexInputBindingDescription
@@ -109,9 +109,8 @@ func createAppPipeline(deviceDriver core1_0.DeviceDriver, desc AppPassDesc, rend
 				core1_0.DynamicStateScissor,
 			},
 		},
-		Layout:     pipelineLayout,
-		RenderPass: renderPass,
-		Subpass:    0,
+		Layout:      pipelineLayout,
+		NextOptions: renderingOptions(formats),
 	})
 	if err != nil {
 		for _, p := range pipelines {

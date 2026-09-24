@@ -3,6 +3,7 @@ package renderer
 import (
 	"errors"
 	"fmt"
+	"github.com/vkngwrapper/extensions/v3/khr_get_physical_device_properties2"
 	"log"
 
 	core "github.com/vkngwrapper/core/v3"
@@ -20,7 +21,7 @@ import (
 const defaultApplicationName = "GlyphEngine Application"
 
 // createInstance initializes the Vulkan driver from GLFW's proc address and
-// creates a Vulkan 1.0 instance with the extensions required by GLFW.
+// creates a Vulkan 1.0 instance with surface and features2 query extensions.
 //
 // wantValidation asks for the Khronos validation layer. The returned
 // gotValidation reports whether it was actually enabled — a machine with only
@@ -51,8 +52,8 @@ func createInstance(w *window.Window, appName string, appVersion common.Version,
 		return nil, false, fmt.Errorf("load vulkan driver: %w", err)
 	}
 
-	extensions := w.GetRequiredInstanceExtensions()
-	log.Printf("GLFW required extensions: %v", extensions)
+	extensions := append(w.GetRequiredInstanceExtensions(), khr_get_physical_device_properties2.ExtensionName)
+	log.Printf("Required instance extensions: %v", extensions)
 
 	var layers []string
 	if wantValidation && resolveValidation(globalDriver) {
@@ -85,13 +86,17 @@ func createInstance(w *window.Window, appName string, appVersion common.Version,
 	// portability subset below is correctly not enabled because no conformant
 	// driver advertises it, and `task validate` stays silent.
 	var flags core1_0.InstanceCreateFlags
-	if available, _, err := globalDriver.AvailableExtensions(); err != nil {
-		log.Printf("instance extension enumeration failed (%v); continuing without portability enumeration", err)
-	} else if _, ok := available[khr_portability_enumeration.ExtensionName]; ok {
+	available, _, err := globalDriver.AvailableExtensions()
+	if err != nil {
+		return nil, false, fmt.Errorf("enumerate instance extensions: %w", err)
+	}
+	if _, ok := available[khr_get_physical_device_properties2.ExtensionName]; !ok {
+		return nil, false, fmt.Errorf("Vulkan runtime lacks VK_KHR_get_physical_device_properties2 required by VK_KHR_dynamic_rendering")
+	}
+	if _, ok := available[khr_portability_enumeration.ExtensionName]; ok {
 		extensions = append(extensions, khr_portability_enumeration.ExtensionName)
 		flags |= khr_portability_enumeration.InstanceCreateEnumeratePortability
-		log.Printf("Portability enumeration enabled (%s); portable devices will be listed",
-			khr_portability_enumeration.ExtensionName)
+		log.Printf("Portability enumeration enabled (%s); portable devices will be listed", khr_portability_enumeration.ExtensionName)
 	}
 
 	if appName == "" {

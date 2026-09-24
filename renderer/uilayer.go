@@ -23,7 +23,7 @@ import (
 // can replace UIFrag outright for an SDF halo on one element. Neither can make a
 // button bleed light onto the panel behind it, because that needs a pass.
 //
-// Off by default and free when off: no images, no framebuffers, no descriptor
+// Off by default and free when off: no images, no descriptor
 // sets and no recorded commands. See WithUIGlowLayer.
 
 // uiLayerTarget is everything the UI layer owns that is sized by the swapchain.
@@ -35,8 +35,7 @@ import (
 // chain's finest level at binding 1) written by the same writeTonemapSets, for
 // the same reason.
 //
-// The graph owns this single-sample, depth-free layer's framebuffers and
-// retires them before these image owners destroy their views.
+// The graph keeps Go-side bindings for this single-sample, depth-free layer.
 type uiLayerTarget struct {
 	color *hdrTarget
 	bloom *bloomTarget
@@ -52,7 +51,7 @@ func (t *uiLayerTarget) destroy(deviceDriver core1_0.DeviceDriver) {
 }
 
 // createUILayerTargets allocates the layer, its bloom chain and its resolve
-// sets at the current swapchain extent. The graph binds framebuffers afterwards.
+// sets at the current swapchain extent. The graph binds their views afterwards.
 //
 // Called from New when the option is on and again from recreateSwapchain, which
 // is why it is one function rather than a sequence inlined in both: a resize

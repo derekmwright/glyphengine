@@ -241,17 +241,17 @@ func (p SkyPalette) endpoints() [skyPaletteCount][3]float32 {
 }
 
 // shadowResources holds all Vulkan resources for the shadow mapping pass.
-// Per-frame images/views/framebuffers prevent read-write conflicts between frames in flight.
+// Per-frame images/views/bindings prevent read-write conflicts between frames in flight.
 // The sun shadow map is a 2D array image with one layer per cascade.
 type shadowResources struct {
 	images       [maxFramesInFlight]core1_0.Image
 	memories     [maxFramesInFlight]core1_0.DeviceMemory
-	cascadeViews [maxFramesInFlight][ShadowCascades]core1_0.ImageView // per-layer, for framebuffers
+	cascadeViews [maxFramesInFlight][ShadowCascades]core1_0.ImageView // per-layer, for rendering attachments
 	arrayViews   [maxFramesInFlight]core1_0.ImageView                 // 2D array view, for sampling
 	format       core1_0.Format
 	sampler      core1_0.Sampler
-	renderPass   core1_0.RenderPass
-	framebuffers [maxFramesInFlight][ShadowCascades]core1_0.Framebuffer
+	formats      renderingFormats
+	targets      [maxFramesInFlight][ShadowCascades]*renderingTarget
 
 	// Per-frame UBOs for the light VP matrix (persistently mapped)
 	lightVPBuffers        [maxFramesInFlight]core1_0.Buffer
@@ -302,10 +302,10 @@ type shadowResources struct {
 	// Point light cube shadow map
 	cubeImages       [maxFramesInFlight]core1_0.Image
 	cubeMemories     [maxFramesInFlight]core1_0.DeviceMemory
-	cubeFaceViews    [maxFramesInFlight][6]core1_0.ImageView // per-face 2D views for framebuffers
+	cubeFaceViews    [maxFramesInFlight][6]core1_0.ImageView // per-face 2D views for rendering attachments
 	cubeSamplerViews [maxFramesInFlight]core1_0.ImageView    // cube view for fragment sampling
 	cubeSampler      core1_0.Sampler                         // nearest, no comparison
-	cubeFramebuffers [maxFramesInFlight][6]core1_0.Framebuffer
+	cubeTargets      [maxFramesInFlight][6]*renderingTarget
 }
 
 // createShadowResources creates all resources for the shadow mapping pass.
@@ -381,7 +381,7 @@ func createShadowResources(
 			return nil, fmt.Errorf("bind shadow image %d: %w", i, err)
 		}
 
-		// Per-cascade layer views for framebuffer attachment
+		// Per-cascade layer views for rendering attachments
 		for c := 0; c < ShadowCascades; c++ {
 			s.cascadeViews[i][c], _, err = deviceDriver.CreateImageView(nil, core1_0.ImageViewCreateInfo{
 				Image:    s.images[i],
@@ -434,68 +434,10 @@ func createShadowResources(
 		return nil, fmt.Errorf("shadow sampler: %w", err)
 	}
 
-	// Depth-only render pass
-	s.renderPass, _, err = deviceDriver.CreateRenderPass(nil, core1_0.RenderPassCreateInfo{
-		Attachments: []core1_0.AttachmentDescription{
-			{
-				Format:         format,
-				Samples:        core1_0.Samples1,
-				LoadOp:         core1_0.AttachmentLoadOpClear,
-				StoreOp:        core1_0.AttachmentStoreOpStore,
-				StencilLoadOp:  core1_0.AttachmentLoadOpDontCare,
-				StencilStoreOp: core1_0.AttachmentStoreOpDontCare,
-				InitialLayout:  core1_0.ImageLayoutUndefined,
-				FinalLayout:    core1_0.ImageLayoutDepthStencilReadOnlyOptimal,
-			},
-		},
-		Subpasses: []core1_0.SubpassDescription{
-			{
-				PipelineBindPoint: core1_0.PipelineBindPointGraphics,
-				DepthStencilAttachment: &core1_0.AttachmentReference{
-					Attachment: 0,
-					Layout:     core1_0.ImageLayoutDepthStencilAttachmentOptimal,
-				},
-			},
-		},
-		SubpassDependencies: []core1_0.SubpassDependency{
-			{
-				// Previous frame's main pass reads must complete before we write.
-				SrcSubpass:    core1_0.SubpassExternal,
-				DstSubpass:    0,
-				SrcStageMask:  core1_0.PipelineStageFragmentShader,
-				DstStageMask:  core1_0.PipelineStageEarlyFragmentTests,
-				SrcAccessMask: core1_0.AccessShaderRead,
-				DstAccessMask: core1_0.AccessDepthStencilAttachmentWrite,
-			},
-			{
-				// Shadow writes must complete before main pass fragment reads.
-				SrcSubpass:    0,
-				DstSubpass:    core1_0.SubpassExternal,
-				SrcStageMask:  core1_0.PipelineStageLateFragmentTests,
-				DstStageMask:  core1_0.PipelineStageFragmentShader,
-				SrcAccessMask: core1_0.AccessDepthStencilAttachmentWrite,
-				DstAccessMask: core1_0.AccessShaderRead,
-			},
-		},
-	})
-	if err != nil {
-		s.destroy(deviceDriver)
-		return nil, fmt.Errorf("shadow render pass: %w", err)
-	}
-
-	for i := 0; i < maxFramesInFlight; i++ {
-		for c := 0; c < ShadowCascades; c++ {
-			s.framebuffers[i][c], _, err = deviceDriver.CreateFramebuffer(nil, core1_0.FramebufferCreateInfo{
-				RenderPass:  s.renderPass,
-				Attachments: []core1_0.ImageView{s.cascadeViews[i][c]},
-				Width:       ShadowMapSize,
-				Height:      ShadowMapSize,
-				Layers:      1,
-			})
-			if err != nil {
-				s.destroy(deviceDriver)
-				return nil, fmt.Errorf("shadow framebuffer %d/%d: %w", i, c, err)
-			}
+	s.formats = colorDepthFormats(0, format)
+	for i := range maxFramesInFlight {
+		for c := range ShadowCascades {
+			s.targets[i][c] = depthRenderingTarget(s.images[i], s.cascadeViews[i][c], s.format, c, core1_0.Extent2D{Width: ShadowMapSize, Height: ShadowMapSize})
 		}
 	}
 
@@ -726,18 +668,18 @@ func createShadowResources(
 	}
 
 	// Create shadow pipelines
-	s.pipeline, err = createShadowPipeline(deviceDriver, sh, s.renderPass, s.pipelineLayout, false)
+	s.pipeline, err = createShadowPipeline(deviceDriver, sh, s.formats, s.pipelineLayout, false)
 	if err != nil {
 		s.destroy(deviceDriver)
 		return nil, fmt.Errorf("shadow pipeline: %w", err)
 	}
 
-	s.instancedPipeline, err = createInstancedShadowPipeline(deviceDriver, sh, s.renderPass, s.pipelineLayout)
+	s.instancedPipeline, err = createInstancedShadowPipeline(deviceDriver, sh, s.formats, s.pipelineLayout)
 	if err != nil {
 		return nil, err
 	}
 
-	s.skinnedPipeline, err = createShadowPipeline(deviceDriver, sh, s.renderPass, s.skinnedPipelineLayout, true)
+	s.skinnedPipeline, err = createShadowPipeline(deviceDriver, sh, s.formats, s.skinnedPipelineLayout, true)
 	if err != nil {
 		s.destroy(deviceDriver)
 		return nil, fmt.Errorf("skinned shadow pipeline: %w", err)
@@ -794,7 +736,7 @@ func createShadowResources(
 			return nil, fmt.Errorf("bind cube shadow image %d: %w", i, err)
 		}
 
-		// Per-face 2D views for framebuffer attachment
+		// Per-face 2D views for rendering attachments
 		for face := 0; face < 6; face++ {
 			s.cubeFaceViews[i][face], _, err = deviceDriver.CreateImageView(nil, core1_0.ImageViewCreateInfo{
 				Image:    s.cubeImages[i],
@@ -832,19 +774,8 @@ func createShadowResources(
 			return nil, fmt.Errorf("cube sampler view %d: %w", i, err)
 		}
 
-		// Per-face framebuffers (reuse shadow render pass)
-		for face := 0; face < 6; face++ {
-			s.cubeFramebuffers[i][face], _, err = deviceDriver.CreateFramebuffer(nil, core1_0.FramebufferCreateInfo{
-				RenderPass:  s.renderPass,
-				Attachments: []core1_0.ImageView{s.cubeFaceViews[i][face]},
-				Width:       PointShadowMapSize,
-				Height:      PointShadowMapSize,
-				Layers:      1,
-			})
-			if err != nil {
-				s.destroy(deviceDriver)
-				return nil, fmt.Errorf("cube framebuffer %d/%d: %w", i, face, err)
-			}
+		for face := range 6 {
+			s.cubeTargets[i][face] = depthRenderingTarget(s.cubeImages[i], s.cubeFaceViews[i][face], s.format, face, core1_0.Extent2D{Width: PointShadowMapSize, Height: PointShadowMapSize})
 		}
 	}
 
@@ -960,20 +891,20 @@ func createShadowResources(
 // the same 128 bytes, and the instanced vertex stage simply reads the first
 // matrix as a view-projection rather than a view-projection-model. Only the
 // vertex input state differs.
-func createInstancedShadowPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, layout core1_0.PipelineLayout) (core1_0.Pipeline, error) {
-	return createShadowPipelineWithInput(deviceDriver, sh, sh.ShadowInstancedVert, renderPass, layout,
+func createInstancedShadowPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, formats renderingFormats, layout core1_0.PipelineLayout) (core1_0.Pipeline, error) {
+	return createShadowPipelineWithInput(deviceDriver, sh, sh.ShadowInstancedVert, formats, layout,
 		[]core1_0.VertexInputBindingDescription{vertexBindingDescription(), instanceBindingDescription()},
 		instanceAttributeDescriptions())
 }
 
 // createShadowPipeline creates a depth-only pipeline for the shadow pass.
-func createShadowPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, layout core1_0.PipelineLayout, skinned bool) (core1_0.Pipeline, error) {
+func createShadowPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, formats renderingFormats, layout core1_0.PipelineLayout, skinned bool) (core1_0.Pipeline, error) {
 	if skinned {
-		return createShadowPipelineWithInput(deviceDriver, sh, sh.ShadowSkinnedVert, renderPass, layout,
+		return createShadowPipelineWithInput(deviceDriver, sh, sh.ShadowSkinnedVert, formats, layout,
 			[]core1_0.VertexInputBindingDescription{skinnedVertexBindingDescription()},
 			skinnedVertexAttributeDescriptions())
 	}
-	return createShadowPipelineWithInput(deviceDriver, sh, sh.ShadowVert, renderPass, layout,
+	return createShadowPipelineWithInput(deviceDriver, sh, sh.ShadowVert, formats, layout,
 		[]core1_0.VertexInputBindingDescription{vertexBindingDescription()},
 		vertexAttributeDescriptions())
 }
@@ -981,7 +912,7 @@ func createShadowPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, rende
 // createShadowPipelineWithInput is createShadowPipeline with the vertex stage
 // and vertex input state supplied, so the skinned and instanced variants
 // differ only in those two things.
-func createShadowPipelineWithInput(deviceDriver core1_0.DeviceDriver, sh ShaderSet, vertSpv []byte, renderPass core1_0.RenderPass, layout core1_0.PipelineLayout, bindings []core1_0.VertexInputBindingDescription, attrDescs []core1_0.VertexInputAttributeDescription) (core1_0.Pipeline, error) {
+func createShadowPipelineWithInput(deviceDriver core1_0.DeviceDriver, sh ShaderSet, vertSpv []byte, formats renderingFormats, layout core1_0.PipelineLayout, bindings []core1_0.VertexInputBindingDescription, attrDescs []core1_0.VertexInputAttributeDescription) (core1_0.Pipeline, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
 		Code: bytesToUint32Slice(vertSpv),
 	})
@@ -1045,9 +976,8 @@ func createShadowPipelineWithInput(deviceDriver core1_0.DeviceDriver, sh ShaderS
 				core1_0.DynamicStateScissor,
 			},
 		},
-		Layout:     layout,
-		RenderPass: renderPass,
-		Subpass:    0,
+		Layout:      layout,
+		NextOptions: renderingOptions(formats),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, err
@@ -1270,7 +1200,7 @@ func ComputeCubeFaceVP(lightPos mgl32.Vec3, lightRange float32, face int) mgl32.
 // ImageLayoutUndefined, but the descriptor written at setup time declares
 // ImageLayoutDepthStencilReadOnlyOptimal and the lit fragment shader samples
 // them on every draw. The transition that would reconcile the two happens when
-// the cube render pass begins — and that whole pass is skipped unless a point
+// cube rendering begins — and that whole pass is skipped unless a point
 // light is actually casting (PointRange > 0). A scene with no point light
 // therefore sampled an Undefined-layout image on every frame for the life of
 // the process: undefined behavior per spec, and six validation errors per
@@ -1290,7 +1220,7 @@ func (s *shadowResources) initCubeShadowLayout(r *Renderer) error {
 	}
 
 	cubeRange := core1_0.ImageSubresourceRange{
-		AspectMask:     core1_0.ImageAspectDepth,
+		AspectMask:     depthAspect(s.format),
 		BaseMipLevel:   0,
 		LevelCount:     1,
 		BaseArrayLayer: 0,
@@ -1347,9 +1277,6 @@ func (s *shadowResources) destroy(deviceDriver core1_0.DeviceDriver) {
 	}
 	for i := 0; i < maxFramesInFlight; i++ {
 		for face := 0; face < 6; face++ {
-			if s.cubeFramebuffers[i][face].Handle() != 0 {
-				deviceDriver.DestroyFramebuffer(s.cubeFramebuffers[i][face], nil)
-			}
 			if s.cubeFaceViews[i][face].Handle() != 0 {
 				deviceDriver.DestroyImageView(s.cubeFaceViews[i][face], nil)
 			}
@@ -1429,16 +1356,6 @@ func (s *shadowResources) destroy(deviceDriver core1_0.DeviceDriver) {
 		if s.lightVPBuffers[i].Handle() != 0 {
 			deviceDriver.DestroyBuffer(s.lightVPBuffers[i], nil)
 		}
-	}
-	for i := 0; i < maxFramesInFlight; i++ {
-		for c := 0; c < ShadowCascades; c++ {
-			if s.framebuffers[i][c].Handle() != 0 {
-				deviceDriver.DestroyFramebuffer(s.framebuffers[i][c], nil)
-			}
-		}
-	}
-	if s.renderPass.Handle() != 0 {
-		deviceDriver.DestroyRenderPass(s.renderPass, nil)
 	}
 	if s.sampler.Handle() != 0 {
 		deviceDriver.DestroySampler(s.sampler, nil)

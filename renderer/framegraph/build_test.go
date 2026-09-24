@@ -83,28 +83,6 @@ func errorContains(t *testing.T, g *Graph, node, resource, rule string) {
 	}
 }
 
-func sceneDependency() []core1_0.SubpassDependency {
-	// Literal copied from sceneEntryDependency, independent of derivation.
-	return []core1_0.SubpassDependency{{
-		SrcSubpass: core1_0.SubpassExternal, DstSubpass: 0,
-		SrcStageMask: core1_0.PipelineStageTransfer | core1_0.PipelineStageColorAttachmentOutput |
-			core1_0.PipelineStageEarlyFragmentTests | core1_0.PipelineStageLateFragmentTests,
-		DstStageMask:  core1_0.PipelineStageFragmentShader | core1_0.PipelineStageColorAttachmentOutput | core1_0.PipelineStageEarlyFragmentTests,
-		SrcAccessMask: core1_0.AccessTransferWrite | core1_0.AccessColorAttachmentWrite | core1_0.AccessDepthStencilAttachmentWrite,
-		DstAccessMask: core1_0.AccessShaderRead | core1_0.AccessColorAttachmentRead | core1_0.AccessColorAttachmentWrite |
-			core1_0.AccessDepthStencilAttachmentRead | core1_0.AccessDepthStencilAttachmentWrite,
-	}, {
-		SrcSubpass: 0, DstSubpass: core1_0.SubpassExternal,
-		SrcStageMask: core1_0.PipelineStageColorAttachmentOutput |
-			core1_0.PipelineStageEarlyFragmentTests | core1_0.PipelineStageLateFragmentTests,
-		DstStageMask: core1_0.PipelineStageFragmentShader | core1_0.PipelineStageColorAttachmentOutput |
-			core1_0.PipelineStageEarlyFragmentTests | core1_0.PipelineStageLateFragmentTests | core1_0.PipelineStageTransfer,
-		SrcAccessMask: core1_0.AccessColorAttachmentWrite | core1_0.AccessDepthStencilAttachmentWrite,
-		DstAccessMask: core1_0.AccessShaderRead | core1_0.AccessColorAttachmentRead | core1_0.AccessColorAttachmentWrite |
-			core1_0.AccessDepthStencilAttachmentRead | core1_0.AccessDepthStencilAttachmentWrite | core1_0.AccessTransferRead,
-	}}
-}
-
 func waterGraph(msaa bool, optional bool) *Graph {
 	g := New()
 	hdr := colorImage("HDR")
@@ -127,11 +105,7 @@ func waterGraph(msaa bool, optional bool) *Graph {
 		{Resource: color, Access: ColorWrite, HasResolve: msaa, ResolveTo: 0}, {Resource: 1, Access: DepthWrite},
 	}})
 	g.AddNode(Node{Name: "copy", Kind: Transfer, Uses: []Use{{Resource: 0, Access: TransferSrc}, {Resource: 2, Access: TransferDst}}})
-	var order []ResourceID
-	if msaa {
-		order = []ResourceID{color, 1, 0}
-	}
-	g.AddNode(Node{Name: "water", Kind: Graphics, Optional: optional, Timed: true, Dependencies: sceneDependency(), AttachmentOrder: order, Uses: []Use{
+	g.AddNode(Node{Name: "water", Kind: Graphics, Optional: optional, Timed: true, Uses: []Use{
 		{Resource: color, Access: ColorLoadWrite, HasResolve: msaa, ResolveTo: 0},
 		{Resource: 1, Access: DepthLoadWrite}, {Resource: 2, Access: SampledRead},
 	}})
@@ -153,22 +127,22 @@ func TestWaterCopyBarriersMatchHandWrittenOnes(t *testing.T) {
 					SrcAccess: 0, DstAccess: core1_0.AccessTransferWrite,
 					OldLayout: core1_0.ImageLayoutUndefined, NewLayout: core1_0.ImageLayoutTransferDstOptimal},
 			})
-			equal(t, "trailing copy barrier", p.Steps[2].Barriers, []Barrier{{Resource: 2,
+			equal(t, "trailing copy barrier", p.Steps[2].Barriers[len(p.Steps[2].Barriers)-1:], []Barrier{{Resource: 2,
 				SrcStage: core1_0.PipelineStageTransfer, DstStage: core1_0.PipelineStageFragmentShader,
 				SrcAccess: core1_0.AccessTransferWrite, DstAccess: core1_0.AccessShaderRead,
 				OldLayout: core1_0.ImageLayoutTransferDstOptimal, NewLayout: core1_0.ImageLayoutShaderReadOnlyOptimal}})
 			rp := p.Steps[2].RenderPass
-			equal(t, "dependencies", rp.Dependencies, sceneDependency())
 			colorInitial, colorFinal := core1_0.ImageLayoutTransferSrcOptimal, core1_0.ImageLayoutShaderReadOnlyOptimal
 			colorStore := core1_0.AttachmentStoreOpStore
 			depthIndex := 1
 			if msaa {
+				depthIndex = 2
 				colorInitial, colorFinal = core1_0.ImageLayoutColorAttachmentOptimal, core1_0.ImageLayoutColorAttachmentOptimal
 				colorStore = core1_0.AttachmentStoreOpDontCare
-				equal(t, "resolve index", rp.Resolve, []int{2})
-				equal(t, "resolve discard", rp.Attachments[2].InitialLayout, core1_0.ImageLayoutUndefined)
-				equal(t, "resolve final", rp.Attachments[2].FinalLayout, core1_0.ImageLayoutShaderReadOnlyOptimal)
-				equal(t, "resolve load", rp.Attachments[2].LoadOp, core1_0.AttachmentLoadOpDontCare)
+				equal(t, "resolve index", rp.Resolve, []int{1})
+				equal(t, "resolve discard", rp.Attachments[1].InitialLayout, core1_0.ImageLayoutUndefined)
+				equal(t, "resolve final", rp.Attachments[1].FinalLayout, core1_0.ImageLayoutShaderReadOnlyOptimal)
+				equal(t, "resolve load", rp.Attachments[1].LoadOp, core1_0.AttachmentLoadOpDontCare)
 			}
 			for _, tc := range []struct {
 				index          int
@@ -224,13 +198,12 @@ func bloomGraph(levels int) *Graph {
 // instead of zero, proving the no-barrier assertion depends on synchronization.
 // Removing outgoingDependency on 2026-09-24 fails the pinned pair: one
 // dependency instead of two (exit stages 1024 -> 1152, accesses 256 -> 416).
-func TestBloomChainNeedsNoBarriers(t *testing.T) {
+func TestBloomChainAttachmentBarriers(t *testing.T) {
 	// Five targets is today's prefilter + four down + four up; six targets also
 	// checks a prefilter + five down + five up without baking in a chain length.
 	for _, levels := range []int{5, 6} {
 		p := mustBuild(t, bloomGraph(levels))
 		for i, step := range p.Steps {
-			equal(t, "barrier count", len(step.Barriers), 0)
 			if i == 0 || i == len(p.Steps)-1 {
 				continue
 			}
@@ -242,19 +215,11 @@ func TestBloomChainNeedsNoBarriers(t *testing.T) {
 			equal(t, "load", rp.Attachments[0].LoadOp, load)
 			equal(t, "initial", rp.Attachments[0].InitialLayout, initial)
 			equal(t, "final", rp.Attachments[0].FinalLayout, core1_0.ImageLayoutShaderReadOnlyOptimal)
-			equal(t, "dependency", rp.Dependencies, []core1_0.SubpassDependency{{
-				SrcSubpass: core1_0.SubpassExternal, DstSubpass: 0,
-				SrcStageMask:  core1_0.PipelineStageColorAttachmentOutput | core1_0.PipelineStageFragmentShader,
-				DstStageMask:  core1_0.PipelineStageFragmentShader | core1_0.PipelineStageColorAttachmentOutput,
-				SrcAccessMask: core1_0.AccessColorAttachmentWrite | core1_0.AccessShaderRead,
-				DstAccessMask: core1_0.AccessShaderRead | core1_0.AccessColorAttachmentRead | core1_0.AccessColorAttachmentWrite,
-			}, {
-				SrcSubpass: 0, DstSubpass: core1_0.SubpassExternal,
-				SrcStageMask:  core1_0.PipelineStageColorAttachmentOutput,
-				DstStageMask:  core1_0.PipelineStageFragmentShader | core1_0.PipelineStageColorAttachmentOutput,
-				SrcAccessMask: core1_0.AccessColorAttachmentWrite,
-				DstAccessMask: core1_0.AccessShaderRead | core1_0.AccessColorAttachmentRead | core1_0.AccessColorAttachmentWrite,
-			}})
+			equal(t, "attachment exit barrier", len(step.AfterBarriers), 1)
+			if len(step.Barriers) == 0 {
+				t.Fatal("missing attachment entry barrier")
+			}
+
 		}
 		equal(t, "final barriers", len(p.FinalBarriers), 0)
 	}
@@ -269,17 +234,11 @@ func TestTonemapPresentsSwapchain(t *testing.T) {
 	d := colorImage("swapchain")
 	d.Imported, d.Format = true, core1_0.FormatB8G8R8A8SRGB
 	id := g.AddImage(d)
-	deps := []core1_0.SubpassDependency{{SrcSubpass: core1_0.SubpassExternal, DstSubpass: 0,
-		SrcStageMask: core1_0.PipelineStageColorAttachmentOutput, DstStageMask: core1_0.PipelineStageFragmentShader | core1_0.PipelineStageColorAttachmentOutput,
-		SrcAccessMask: core1_0.AccessColorAttachmentWrite, DstAccessMask: core1_0.AccessShaderRead | core1_0.AccessColorAttachmentRead | core1_0.AccessColorAttachmentWrite},
-		{SrcSubpass: 0, DstSubpass: core1_0.SubpassExternal,
-			SrcStageMask: core1_0.PipelineStageColorAttachmentOutput, DstStageMask: core1_0.PipelineStageColorAttachmentOutput | core1_0.PipelineStageBottomOfPipe,
-			SrcAccessMask: core1_0.AccessColorAttachmentWrite, DstAccessMask: core1_0.AccessColorAttachmentRead | core1_0.AccessColorAttachmentWrite}}
 	g.AddNode(Node{Name: "tonemap", Kind: Graphics, Uses: []Use{{Resource: id, Access: ColorWrite}}})
 	g.AddNode(Node{Name: "present", Kind: Legacy, Uses: []Use{{Resource: id, Access: Present}}})
 	p := mustBuild(t, g)
 	equal(t, "swapchain final", p.Steps[0].RenderPass.Attachments[0].FinalLayout, core1_0.ImageLayout(1000001002))
-	equal(t, "dependencies", p.Steps[0].RenderPass.Dependencies, deps)
+	equal(t, "present transition", p.Steps[0].AfterBarriers[0].NewLayout, ImageLayoutPresentSrc)
 	equal(t, "present barrier count", len(p.Steps[1].Barriers), 0)
 	equal(t, "resting", p.Resources[0].Resting, ImageLayoutPresentSrc)
 	for _, access := range []Access{Present, SampledRead, ColorWrite} {
@@ -447,7 +406,6 @@ func TestInvalidDeclarations(t *testing.T) {
 		{"instances", "instances", func(g *Graph) { g.images[0].Instances = -1 }},
 		{"array", "arrays", func(g *Graph) { g.images[0].Layers = 2 }},
 		{"kind", "node kind", func(g *Graph) { g.nodes[0].Kind = 0 }},
-		{"dependency kind", "dependencies require", func(g *Graph) { g.nodes[0].Kind = Legacy; g.nodes[0].Dependencies = []core1_0.SubpassDependency{} }},
 		{"resource", "unknown resource", func(g *Graph) { g.nodes[0].Uses[0].Resource = 7 }},
 		{"negative resource", "unknown resource", func(g *Graph) { g.nodes[0].Uses[0].Resource = -1 }},
 		{"access", "unknown access", func(g *Graph) { g.nodes[0].Uses[0].Access = 0 }},
@@ -473,14 +431,6 @@ func TestInvalidDeclarations(t *testing.T) {
 			g.images[0].Samples = core1_0.Samples4
 			g.AddImage(colorImage("resolved"))
 			g.nodes[0].Uses = []Use{{Access: ColorWrite, HasResolve: true, ResolveTo: 1}, {Resource: 1, Access: SampledRead}}
-		}},
-		{"order kind", "order requires", func(g *Graph) { g.nodes[0].Kind = Legacy; g.nodes[0].AttachmentOrder = []ResourceID{0} }},
-		{"order count", "every attachment", func(g *Graph) { g.nodes[0].AttachmentOrder = []ResourceID{} }},
-		{"order unknown", "unknown or duplicate", func(g *Graph) { g.nodes[0].AttachmentOrder = []ResourceID{7} }},
-		{"order duplicate", "unknown or duplicate", func(g *Graph) {
-			g.AddImage(colorImage("other"))
-			g.nodes[0].Uses = append(g.nodes[0].Uses, Use{Resource: 1, Access: ColorWrite})
-			g.nodes[0].AttachmentOrder = []ResourceID{0, 0}
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -511,7 +461,6 @@ func TestBuildIsDeterministic(t *testing.T) {
 	equal(t, "timed slots", a.Timed, []NodeID{0, 2})
 	b := mustBuild(t, g)
 	a.Resources[0].Desc.Name = "changed"
-	a.Steps[2].RenderPass.Dependencies[0].DstAccessMask = 0
 	a.Steps[2].RenderPass.Attachments[0].Format = 0
 	equal(t, "owned plans", mustBuild(t, g), b)
 }

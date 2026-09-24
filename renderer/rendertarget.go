@@ -163,8 +163,8 @@ func (r *Renderer) DestroyRenderTarget(t *RenderTarget) {
 	}
 	r.appTargets = slices.DeleteFunc(r.appTargets, func(x *RenderTarget) bool { return x == t })
 	r.graphDirty = true
-	// Graph framebuffers must retire before their attachment views. The graph
-	// rebuild queues those first, then pending targets, after the waited fence.
+	// Rebuild Go-side graph bindings before retiring the target views used by
+	// preceding submissions. The existing deferred queue owns GPU lifetime.
 	r.retiredTargets = append(r.retiredTargets, t)
 }
 
@@ -292,6 +292,9 @@ func (r *Renderer) newAppImages(format core1_0.Format, aspect core1_0.ImageAspec
 				return nil, err
 			}
 		}
+	}
+	if aspect&core1_0.ImageAspectDepth != 0 {
+		aspect |= depthAspect(format)
 	}
 	if err = r.primeAppImages(t, aspect, opts.sampled); err != nil {
 		return nil, err

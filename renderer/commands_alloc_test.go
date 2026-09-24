@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/vkngwrapper/core/v3/core1_0"
+	"github.com/vkngwrapper/extensions/v3/khr_dynamic_rendering"
 )
 
 // noClouds stands in for the real cloud pass, which lives in a different file
@@ -21,8 +22,9 @@ func (fx *frame) record(d core1_0.DeviceDriver, frameIndex int) error {
 		fx.initGraph()
 	}
 	fx.bindGraph()
+	fx.scratch.dynamic = d.(khr_dynamic_rendering.ExtensionDriver)
 	return recordCommandBuffer(
-		d, fx.cmdBuf, fx.renderPass, fx.framebuffer, fx.pipeline, fx.litDoubleSidedPipeline,
+		d, fx.cmdBuf, fx.target, fx.pipeline, fx.litDoubleSidedPipeline,
 		fx.translucentPipeline, fx.translucentDoubleSidedPipeline, fx.skinnedTranslucentPipel,
 		fx.instancedPipeline, fx.instancedDoubleSidedPipeline, fx.overlayPipeline, fx.skyPipeline, fx.skyVolumetricPipeline,
 		fx.starsPipeline, fx.celestialPipeline, fx.uiPipeline, fx.msdfPipeline, fx.skinnedPipeline,
@@ -193,7 +195,12 @@ func benchName(n int) string {
 // calls (3299 -> 3317); application/UI/volumetric additions are unchanged.
 // Removing only that fix restores 0x0db1df67cfc2a68b and fails
 // TestPointShadowUsesInstanceTransforms (6 instances, want 18).
-const goldenStreamHash = Hasher(0x129eaca6a2990cb5)
+// Dynamic rendering (#120): full-stream hashes include explicit attachment
+// barriers and CmdBegin/EndRendering. Base 3317 -> 3342 calls; depth 3353,
+// application 3382, compute 3390, glow 3442, volumetric 3348, GPU LOD 1746.
+// TestMigrationDrawStreams independently pins every non-rendering/barrier call
+// to the measured pre-migration stream, including all draw-side arguments.
+const goldenStreamHash = Hasher(0x8c25083b2f66a28d)
 
 // TestRecordCommandBufferStreamIsUnchanged is the GPU-free half of "nothing
 // changed": every driver call the recorder makes, folded in order with its
@@ -261,7 +268,7 @@ func withVolumetricLight(fx *frame) *frame {
 // viewport, set scissor, bind descriptor sets, push constants, draw, and
 // nothing else.
 // Same regular-sky binding change as goldenStreamHash (#98), still 3305 calls.
-const goldenVolumetricStreamHash = Hasher(0x0771fe136cb379c1)
+const goldenVolumetricStreamHash = Hasher(0x38828a7256acebbd)
 
 // TestVolumetricSkyDrawIsRecorded is the volumetrics-on half of "nothing
 // changed": the extra draw reaches the driver, with the argument values it

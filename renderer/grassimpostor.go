@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-gl/mathgl/mgl32"
 	"github.com/vkngwrapper/core/v3/core1_0"
+	"github.com/vkngwrapper/extensions/v3/khr_dynamic_rendering"
 )
 
 // grassImpostor is the baked atlas that stands in for grass meshes at distance.
@@ -36,11 +37,11 @@ type grassImpostor struct {
 	memory core1_0.DeviceMemory
 	view   core1_0.ImageView
 	set    core1_0.DescriptorSet
-	fb     core1_0.Framebuffer
+	target *renderingTarget
 
-	sampler    core1_0.Sampler
-	renderPass core1_0.RenderPass
-	pipeline   core1_0.Pipeline
+	sampler  core1_0.Sampler
+	formats  renderingFormats
+	pipeline core1_0.Pipeline
 
 	extent core1_0.Extent2D
 	cells  int // one per variant, laid out left to right
@@ -139,13 +140,7 @@ func (r *Renderer) recordGrassBake(gs *GrassSystem, imp *grassImpostor, cellSize
 		return err
 	}
 
-	if err := r.deviceDriver.CmdBeginRenderPass(cmdBuf, core1_0.SubpassContentsInline, core1_0.RenderPassBeginInfo{
-		RenderPass:  imp.renderPass,
-		Framebuffer: imp.fb,
-		RenderArea:  core1_0.Rect2D{Offset: core1_0.Offset2D{X: 0, Y: 0}, Extent: imp.extent},
-		// Transparent black, so anything the cutout discards stays empty.
-		ClearValues: []core1_0.ClearValue{core1_0.ClearValueFloat{0, 0, 0, 0}},
-	}); err != nil {
+	if err := imp.target.begin(r.deviceDriver, r.cmdScratch.dynamic, cmdBuf); err != nil {
 		return err
 	}
 	r.deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, imp.pipeline)
@@ -223,7 +218,9 @@ func (r *Renderer) recordGrassBake(gs *GrassSystem, imp *grassImpostor, cellSize
 		}
 	}
 
-	r.deviceDriver.CmdEndRenderPass(cmdBuf)
+	if err := imp.target.end(r.deviceDriver, r.cmdScratch.dynamic, cmdBuf); err != nil {
+		return err
+	}
 	return r.endSingleTimeCommands(cmdBuf)
 }
 
@@ -237,8 +234,7 @@ func (r *Renderer) recordGrassBake(gs *GrassSystem, imp *grassImpostor, cellSize
 // The set goes back FIRST, before the view and sampler it names, for the same
 // reason DestroyTexture orders itself that way: what the layer reports
 // otherwise is a sampler destroyed while a descriptor set still names it. Set
-// aside from that, the rest keeps the order it always had -- pipeline and
-// framebuffer before the render pass and view they were built against.
+// aside from that, pipeline destruction precedes the target views.
 //
 // Called both at bake-time error paths (before the atlas is ever live, so the
 // set may be its zero value; freeDescriptorSets skips that) and from
@@ -251,12 +247,6 @@ func (imp *grassImpostor) destroy(r *Renderer) {
 	r.freeDescriptorSets(imp.set)
 	if imp.pipeline.Handle() != 0 {
 		r.deviceDriver.DestroyPipeline(imp.pipeline, nil)
-	}
-	if imp.fb.Handle() != 0 {
-		r.deviceDriver.DestroyFramebuffer(imp.fb, nil)
-	}
-	if imp.renderPass.Handle() != 0 {
-		r.deviceDriver.DestroyRenderPass(imp.renderPass, nil)
 	}
 	if imp.view.Handle() != 0 {
 		r.deviceDriver.DestroyImageView(imp.view, nil)
@@ -308,61 +298,9 @@ func deviceSampler(deviceDriver core1_0.DeviceDriver) (core1_0.Sampler, error) {
 	return s, nil
 }
 
-// createGrassBakeRenderPass clears to transparent black and ends sampleable.
-func createGrassBakeRenderPass(deviceDriver core1_0.DeviceDriver, depthFormat core1_0.Format) (core1_0.RenderPass, error) {
-	info := core1_0.RenderPassCreateInfo{
-		Attachments: []core1_0.AttachmentDescription{{
-			Format:  hdrFormat,
-			Samples: core1_0.Samples1,
-			// Clear rather than discard: the bake is discard-heavy, so every
-			// texel the cutout rejects keeps whatever the clear put there.
-			LoadOp:         core1_0.AttachmentLoadOpClear,
-			StoreOp:        core1_0.AttachmentStoreOpStore,
-			StencilLoadOp:  core1_0.AttachmentLoadOpDontCare,
-			StencilStoreOp: core1_0.AttachmentStoreOpDontCare,
-			InitialLayout:  core1_0.ImageLayoutUndefined,
-			FinalLayout:    core1_0.ImageLayoutShaderReadOnlyOptimal,
-		}},
-		Subpasses: []core1_0.SubpassDescription{{
-			PipelineBindPoint: core1_0.PipelineBindPointGraphics,
-			ColorAttachments: []core1_0.AttachmentReference{
-				{Attachment: 0, Layout: core1_0.ImageLayoutColorAttachmentOptimal},
-			},
-		}},
-		SubpassDependencies: []core1_0.SubpassDependency{{
-			SrcSubpass:    core1_0.SubpassExternal,
-			DstSubpass:    0,
-			SrcStageMask:  core1_0.PipelineStageColorAttachmentOutput,
-			DstStageMask:  core1_0.PipelineStageFragmentShader,
-			SrcAccessMask: core1_0.AccessColorAttachmentWrite,
-			DstAccessMask: core1_0.AccessShaderRead,
-		}},
-	}
-	if depthFormat != 0 {
-		info.Attachments = append(info.Attachments, core1_0.AttachmentDescription{
-			Format: depthFormat, Samples: core1_0.Samples1, LoadOp: core1_0.AttachmentLoadOpClear,
-			StoreOp: core1_0.AttachmentStoreOpDontCare, StencilLoadOp: core1_0.AttachmentLoadOpDontCare,
-			StencilStoreOp: core1_0.AttachmentStoreOpDontCare, InitialLayout: core1_0.ImageLayoutUndefined,
-			FinalLayout: core1_0.ImageLayoutDepthStencilAttachmentOptimal,
-		})
-		info.Subpasses[0].DepthStencilAttachment = &core1_0.AttachmentReference{Attachment: 1, Layout: core1_0.ImageLayoutDepthStencilAttachmentOptimal}
-	}
-	// The consumer samples after this pass, including in later submissions.
-	info.SubpassDependencies = []core1_0.SubpassDependency{{
-		SrcSubpass: 0, DstSubpass: core1_0.SubpassExternal,
-		SrcStageMask: core1_0.PipelineStageColorAttachmentOutput, DstStageMask: core1_0.PipelineStageFragmentShader,
-		SrcAccessMask: core1_0.AccessColorAttachmentWrite, DstAccessMask: core1_0.AccessShaderRead,
-	}}
-	renderPass, _, err := deviceDriver.CreateRenderPass(nil, info)
-	if err != nil {
-		return core1_0.RenderPass{}, err
-	}
-	return renderPass, nil
-}
-
 // createGrassBakePipeline draws both faces. Grass retains its depth-free bake;
 // a general mesh atlas enables reverse-Z depth to resolve overlapping surfaces.
-func createGrassBakePipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, pipelineLayout core1_0.PipelineLayout, depth bool) (core1_0.Pipeline, error) {
+func createGrassBakePipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, formats renderingFormats, pipelineLayout core1_0.PipelineLayout, depth bool) (core1_0.Pipeline, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
 		Code: bytesToUint32Slice(sh.GrassBakeVert),
 	})
@@ -409,9 +347,8 @@ func createGrassBakePipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, re
 		DynamicState: &core1_0.PipelineDynamicStateCreateInfo{
 			DynamicStates: []core1_0.DynamicState{core1_0.DynamicStateViewport, core1_0.DynamicStateScissor},
 		},
-		Layout:     pipelineLayout,
-		RenderPass: renderPass,
-		Subpass:    0,
+		Layout:      pipelineLayout,
+		NextOptions: renderingOptions(formats),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, err
@@ -526,7 +463,7 @@ func half16(h uint16) float32 {
 // impostor lights, cuts out and fades identically -- only the vertex stage
 // differs. It declares binding 1 alone: the quad's corners come from
 // gl_VertexIndex, so there is no per-vertex buffer to bind.
-func createGrassImpostorPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, layout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
+func createGrassImpostorPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, formats renderingFormats, layout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
 		Code: bytesToUint32Slice(sh.GrassImpostorVert),
 	})
@@ -593,9 +530,8 @@ func createGrassImpostorPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet
 		DynamicState: &core1_0.PipelineDynamicStateCreateInfo{
 			DynamicStates: []core1_0.DynamicState{core1_0.DynamicStateViewport, core1_0.DynamicStateScissor},
 		},
-		Layout:     layout,
-		RenderPass: renderPass,
-		Subpass:    0,
+		Layout:      layout,
+		NextOptions: renderingOptions(formats),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, fmt.Errorf("create grass impostor pipeline: %w", err)
@@ -630,30 +566,17 @@ func (r *Renderer) allocateBakeAtlas(imp *grassImpostor, depth bool) error {
 		}
 		depthFormat = imp.depth.format
 	}
-	imp.renderPass, err = createGrassBakeRenderPass(r.deviceDriver, depthFormat)
-	if err != nil {
-		imp.destroy(r)
-		return fmt.Errorf("grass impostor render pass: %w", err)
-	}
-
-	attachments := []core1_0.ImageView{imp.view}
+	imp.formats = colorDepthFormats(hdrFormat, depthFormat)
+	imp.target = newRenderingTarget(imp.extent)
+	imp.target.info.ColorAttachments = []khr_dynamic_rendering.RenderingAttachmentInfo{attachmentInfo(imp.view, false, core1_0.AttachmentLoadOpClear, core1_0.AttachmentStoreOpStore, core1_0.ClearValueFloat{})}
+	imp.target.transition(imp.image, core1_0.ImageAspectColor, 0, core1_0.ImageLayoutUndefined, core1_0.ImageLayoutShaderReadOnlyOptimal)
 	if depth {
-		attachments = append(attachments, imp.depth.views[0])
+		a := attachmentInfo(imp.depth.views[0], true, core1_0.AttachmentLoadOpClear, core1_0.AttachmentStoreOpDontCare, core1_0.ClearValueDepthStencil{Depth: 0})
+		imp.target.info.DepthAttachment = &a
+		imp.target.transition(imp.depth.images[0], depthAspect(imp.depth.format), 0, core1_0.ImageLayoutUndefined, core1_0.ImageLayoutDepthStencilAttachmentOptimal)
 	}
-	fb, _, err := r.deviceDriver.CreateFramebuffer(nil, core1_0.FramebufferCreateInfo{
-		RenderPass:  imp.renderPass,
-		Attachments: attachments,
-		Width:       imp.extent.Width,
-		Height:      imp.extent.Height,
-		Layers:      1,
-	})
-	if err != nil {
-		imp.destroy(r)
-		return fmt.Errorf("grass impostor framebuffer: %w", err)
-	}
-	imp.fb = fb
 
-	imp.pipeline, err = createGrassBakePipeline(r.deviceDriver, r.shaders, imp.renderPass, r.pipelineLayout, depth)
+	imp.pipeline, err = createGrassBakePipeline(r.deviceDriver, r.shaders, imp.formats, r.pipelineLayout, depth)
 	if err != nil {
 		imp.destroy(r)
 		return fmt.Errorf("grass impostor pipeline: %w", err)

@@ -12,10 +12,11 @@ Start with the index below; use [the template](template.md) for a new record.
 | [0002](0002-keep-game-ownership-outside-the-engine.md) | Keep game ownership outside the engine | Accepted | 2026-09-22 |
 | [0003](0003-isolate-examples-in-a-separate-module.md) | Isolate examples in a separate Go module | Accepted | 2026-09-22 |
 | [0004](0004-ship-runtime-assets-in-the-module.md) | Ship runtime assets in the Go module | Accepted | 2026-09-22 |
-| [0005](0005-schedule-the-frame-through-a-frame-graph.md) | Schedule the frame through a frame graph | Accepted | 2026-09-23 |
+| [0005](0005-schedule-the-frame-through-a-frame-graph.md) | Schedule the frame through a frame graph | Accepted; partly superseded by 0009 | 2026-09-23 |
 | [0006](0006-expose-application-graphics-nodes.md) | Expose application graphics nodes and sampled targets | Accepted | 2026-09-23 |
 | [0007](0007-cpu-selected-instance-lod.md) | CPU-selected instance LOD, coverage and deferred buffers | Accepted | 2026-09-24 |
 | [0008](0008-buffer-resources-and-gpu-draw-generation.md) | Buffer resources, storage buffers and GPU draw generation | Accepted | 2026-09-24 |
+| [0009](0009-execute-render-passes-with-dynamic-rendering.md) | Execute render passes with dynamic rendering | Accepted | 2026-09-24 |
 
 Records 0002–0004 document existing decisions retrospectively. Their recorded
 date is when the ADR was written, not an assertion about when the original

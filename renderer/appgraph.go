@@ -9,38 +9,11 @@ import (
 
 type appGraphTarget struct{ write, read, depth framegraph.ResourceID }
 
-// Shared-image readers include the preceding frame and both graphics shader
-// stages. Keeping this dependency fixed also keeps pass pipelines compatible
-// when a slot binding changes or a preceding application node is removed.
-// Sync-validation measurement: 60 frames of the apppasscheck chain plus water
-// reported 240 RAW hazards from application final-layout transitions without
-// the outgoing dependency, and 60 from sampling the legacy water output without
-// the broad incoming scope. Both counts are zero with these dependencies.
-// Scene: 640x360, 4x MSAA, plus a quad at (0,-0.7,0.1) scaled (0.8,0.1,1),
-// with WaterParams{WaveLength: 2, AbsorptionDepth: 1}; count RAW messages per
-// producer with VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT.
-// Before issue #109 the legacy pass's implicit outgoing dependency ended at
-// bottom-of-pipe, so incoming color-output scope alone missed its final
-// transition. Scene/water now declare an explicit exit dependency too.
-func appDependency() []core1_0.SubpassDependency {
-	return []core1_0.SubpassDependency{{SrcSubpass: core1_0.SubpassExternal, DstSubpass: 0,
-		SrcStageMask:  core1_0.PipelineStageAllCommands | core1_0.PipelineStageVertexShader | core1_0.PipelineStageFragmentShader | core1_0.PipelineStageColorAttachmentOutput | core1_0.PipelineStageEarlyFragmentTests | core1_0.PipelineStageLateFragmentTests | core1_0.PipelineStageTransfer,
-		DstStageMask:  core1_0.PipelineStageVertexShader | core1_0.PipelineStageFragmentShader | core1_0.PipelineStageColorAttachmentOutput | core1_0.PipelineStageEarlyFragmentTests | core1_0.PipelineStageLateFragmentTests,
-		SrcAccessMask: core1_0.AccessMemoryWrite | core1_0.AccessShaderRead | core1_0.AccessColorAttachmentWrite | core1_0.AccessDepthStencilAttachmentWrite | core1_0.AccessTransferRead,
-		DstAccessMask: core1_0.AccessShaderRead | core1_0.AccessColorAttachmentRead | core1_0.AccessColorAttachmentWrite | core1_0.AccessDepthStencilAttachmentRead | core1_0.AccessDepthStencilAttachmentWrite},
-		{SrcSubpass: 0, DstSubpass: core1_0.SubpassExternal,
-			SrcStageMask:  core1_0.PipelineStageColorAttachmentOutput | core1_0.PipelineStageEarlyFragmentTests | core1_0.PipelineStageLateFragmentTests,
-			DstStageMask:  core1_0.PipelineStageVertexShader | core1_0.PipelineStageFragmentShader | core1_0.PipelineStageColorAttachmentOutput | core1_0.PipelineStageEarlyFragmentTests | core1_0.PipelineStageLateFragmentTests | core1_0.PipelineStageTransfer,
-			SrcAccessMask: core1_0.AccessColorAttachmentWrite | core1_0.AccessDepthStencilAttachmentWrite,
-			DstAccessMask: core1_0.AccessShaderRead | core1_0.AccessColorAttachmentRead | core1_0.AccessColorAttachmentWrite | core1_0.AccessDepthStencilAttachmentRead | core1_0.AccessDepthStencilAttachmentWrite | core1_0.AccessTransferRead}}
-}
-
 func (r *Renderer) buildAppGraph() (*frameGraph, error) {
 	f, err := newFrameGraph(r.msaaSamples, r.depth.format, r.sc.imageFormat, len(r.sc.imageViews), r)
 	if err != nil {
 		return nil, err
 	}
-	f.cache = r.frameGraph.cache
 	return f, nil
 }
 
@@ -116,7 +89,7 @@ func (r *Renderer) extendAppGraph(f *frameGraph, g *framegraph.Graph) error {
 				continue
 			}
 			d := p.desc
-			n := framegraph.Node{Name: d.Name, Kind: framegraph.Graphics, Optional: true, Timed: d.Timed, Dependencies: appDependency()}
+			n := framegraph.Node{Name: d.Name, Kind: framegraph.Graphics, Optional: true, Timed: d.Timed}
 			color, depth := f.color, f.depth
 			if d.Target != nil {
 				ids := f.targets[d.Target]
@@ -215,7 +188,7 @@ func (r *Renderer) extendAppGraph(f *frameGraph, g *framegraph.Graph) error {
 		appendNode(n, nodes[i])
 		if i == graphLegacy && r.depthResolve != nil {
 			f.depthNode = len(f.nodes)
-			appendNode(framegraph.Node{Name: "scene depth resolve", Kind: framegraph.Graphics, Dependencies: appDependency(), Uses: []framegraph.Use{
+			appendNode(framegraph.Node{Name: "scene depth resolve", Kind: framegraph.Graphics, Uses: []framegraph.Use{
 				{Resource: f.depth, Access: framegraph.SampledRead}, {Resource: f.resolvedDepth, Access: framegraph.ColorWrite, Discard: true}}},
 				graphNode{name: "scene depth resolve", record: r.depthResolve.record, begin: -1, end: -1, resolve: -1})
 		}
@@ -249,11 +222,9 @@ func (r *Renderer) replaceAppGraph(deferOld bool) error {
 			err = r.bindGraphTargetsMode(false)
 		}
 		if err != nil {
-			f.destroyFramebuffers(r.deviceDriver)
 			r.frameGraph = old
 			return err
 		}
-		r.DeferDestroy(func() { old.destroyFramebuffers(r.deviceDriver) })
 	}
 	f.sizeScratch(&r.cmdScratch)
 	if r.gpuTimer != nil {
@@ -405,15 +376,5 @@ func (r *Renderer) destroyAppResources() {
 	if r.appSetLayout.Handle() != 0 {
 		r.deviceDriver.DestroyDescriptorSetLayout(r.appSetLayout, nil)
 		r.appSetLayout = core1_0.DescriptorSetLayout{}
-	}
-}
-
-func (f *frameGraph) destroyFramebuffers(d core1_0.DeviceDriver) {
-	for i := range f.nodes {
-		n := &f.nodes[i]
-		for _, fb := range n.framebuffers {
-			d.DestroyFramebuffer(fb, nil)
-		}
-		n.framebuffers = nil
 	}
 }

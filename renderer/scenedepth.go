@@ -85,11 +85,8 @@ func (r *Renderer) ensureSceneDepth() error {
 				return err
 			}
 		}
-		pass, err := f.renderPass(r.deviceDriver, f.depthNode)
-		if err != nil {
-			s.releaseTargets()
-			return err
-		}
+		pass := f.pipelineFormats(f.depthNode)
+		var err error
 		frag := shaders.DepthResolveFragSpv
 		if r.msaaSamples != core1_0.Samples1 {
 			frag = shaders.DepthResolveMSFragSpv

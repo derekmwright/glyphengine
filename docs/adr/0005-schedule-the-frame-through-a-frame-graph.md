@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Recorded: 2026-09-23
+- Superseded in part: [0009](0009-execute-render-passes-with-dynamic-rendering.md), 2026-09-24, replaces the render-pass/cache and framebuffer executor decisions. The graph and ownership decisions remain accepted.
 
 ## Context
 

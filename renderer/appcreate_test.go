@@ -3,7 +3,6 @@ package renderer
 import (
 	"errors"
 
-	"github.com/derekmwright/glyphengine/renderer/framegraph"
 	"github.com/derekmwright/glyphengine/shaders"
 	"github.com/vkngwrapper/core/v3/common"
 	"github.com/vkngwrapper/core/v3/core1_0"
@@ -42,7 +41,15 @@ func (d *resizeFakeDriver) CreatePipelineLayout(_ *loader.AllocationCallbacks, _
 func (d *resizeFakeDriver) DestroyPipelineLayout(core1_0.PipelineLayout, *loader.AllocationCallbacks) {
 	d.destroyed["PipelineLayout"]++
 }
-func (d *resizeFakeDriver) CreateGraphicsPipelines(_ *core1_0.PipelineCache, _ *loader.AllocationCallbacks, _ ...core1_0.GraphicsPipelineCreateInfo) ([]core1_0.Pipeline, common.VkResult, error) {
+func (d *resizeFakeDriver) CreateGraphicsPipelines(_ *core1_0.PipelineCache, _ *loader.AllocationCallbacks, infos ...core1_0.GraphicsPipelineCreateInfo) ([]core1_0.Pipeline, common.VkResult, error) {
+	for _, info := range infos {
+		if info.RenderPass.Handle() != 0 || info.Subpass != 0 {
+			panic("graphics pipeline still uses a render pass")
+		}
+		if _, ok := info.NextOptions.Next.(renderingFormats); !ok {
+			panic("missing dynamic rendering pipeline formats")
+		}
+	}
 	if d.shouldFail("CreateGraphicsPipelines") {
 		return nil, core1_0.VKErrorUnknown, errInjected
 	}
@@ -57,12 +64,11 @@ func TestAppPassCreationUnwinds(t *testing.T) {
 	for _, tc := range []struct {
 		call string
 		at   int
-	}{{"CreateDescriptorSetLayout", 1}, {"CreateRenderPass", 1}, {"CreateShaderModule", 1}, {"CreateShaderModule", 2}, {"CreatePipelineLayout", 1}, {"CreateGraphicsPipelines", 1}, {"AllocateDescriptorSets", 1}} {
+	}{{"CreateDescriptorSetLayout", 1}, {"CreateShaderModule", 1}, {"CreateShaderModule", 2}, {"CreatePipelineLayout", 1}, {"CreateGraphicsPipelines", 1}, {"AllocateDescriptorSets", 1}} {
 		t.Run(tc.call+string(rune('0'+tc.at)), func(t *testing.T) {
 			d := newResizeFakeDriver()
 			r := newResizeFixture(d, 3)
 			r.depth = &depthResources{format: core1_0.FormatD32SignedFloat}
-			r.frameGraph.cache = make(map[framegraph.RenderPassKey]core1_0.RenderPass)
 			target, err := r.CreateRenderTarget(RenderTargetDesc{Name: "fixture target", Format: TargetR16F, Scale: 1})
 			if err != nil {
 				t.Fatal(err)
@@ -80,7 +86,7 @@ func TestAppPassCreationUnwinds(t *testing.T) {
 				t.Fatal("failed pass remained registered")
 			}
 			r.destroyAppResources()
-			r.frameGraph.destroyPasses(d)
+
 			for kind, n := range d.created {
 				if d.destroyed[kind] != n {
 					t.Errorf("%s: created %d destroyed %d", kind, n, d.destroyed[kind])

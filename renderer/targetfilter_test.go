@@ -184,7 +184,6 @@ func TestSceneDepthSamplerStaysNearest(t *testing.T) {
 	d := newTargetSamplerProbe()
 	r := appResizeFixture(d.resizeFakeDriver)
 	r.deviceDriver = d
-	oldCache := appCacheKeys(r)
 	var undo rebuildUndo
 	if err := r.rebuildSwapchainTargets(r.sc.extent, &undo); err != nil {
 		t.Fatal(err)
@@ -194,6 +193,5 @@ func TestSceneDepthSamplerStaysNearest(t *testing.T) {
 		t.Fatalf("scene depth sampler: %+v", s)
 	}
 	undo.unwind()
-	freeNewAppPasses(r, oldCache)
 	assertBalanced(t, d.resizeFakeDriver)
 }

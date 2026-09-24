@@ -3,15 +3,14 @@ id: frame-graph
 title: Record the renderer's frame graph
 summary: >
   The renderer compiles its tail into an ordered plan and owns the Vulkan
-  render pass cache, physical image/buffer bindings, framebuffers and recording closures.
+  dynamic-rendering attachment bindings, physical images/buffers and recording closures.
 capability: rendering
 status: experimental
 api:
   - framegraph.Graph.AddBuffer
   - framegraph.BufferDesc
   - framegraph.Graph.Build
-  - framegraph.RenderPassDesc.Key
-  - framegraph.Compatible
+  - framegraph.Step.AfterBarriers
   - renderer.recordCommandBuffer
   - renderer.Pass
   - renderer.AppComputeDesc
@@ -24,9 +23,10 @@ run: task validate
 requires:
   - cgo
   - vulkan-runtime
+  - VK_KHR_dynamic_rendering
   - vulkan-sdk
 assets: procedural
-verified: 2026-09-24 # buffer resources and GPU LOD synchronization
+verified: 2026-09-24 # dynamic rendering and explicit attachment barriers
 ---
 
 # Record the renderer's frame graph
@@ -45,10 +45,10 @@ Vulkan handles. It retains declaration order.
 
 Clouds, both shadow passes and the main scene pass remain one hand-recorded
 `Legacy` node. It declares the HDR colour and depth attachments it leaves and
-the sampled shadow maps. `recordCommandBuffer` records that body unchanged,
+the sampled shadow maps. `recordCommandBuffer` records that body using dynamic rendering,
 including `PassSceneResolve`, then calls `executeGraph` for the remaining steps:
 the scene-colour copy, water, nine bloom stages, the optional UI layer and its
-nine glow stages, and tonemap with the composite inside its render pass. A
+nine glow stages, and tonemap with the composite inside the same rendering instance. A
 final declaration marks the swapchain image presented; it records no command.
 
 ## Application nodes
@@ -71,7 +71,7 @@ nodes. Both interleave in creation order at a named stage:
 
 Compute nodes bind a compute pipeline, fallback/light/input descriptor sets,
 push VP plus identity model and application data, then dispatch on the graphics
-queue. They have no render pass or framebuffer. Sampled inputs and storage
+queue. They execute outside rendering instances. Sampled inputs and storage
 outputs use the same target/scene identity mapping. History reads use the
 previous image, while `StorageReadWrite` describes the destination when the
 same target is also declared as an input; other destinations use `StorageWrite`.
@@ -87,17 +87,17 @@ derives sampled-read visibility
 for application textures used by ordinary scene draws. It copies nothing.
 The hand-recorded legacy body remains unchanged when there are no application
 nodes. With them, its pre-scene boundary executes graph steps after shadows
-and before the main render pass begins. The engine depth-resolve node is a
+and before scene rendering begins. The engine depth-resolve node is a
 fullscreen `Graphics` step immediately after the legacy scene. The legacy use
 explicitly declares its depth attachment exit layout; the compiler derives
 the sampling barrier and water's subsequent attachment initial layout.
 
 Creating or destroying a pass, changing target slot dependencies, and the first
 `SceneDepth()` request mark the graph dirty. After the next frame fence wait,
-the renderer rebuilds the plan and framebuffers while retaining its render-pass
-cache. Previous framebuffers retire through `DeferDestroy`. `CreateAppPass`
-also builds the pure plan immediately to create its pipeline against the exact
-render-pass description. Enabling or disabling an existing pass needs no
+the renderer rebuilds the plan and Go-side attachment bindings. No render-pass
+or framebuffer objects are created or retired. `CreateAppPass` also builds the
+pure plan immediately to supply its pipeline's attachment formats and samples.
+Enabling or disabling an existing pass needs no
 rebuild: optional nodes are layout-neutral and both timing edges still execute.
 
 Relative targets and per-swapchain resolved depth are rebuilt under the resize
@@ -125,11 +125,10 @@ to indirect fetch, even when both reads belong to the same node.
 
 `Barrier.Buffer`, `Offset` and `Size` identify a buffer range. The current
 compiler emits whole logical buffers and does not alias them. Graphics buffer
-reads become explicit barriers **before** render-pass begin; they never alter
-subpass dependencies or render-pass compatibility. A stage-pair group may mix
+reads become explicit barriers **before** CmdBeginRendering. A stage-pair group may mix
 buffer and image barriers. The executor allocates both scratch arrays from the
 plan at build time and emits one CmdPipelineBarrier per adjacent stage pair.
-Image-only pinned streams retain their original calls and arguments.
+Draw-side pinned streams retain their original calls and arguments.
 
 GPU LOD adds engine-owned classify/prefix/scatter nodes before shadows and
 before application StageBeforeScene work. A trailing copy obtains diagnostic
@@ -143,18 +142,19 @@ its existing shadow boundary. See [ADR 0008](../adr/0008-buffer-resources-and-gp
 
 A sampled resource rests in `ShaderReadOnlyOptimal`; storage rests in
 `General`, other attachments in their attachment layouts, and the swapchain
-in `PresentSrc`. Attachments transition through the render pass's initial and
-final layouts, never explicit image barriers. This lets the water attachment
-enter from `TransferSrcOptimal` without a redundant transition after the copy.
+in `PresentSrc`. `Step.Barriers` transitions each attachment into its color or
+depth attachment layout before CmdBeginRendering. `Step.AfterBarriers` exposes
+attachment writes and restores resting layouts after CmdEndRendering. Water
+therefore transitions the copied HDR image from TransferSrc to ColorAttachment
+explicitly. Resolve destinations are included in these transitions.
 
-The compiler emits explicit barriers for non-attachment uses. Each adjacent
-run with identical source and destination stages becomes one
-`commandScratch.pipelineBarrier` call. Undefined sources already carry the
-group's source stage in the plan. Scratch is allocated once to fit the widest
-group: two barriers for the scene-colour copy on the engine-only path, or the widest
-application dependency group when targets are registered. Final barriers execute after
-the last step if present; `TestFrameGraphTailLayoutsAndCache` requires this
-tail to produce none.
+Each adjacent run with identical source and destination stages becomes one
+CmdPipelineBarrier call. Undefined sources carry the group's source stage in
+the plan. Scratch is allocated once to fit the widest image/buffer group across
+entry, exit and final barriers. Final barriers run after the last step if
+needed; `TestFrameGraphTailLayouts` checks that the engine tail restores all
+layouts without them. Consumer scopes include all declared shader stages and
+next-frame readers.
 
 An optional node must leave every touched resource in its entry layout. The
 copy and water draw satisfy that only together, so both belong to one
@@ -164,63 +164,62 @@ allocation. The graph primes the copy target and UI layer's layouts without
 clearing: the copy overwrites its destination and the UI node clears before
 anything consumes it. Priming a layout does not initialize readable history.
 
-At an optional join, the compiler retains reader stages for subsequent
-writers and separately tracks writer stages. A later sampler needs visibility
-of those writers, not ordering against readers from the skipped path. This
-keeps a bloom reader's incoming colour dependency sufficient without losing a
-possible storage-write hazard.
+At an optional join, the compiler retains both paths' reader/writer scopes.
+A later writer waits for preceding readers even if the optional producer did
+not run. A later sampler cannot lose an earlier storage-write hazard.
 
 ## Registering a renderer pass
 
 Add its image uses and node in `newFrameGraph`, beside its draw closure. The
-closure records draws; the executor owns barriers, render-pass begin/end and
+closure records draws; the executor owns barriers, dynamic-rendering begin/end and
 node-boundary timer brackets. Set `begin`/`end` to the existing `Pass` value
 at the appropriate boundaries. Bloom's stages share one interval, beginning
 at prefilter and ending after the last upsample. Water's interval starts
 before the copy; its draw body retains the separate shafts and over-water
-intervals. `resolve` brackets only `CmdEndRenderPass`. Tonemap and composite
-are adjacent intervals inside one render pass.
+intervals. `resolve` brackets only `CmdEndRendering`. Tonemap and composite
+are adjacent intervals inside one rendering instance.
 
 Skipping optional work still emits every timer edge. Use the same predicate
 for every member of an optional group. Keep the public `Pass` enum intact;
 examples and profiling consumers use it.
 
-Create pipelines against `frameGraph.renderPass` for their node. This cache
-uses `RenderPassDesc.Key()` and excludes framebuffer size and resource
-identity. Both bloom chains share downsample and upsample descriptions;
-the legacy clouds also use the cached downsample description. Water, UI clear
-and tonemap have separate descriptions. There are four cached objects with
-the UI layer disabled and five with it enabled. Water supplies
-the shared incoming/outgoing pair from `sceneEntryDependency()` and
-colour/depth/resolve `AttachmentOrder` explicitly;
-`TestFrameGraphWaterOrderCompatibleWithLegacyScene` checks compatibility with
-the actual legacy render-pass constructor.
+Create graphics pipelines using `frameGraph.pipelineFormats` for their node,
+with a null RenderPass and subpass zero. `PipelineRenderingCreateInfo` supplies
+color/depth formats and view mask zero; rasterization samples come from the
+compiled attachment description. Load/store operations and resolves are bound
+at CmdBeginRendering. `RenderPassDesc`, `AttachmentDesc` and `Step.RenderPass`
+remain the public metadata names. There is no compatibility key or object cache.
+Scene and water reuse pipelines because their formats and sample counts match.
+`TestFrameGraphWaterFormatsMatchScene` checks both single-sample and MSAA cases.
+
+The device requires `VK_KHR_dynamic_rendering` and its `dynamicRendering`
+feature. It retains a Vulkan 1.0 API request with the complete extension
+dependency closure enabled; see [ADR 0009](../adr/0009-execute-render-passes-with-dynamic-rendering.md).
 
 ## Resize and teardown
 
-`Renderer.New` compiles the graph after allocating its tail targets. The current plan,
-closures, cache and pipelines survive resize unless application declarations
-also changed. `bindGraphTargets` reconnects
-the newly allocated images and makes framebuffers per node and swapchain
-image; the scene-colour copy is a single physical image. Relative extents are
-evaluated again at the new size.
+`Renderer.New` compiles the graph after allocating its tail targets. Plans,
+closures and pipelines survive resize unless application declarations also
+change. `bindGraphTargets` reconnects replacement images, resolves extents and
+builds retained RenderingInfo/RenderingAttachmentInfo values per physical
+instance. The scene-color copy remains one physical image; history still uses
+frame-indexed double buffers.
 
-`rebuildSwapchainTargets` pushes an undo step for these framebuffers.
-`releaseGraphFramebuffers` returns the target descriptor sets first, destroys
-the graph framebuffers, then clears its bindings. The existing target owners
-subsequently destroy their views and images. Both successful shutdown and
-failed initialization use `New`'s init stack; failed rebuilds use the scoped
-undo stack. The cache destroys each shared render pass exactly once.
+`releaseGraphBindings` returns descriptor sets before image owners destroy
+views, then drops Go-side rendering bindings. Shutdown and constructor failure
+use `New`'s init stack; failed rebuilds use the existing scoped undo stack.
+Graph rebuild no longer needs deferred framebuffer destruction. Images and
+other GPU objects still retire through their existing lifetime mechanisms.
 
 ## Failure modes
 
-- A command-stream hash change means a driver call or argument changed. Diff
-  the fake driver's call logs; do not replace the golden values.
-- A missing timer bracket leaves a reset query unwritten, making the whole
-  frame's readback unavailable, including passes that ran correctly.
-- Creating a migrated render pass outside the cache bypasses its shared
-  description and can silently break pipeline compatibility. The validation
-  layer catches incompatible pipelines when they draw.
-- A stale framebuffer or descriptor after resize names retired views. The
-  framebuffer failure-injection tests check every creation site, and
-  validation's provoked rebuilds exercise the real device path.
+- A command-stream hash change means a driver call or argument changed.
+  `TestMigrationDrawStreams` independently pins draw-side arguments to the
+  pre-migration baseline, excluding only rendering and barrier calls.
+- A missing timer bracket leaves a reset query unwritten, making frame readback
+  unavailable. SceneResolve/WaterResolve contain only CmdEndRendering.
+- A missing entry/exit barrier can leave an attachment in its sampled layout
+  or hide writes from a later reader. Run both core and synchronization validation.
+- Stale attachment bindings or descriptors after resize name retired views.
+  Failure-injection tests cover remaining allocation sites;
+  `TestResizeCreatesNoRenderPassesOrFramebuffers` requires zero obsolete objects.

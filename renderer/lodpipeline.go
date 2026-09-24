@@ -15,5 +15,5 @@ func (r *Renderer) createLODPipeline(kind int) (core1_0.Pipeline, core1_0.Pipeli
 		bindings = bindings[1:]
 		attrs = attrs[len(vertexAttributeDescriptions()):]
 	}
-	return createLitVariantPipelineWithInput(r.deviceDriver, vert, frag, "LOD", r.renderPass, r.sc.extent, r.descriptorSetLayout, r.shadow.descriptorSetLayout, r.msaaSamples, cull, false, bindings, attrs, true)
+	return createLitVariantPipelineWithInput(r.deviceDriver, vert, frag, "LOD", r.sceneFormats, r.sc.extent, r.descriptorSetLayout, r.shadow.descriptorSetLayout, r.msaaSamples, cull, false, bindings, attrs, true)
 }
