@@ -103,6 +103,9 @@ type ResourceCounts struct {
 	// recomputed, because the list is the thing DestroyInstanceSet's
 	// deferred callback actually edits.
 	InstanceSets int
+	// LODSets and ImpostorAtlases include resources awaiting deferred release.
+	LODSets         int
+	ImpostorAtlases int
 
 	// Deferred is how many destruction callbacks are queued behind the frames
 	// in flight. DestroyModel routes everything through that queue, so a
@@ -116,12 +119,14 @@ type ResourceCounts struct {
 // ResourceCounts returns the renderer's live GPU resource counts.
 func (r *Renderer) ResourceCounts() ResourceCounts {
 	return ResourceCounts{
-		Meshes:         len(r.meshes),
-		Textures:       len(r.textures),
-		Materials:      len(r.materials),
-		DescriptorSets: r.liveDescriptorSets,
-		InstanceSets:   len(r.instanceSets),
-		Deferred:       len(r.deferredDestroys),
+		Meshes:          len(r.meshes),
+		Textures:        len(r.textures),
+		Materials:       len(r.materials),
+		DescriptorSets:  r.liveDescriptorSets,
+		InstanceSets:    len(r.instanceSets),
+		LODSets:         len(r.lodSets),
+		ImpostorAtlases: len(r.impostorAtlases),
+		Deferred:        len(r.deferredDestroys),
 	}
 }
 

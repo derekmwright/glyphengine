@@ -120,11 +120,11 @@ type Hidden struct{}
 // whole. Translucent does not — there is no blended instanced pipeline, and the
 // set stays opaque rather than silently losing its placements.
 //
-// Culling is per set, not per placement: a set with one dome on screen draws
-// all of them. See docs/agents/instancing.md for why, and for the measurement
-// that says where this starts to pay.
+// Set culls as one group; LOD culls each placement and selects distance levels.
+// See docs/agents/instancing.md and docs/agents/lod-instancing.md for the costs.
 type InstancedMesh struct {
 	Set *renderer.InstanceSet
+	LOD *renderer.InstanceSetLOD // mutually exclusive with Set; per-placement culling and distance levels
 }
 
 // Translucent draws an entity blended over the scene instead of opaque.

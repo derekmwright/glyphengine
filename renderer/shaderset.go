@@ -27,6 +27,8 @@ type ShaderSet struct {
 	TriangleVert, TriangleFrag []byte // diagnostic tri-color triangle
 	MeshVert, MeshFrag         []byte // unlit textured mesh
 	LitVert, LitFrag           []byte // lit static geometry
+	LitLODVert, LitLODFrag     []byte // LOD mesh buckets; location 5 carries fade coverage
+	ImpostorVert, ImpostorFrag []byte // eight-view LOD billboard
 	LitInstancedVert           []byte // lit, model matrix per instance (shares LitFrag)
 	LitMaterialFrag            []byte // lit + normal/roughness/AO maps (shares LitVert)
 	TerrainFrag                []byte // terrain splat blend (shares LitVert)
@@ -69,6 +71,10 @@ func DefaultShaders() ShaderSet {
 		MeshFrag:         shaders.MeshFragSpv,
 		LitVert:          shaders.LitVertSpv,
 		LitInstancedVert: shaders.LitInstancedVertSpv,
+		LitLODVert:       shaders.LitLODVertSpv,
+		LitLODFrag:       shaders.LitLODFragSpv,
+		ImpostorVert:     shaders.ImpostorVertSpv,
+		ImpostorFrag:     shaders.ImpostorFragSpv,
 		LitFrag:          shaders.LitFragSpv,
 		LitMaterialFrag:  shaders.LitMaterialFragSpv,
 		TerrainFrag:      shaders.TerrainFragSpv,
@@ -122,6 +128,8 @@ func (s ShaderSet) withDefaults() ShaderSet {
 		{&s.MeshVert, d.MeshVert}, {&s.MeshFrag, d.MeshFrag},
 		{&s.LitVert, d.LitVert}, {&s.LitFrag, d.LitFrag},
 		{&s.LitInstancedVert, d.LitInstancedVert},
+		{&s.LitLODVert, d.LitLODVert}, {&s.LitLODFrag, d.LitLODFrag},
+		{&s.ImpostorVert, d.ImpostorVert}, {&s.ImpostorFrag, d.ImpostorFrag},
 		{&s.LitMaterialFrag, d.LitMaterialFrag},
 		{&s.TerrainFrag, d.TerrainFrag},
 		{&s.SkinnedLitVert, d.SkinnedLitVert}, {&s.SkinnedLitFrag, d.SkinnedLitFrag},

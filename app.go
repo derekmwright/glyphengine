@@ -1476,7 +1476,10 @@ func (e *Engine) Run() {
 		e.cpu.add(CPUGPUWait, wait)
 		e.cpu.add(CPURecord, record)
 		e.cpu.add(CPUPresent, present)
-		e.cpu.add(CPUSubmit, -(wait + record + present))
+		lodCull, lodUpload := e.renderer.LastLODWork()
+		e.cpu.add(CPULODCull, lodCull)
+		e.cpu.add(CPULODUpload, lodUpload)
+		e.cpu.add(CPUSubmit, -(wait + record + present + lodCull + lodUpload))
 
 		e.cpu.endFrame(time.Since(frameStart))
 
@@ -1830,19 +1833,25 @@ func (e *Engine) buildDrawList(vp mgl32.Mat4, shadowEnabled bool, lightVPs ...mg
 	// first, and they emit one RenderObject each however many placements they
 	// hold.
 	//
-	// Culling is against the set's whole bound. A set with one dome on screen
-	// therefore draws all of them, which is the trade this feature makes: the
-	// alternative is culling per placement and re-uploading the visible subset
-	// every frame, which is the CPU cost the instancing exists to remove. The
-	// GPU cost of the off-screen placements is vertex shading a few hundred
-	// thousand triangles, which is not where frames go. See
-	// docs/agents/instancing.md for the numbers.
+	// Ordinary sets cull against the whole bound here. LOD sets instead reach
+	// the renderer intact; after the frame fence, it culls each placement and
+	// uploads the visible distance buckets. See docs/agents/instancing.md and
+	// docs/agents/lod-instancing.md for the measured tradeoffs.
 	c.InstancedMesh.Each(func(entity ecs.Entity, im *InstancedMesh) {
-		if im.Set == nil || im.Set.Count() == 0 || c.Hidden.Has(entity) {
+		if c.Hidden.Has(entity) || (im.LOD == nil && (im.Set == nil || im.Set.Count() == 0)) {
 			return
 		}
 
-		center, radius := im.Set.Bounds()
+		if im.Set != nil && im.LOD != nil {
+			panic("InstancedMesh: Set and LOD are mutually exclusive")
+		}
+		var mesh *renderer.Mesh
+		var center [3]float32
+		var radius float32
+		if im.Set != nil {
+			mesh = im.Set.Mesh
+			center, radius = im.Set.Bounds()
+		}
 		shadowOnly := false
 		if radius > 0 && !cameraFrustum.SphereInFrustum(center[0], center[1], center[2], radius) {
 			if !inShadowVolume(center[0], center[1], center[2], radius) {
@@ -1867,7 +1876,8 @@ func (e *Engine) buildDrawList(vp mgl32.Mat4, shadowEnabled bool, lightVPs ...mg
 		}
 
 		draws = append(draws, renderer.RenderObject{
-			Mesh:         im.Set.Mesh,
+			Mesh:         mesh,
+			InstancesLOD: im.LOD,
 			Instances:    im.Set,
 			SortID:       uint64(entity),
 			Texture:      tex,

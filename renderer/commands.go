@@ -133,6 +133,7 @@ type RenderObject struct {
 	Roughness    float32          // 0 = mirror, 1 = matte (default 0.5)
 	Emissive     bool             // bypass lighting in lit shader (tint.w = 1.0)
 	Alpha        float32          // per-object opacity; 0 means opaque (see IsTranslucent)
+	InstancesLOD *InstanceSetLOD  // mutually exclusive with Instances
 	Instances    *InstanceSet     // non-nil = one instanced draw of the whole set
 	DoubleSided  bool             // render both front and back faces (no culling)
 	NoCastShadow bool             // skip this object in shadow pass (receives shadows only)
@@ -200,7 +201,7 @@ func (d *RenderObject) IsTranslucent() bool {
 	if d.Alpha <= 0 || d.Alpha >= 1 {
 		return false
 	}
-	return d.TerrainMat == nil && d.Water == nil && d.Material == nil
+	return d.Instances == nil && d.InstancesLOD == nil && d.TerrainMat == nil && d.Water == nil && d.Material == nil
 }
 
 // ViewDepth returns the squared distance from eye to this draw's world-space

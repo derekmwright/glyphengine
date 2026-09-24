@@ -181,6 +181,18 @@ tasks:
       # -C must be the first flag on the command line.
       - go vet -C examples -unsafeptr=false ./...
 
+  lod:
+    desc: "Per-instance culling, LOD fades, impostors and deferred lifetime (needs a GPU)"
+    cmds:
+      # 25-lod-forest frames 60/61, tree rectangle 575,280..705,440:
+      # MSAA4 MAE 0.069279/255 (fade 6) vs 3.698333/255 (fade 0).
+      # Broken and rejected: no cull (3875 bucket entries, 0 culled), no fade
+      # (both 3.698333), no billboard draw (far MAE 0), wall-clock camera
+      # (different PNGs), no set release (resource count grows), and equal
+      # benchmark GPU totals (3.992 >= 3.992). Allocation reuse is separately
+      # broken in the recorder fixture: four allocations instead of zero.
+      - go run ./cmd/lodcheck {{.CLI_ARGS}}
+
   smoke:
     desc: "Headless-ish smoke test: render a fixed number of frames of every example and exit"
     dir: examples
@@ -215,6 +227,7 @@ tasks:
       - go run ./17-input -frames 60
       - go run ./18-translucent -frames 60
       - go run ./19-instanced -frames 60
+      - go run ./25-lod-forest -frames 60
       - go run ./20-screens -frames 60
       - go run ./21-streetlights -frames 60
       - go run ./22-level -frames 60
@@ -266,6 +279,9 @@ tasks:
         done
         check 24-custom-passes
         check 24-custom-passes -passes off
+        check 25-lod-forest
+        check 25-lod-forest -msaa 1
+        check 25-lod-forest -replace
         check 23-shadow-coverage
         check 23-shadow-coverage -coverage=false
         check 23-shadow-coverage -caster=false
@@ -447,6 +463,7 @@ tasks:
         check 24-custom-passes
         check 13-ui -glow on
         check 13-ui
+        check 25-lod-forest -replace
         unset GLYPHENGINE_PROVOKE_RECREATE_FRAMES
         exit $status
 
@@ -712,7 +729,7 @@ tasks:
         # run to run, which no other entry here would notice because no other
         # entry turns the march on. -skylamp is in it because the sky's march
         # is a second copy of the jitter in a second shader.
-        for ex in "08-grass" "08-grass -timeofday 0.0" "08-grass -timeofday 0.03" "09-water" "12-particles" "06-skinned -demo" "15-kitchen-sink -demo" "09-water -plume -ghost -marker -submerged" "09-water -time 0.72 -yaw 1.771 -pitch -0.185 -pillars" "13-ui -glow on" "21-streetlights -volumetric 1 -lampvolumetric 1 -skylamp" "24-custom-passes"; do
+        for ex in "08-grass" "08-grass -timeofday 0.0" "08-grass -timeofday 0.03" "09-water" "12-particles" "06-skinned -demo" "15-kitchen-sink -demo" "09-water -plume -ghost -marker -submerged" "09-water -time 0.72 -yaw 1.771 -pitch -0.185 -pillars" "13-ui -glow on" "21-streetlights -volumetric 1 -lampvolumetric 1 -skylamp" "24-custom-passes" "25-lod-forest"; do
           set -- $ex
           name=$1; shift
           shot 16.667ms $name a "$*"
@@ -874,7 +891,7 @@ tasks:
             status=1
           fi
         }
-        for ex in "08-grass" "08-grass -timeofday 0.0" "08-grass -timeofday 0.03" "09-water"                   "12-particles" "06-skinned -demo" "15-kitchen-sink -demo"                   "09-water -plume -ghost -marker -submerged"                   "18-translucent" "13-ui" "10-text" "19-instanced" "21-streetlights" "24-custom-passes"; do
+        for ex in "08-grass" "08-grass -timeofday 0.0" "08-grass -timeofday 0.03" "09-water" "12-particles" "06-skinned -demo" "15-kitchen-sink -demo" "09-water -plume -ghost -marker -submerged" "18-translucent" "13-ui" "10-text" "19-instanced" "21-streetlights" "24-custom-passes" "25-lod-forest"; do
           drawseq "$ex"
         done
         # Prove this comparison can say no on real traces and not only on the
@@ -949,6 +966,7 @@ tasks:
       - go run ./17-input -frames 60 -screenshot ../docs/images/17-input.png
       - go run ./18-translucent -frames 120 -screenshot ../docs/images/18-translucent.png
       - go run ./19-instanced -frames 60 -screenshot ../docs/images/19-instanced.png
+      - go run ./25-lod-forest -frames 60 -screenshot ../docs/images/25-lod-forest.png
       - go run ./20-screens -frames 60 -screenshot ../docs/images/20-screens.png
       - go run ./21-streetlights -frames 90 -screenshot ../docs/images/21-streetlights.png
       - go run ./22-level -frames 90 -screenshot ../docs/images/22-level.png

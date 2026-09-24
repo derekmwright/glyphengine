@@ -18,7 +18,7 @@ import (
 // for a million blades and the wrong one for nine hundred buildings.
 type MeshInstance struct {
 	Model [16]float32
-	Tint  [4]float32 // rgb multiplies the mesh's vertex colour; w is unused
+	Tint  [4]float32 // rgb multiplies the mesh's vertex colour; w is unused here; InstanceSetLOD overwrites it with coverage
 }
 
 // meshInstanceSize is the vertex stride of the per-instance binding.
@@ -42,7 +42,9 @@ const meshInstanceSize = int(unsafe.Sizeof(MeshInstance{})) // 80
 // props it draws goes away; see that method's comment for what a stale draw
 // does if a game does not stop drawing it first.
 type InstanceSet struct {
-	Mesh *Mesh
+	Mesh     *Mesh
+	lod      *InstanceSetLOD
+	lodLevel int
 
 	buffer    core1_0.Buffer
 	memory    core1_0.DeviceMemory
@@ -54,13 +56,10 @@ type InstanceSet struct {
 	// Bound sphere over every instance, in world space. The draw list frustum
 	// tests this once for the set rather than once per instance.
 	//
-	// Per-instance CPU culling is the other option the design had and is not
-	// done: it would mean re-uploading the visible subset every frame, which
-	// trades the CPU cost this feature exists to remove for a different one.
-	// The cost of not doing it is vertex shading for instances that are off
-	// screen, which for the sizes this is aimed at is small -- 900 domes of 200
-	// triangles is 180k triangles, and the GPU does not notice. Measure before
-	// changing that; see docs/agents/instancing.md.
+	// Ordinary sets retain all placements. InstanceSetLOD pays for per-placement
+	// culling and uploads survivors into these buffers as internal buckets;
+	// their bounds enclose only that frame's survivors. See
+	// docs/agents/instancing.md and docs/agents/lod-instancing.md for the costs.
 	boundCenter [3]float32
 	boundRadius float32
 }

@@ -255,7 +255,7 @@ func createLitVariantPipeline(deviceDriver core1_0.DeviceDriver, vertSpv, fragSp
 // createLitVariantPipelineWithInput is createLitVariantPipeline with the vertex
 // input state supplied, which is what the instanced variant needs: a second
 // per-instance binding carrying the model matrix the ordinary path pushes.
-func createLitVariantPipelineWithInput(deviceDriver core1_0.DeviceDriver, vertSpv, fragSpv []byte, label string, renderPass core1_0.RenderPass, extent core1_0.Extent2D, set0Layout, shadowSetLayout core1_0.DescriptorSetLayout, samples core1_0.SampleCountFlags, cull core1_0.CullModeFlags, blend bool, bindings []core1_0.VertexInputBindingDescription, attrs []core1_0.VertexInputAttributeDescription) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
+func createLitVariantPipelineWithInput(deviceDriver core1_0.DeviceDriver, vertSpv, fragSpv []byte, label string, renderPass core1_0.RenderPass, extent core1_0.Extent2D, set0Layout, shadowSetLayout core1_0.DescriptorSetLayout, samples core1_0.SampleCountFlags, cull core1_0.CullModeFlags, blend bool, bindings []core1_0.VertexInputBindingDescription, attrs []core1_0.VertexInputAttributeDescription, coverage ...bool) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
 		Code: bytesToUint32Slice(vertSpv),
 	})
@@ -315,10 +315,19 @@ func createLitVariantPipelineWithInput(deviceDriver core1_0.DeviceDriver, vertSp
 		Attachments: []core1_0.PipelineColorBlendAttachmentState{attachment},
 	}
 
+	var spec map[uint32]any
+	atc := len(coverage) > 0 && coverage[0] && samples != core1_0.Samples1
+	if len(coverage) > 0 && coverage[0] {
+		mode := int32(1)
+		if atc {
+			mode = 2
+		}
+		spec = map[uint32]any{0: mode}
+	}
 	pipelines, _, err := deviceDriver.CreateGraphicsPipelines(nil, nil, core1_0.GraphicsPipelineCreateInfo{
 		Stages: []core1_0.PipelineShaderStageCreateInfo{
 			{Stage: core1_0.StageVertex, Module: vertModule, Name: "main"},
-			{Stage: core1_0.StageFragment, Module: fragModule, Name: "main"},
+			{Stage: core1_0.StageFragment, Module: fragModule, Name: "main", SpecializationInfo: spec},
 		},
 		VertexInputState: &core1_0.PipelineVertexInputStateCreateInfo{
 			VertexBindingDescriptions:   bindings,
@@ -338,7 +347,8 @@ func createLitVariantPipelineWithInput(deviceDriver core1_0.DeviceDriver, vertSp
 			LineWidth:   1.0,
 		},
 		MultisampleState: &core1_0.PipelineMultisampleStateCreateInfo{
-			RasterizationSamples: samples,
+			RasterizationSamples:  samples,
+			AlphaToCoverageEnable: atc,
 		},
 		DepthStencilState: depthState,
 		ColorBlendState:   blendState,

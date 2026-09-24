@@ -43,13 +43,15 @@ api:
   - renderer.Renderer.ResourceCounts
   - renderer.ResourceCounts.DescriptorSets
   - renderer.ResourceCounts.InstanceSets
+  - renderer.ResourceCounts.LODSets
+  - renderer.ResourceCounts.ImpostorAtlases
 example: examples/08-grass
 run: task example:08-grass
 requires:
   - cgo
   - vulkan-runtime
 assets: bundled
-verified: 2026-09-20
+verified: 2026-09-24
 ---
 
 # Treat a loaded model as geometry, not only as a draw call
@@ -459,6 +461,11 @@ reported zero leaks because teardown never ran.
 
 `Deferred` is not a detail: a count taken immediately after `DestroyModel`
 still includes the model, because those resources are genuinely still alive.
+
+`LODSets` and `ImpostorAtlases` count the resources described in
+[LOD instancing](lod-instancing.md), including deferred releases. An atlas also
+owns one descriptor set, counted in `DescriptorSets`; a LOD set borrows its atlas
+and owns only its placement buffers.
 
 `DescriptorSets` is not derivable from the other three, which is why it is
 there — see the next section for what it cost to find that out. It counts one

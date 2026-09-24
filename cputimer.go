@@ -51,12 +51,20 @@ const (
 	// reports a busy CPU on a frame that is only being paced.
 	CPUPresent
 
+	// CPULODCull and CPULODUpload measure CPU distance selection and buffer writes.
+	CPULODCull
+	CPULODUpload
+
 	cpuPhaseCount
 )
 
 // String is the label used in reports.
 func (p CPUPhase) String() string {
 	switch p {
+	case CPULODCull:
+		return "lodcull"
+	case CPULODUpload:
+		return "lodupload"
 	case CPUPoll:
 		return "poll"
 	case CPUUpdate:

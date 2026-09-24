@@ -23,7 +23,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-09-20
+verified: 2026-09-24
 ---
 
 # Draw repeated static meshes in one call
@@ -112,6 +112,10 @@ disagree in the last bits.
 
 ## Culling is per set
 
+For per-placement culling, distance meshes and far billboards, use
+[`InstanceSetLOD`](lod-instancing.md) through `InstancedMesh.LOD`. The ordinary
+`Set` path below remains the cheaper option when a small group is visible together.
+
 The set carries one bounding sphere over every placement, and the draw list
 frustum-tests that. **A set with one dome on screen draws all of them.**
 
@@ -128,6 +132,11 @@ and it needs no engine change.
 ## Shadows
 
 Instanced geometry casts, through its own depth-only stage.
+
+Both directional cascades and point-light cube faces use that stage. The
+point-light path previously submitted one mesh at the object's transform;
+`TestPointShadowUsesInstanceTransforms` now asserts that three placements
+submit 18 instances over six faces (the old path submitted six).
 
 That stage exists because it has to: `shadow.vert` takes the model matrix from a
 push constant, which the instanced path does not write, so without
@@ -550,9 +559,9 @@ in the draw list and groups them. An explicit opt-in is the cheap 90%, and the
 implicit version cannot be measured against the explicit one until the explicit
 one exists — which it now does, with the table above as the baseline.
 
-Per-instance CPU culling, for the same reason: the numbers say the off-screen
-vertex work costs 0.008 ms at 900 props, and re-uploading a visible subset every
-frame would cost more than that.
+Per-instance CPU culling and distance levels are available through the separate
+[`InstanceSetLOD`](lod-instancing.md) API. They cost selection and upload work;
+the original measurements above still describe the ordinary `InstanceSet` path.
 
 Instanced skinned meshes and instanced materials. Both are a pipeline and a
 branch; neither has been needed.

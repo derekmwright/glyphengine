@@ -17,6 +17,12 @@ var MeshFragSpv []byte
 //go:embed lit.vert.spv
 var LitVertSpv []byte
 
+//go:embed lit_lod.vert.spv
+var LitLODVertSpv []byte
+
+//go:embed lit_lod.frag.spv
+var LitLODFragSpv []byte
+
 //go:embed lit_instanced.vert.spv
 var LitInstancedVertSpv []byte
 
@@ -133,3 +139,9 @@ var DepthResolveFragSpv []byte
 
 //go:embed depthresolve_ms.frag.spv
 var DepthResolveMSFragSpv []byte
+
+//go:embed impostor.vert.spv
+var ImpostorVertSpv []byte
+
+//go:embed impostor.frag.spv
+var ImpostorFragSpv []byte
