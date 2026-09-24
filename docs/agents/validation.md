@@ -101,6 +101,33 @@ Every example is expected to be completely silent, so the gate is strict on
 purpose. It needs a GPU and the SDK, so it is deliberately not part of
 `task ci`.
 
+### Startup swapchain failures in batch gates
+
+`task smoke` and `task validate` source the same `tools/check-example.sh`.
+If a process exits nonzero with `renderer: create swapchain:
+vkCreateSwapchainKHR: VkResult=...`, before any successful swapchain or renderer
+initialization, the gate prints **STARTUP FAILURE (swapchain)** with the Vulkan
+result and retries that example once. This is a new process, with a new window,
+surface and device. The renderer itself makes no additional startup attempt.
+
+Every attempt records its exit code and log path under a separate run directory
+in `.task/smoke/` or `.task/validate/`. A retry prints both full logs, including
+when it succeeds; two startup failures fail the task. A surface query, image
+view allocation, mid-frame rebuild, draw failure or other startup error is not
+classified as this flake. Any `VULKAN ERROR` or `VULKAN WARNING` fails either
+gate without a retry, even if the same log also contains a startup error.
+Validation still requires the layer to be enabled, and synchronization
+validation still requires its enablement marker.
+
+`task check:self-test` (also in `task ci`) covers the retry bound and negative
+classifications. On 2026-09-24 a temporary startup return of `VkResult=-13`
+was injected at the creation boundary in `01-triangle` under validation:
+one failure printed the classification and then rendered two frames on
+attempt 2; a persistent failure made exactly two attempts and Task exited 201.
+The injection was removed. Disabling the checker's retry made its regression
+check fail with one call instead of two. Measured reproduction rates and the
+remaining uncertainty are in [windowing](windowing.md#intermittent-startup-swapchain-failure).
+
 ## Synchronization validation
 
 Core validation checks API use, layouts and object lifetime, but does not

@@ -89,19 +89,19 @@ func createSwapchain(
 	width, height int,
 	vsync bool,
 ) (*swapchainDetails, khr_swapchain.ExtensionDriver, error) {
-	capabilities, _, err := surfaceExt.GetPhysicalDeviceSurfaceCapabilities(surface, physicalDevice)
+	capabilities, result, err := surfaceExt.GetPhysicalDeviceSurfaceCapabilities(surface, physicalDevice)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("vkGetPhysicalDeviceSurfaceCapabilitiesKHR: VkResult=%d (%s): %w", result, result, err)
 	}
 
-	formats, _, err := surfaceExt.GetPhysicalDeviceSurfaceFormats(surface, physicalDevice)
+	formats, result, err := surfaceExt.GetPhysicalDeviceSurfaceFormats(surface, physicalDevice)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("vkGetPhysicalDeviceSurfaceFormatsKHR: VkResult=%d (%s): %w", result, result, err)
 	}
 
-	modes, _, err := surfaceExt.GetPhysicalDeviceSurfacePresentModes(surface, physicalDevice)
+	modes, result, err := surfaceExt.GetPhysicalDeviceSurfacePresentModes(surface, physicalDevice)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("vkGetPhysicalDeviceSurfacePresentModesKHR: VkResult=%d (%s): %w", result, result, err)
 	}
 
 	log.Printf("Available present modes: %v", modes)
@@ -149,12 +149,15 @@ func createSwapchain(
 
 	swapchainExt := khr_swapchain.CreateExtensionDriverFromCoreDriver(deviceDriver)
 	if swapchainExt == nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("VK_KHR_swapchain driver unavailable")
 	}
 
-	swapchain, _, err := swapchainExt.CreateSwapchain(nil, createInfo)
+	swapchain, result, err := swapchainExt.CreateSwapchain(nil, createInfo)
 	if err != nil {
-		return nil, nil, err
+		// Keep the call and numeric result: the wrapper's "vulkan error:
+		// unknown" alone cannot distinguish a refused surface from a refused
+		// swapchain. The gate retries the process, not this Vulkan call (#125).
+		return nil, nil, fmt.Errorf("vkCreateSwapchainKHR: VkResult=%d (%s): %w", result, result, err)
 	}
 
 	images, _, err := swapchainExt.GetSwapchainImages(swapchain)
