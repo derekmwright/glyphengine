@@ -49,7 +49,12 @@ tasks:
       - for f in *.vert *.frag; do "${VULKAN_SDK}/bin/glslc{{.EXE}}" "$f" -o "$f.spv"; done
       - for f in ../cmd/skyshadowcheck/*.frag; do "${VULKAN_SDK}/bin/glslc{{.EXE}}" "$f" -o "$f.spv"; done
       - for f in ../cmd/apppasscheck/*.vert ../cmd/apppasscheck/*.frag ../cmd/apppasscheck/*.comp; do "${VULKAN_SDK}/bin/glslc{{.EXE}}" "$f" -o "$f.spv"; done
+      - for f in ../examples/*/*.vert ../examples/*/*.frag ../examples/*/*.comp; do [ -f "$f" ] || continue; "${VULKAN_SDK}/bin/glslc{{.EXE}}" "$f" -o "$f.spv" || exit 1; done
     sources:
+      - examples/*/*.vert
+      - examples/*/*.frag
+      - examples/*/*.comp
+      - examples/*/*.inc
       - cmd/apppasscheck/*.vert
       - cmd/apppasscheck/*.frag
       - cmd/apppasscheck/*.comp
@@ -59,6 +64,7 @@ tasks:
       - cmd/skyshadowcheck/*.frag
       - cmd/skyshadowcheck/*.inc
     generates:
+      - examples/*/*.spv
       - cmd/apppasscheck/*.spv
       - shaders/*.spv
       - cmd/skyshadowcheck/*.spv
@@ -213,6 +219,7 @@ tasks:
       - go run ./21-streetlights -frames 60
       - go run ./22-level -frames 60
       - go run ./23-shadow-coverage -frames 60
+      - go run ./24-custom-passes -frames 60
       - go run ./15-kitchen-sink -demo -frames 60
 
   validate:
@@ -257,6 +264,8 @@ tasks:
         for ex in 01-triangle 02-cube 03-physics 04-first-person 05-textures 06-skinned 07-terrain 08-grass 09-water 10-text 11-lights 12-particles 13-ui 16-materials 17-input 18-translucent 19-instanced 20-screens 21-streetlights 22-level 15-kitchen-sink; do
           check $ex
         done
+        check 24-custom-passes
+        check 24-custom-passes -passes off
         check 23-shadow-coverage
         check 23-shadow-coverage -coverage=false
         check 23-shadow-coverage -caster=false
@@ -435,6 +444,7 @@ tasks:
         # reads r.uiLayer rather than capturing it.
         echo "-- the runs below rebuild the swapchain mid-flight --"
         export GLYPHENGINE_PROVOKE_RECREATE_FRAMES=15
+        check 24-custom-passes
         check 13-ui -glow on
         check 13-ui
         unset GLYPHENGINE_PROVOKE_RECREATE_FRAMES
@@ -702,7 +712,7 @@ tasks:
         # run to run, which no other entry here would notice because no other
         # entry turns the march on. -skylamp is in it because the sky's march
         # is a second copy of the jitter in a second shader.
-        for ex in "08-grass" "08-grass -timeofday 0.0" "08-grass -timeofday 0.03" "09-water" "12-particles" "06-skinned -demo" "15-kitchen-sink -demo" "09-water -plume -ghost -marker -submerged" "09-water -time 0.72 -yaw 1.771 -pitch -0.185 -pillars" "13-ui -glow on" "21-streetlights -volumetric 1 -lampvolumetric 1 -skylamp"; do
+        for ex in "08-grass" "08-grass -timeofday 0.0" "08-grass -timeofday 0.03" "09-water" "12-particles" "06-skinned -demo" "15-kitchen-sink -demo" "09-water -plume -ghost -marker -submerged" "09-water -time 0.72 -yaw 1.771 -pitch -0.185 -pillars" "13-ui -glow on" "21-streetlights -volumetric 1 -lampvolumetric 1 -skylamp" "24-custom-passes"; do
           set -- $ex
           name=$1; shift
           shot 16.667ms $name a "$*"
@@ -864,7 +874,7 @@ tasks:
             status=1
           fi
         }
-        for ex in "08-grass" "08-grass -timeofday 0.0" "08-grass -timeofday 0.03" "09-water"                   "12-particles" "06-skinned -demo" "15-kitchen-sink -demo"                   "09-water -plume -ghost -marker -submerged"                   "18-translucent" "13-ui" "10-text" "19-instanced" "21-streetlights"; do
+        for ex in "08-grass" "08-grass -timeofday 0.0" "08-grass -timeofday 0.03" "09-water"                   "12-particles" "06-skinned -demo" "15-kitchen-sink -demo"                   "09-water -plume -ghost -marker -submerged"                   "18-translucent" "13-ui" "10-text" "19-instanced" "21-streetlights" "24-custom-passes"; do
           drawseq "$ex"
         done
         # Prove this comparison can say no on real traces and not only on the
@@ -942,6 +952,7 @@ tasks:
       - go run ./20-screens -frames 60 -screenshot ../docs/images/20-screens.png
       - go run ./21-streetlights -frames 90 -screenshot ../docs/images/21-streetlights.png
       - go run ./22-level -frames 90 -screenshot ../docs/images/22-level.png
+      - go run ./24-custom-passes -frames 120 -screenshot ../docs/images/24-custom-passes.png
       - go run ./15-kitchen-sink -demo -frames 260 -screenshot ../docs/images/15-kitchen-sink.png
 
   hud:
@@ -1319,6 +1330,61 @@ tasks:
           rm -rf $d
         fi
         exit $status
+
+  custompasses:
+    desc: "Application light/compute/fog passes are visible, confined, deterministic and validation-clean"
+    dir: examples
+    env:
+      GLYPHENGINE_BACKGROUND: "1"
+      GLYPHENGINE_FIXED_FRAME_TIME: "16.667ms"
+    cmds:
+      # 960x540, frame 120, RX 7900 XTX: ground box (180,285)-(930,470)
+      # has 41325 pixels >=8/255, maximum contrast 109/255. N=30000 leaves
+      # margin below that measured count; contrast has an absolute 8/255 floor.
+      # Fog above the horizon (100,175)-(860,200): 19000 >=8/255, max 50/255;
+      # require 15000. Upper sky (100,20)-(860,80): exactly 0 changed pixels.
+      # The ground box includes the overlapping rectangles; starting at y=345
+      # misses their overlap and reports the same visible count without blending.
+      # PROVED: BlendNone in the pattern pass still passes (a), but drops the
+      # ground count to 41289 and maximum contrast to 66/255. Restored afterward.
+      # PROVED: adding 0.05 RGB in the composite writes the upper sky and
+      # fails (c): 45600 sky pixels change (max 10/255). Restored afterward.
+      # PROVED: without the fixed clock, two frame-120 captures differ in
+      # 157 pixels (max 1/255); byte identity fails even below the visibility
+      # floor. Both controls were restored before the final gate run.
+      # Isolation controls in scratch copies: no pattern draws leaves only
+      # 185 ground pixels >=8/255 (fails a); disabling the fog pass leaves
+      # 0 fog pixels changed (fails b) while 41136 ground pixels remain visible.
+      - |
+        set -e
+        d=../.task/custompasses
+        mkdir -p $d
+        rm -f $d/on.png $d/off.png $d/repeat.png
+        shot() {
+          name=$1; shift
+          if ! go run ./24-custom-passes -frames 120 "$@" -screenshot $d/$name.png >$d/$name.log 2>&1; then
+            cat $d/$name.log
+            exit 1
+          fi
+        }
+        shot on -passes on -timings
+        shot off -passes off
+        shot repeat -passes on
+        go run ../cmd/custompassescheck -on $d/on.png -off $d/off.png -repeat $d/repeat.png
+        if ! GLYPHENGINE_VALIDATION=1 GLYPHENGINE_PROVOKE_RECREATE_FRAMES=15,60,90 go run ./24-custom-passes -frames 120 >$d/validation.log 2>&1; then
+          cat $d/validation.log
+          exit 1
+        fi
+        # Prove the message counter works before accepting a silent log.
+        probe=$(echo "VULKAN ERROR: self-check" | grep -cE "VULKAN (ERROR|WARNING)" || true)
+        [ "$probe" = "1" ] || { echo "cannot count validation messages"; exit 1; }
+        grep -q "Vulkan validation layer enabled" $d/validation.log || { cat $d/validation.log; exit 1; }
+        msgs=$(grep -cE "VULKAN (ERROR|WARNING)" $d/validation.log || true)
+        [ "$msgs" = "0" ] || { cat $d/validation.log; exit 1; }
+        rebuilds=$(grep -c "Swapchain recreated:" $d/validation.log || true)
+        [ "$rebuilds" -ge 3 ] || { cat $d/validation.log; exit 1; }
+        echo "24-custom-passes: recreate at 15,60,90; 0 validation messages"
+        echo "captures and logs kept in .task/custompasses"
 
   shafts:
     desc: "Check that light shafts reach through the gaps between occluders"

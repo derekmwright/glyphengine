@@ -193,6 +193,7 @@ takes `-screenshot out.png` to capture its last frame.
 | ![](docs/images/05-textures.png) `05-textures` | ![](docs/images/06-skinned.png) `06-skinned` |
 | ![](docs/images/08-grass.png) `08-grass` | ![](docs/images/09-water.png) `09-water` |
 | ![](docs/images/11-lights.png) `11-lights` | ![](docs/images/21-streetlights.png) `21-streetlights` |
+| ![](docs/images/24-custom-passes.png) `24-custom-passes` | Additive light patterns, compute smoothing and depth-aware fog |
 
 ```
 task example:01-triangle      # window, renderer, input loop
@@ -217,6 +218,7 @@ task example:20-screens       # main menu, pause menu, scene swapping, keyboard 
 task example:21-streetlights  # clustered spot and point lights on terrain at night
 task example:22-level         # a level loaded from one glTF: extras, KHR_lights_punctual, per-node placement
 task example:23-shadow-coverage # distant off-camera casters with independent shadow coverage/depth
+task example:24-custom-passes # application render targets, graphics/compute passes and depth-aware fog
 ```
 
 ## Building
