@@ -46,6 +46,8 @@ type scene struct {
 // own loop rather than going through Engine.Run, which is the point of it, and
 // that means there is no frame loop to instrument and no BENCH line to parse.
 var scenes = []scene{
+	{"lod-full", "25-lod-forest", []string{"-frames", "200", "-levels", "1"}, "3600 full-detail trees, per-set culling"},
+	{"lod", "25-lod-forest", []string{"-frames", "200"}, "same placements, per-instance culling and four LOD bands"},
 	{"cube", "02-cube", []string{"-frames", "200"}, "control: minimal lit scene"},
 	{"terrain", "07-terrain", []string{"-frames", "200"}, "heightmap terrain, no flora"},
 	{"grass", "08-grass", []string{"-frames", "200"}, "instanced flora, the heaviest pass"},
@@ -206,6 +208,10 @@ func run(sc scene) (*result, error) {
 		"GLYPHENGINE_BENCH_LABEL="+sc.name,
 	)
 
+	if strings.HasPrefix(sc.name, "lod") {
+		cmd.Env = append(cmd.Env, "GLYPHENGINE_FIXED_FRAME_TIME=16.667ms")
+	}
+
 	start := time.Now()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -244,6 +250,9 @@ func printRow(r result) {
 	fmt.Printf("  frame %7.3f ms    gpu %7.3f ms    waiting %7.3f ms    cpu work %6.3f ms\n",
 		cpu, gpu, wait, cpu-wait)
 
+	if c, u := r.Values["cpu_lodcull"], r.Values["cpu_lodupload"]; c+u > 0 {
+		fmt.Printf("    cpu LOD cull %.3f ms  upload %.3f ms (per frame)\n", c, u)
+	}
 	type kv struct {
 		k string
 		v float64

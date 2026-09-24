@@ -19,9 +19,8 @@ import (
 //
 // The push constants carry the view-projection in the slot the ordinary path
 // uses for view-projection-model, and lit_instanced.vert does the model
-// multiply from its per-instance attribute. The model slot itself goes unused
-// here; there is no room in the 256-byte block to give the instanced path its
-// own layout, and no need, since the fragment stage never read pc.model.
+// multiply from its per-instance attribute. Ordinary sets leave the model slot
+// unused; LOD draws store their coverage phase and optional atlas framing there.
 func recordInstanced(
 	deviceDriver core1_0.DeviceDriver,
 	stats *RenderStats,
@@ -39,6 +38,7 @@ func recordInstanced(
 ) {
 	bound := false
 	currentDoubleSided := false
+	var currentPipeline core1_0.Pipeline
 	var lastTex *Texture
 
 	for i := range draws {
@@ -48,11 +48,24 @@ func recordInstanced(
 			continue
 		}
 
-		if !bound || d.DoubleSided != currentDoubleSided {
-			p := instancedPipeline
+		p := instancedPipeline
+		if d.DoubleSided {
+			p = instancedDoubleSidedPipeline
+		}
+		var atlas *ImpostorAtlas
+		if set.lod != nil {
+			kind := 0
 			if d.DoubleSided {
-				p = instancedDoubleSidedPipeline
+				kind = 1
 			}
+			if set.lodLevel == len(set.lod.levels) {
+				kind = 2
+				atlas = set.lod.impostor
+			}
+			p = set.lod.owner.lodPipelines[kind]
+		}
+		if !bound || d.DoubleSided != currentDoubleSided || currentPipeline != p {
+			currentPipeline = p
 			deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, p)
 			scratch.setViewport(deviceDriver, cmdBuf, viewport)
 			scratch.setScissor(deviceDriver, cmdBuf, scissor)
@@ -62,6 +75,9 @@ func recordInstanced(
 		}
 
 		tex := d.Texture
+		if atlas != nil {
+			tex = &atlas.texture
+		}
 		if tex == nil {
 			tex = fallbackTexture
 		}
@@ -71,11 +87,14 @@ func recordInstanced(
 		}
 
 		// Binding 0 is the mesh, binding 1 is the placements.
-		scratch.bindVertexBuffers(deviceDriver, cmdBuf, 0, set.Mesh.vertexBuffer, set.buffer)
+		if atlas != nil {
+			scratch.bindVertexBuffers(deviceDriver, cmdBuf, 1, set.buffer)
+		} else {
+			scratch.bindVertexBuffers(deviceDriver, cmdBuf, 0, set.Mesh.vertexBuffer, set.buffer)
+		}
 
-		// The model columns (16:32) are never written here: the instanced
-		// shader takes the model from a per-instance attribute rather than the
-		// push constant, so they must read as zero, which resetPC guarantees.
+		// Model transforms come from attributes. Ordinary sets leave the second
+		// matrix zero; LOD draws use it for coverage phase and atlas framing.
 		scratch.resetPC()
 		copy(scratch.pc[:16], lighting.VP[:]) // view-projection, not MVP
 		scratch.pc[32] = d.Color[0]
@@ -94,8 +113,25 @@ func recordInstanced(
 		}
 		scratch.pc[51] = roughness
 		scratch.pc[55] = d.Metallic
+		if set.lod != nil {
+			// Opposite phases fill the neighbour's discarded pixels. At the
+			// 25-lod-forest 40-unit crossing (frames 60/61, 1280x720 MSAA4),
+			// width 6 changes 0.069279/255 MAE versus 3.698333 for width 0;
+			// task lod also requires visible hard-switch pixels, not just a ratio.
+			scratch.pc[31] = float32(set.lodLevel % 2)
+		}
+		if atlas != nil {
+			copy(scratch.pc[16:19], atlas.center[:])
+			scratch.pc[19] = atlas.radius
+			scratch.pc[20] = 0.5 / float32(atlas.size)
+		}
 		scratch.pushConstants(deviceDriver, cmdBuf, litPipelineLayout, core1_0.StageVertex|core1_0.StageFragment)
 
+		if atlas != nil {
+			stats.addDraw(set.count, 0, 6)
+			deviceDriver.CmdDraw(cmdBuf, 6, set.count, 0, 0)
+			continue
+		}
 		stats.addDraw(set.count, set.Mesh.IndexCount, set.Mesh.VertexCount)
 		if set.Mesh.IndexCount > 0 {
 			deviceDriver.CmdBindIndexBuffer(cmdBuf, set.Mesh.indexBuffer, 0, set.Mesh.indexType)
@@ -115,9 +151,9 @@ func recordInstanced(
 // called out, and it is invisible in a still frame of a scene whose props
 // happen to sit where their shadows would.
 //
-// Culling is per set rather than per instance, so a set with one dome inside
-// the cascade draws all of them. The alternative is a visible subset uploaded
-// per cascade per frame, which is the CPU cost this feature exists to remove.
+// Culling is per submitted set, so a set with one dome inside the cascade draws
+// all its placements. LOD supplies only the chosen main-camera-visible bucket;
+// neither path uploads a separate visible subset for each shadow view.
 func recordInstancedShadow(
 	deviceDriver core1_0.DeviceDriver,
 	stats *RenderStats,

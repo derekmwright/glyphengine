@@ -219,6 +219,7 @@ task example:21-streetlights  # clustered spot and point lights on terrain at ni
 task example:22-level         # a level loaded from one glTF: extras, KHR_lights_punctual, per-node placement
 task example:23-shadow-coverage # distant off-camera casters with independent shadow coverage/depth
 task example:24-custom-passes # application render targets, graphics/compute passes and depth-aware fog
+task example:25-lod-forest     # per-instance culling, distance levels, dithered fades and baked impostors
 ```
 
 ## Building

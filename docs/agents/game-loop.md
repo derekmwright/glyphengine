@@ -52,7 +52,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-09-23
+verified: 2026-09-24
 ---
 
 # Run a game loop with Engine and Game
@@ -373,6 +373,13 @@ colours.
 layout, descriptor set layout and push-constant ranges the engine's pipelines
 declare. A mismatch is a pipeline-creation failure at startup or — worse — a
 shader that links and draws nothing, so develop one under `WithValidation`.
+
+For instance LOD, custom `LitLODVert` forwards instance `Tint.w` to fragment
+location 5; `LitLODFrag` specialises constant 0 for coverage. Ordinary
+`LitVert`, `LitFrag` and `LitInstancedVert` keep their existing interfaces.
+`ImpostorVert` and `ImpostorFrag` replace
+the far billboard stages independently. See [LOD instancing](lod-instancing.md)
+for the attributes, reserved push data and measured transition checks.
 
 Authoring is unchanged: write GLSL, run `task shaders`, commit the `.spv`, and
 `go:embed` it. There is no hot reload.

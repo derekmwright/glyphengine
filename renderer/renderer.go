@@ -75,11 +75,18 @@ type Renderer struct {
 	// bookkeeping DestroyModel's release closure keeps for r.meshes/
 	// r.textures/r.materials, and for the same reason: the resource is still
 	// genuinely alive for the frames still in flight when the call is made.
-	instanceSets      []*InstanceSet
-	overlayPipeline   core1_0.Pipeline
-	starsPipeline     core1_0.Pipeline
-	celestialPipeline core1_0.Pipeline
-	skyPipeline       core1_0.Pipeline
+	instanceSets               []*InstanceSet
+	lodSets                    []*InstanceSetLOD
+	impostorAtlases            []*ImpostorAtlas
+	lodDraws                   []RenderObject
+	lodGeneration              uint64
+	lodPipelines               [3]core1_0.Pipeline
+	lodLayouts                 [3]core1_0.PipelineLayout
+	lastLODCull, lastLODUpload time.Duration
+	overlayPipeline            core1_0.Pipeline
+	starsPipeline              core1_0.Pipeline
+	celestialPipeline          core1_0.Pipeline
+	skyPipeline                core1_0.Pipeline
 	// skyVolumetricPipeline draws in-scattering over the pixels the sky
 	// covers. Both sky passes use skyPipelineLayout: the non-lit layout plus
 	// the shadow/light set at set 1 for directional shadows and the froxel grid. See
@@ -840,6 +847,27 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 			s.destroy(r.deviceDriver)
 		}
 		r.instanceSets = nil
+	})
+
+	for i := range r.lodPipelines {
+		r.lodPipelines[i], r.lodLayouts[i], err = r.createLODPipeline(i)
+		if err != nil {
+			return nil, fmt.Errorf("renderer: LOD pipeline: %w", err)
+		}
+		r.onInit(func() {
+			r.deviceDriver.DestroyPipeline(r.lodPipelines[i], nil)
+			r.deviceDriver.DestroyPipelineLayout(r.lodLayouts[i], nil)
+		})
+	}
+	r.onInit(func() {
+		for _, s := range r.lodSets {
+			s.destroy()
+		}
+		r.lodSets = nil
+		for _, a := range r.impostorAtlases {
+			a.destroy()
+		}
+		r.impostorAtlases = nil
 	})
 
 	r.overlayPipeline, err = createOverlayPipeline(r.deviceDriver, r.shaders, r.renderPass, r.pipelineLayout, r.sc.extent, r.msaaSamples)
@@ -1887,6 +1915,7 @@ func (r *Renderer) rebuildAndAcquire(f int) (int, bool, error) {
 // a swapchain image, records draw commands, submits to the GPU, and presents.
 func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, celestials []RenderObject, uiOverlays []UIRenderObject, msdfOverlays []RenderObject, lighting SceneLighting) error {
 	f := r.currentFrame
+	r.lastLODCull, r.lastLODUpload = 0, 0
 
 	if t := r.trace; t != nil {
 		t.Int("slot", f)
@@ -1971,6 +2000,7 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 		r.particles.flushUploads(f)
 	}
 	r.flushDynamicMeshes(f)
+	draws = r.prepareLOD(draws, lighting, f)
 
 	// Hashed after the flushes, so what is recorded is what this frame's slot
 	// actually holds rather than what was staged -- a dirty flag that failed to
@@ -2082,6 +2112,18 @@ func (r *Renderer) traceStreamedBuffers(t *StateTrace) {
 	if r.particles != nil {
 		t.CountHash("particles", len(r.particles.staging), HashPOD(NewHash, r.particles.staging))
 		t.Int("particlesbehind", r.particles.behind)
+	}
+	lh := NewHash
+	nLOD := 0
+	for _, d := range r.lodDraws {
+		if b := d.Instances; b != nil && b.lod != nil {
+			lh = HashPOD(lh, unsafe.Slice((*MeshInstance)(b.mapped), b.count))
+			lh = lh.Int(b.lodLevel).Int(b.count)
+			nLOD++
+		}
+	}
+	if nLOD > 0 {
+		t.CountHash("lod", nLOD, lh)
 	}
 	// Contents combined with XOR so it does not depend on the walk order, and
 	// the walk order hashed separately so it is visible either way.

@@ -31,6 +31,7 @@ import (
 const grassImpostorCellSize = 256
 
 type grassImpostor struct {
+	depth  *depthResources
 	image  core1_0.Image
 	memory core1_0.DeviceMemory
 	view   core1_0.ImageView
@@ -114,68 +115,8 @@ func (r *Renderer) bakeGrassImpostors(gs *GrassSystem, cellSize int) (*grassImpo
 	imp.worldHeight = tipHeight * grassBladeScale
 	imp.worldWidth = 2 * halfWidth * grassBladeScale
 
-	sampler, err := deviceSampler(r.deviceDriver)
-	if err != nil {
+	if err := r.allocateBakeAtlas(imp, false); err != nil {
 		return nil, err
-	}
-	imp.sampler = sampler
-
-	img, mem, view, err := createOffscreenColor(r.instanceDriver, r.deviceDriver, r.physicalDevice, imp.extent)
-	if err != nil {
-		imp.destroy(r)
-		return nil, fmt.Errorf("grass impostor image: %w", err)
-	}
-	imp.image, imp.memory, imp.view = img, mem, view
-
-	// A clearing pass: cells are written by discard-heavy geometry, so whatever
-	// the cutout rejects has to already be transparent black.
-	imp.renderPass, err = createGrassBakeRenderPass(r.deviceDriver)
-	if err != nil {
-		imp.destroy(r)
-		return nil, fmt.Errorf("grass impostor render pass: %w", err)
-	}
-
-	fb, _, err := r.deviceDriver.CreateFramebuffer(nil, core1_0.FramebufferCreateInfo{
-		RenderPass:  imp.renderPass,
-		Attachments: []core1_0.ImageView{imp.view},
-		Width:       imp.extent.Width,
-		Height:      imp.extent.Height,
-		Layers:      1,
-	})
-	if err != nil {
-		imp.destroy(r)
-		return nil, fmt.Errorf("grass impostor framebuffer: %w", err)
-	}
-	imp.fb = fb
-
-	imp.pipeline, err = createGrassBakePipeline(r.deviceDriver, r.shaders, imp.renderPass, r.pipelineLayout)
-	if err != nil {
-		imp.destroy(r)
-		return nil, fmt.Errorf("grass impostor pipeline: %w", err)
-	}
-
-	sets, _, err := r.deviceDriver.AllocateDescriptorSets(core1_0.DescriptorSetAllocateInfo{
-		DescriptorPool: r.descriptorPool,
-		SetLayouts:     []core1_0.DescriptorSetLayout{r.descriptorSetLayout},
-	})
-	if err != nil {
-		imp.destroy(r)
-		return nil, fmt.Errorf("grass impostor descriptor set: %w", err)
-	}
-	imp.set = sets[0]
-	r.liveDescriptorSets++
-	if err := r.deviceDriver.UpdateDescriptorSets([]core1_0.WriteDescriptorSet{{
-		DstSet:         imp.set,
-		DstBinding:     0,
-		DescriptorType: core1_0.DescriptorTypeCombinedImageSampler,
-		ImageInfo: []core1_0.DescriptorImageInfo{{
-			Sampler:     imp.sampler,
-			ImageView:   imp.view,
-			ImageLayout: core1_0.ImageLayoutShaderReadOnlyOptimal,
-		}},
-	}}, nil); err != nil {
-		imp.destroy(r)
-		return nil, fmt.Errorf("grass impostor descriptor write: %w", err)
 	}
 
 	if err := r.recordGrassBake(gs, imp, cellSize, halfWidth, tipHeight); err != nil {
@@ -329,6 +270,9 @@ func (imp *grassImpostor) destroy(r *Renderer) {
 	if imp.sampler.Handle() != 0 {
 		r.deviceDriver.DestroySampler(imp.sampler, nil)
 	}
+	if imp.depth != nil {
+		imp.depth.destroy(r.deviceDriver, 1)
+	}
 	*imp = grassImpostor{}
 }
 
@@ -365,8 +309,8 @@ func deviceSampler(deviceDriver core1_0.DeviceDriver) (core1_0.Sampler, error) {
 }
 
 // createGrassBakeRenderPass clears to transparent black and ends sampleable.
-func createGrassBakeRenderPass(deviceDriver core1_0.DeviceDriver) (core1_0.RenderPass, error) {
-	renderPass, _, err := deviceDriver.CreateRenderPass(nil, core1_0.RenderPassCreateInfo{
+func createGrassBakeRenderPass(deviceDriver core1_0.DeviceDriver, depthFormat core1_0.Format) (core1_0.RenderPass, error) {
+	info := core1_0.RenderPassCreateInfo{
 		Attachments: []core1_0.AttachmentDescription{{
 			Format:  hdrFormat,
 			Samples: core1_0.Samples1,
@@ -393,17 +337,32 @@ func createGrassBakeRenderPass(deviceDriver core1_0.DeviceDriver) (core1_0.Rende
 			SrcAccessMask: core1_0.AccessColorAttachmentWrite,
 			DstAccessMask: core1_0.AccessShaderRead,
 		}},
-	})
+	}
+	if depthFormat != 0 {
+		info.Attachments = append(info.Attachments, core1_0.AttachmentDescription{
+			Format: depthFormat, Samples: core1_0.Samples1, LoadOp: core1_0.AttachmentLoadOpClear,
+			StoreOp: core1_0.AttachmentStoreOpDontCare, StencilLoadOp: core1_0.AttachmentLoadOpDontCare,
+			StencilStoreOp: core1_0.AttachmentStoreOpDontCare, InitialLayout: core1_0.ImageLayoutUndefined,
+			FinalLayout: core1_0.ImageLayoutDepthStencilAttachmentOptimal,
+		})
+		info.Subpasses[0].DepthStencilAttachment = &core1_0.AttachmentReference{Attachment: 1, Layout: core1_0.ImageLayoutDepthStencilAttachmentOptimal}
+	}
+	// The consumer samples after this pass, including in later submissions.
+	info.SubpassDependencies = []core1_0.SubpassDependency{{
+		SrcSubpass: 0, DstSubpass: core1_0.SubpassExternal,
+		SrcStageMask: core1_0.PipelineStageColorAttachmentOutput, DstStageMask: core1_0.PipelineStageFragmentShader,
+		SrcAccessMask: core1_0.AccessColorAttachmentWrite, DstAccessMask: core1_0.AccessShaderRead,
+	}}
+	renderPass, _, err := deviceDriver.CreateRenderPass(nil, info)
 	if err != nil {
 		return core1_0.RenderPass{}, err
 	}
 	return renderPass, nil
 }
 
-// createGrassBakePipeline draws mesh geometry with no depth test and no
-// culling: the bake wants both faces of a blade, and a depth buffer would only
-// decide which of two coplanar leaves wins.
-func createGrassBakePipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, pipelineLayout core1_0.PipelineLayout) (core1_0.Pipeline, error) {
+// createGrassBakePipeline draws both faces. Grass retains its depth-free bake;
+// a general mesh atlas enables reverse-Z depth to resolve overlapping surfaces.
+func createGrassBakePipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, pipelineLayout core1_0.PipelineLayout, depth bool) (core1_0.Pipeline, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
 		Code: bytesToUint32Slice(sh.GrassBakeVert),
 	})
@@ -441,7 +400,7 @@ func createGrassBakePipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, re
 			LineWidth:   1.0,
 		},
 		MultisampleState:  &core1_0.PipelineMultisampleStateCreateInfo{RasterizationSamples: core1_0.Samples1},
-		DepthStencilState: &core1_0.PipelineDepthStencilStateCreateInfo{},
+		DepthStencilState: &core1_0.PipelineDepthStencilStateCreateInfo{DepthTestEnable: depth, DepthWriteEnable: depth, DepthCompareOp: core1_0.CompareOpGreater},
 		ColorBlendState: &core1_0.PipelineColorBlendStateCreateInfo{
 			Attachments: []core1_0.PipelineColorBlendAttachmentState{{
 				ColorWriteMask: core1_0.ColorComponentRed | core1_0.ColorComponentGreen | core1_0.ColorComponentBlue | core1_0.ColorComponentAlpha,
@@ -643,4 +602,86 @@ func createGrassImpostorPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet
 	}
 	log.Println("Grass impostor pipeline created")
 	return pipelines[0], nil
+}
+
+// allocateBakeAtlas shares atlas storage and descriptors with the grass bake.
+func (r *Renderer) allocateBakeAtlas(imp *grassImpostor, depth bool) error {
+	sampler, err := deviceSampler(r.deviceDriver)
+	if err != nil {
+		return err
+	}
+	imp.sampler = sampler
+
+	img, mem, view, err := createOffscreenColor(r.instanceDriver, r.deviceDriver, r.physicalDevice, imp.extent)
+	if err != nil {
+		imp.destroy(r)
+		return fmt.Errorf("grass impostor image: %w", err)
+	}
+	imp.image, imp.memory, imp.view = img, mem, view
+
+	// A clearing pass: cells are written by discard-heavy geometry, so whatever
+	// the cutout rejects has to already be transparent black.
+	var depthFormat core1_0.Format
+	if depth {
+		imp.depth, err = createDepthResources(r.instanceDriver, r.deviceDriver, r.physicalDevice, imp.extent, 1, core1_0.Samples1)
+		if err != nil {
+			imp.destroy(r)
+			return err
+		}
+		depthFormat = imp.depth.format
+	}
+	imp.renderPass, err = createGrassBakeRenderPass(r.deviceDriver, depthFormat)
+	if err != nil {
+		imp.destroy(r)
+		return fmt.Errorf("grass impostor render pass: %w", err)
+	}
+
+	attachments := []core1_0.ImageView{imp.view}
+	if depth {
+		attachments = append(attachments, imp.depth.views[0])
+	}
+	fb, _, err := r.deviceDriver.CreateFramebuffer(nil, core1_0.FramebufferCreateInfo{
+		RenderPass:  imp.renderPass,
+		Attachments: attachments,
+		Width:       imp.extent.Width,
+		Height:      imp.extent.Height,
+		Layers:      1,
+	})
+	if err != nil {
+		imp.destroy(r)
+		return fmt.Errorf("grass impostor framebuffer: %w", err)
+	}
+	imp.fb = fb
+
+	imp.pipeline, err = createGrassBakePipeline(r.deviceDriver, r.shaders, imp.renderPass, r.pipelineLayout, depth)
+	if err != nil {
+		imp.destroy(r)
+		return fmt.Errorf("grass impostor pipeline: %w", err)
+	}
+
+	sets, _, err := r.deviceDriver.AllocateDescriptorSets(core1_0.DescriptorSetAllocateInfo{
+		DescriptorPool: r.descriptorPool,
+		SetLayouts:     []core1_0.DescriptorSetLayout{r.descriptorSetLayout},
+	})
+	if err != nil {
+		imp.destroy(r)
+		return fmt.Errorf("grass impostor descriptor set: %w", err)
+	}
+	imp.set = sets[0]
+	r.liveDescriptorSets++
+	if err := r.deviceDriver.UpdateDescriptorSets([]core1_0.WriteDescriptorSet{{
+		DstSet:         imp.set,
+		DstBinding:     0,
+		DescriptorType: core1_0.DescriptorTypeCombinedImageSampler,
+		ImageInfo: []core1_0.DescriptorImageInfo{{
+			Sampler:     imp.sampler,
+			ImageView:   imp.view,
+			ImageLayout: core1_0.ImageLayoutShaderReadOnlyOptimal,
+		}},
+	}}, nil); err != nil {
+		imp.destroy(r)
+		return fmt.Errorf("grass impostor descriptor write: %w", err)
+	}
+
+	return nil
 }
