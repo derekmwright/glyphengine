@@ -106,7 +106,7 @@ func recordInstanced(
 	}
 }
 
-// recordInstancedShadow draws the instance sets into one shadow cascade.
+// recordInstancedShadow draws instance sets into one cascade or point-light face.
 //
 // Instanced geometry needs its own path here or it silently stops casting: the
 // draw would still record against shadow.vert, which takes the model matrix

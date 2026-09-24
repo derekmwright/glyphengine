@@ -698,7 +698,7 @@ func recordCommandBuffer(
 		casters := scratch.cubeCasters[:0]
 		for i := range draws {
 			d := &draws[i]
-			if d.Emissive || d.NoCastShadow || d.Water != nil {
+			if d.Emissive || d.NoCastShadow || d.Water != nil || d.Instances != nil {
 				continue
 			}
 			cx, cy, cz, cr := d.worldBoundSphere()
@@ -776,6 +776,8 @@ func recordCommandBuffer(
 				}
 			}
 
+			recordInstancedShadow(deviceDriver, stats, cmdBuf, shadow.instancedPipeline,
+				shadow.pipelineLayout, cubeViewport, cubeScissor, draws, faceVP, faceFrustum, scratch)
 			deviceDriver.CmdEndRenderPass(cmdBuf)
 		}
 	}

@@ -134,7 +134,12 @@ func withUILayer(fx *frame, glow bool) *frame {
 // UNINTENDED change moves it, that is what this is for.
 // #98 changes the regular sky's descriptor/layout arguments; UI work and
 // the 3379 calls are unchanged. Previous hash: 0xab0f60e975b26193.
-const goldenUILayerStreamHash = Hasher(0xdf477ab29db846b8)
+// The point-light instance-shadow fix: the cube pass now uses the
+// instanced depth pipeline and placement count. The base fixture adds 18 driver
+// calls (3299 -> 3317); application/UI/volumetric additions are unchanged.
+// Removing only that fix restores 0x0db1df67cfc2a68b and fails
+// TestPointShadowUsesInstanceTransforms (6 instances, want 18).
+const goldenUILayerStreamHash = Hasher(0x77fcc98c39c6cbde)
 
 // TestUILayerStreamIsPinned is the layer-on half of "nothing changed": the
 // extra render pass, the two overlay pipelines bound inside it, the bloom chain

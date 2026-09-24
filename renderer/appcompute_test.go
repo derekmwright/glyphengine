@@ -118,8 +118,13 @@ func TestAppComputeStreams(t *testing.T) {
 // 0xa0170632efdd823d; the direct command probe also reports zero dispatches.
 // Four compute commands, two entry barrier groups, one return barrier, and
 // one additional scene-input barrier add eight calls to the 3331-call graphics fixture.
-const goldenAppComputeStreamHash Hasher = 0x7c76c535eabbcaa0
-const goldenAppComputeCalls = 3339
+// The point-light instance-shadow fix: the cube pass now uses the
+// instanced depth pipeline and placement count. The base fixture adds 18 driver
+// calls (3299 -> 3317); application/UI/volumetric additions are unchanged.
+// Removing only that fix restores 0x0db1df67cfc2a68b and fails
+// TestPointShadowUsesInstanceTransforms (6 instances, want 18).
+const goldenAppComputeStreamHash Hasher = 0x04f6db66707221ea
+const goldenAppComputeCalls = 3357
 
 func TestAppComputeAllocs(t *testing.T) {
 	for _, n := range []int{7, 97, 511} {
