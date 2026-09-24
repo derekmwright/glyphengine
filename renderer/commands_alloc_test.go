@@ -188,7 +188,12 @@ func benchName(n int) string {
 // Issue #98 deliberately changes two arguments in the regular sky draw:
 // bind cloudSet+shadowDS with skyPipelineLayout, and push through that layout.
 // Calls stay at 3299; the old hash was 0x7f81990a07a357c6.
-const goldenStreamHash = Hasher(0x0db1df67cfc2a68b)
+// The point-light instance-shadow fix: the cube pass now uses the
+// instanced depth pipeline and placement count. The base fixture adds 18 driver
+// calls (3299 -> 3317); application/UI/volumetric additions are unchanged.
+// Removing only that fix restores 0x0db1df67cfc2a68b and fails
+// TestPointShadowUsesInstanceTransforms (6 instances, want 18).
+const goldenStreamHash = Hasher(0x129eaca6a2990cb5)
 
 // TestRecordCommandBufferStreamIsUnchanged is the GPU-free half of "nothing
 // changed": every driver call the recorder makes, folded in order with its
@@ -256,7 +261,7 @@ func withVolumetricLight(fx *frame) *frame {
 // viewport, set scissor, bind descriptor sets, push constants, draw, and
 // nothing else.
 // Same regular-sky binding change as goldenStreamHash (#98), still 3305 calls.
-const goldenVolumetricStreamHash = Hasher(0xa33167bca582b3df)
+const goldenVolumetricStreamHash = Hasher(0x0771fe136cb379c1)
 
 // TestVolumetricSkyDrawIsRecorded is the volumetrics-on half of "nothing
 // changed": the extra draw reaches the driver, with the argument values it

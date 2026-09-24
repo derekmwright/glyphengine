@@ -58,8 +58,13 @@ func withAppFrame(fx *frame, passes bool, compute ...bool) *frame {
 // Three-set bindings reuse draw textures at set 0 and add pass inputs at set 2:
 // the app hash moved from 0xee218de19dd3548f without adding a driver call. The
 // fixture now allocates two pass-input handles instead of four per-draw handles.
-const goldenSceneDepthStreamHash Hasher = 0x944b6fa19f8b37dc
-const goldenAppPassStreamHash Hasher = 0x68c983caf624e51d
+// The point-light instance-shadow fix: the cube pass now uses the
+// instanced depth pipeline and placement count. The base fixture adds 18 driver
+// calls (3299 -> 3317); application/UI/volumetric additions are unchanged.
+// Removing only that fix restores 0x0db1df67cfc2a68b and fails
+// TestPointShadowUsesInstanceTransforms (6 instances, want 18).
+const goldenSceneDepthStreamHash Hasher = 0x47dfc330b0b34eae
+const goldenAppPassStreamHash Hasher = 0xba0a7a3199a5239b
 
 func TestAppPassStreams(t *testing.T) {
 	base := &fakeDriver{hashing: true}
