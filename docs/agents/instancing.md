@@ -28,6 +28,11 @@ verified: 2026-09-24
 
 # Draw repeated static meshes in one call
 
+For **distinct geometry** sharing storage, use [mesh arenas and draw ranges](models.md#shared-geometry-storage-and-independent-draw-ranges).
+Every allocated range is an ordinary `*Mesh`, so it can also be the mesh of an
+`InstanceSet` or LOD level. The models page compares direct and indirect range
+submission; the measurements below concern repeated placements of one mesh.
+
 ```go
 placements := make([]renderer.MeshInstance, 0, 900)
 for _, p := range colony.Domes {

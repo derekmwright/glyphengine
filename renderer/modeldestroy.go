@@ -72,6 +72,10 @@ type ResourceCounts struct {
 	Textures  int
 	Materials int
 
+	// MeshArenas counts shared allocations; MeshRanges includes retiring ranges.
+	MeshArenas int
+	MeshRanges int
+
 	// DescriptorSets is how many sets those resources hold from the
 	// renderer's one descriptor pool: one per Texture, one per Material, one
 	// per TerrainMaterial, maxFramesInFlight per JointBuffer, plus one for the
@@ -118,8 +122,14 @@ type ResourceCounts struct {
 
 // ResourceCounts returns the renderer's live GPU resource counts.
 func (r *Renderer) ResourceCounts() ResourceCounts {
+	ranges := 0
+	for _, a := range r.meshArenas {
+		ranges += len(a.live)
+	}
 	return ResourceCounts{
 		Meshes:          len(r.meshes),
+		MeshArenas:      len(r.meshArenas),
+		MeshRanges:      ranges,
 		Textures:        len(r.textures),
 		Materials:       len(r.materials),
 		DescriptorSets:  r.liveDescriptorSets,

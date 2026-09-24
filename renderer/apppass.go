@@ -329,7 +329,7 @@ func (p *AppPass) record(c *graphFrame) {
 		s.bindVertexBuffers(d, c.cmd, 0, draw.Mesh.vertexBuffer)
 		if draw.Mesh.IndexCount > 0 {
 			d.CmdBindIndexBuffer(c.cmd, draw.Mesh.indexBuffer, 0, draw.Mesh.indexType)
-			d.CmdDrawIndexed(c.cmd, draw.Mesh.IndexCount, 1, 0, 0, 0)
+			d.CmdDrawIndexed(c.cmd, draw.Mesh.IndexCount, 1, draw.Mesh.firstIndex, draw.Mesh.vertexOffset, 0)
 		} else {
 			d.CmdDraw(c.cmd, draw.Mesh.VertexCount, 1, 0, 0)
 		}

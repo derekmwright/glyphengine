@@ -8,16 +8,20 @@ import (
 	"github.com/vkngwrapper/core/v3/core1_0"
 )
 
-// Mesh holds GPU vertex/index buffers and their counts.
+// Mesh holds GPU vertex/index buffers and their counts. It either owns its
+// buffers or borrows an immutable range of a MeshArena's storage.
 type Mesh struct {
 	vertexBuffer core1_0.Buffer
 	vertexMemory core1_0.DeviceMemory
 	VertexCount  int
 
-	indexBuffer core1_0.Buffer
-	indexMemory core1_0.DeviceMemory
-	IndexCount  int
-	indexType   core1_0.IndexType
+	indexBuffer  core1_0.Buffer
+	indexMemory  core1_0.DeviceMemory
+	IndexCount   int
+	indexType    core1_0.IndexType
+	firstIndex   uint32
+	vertexOffset int
+	owner        *MeshArena
 
 	BoundCenter [3]float32 // object-space bounding sphere center
 	BoundRadius float32    // object-space bounding sphere radius (0 = skip culling)
@@ -396,6 +400,13 @@ func (r *Renderer) flushDynamicMeshes(frame int) {
 // after all in-flight frames finish referencing them.
 func (r *Renderer) DestroyMesh(m *Mesh) {
 	if m == nil || m.destroyed {
+		return
+	}
+	if m.owner != nil {
+		if m.owner.r != r {
+			panic("DestroyMesh: range belongs to another renderer")
+		}
+		m.owner.Free(m)
 		return
 	}
 	m.destroyed = true

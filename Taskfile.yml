@@ -242,6 +242,7 @@ tasks:
         check 18-translucent
         check 19-instanced
         check 25-lod-forest
+        check 26-mesh-ranges
         check 20-screens
         check 21-streetlights
         check 22-level
@@ -281,6 +282,10 @@ tasks:
         check 25-lod-forest -replace
         check 25-lod-forest -gpu -replace
         check 25-lod-forest -gpu -indexed
+        check 26-mesh-ranges -count 100 -mode separate
+        check 26-mesh-ranges -count 100 -mode ranges
+        check 26-mesh-ranges -count 100 -mode indirect
+        check 26-mesh-ranges -count 100 -mode indirect -index32=false
         check 23-shadow-coverage
         check 23-shadow-coverage -coverage=false
         check 23-shadow-coverage -caster=false
@@ -2184,6 +2189,12 @@ tasks:
     desc: Verify startup classification, one retry, and validation failure handling
     cmds:
       - . tools/check-example-test.sh
+  ranges:
+    desc: Compare mesh ranges and indirect batches against separate meshes
+    env:
+      GLYPHENGINE_FIXED_FRAME_TIME: 16.667ms
+    cmds:
+      - go run ./cmd/rangecheck {{.CLI_ARGS}}
 
   ci:
     desc: Run everything CI runs

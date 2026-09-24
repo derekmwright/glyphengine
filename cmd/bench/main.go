@@ -17,12 +17,14 @@
 package main
 
 import (
+	"encoding/csv"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -149,7 +151,7 @@ type result struct {
 func main() {
 	only := flag.String("scene", "", "run only the named scene")
 	jsonOut := flag.String("json", "", "also write results as JSON to this path")
-	repeat := flag.Int("repeat", 1, "run each scene N times and keep the fastest")
+	repeat := flag.Int("repeat", 1, "run N times; patches retains interleaved samples, other scenes keep the fastest")
 	// extra exists so a sweep -- a resolution, a step count, a light count --
 	// can be measured with this tool's parsing and this tool's table instead
 	// of a one-off script that reports something subtly different. It is
@@ -158,6 +160,13 @@ func main() {
 	// than silently skipping it in a run of twenty.
 	extra := flag.String("extra", "", "extra arguments appended to the scene's own, e.g. -extra \"-width 1920 -height 1080\"; requires -scene")
 	flag.Parse()
+	if *only == "patches" {
+		if err := runPatches(*repeat, *jsonOut, *extra); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	if *extra != "" && *only == "" {
 		fmt.Fprintln(os.Stderr, "bench: -extra needs -scene: the arguments are not valid for every scene")
@@ -209,7 +218,7 @@ func run(sc scene) (*result, error) {
 		"GLYPHENGINE_BENCH_LABEL="+sc.name,
 	)
 
-	if strings.HasPrefix(sc.name, "lod") {
+	if strings.HasPrefix(sc.name, "lod") || strings.HasPrefix(sc.name, "patches") {
 		cmd.Env = append(cmd.Env, "GLYPHENGINE_FIXED_FRAME_TIME=16.667ms")
 	}
 
@@ -237,7 +246,80 @@ func run(sc scene) (*result, error) {
 		}
 		r.Values[fields[i]] = v
 	}
+	if p := regexp.MustCompile(`PATCHES\t([^\r\n]+)`).FindSubmatch(out); p != nil {
+		fields := strings.Split(string(p[1]), "\t")
+		for i := 0; i+1 < len(fields); i += 2 {
+			if v, err := strconv.ParseFloat(fields[i+1], 64); err == nil {
+				r.Values[fields[i]] = v
+			}
+		}
+	}
 	return r, nil
+}
+
+// A/B/C/A/B/C preserves all samples instead of selecting a favourable fastest
+// run. Compare the mean saving to the within-mode range at 400 patches; accept
+// batching only when CPU recording improves beyond scatter without GPU cost.
+func runPatches(repeat int, jsonOut, extra string) error {
+	if repeat < 2 {
+		repeat = 2
+	}
+	var results []result
+	for _, n := range []int{100, 400, 1600} {
+		for trial := 0; trial < repeat; trial++ {
+			for _, mode := range []string{"separate", "ranges", "indirect"} {
+				if err := patchesGPUIdle(); err != nil {
+					return err
+				}
+				sc := scene{name: fmt.Sprintf("patches-%d-%s-%d", n, mode, trial+1), dir: "26-mesh-ranges", args: []string{"-count", strconv.Itoa(n), "-mode", mode, "-frames", "200"}}
+				sc.args = append(sc.args, strings.Fields(extra)...)
+				r, err := run(sc)
+				if err != nil {
+					return err
+				}
+				if err := patchesGPUIdle(); err != nil {
+					return fmt.Errorf("discard %s: %w", sc.name, err)
+				}
+				results = append(results, *r)
+				fmt.Printf("%s: record %.3f ms CPU %.3f ms GPU %.3f ms draws %.0f instances %.0f geometry buffers %.0f bytes %.0f Alloc %.6f ms\n", r.Scene, r.Values["cpu_record"], r.Values["cpu_total"], r.Values["gpu_total"], r.Values["n_draws"], r.Values["n_instances"], r.Values["n_geometry_buffers"], r.Values["geometry_bytes"], r.Values["alloc_ms"])
+			}
+		}
+	}
+	if jsonOut != "" {
+		writeJSON(jsonOut, results)
+	}
+	return nil
+}
+
+// Validate the Windows process-isolation precondition on each side of every
+// sample, so a second engine run cannot quietly become performance evidence.
+func patchesGPUIdle() error {
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+	out, err := exec.Command("tasklist", "/FO", "CSV", "/NH").Output()
+	if err != nil {
+		return fmt.Errorf("patches: tasklist: %w", err)
+	}
+	rows, err := csv.NewReader(strings.NewReader(string(out))).ReadAll()
+	if err != nil {
+		return err
+	}
+	example := regexp.MustCompile(`^[0-9]{2}-.*\.exe$`)
+	for _, row := range rows {
+		if len(row) < 2 {
+			continue
+		}
+		pid, _ := strconv.Atoi(row[1])
+		if pid == os.Getpid() {
+			continue
+		}
+		name := strings.ToLower(row[0])
+		if example.MatchString(name) || name == "bench.exe" || name == "universebuild.exe" || name == "churn.exe" || strings.HasSuffix(name, "check.exe") {
+			return fmt.Errorf("patches: GPU busy: %s PID %d; retry when no other engine jobs are running", name, pid)
+		}
+	}
+	return nil
 }
 
 // printRow prints one scene: the totals, then whichever passes are actually

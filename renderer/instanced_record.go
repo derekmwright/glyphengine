@@ -138,6 +138,10 @@ func recordInstanced(
 			deviceDriver.CmdDraw(cmdBuf, 6, set.count, 0, 0)
 			continue
 		}
+		if set.batch != nil {
+			set.batch.record(deviceDriver, stats, cmdBuf, nil)
+			continue
+		}
 		stats.addInstanceDraw(set, set.Mesh.IndexCount, set.Mesh.VertexCount)
 		if set.indirect.Handle() != 0 {
 			set.drawIndirect(deviceDriver, cmdBuf)
@@ -145,7 +149,7 @@ func recordInstanced(
 		}
 		if set.Mesh.IndexCount > 0 {
 			deviceDriver.CmdBindIndexBuffer(cmdBuf, set.Mesh.indexBuffer, 0, set.Mesh.indexType)
-			deviceDriver.CmdDrawIndexed(cmdBuf, set.Mesh.IndexCount, set.count, 0, 0, 0)
+			deviceDriver.CmdDrawIndexed(cmdBuf, set.Mesh.IndexCount, set.count, set.Mesh.firstIndex, set.Mesh.vertexOffset, 0)
 		} else {
 			deviceDriver.CmdDraw(cmdBuf, set.Mesh.VertexCount, set.count, 0, 0)
 		}
@@ -213,6 +217,10 @@ func recordInstancedShadow(
 		copy(scratch.shadowPC[:16], cascadeVP[:])
 		scratch.pushShadowConstants(deviceDriver, cmdBuf, layout)
 
+		if set.batch != nil {
+			set.batch.record(deviceDriver, stats, cmdBuf, &cascadeFrustum)
+			continue
+		}
 		stats.addInstanceDraw(set, set.Mesh.IndexCount, set.Mesh.VertexCount)
 		if set.indirect.Handle() != 0 {
 			set.drawIndirect(deviceDriver, cmdBuf)
@@ -220,7 +228,7 @@ func recordInstancedShadow(
 		}
 		if set.Mesh.IndexCount > 0 {
 			deviceDriver.CmdBindIndexBuffer(cmdBuf, set.Mesh.indexBuffer, 0, set.Mesh.indexType)
-			deviceDriver.CmdDrawIndexed(cmdBuf, set.Mesh.IndexCount, set.count, 0, 0, 0)
+			deviceDriver.CmdDrawIndexed(cmdBuf, set.Mesh.IndexCount, set.count, set.Mesh.firstIndex, set.Mesh.vertexOffset, 0)
 		} else {
 			deviceDriver.CmdDraw(cmdBuf, set.Mesh.VertexCount, set.count, 0, 0)
 		}

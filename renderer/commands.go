@@ -624,7 +624,7 @@ func recordCommandBuffer(
 				stats.addDraw(1, d.Mesh.IndexCount, d.Mesh.VertexCount)
 				if d.Mesh.IndexCount > 0 {
 					deviceDriver.CmdBindIndexBuffer(cmdBuf, d.Mesh.indexBuffer, 0, d.Mesh.indexType)
-					deviceDriver.CmdDrawIndexed(cmdBuf, d.Mesh.IndexCount, 1, 0, 0, 0)
+					deviceDriver.CmdDrawIndexed(cmdBuf, d.Mesh.IndexCount, 1, d.Mesh.firstIndex, d.Mesh.vertexOffset, 0)
 				} else {
 					deviceDriver.CmdDraw(cmdBuf, d.Mesh.VertexCount, 1, 0, 0)
 				}
@@ -730,7 +730,7 @@ func recordCommandBuffer(
 				stats.addDraw(1, d.Mesh.IndexCount, d.Mesh.VertexCount)
 				if d.Mesh.IndexCount > 0 {
 					deviceDriver.CmdBindIndexBuffer(cmdBuf, d.Mesh.indexBuffer, 0, d.Mesh.indexType)
-					deviceDriver.CmdDrawIndexed(cmdBuf, d.Mesh.IndexCount, 1, 0, 0, 0)
+					deviceDriver.CmdDrawIndexed(cmdBuf, d.Mesh.IndexCount, 1, d.Mesh.firstIndex, d.Mesh.vertexOffset, 0)
 				} else {
 					deviceDriver.CmdDraw(cmdBuf, d.Mesh.VertexCount, 1, 0, 0)
 				}
@@ -816,7 +816,7 @@ func recordCommandBuffer(
 		stats.addDraw(1, d.Mesh.IndexCount, d.Mesh.VertexCount)
 		if d.Mesh.IndexCount > 0 {
 			deviceDriver.CmdBindIndexBuffer(cmdBuf, d.Mesh.indexBuffer, 0, d.Mesh.indexType)
-			deviceDriver.CmdDrawIndexed(cmdBuf, d.Mesh.IndexCount, 1, 0, 0, 0)
+			deviceDriver.CmdDrawIndexed(cmdBuf, d.Mesh.IndexCount, 1, d.Mesh.firstIndex, d.Mesh.vertexOffset, 0)
 		} else {
 			deviceDriver.CmdDraw(cmdBuf, d.Mesh.VertexCount, 1, 0, 0)
 		}
@@ -947,7 +947,7 @@ func recordCommandBuffer(
 		stats.addDraw(1, d.Mesh.IndexCount, d.Mesh.VertexCount)
 		if d.Mesh.IndexCount > 0 {
 			deviceDriver.CmdBindIndexBuffer(cmdBuf, d.Mesh.indexBuffer, 0, d.Mesh.indexType)
-			deviceDriver.CmdDrawIndexed(cmdBuf, d.Mesh.IndexCount, 1, 0, 0, 0)
+			deviceDriver.CmdDrawIndexed(cmdBuf, d.Mesh.IndexCount, 1, d.Mesh.firstIndex, d.Mesh.vertexOffset, 0)
 		} else {
 			deviceDriver.CmdDraw(cmdBuf, d.Mesh.VertexCount, 1, 0, 0)
 		}
@@ -1099,7 +1099,7 @@ func recordCommandBuffer(
 					grassOrder = grassOrder.Int(i).Int(tile.FirstInstance).Int(count)
 					grassDraws++
 				}
-				deviceDriver.CmdDrawIndexed(cmdBuf, v.Mesh.IndexCount, count, 0, 0, uint32(tile.FirstInstance))
+				deviceDriver.CmdDrawIndexed(cmdBuf, v.Mesh.IndexCount, count, v.Mesh.firstIndex, v.Mesh.vertexOffset, uint32(tile.FirstInstance))
 			}
 		}
 
@@ -1301,7 +1301,7 @@ func recordCommandBuffer(
 			stats.addDraw(1, d.Mesh.IndexCount, d.Mesh.VertexCount)
 			if d.Mesh.IndexCount > 0 {
 				deviceDriver.CmdBindIndexBuffer(cmdBuf, d.Mesh.indexBuffer, 0, d.Mesh.indexType)
-				deviceDriver.CmdDrawIndexed(cmdBuf, d.Mesh.IndexCount, 1, 0, 0, 0)
+				deviceDriver.CmdDrawIndexed(cmdBuf, d.Mesh.IndexCount, 1, d.Mesh.firstIndex, d.Mesh.vertexOffset, 0)
 			} else {
 				deviceDriver.CmdDraw(cmdBuf, d.Mesh.VertexCount, 1, 0, 0)
 			}
@@ -1433,7 +1433,7 @@ func recordParticles(
 
 	scratch.bindVertexBuffers(deviceDriver, cmdBuf, 0, particles.QuadMesh.vertexBuffer, particles.InstanceBuffers[frame])
 	deviceDriver.CmdBindIndexBuffer(cmdBuf, particles.QuadMesh.indexBuffer, 0, particles.QuadMesh.indexType)
-	deviceDriver.CmdDrawIndexed(cmdBuf, particles.QuadMesh.IndexCount, count, 0, 0, uint32(first))
+	deviceDriver.CmdDrawIndexed(cmdBuf, particles.QuadMesh.IndexCount, count, particles.QuadMesh.firstIndex, particles.QuadMesh.vertexOffset, uint32(first))
 }
 
 // recordOverlays draws the world-space unlit overlays: no depth test, no
@@ -1489,7 +1489,7 @@ func recordOverlays(
 		stats.addDraw(1, d.Mesh.IndexCount, d.Mesh.VertexCount)
 		if d.Mesh.IndexCount > 0 {
 			deviceDriver.CmdBindIndexBuffer(cmdBuf, d.Mesh.indexBuffer, 0, d.Mesh.indexType)
-			deviceDriver.CmdDrawIndexed(cmdBuf, d.Mesh.IndexCount, 1, 0, 0, 0)
+			deviceDriver.CmdDrawIndexed(cmdBuf, d.Mesh.IndexCount, 1, d.Mesh.firstIndex, d.Mesh.vertexOffset, 0)
 		} else {
 			deviceDriver.CmdDraw(cmdBuf, d.Mesh.VertexCount, 1, 0, 0)
 		}
@@ -1592,7 +1592,7 @@ func recordWaterDraws(
 		stats.addDraw(1, d.Mesh.IndexCount, d.Mesh.VertexCount)
 		if d.Mesh.IndexCount > 0 {
 			deviceDriver.CmdBindIndexBuffer(cmdBuf, d.Mesh.indexBuffer, 0, d.Mesh.indexType)
-			deviceDriver.CmdDrawIndexed(cmdBuf, d.Mesh.IndexCount, 1, 0, 0, 0)
+			deviceDriver.CmdDrawIndexed(cmdBuf, d.Mesh.IndexCount, 1, d.Mesh.firstIndex, d.Mesh.vertexOffset, 0)
 		} else {
 			deviceDriver.CmdDraw(cmdBuf, d.Mesh.VertexCount, 1, 0, 0)
 		}

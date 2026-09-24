@@ -75,17 +75,60 @@ func (r *Renderer) UploadStorageBuffer(b *StorageBuffer, data []byte) error {
 }
 
 func (r *Renderer) uploadBuffers(buffers []core1_0.Buffer, data []byte) error {
-	staging, mem, err := r.createBuffer(len(data), core1_0.BufferUsageTransferSrc, core1_0.MemoryPropertyHostVisible|core1_0.MemoryPropertyHostCoherent)
+	uploads := make([]bufferUpload, len(buffers))
+	for i, b := range buffers {
+		uploads[i] = bufferUpload{buffer: b, data: data}
+	}
+	return r.uploadBufferRanges(uploads)
+}
+
+type bufferUpload struct {
+	buffer core1_0.Buffer
+	offset int
+	data   []byte
+}
+
+// One staging allocation and submission for the whole transaction. Offsets
+// let immutable mesh ranges share storage without overwriting their neighbours.
+func (r *Renderer) uploadBufferRanges(uploads []bufferUpload) error {
+	size := 0
+	sources := make([]int, len(uploads))
+	for i, u := range uploads {
+		// History instances share one source slice. Keep that staging copy
+		// shared too; only distinct payloads need another part of the buffer.
+		shared := false
+		for j := 0; j < i; j++ {
+			if len(u.data) == len(uploads[j].data) && unsafe.SliceData(u.data) == unsafe.SliceData(uploads[j].data) {
+				sources[i], shared = sources[j], true
+				break
+			}
+		}
+		if shared {
+			continue
+		}
+		sources[i] = size
+		size += len(u.data)
+	}
+	if size == 0 {
+		return nil
+	}
+	staging, mem, err := r.createBuffer(size, core1_0.BufferUsageTransferSrc, core1_0.MemoryPropertyHostVisible|core1_0.MemoryPropertyHostCoherent)
 	if err != nil {
 		return err
 	}
 	defer r.deviceDriver.FreeMemory(mem, nil)
 	defer r.deviceDriver.DestroyBuffer(staging, nil)
-	ptr, _, err := r.deviceDriver.MapMemory(mem, 0, len(data), 0)
+	ptr, _, err := r.deviceDriver.MapMemory(mem, 0, size, 0)
 	if err != nil {
 		return err
 	}
-	copy(unsafe.Slice((*byte)(ptr), len(data)), data)
+	dst := unsafe.Slice((*byte)(ptr), size)
+	pos := 0
+	for i, u := range uploads {
+		if sources[i] == pos {
+			pos += copy(dst[pos:], u.data)
+		}
+	}
 	r.deviceDriver.UnmapMemory(mem)
 	cmds, _, err := r.deviceDriver.AllocateCommandBuffers(core1_0.CommandBufferAllocateInfo{CommandPool: r.commandPool, Level: core1_0.CommandBufferLevelPrimary, CommandBufferCount: 1})
 	if err != nil {
@@ -96,15 +139,15 @@ func (r *Renderer) uploadBuffers(buffers []core1_0.Buffer, data []byte) error {
 	if _, err = r.deviceDriver.BeginCommandBuffer(cmd, core1_0.CommandBufferBeginInfo{Flags: core1_0.CommandBufferUsageOneTimeSubmit}); err != nil {
 		return err
 	}
-	barriers := make([]core1_0.BufferMemoryBarrier, len(buffers))
-	for i, b := range buffers {
-		barriers[i] = core1_0.BufferMemoryBarrier{Buffer: b, Size: len(data), SrcQueueFamilyIndex: -1, DstQueueFamilyIndex: -1, SrcAccessMask: core1_0.AccessMemoryRead | core1_0.AccessMemoryWrite, DstAccessMask: core1_0.AccessTransferWrite}
+	barriers := make([]core1_0.BufferMemoryBarrier, len(uploads))
+	for i, u := range uploads {
+		barriers[i] = core1_0.BufferMemoryBarrier{Buffer: u.buffer, Offset: u.offset, Size: len(u.data), SrcQueueFamilyIndex: -1, DstQueueFamilyIndex: -1, SrcAccessMask: core1_0.AccessMemoryRead | core1_0.AccessMemoryWrite, DstAccessMask: core1_0.AccessTransferWrite}
 	}
 	if err = r.deviceDriver.CmdPipelineBarrier(cmd, core1_0.PipelineStageAllCommands, core1_0.PipelineStageTransfer, 0, nil, barriers, nil); err != nil {
 		return err
 	}
-	for _, b := range buffers {
-		if err = r.deviceDriver.CmdCopyBuffer(cmd, staging, b, core1_0.BufferCopy{Size: len(data)}); err != nil {
+	for i, u := range uploads {
+		if err = r.deviceDriver.CmdCopyBuffer(cmd, staging, u.buffer, core1_0.BufferCopy{SrcOffset: sources[i], DstOffset: u.offset, Size: len(u.data)}); err != nil {
 			return err
 		}
 	}

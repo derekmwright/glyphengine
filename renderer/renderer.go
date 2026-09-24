@@ -301,10 +301,13 @@ type Renderer struct {
 	// see ProvokeSkipNextFrame. False in every run that did not ask for it.
 	provokeSkip bool
 
-	meshes        []*Mesh
-	jointBuffers  []*JointBuffer
-	dynamicMeshes map[*Mesh]*dynamicMesh
-	maxAnisotropy float32 // 0 = anisotropic filtering unavailable
+	meshes           []*Mesh
+	meshArenas       []*MeshArena
+	rangeBatching    bool
+	rangeBatchFrames [maxFramesInFlight]meshBatchFrame
+	jointBuffers     []*JointBuffer
+	dynamicMeshes    map[*Mesh]*dynamicMesh
+	maxAnisotropy    float32 // 0 = anisotropic filtering unavailable
 
 	// Reported to Vulkan at instance creation; see WithApplicationName.
 	appName    string
@@ -1940,6 +1943,12 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 	}
 	r.flushDynamicMeshes(f)
 	draws = r.prepareLOD(draws, lighting, f)
+	if r.rangeBatching {
+		draws, err = r.prepareMeshBatches(draws, f)
+		if err != nil {
+			return err
+		}
+	}
 
 	// Hashed after the flushes, so what is recorded is what this frame's slot
 	// actually holds rather than what was staged -- a dirty flag that failed to
@@ -2190,6 +2199,10 @@ func (r *Renderer) Destroy() {
 	// is already idle, so run anything queued during the loop above.
 	r.flushAllDeferred()
 
+	r.destroyMeshArenas()
+	for f := range r.rangeBatchFrames {
+		r.rangeBatchFrames[f].destroy(r)
+	}
 	r.unwindInit()
 
 	log.Println("Renderer destroyed")
