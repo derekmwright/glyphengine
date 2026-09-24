@@ -45,10 +45,10 @@ var bufferBlur []byte
 var add []byte
 
 type options struct {
-	frames                                                         int
-	screenshot                                                     string
-	recreate, churn, validate, disabled, history, compute, buffers bool
-	msaa                                                           int
+	frames                                                                 int
+	screenshot                                                             string
+	recreate, churn, validate, disabled, history, compute, buffers, filter bool
+	msaa                                                                   int
 }
 
 func main() {
@@ -64,6 +64,7 @@ func main() {
 	flag.BoolVar(&o.history, "history", false, "exercise a target reading its own previous frame")
 	flag.BoolVar(&o.compute, "compute", false, "blur and accumulate the pattern with a compute pass")
 	flag.BoolVar(&o.buffers, "buffers", false, "exercise four storage buffers with history, staged updates and churn")
+	flag.BoolVar(&o.filter, "filter", false, "probe target filtering and addressing before and after recreation")
 	flag.Parse()
 	if o.buffers {
 		o.compute = true
@@ -85,6 +86,9 @@ func main() {
 }
 
 func run(o options) error {
+	if o.filter {
+		return runTargetFilter(o)
+	}
 	w, err := window.New(640, 360, "Application render passes")
 	if err != nil {
 		return err

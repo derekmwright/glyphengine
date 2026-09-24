@@ -20,10 +20,28 @@ const (
 	TargetRGBA32F
 )
 
+// TargetFilter selects the minification and magnification filter.
+type TargetFilter int
+
+const (
+	FilterNearest TargetFilter = iota
+	FilterLinear
+)
+
+// TargetWrap selects addressing on the target's U and V axes.
+type TargetWrap int
+
+const (
+	WrapClampToEdge TargetWrap = iota
+	WrapRepeat
+)
+
 // RenderTargetDesc specifies either a fixed extent or a positive swapchain scale.
 type RenderTargetDesc struct {
 	Name          string
 	Format        TargetFormat
+	Filter        TargetFilter // min/mag; defaults to nearest
+	Wrap          TargetWrap   // U/V addressing; defaults to clamp-to-edge
 	Scale         float32
 	Width, Height uint32
 	Depth         bool
@@ -76,6 +94,12 @@ func validateTarget(d RenderTargetDesc) error {
 	if _, err := targetFormat(d.Format); err != nil {
 		return err
 	}
+	if d.Filter != FilterNearest && d.Filter != FilterLinear {
+		return fmt.Errorf("Filter: unknown target filter %d", d.Filter)
+	}
+	if d.Wrap != WrapClampToEdge && d.Wrap != WrapRepeat {
+		return fmt.Errorf("Wrap: unknown target wrap %d", d.Wrap)
+	}
 	if d.Width != 0 || d.Height != 0 {
 		if d.Width == 0 || d.Height == 0 {
 			return fmt.Errorf("Width/Height: both fixed dimensions must be nonzero")
@@ -90,10 +114,13 @@ func (r *Renderer) CreateRenderTarget(d RenderTargetDesc) (*RenderTarget, error)
 	if err := validateTarget(d); err != nil {
 		return nil, fmt.Errorf("render target %q: %w", d.Name, err)
 	}
-	if d.Storage {
+	if d.Storage || d.Filter == FilterLinear {
 		format, _ := targetFormat(d.Format)
 		props := r.instanceDriver.GetPhysicalDeviceFormatProperties(r.physicalDevice, format)
-		if props.OptimalTilingFeatures&core1_0.FormatFeatureStorageImage == 0 {
+		if d.Filter == FilterLinear && props.OptimalTilingFeatures&core1_0.FormatFeatureSampledImageFilterLinear == 0 {
+			return nil, fmt.Errorf("render target %q: Filter: format %v does not support linear sampling", d.Name, format)
+		}
+		if d.Storage && props.OptimalTilingFeatures&core1_0.FormatFeatureStorageImage == 0 {
 			return nil, fmt.Errorf("render target %q: format %v does not support storage images", d.Name, format)
 		}
 	}
@@ -150,12 +177,14 @@ func (r *Renderer) allocateAppTarget(t *RenderTarget) error {
 	}
 	f, _ := targetFormat(t.desc.Format)
 	var err error
-	t.color, err = r.newAppImages(f, core1_0.ImageAspectColor, e, n, true, t.desc.Storage)
+	t.color, err = r.newAppImages(f, core1_0.ImageAspectColor, e, n, appImageOptions{
+		sampled: true, storage: t.desc.Storage, filter: t.desc.Filter, wrap: t.desc.Wrap,
+	})
 	if err != nil {
 		return err
 	}
 	if t.desc.Depth {
-		t.depth, err = r.newAppImages(r.depth.format, core1_0.ImageAspectDepth, e, n, false)
+		t.depth, err = r.newAppImages(r.depth.format, core1_0.ImageAspectDepth, e, n, appImageOptions{})
 		if err != nil {
 			t.color.destroy(r.deviceDriver)
 			t.color = nil
@@ -178,7 +207,26 @@ type appImages struct {
 	extent   core1_0.Extent2D
 }
 
-func (r *Renderer) newAppImages(format core1_0.Format, aspect core1_0.ImageAspectFlags, extent core1_0.Extent2D, count int, sampled bool, storage ...bool) (_ *appImages, err error) {
+type appImageOptions struct {
+	sampled, storage bool
+	filter           TargetFilter
+	wrap             TargetWrap
+}
+
+func (o appImageOptions) samplerInfo() core1_0.SamplerCreateInfo {
+	filter := core1_0.FilterNearest
+	if o.filter == FilterLinear {
+		filter = core1_0.FilterLinear
+	}
+	wrap := core1_0.SamplerAddressModeClampToEdge
+	if o.wrap == WrapRepeat {
+		wrap = core1_0.SamplerAddressModeRepeat
+	}
+	return core1_0.SamplerCreateInfo{MagFilter: filter, MinFilter: filter,
+		AddressModeU: wrap, AddressModeV: wrap, AddressModeW: core1_0.SamplerAddressModeClampToEdge}
+}
+
+func (r *Renderer) newAppImages(format core1_0.Format, aspect core1_0.ImageAspectFlags, extent core1_0.Extent2D, count int, opts appImageOptions) (_ *appImages, err error) {
 	t := &appImages{extent: extent}
 	defer func() {
 		if err != nil {
@@ -189,10 +237,10 @@ func (r *Renderer) newAppImages(format core1_0.Format, aspect core1_0.ImageAspec
 	if aspect == core1_0.ImageAspectColor {
 		usage = core1_0.ImageUsageColorAttachment | core1_0.ImageUsageTransferDst
 	}
-	if sampled {
+	if opts.sampled {
 		usage |= core1_0.ImageUsageSampled
 	}
-	if len(storage) > 0 && storage[0] {
+	if opts.storage {
 		usage |= core1_0.ImageUsageStorage
 	}
 	for range count {
@@ -224,9 +272,8 @@ func (r *Renderer) newAppImages(format core1_0.Format, aspect core1_0.ImageAspec
 		}
 		t.views = append(t.views, view)
 	}
-	if sampled {
-		t.sampler, _, err = r.deviceDriver.CreateSampler(nil, core1_0.SamplerCreateInfo{MagFilter: core1_0.FilterNearest, MinFilter: core1_0.FilterNearest,
-			AddressModeU: core1_0.SamplerAddressModeClampToEdge, AddressModeV: core1_0.SamplerAddressModeClampToEdge, AddressModeW: core1_0.SamplerAddressModeClampToEdge})
+	if opts.sampled {
+		t.sampler, _, err = r.deviceDriver.CreateSampler(nil, opts.samplerInfo())
 		if err != nil {
 			return nil, err
 		}
@@ -246,7 +293,7 @@ func (r *Renderer) newAppImages(format core1_0.Format, aspect core1_0.ImageAspec
 			}
 		}
 	}
-	if err = r.primeAppImages(t, aspect, sampled); err != nil {
+	if err = r.primeAppImages(t, aspect, opts.sampled); err != nil {
 		return nil, err
 	}
 	return t, nil
