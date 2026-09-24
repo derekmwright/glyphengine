@@ -18,7 +18,7 @@ api:
   - renderer.HashPOD
 assets: none
 run: task determinism
-verified: 2026-09-19
+verified: 2026-09-24 # grassbake, grassatlas, grasspc, config and the prime provocation
 ---
 
 # Finding a render that differs run to run
@@ -115,6 +115,10 @@ cascades=71e68c… lights=0/e79af2… grass=124/82b4a2… outcome=present render
 | `lights` | Clustered light count and the whole binning -- the uploaded `GpuLight` array is hashed as bytes, so per-light fields like `Volumetric` are covered without listing them |
 | `grass` | Grass tile draw count and the ordered (variant, range, instance count) sequence |
 | `grasslod` | The live `GrassLOD`, which `SetGrassLOD` can move at any time |
+| `grassbake` | Total instances scattered, and a hash of every variant's uploaded instance array and tile table — what the scatter **built**, as against what a frame drew |
+| `grassatlas` | The baked impostor atlas, read back and hashed. `0` means the readback failed and the field says nothing |
+| `grasspc` | The 256-byte push block the grass mesh draws were recorded against |
+| `config` | The **negotiated** device and swapchain: MSAA sample count, swapchain format, image count and extent, depth format, frames in flight, and the GPU's name, driver version, vendor/device id and pipeline cache UUID |
 | `post` | Exposure, tonemap curve and white point, and the four bloom knobs |
 | `outcome` | What the iteration did — see below |
 
@@ -122,6 +126,61 @@ cascades=71e68c… lights=0/e79af2… grass=124/82b4a2… outcome=present render
 `WithDebugKeys`, which toggles bloom and cycles the tonemap curve — can change
 them mid-run. Without them, every other field would match while the whole frame
 came out different, which is the worst kind of divergence to be handed.
+
+### Four fields that never move inside one run
+
+`grassbake`, `grassatlas`, `grasspc` and `config` are constant for the whole of
+a normal run, and are written on every line anyway. That is not redundancy: the
+trace is diffed **between** two runs, and a value that cannot move inside one
+run can still be the value that differs between two.
+
+Everything the trace carried before them was per frame, which quietly narrowed
+what "the two traces are identical" could mean. It meant the simulation, the
+draw list and the streamed buffers agreed. It did not mean the grass was
+scattered the same way, that the impostor atlas baked the same way, that the
+grass pass was pushed the same 256 bytes, or that the two processes were even
+talking to the same driver:
+
+- `grassbake` separates *built differently* from *drawn differently*. `grass=`
+  records the tile draw sequence, so two scatters that disagree about where
+  blades stand and agree about how many fall in each tile produce the identical
+  field.
+- `grassatlas` covers what a far tile actually is. Past
+  `GrassLOD.ImpostorDistance` a grass pixel is the atlas and nothing else, and
+  the atlas is baked at load from a pipeline whose first compile in a session
+  may take a different path. It is hashed over the 8-bit readback, so the
+  instrument's floor is 1/255 per channel, and it is only filled in when a
+  trace is being written — the readback costs a device wait.
+- `grasspc` is what was pushed, not what went into it. `sky=`, `lights=` and
+  `grasslod=` each cover part of that block; none covers the block.
+- `config` is the one that can differ for reasons outside the program. MSAA is
+  halved until the device supports it, and grass dissolves through
+  alpha-to-coverage rather than blending, so a run that negotiated a different
+  sample count moves the grass and leaves everything else alone. Measured on
+  `08-grass -timeofday 0.0 -frames 150`, 4x against 1x: 199621 of 921600
+  pixels (21.66 %), max delta 47/255; 4x against 2x, 184861 pixels (20.06 %),
+  max delta 38. With the grass culled away (`-grassdist 0.5`) the same 4x/1x
+  pair moves 1907 pixels (0.21 %) at max delta 14 — so 99 % of it is the
+  grass, and the sky, the terrain and the HUD are not in it. The driver
+  identity is in there for the same reason: a driver update between two runs
+  is exactly the kind of "first run of a session" difference that leaves every
+  other field in this file agreeing.
+
+None of them reproduced issue #40 on the machine they were added on; what they
+change is that the next sighting is a diff rather than an argument.
+
+The harness that measured that is `tools/firstrun-repro.sh <cycles> <label>
+<example> [args]`: each cycle forces a real rebuild of the renderer package,
+captures the example twice back to back with a trace beside each capture, and
+compares the captures with `cmd/pngsame`; `REPRO_NOBUILD`, `REPRO_VALIDATION`,
+`REPRO_FOREGROUND`, `REPRO_CLEARCACHE`, `REPRO_FRAMES`, `REPRO_RUNS` and
+`REPRO_PRE` vary one thing at a time. Ten cycles of `08-grass -timeofday 0.0`
+per variant and of `12-particles`, 75 cycles and 160 captures in all, gave
+zero differing pixels and 72 byte-identical trace pairs on the machine above.
+Diff `config=` first when it recurs, then `grassatlas=`, `grassbake=` and
+`grasspc=`; if all four agree and the pixels differ, the divergence is below
+the CPU and the next run is the same capture under the validation layer and
+`task syncvalidate`.
 
 `outcome` is the field that catches a frame which was simulated but never drawn:
 
@@ -206,6 +265,7 @@ was sighted.
 | `GLYPHENGINE_PROVOKE_RECREATE_FRAMES=149` | Forces a swapchain rebuild after the present on those loop frames |
 | `GLYPHENGINE_PROVOKE_DRAW_ORDER=reverse` | Reverses the draw list before it is sorted — a permutation the ECS map walk could legally have produced |
 | `GLYPHENGINE_PROVOKE_STALL=20:40ms` | Sleeps inside the first N loop frames: a cold GPU, a compile finishing, another process on the machine |
+| `GLYPHENGINE_PROVOKE_PRIME=0.5` | Clears the cloud history and the bloom chain to that grey instead of to black when they are created |
 
 Frame numbers are 1-based and count every iteration, so they line up with the
 state trace's `loop=` field.
@@ -222,6 +282,8 @@ What they found, measured on this repo before the fixes that followed
 | `RECREATE_FRAMES=89` | `09-water -frames 90` | 234723 (25.47 %) | 114 |
 | `STALL=20:40ms` | `08-grass -timeofday 0.0 -frames 150` | none | — |
 | `DRAW_ORDER=reverse` | `18-translucent`, `15-kitchen-sink -demo`, `09-water -plume -ghost -marker -submerged` | none | — |
+| `PRIME=0.5` | `08-grass -timeofday 0.0`, at 1, 3 and 150 frames | none | — |
+| `PRIME=0.5` | `12-particles`, at 3 and 90 frames | none | — |
 
 Read that table as three findings. A wall-clock stall changes nothing, which is
 what a fixed clock is for. And a frame the renderer did not draw, or a swapchain

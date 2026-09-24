@@ -130,6 +130,24 @@ type GrassSystem struct {
 	impostorScratch  []tileDraw
 	impostorVariants []variantTiles
 
+	// bakeCount and bakeHash are what the scatter produced and uploaded:
+	// every variant's instance array and its tile table, folded once at build
+	// time. The state trace emits them on every frame as grassbake=.
+	//
+	// grass= cannot answer the question they answer. It records the tile draw
+	// SEQUENCE -- variant, instance-buffer range, surviving count -- so two
+	// scatters that disagree about where blades stand but agree about how many
+	// fall in each tile produce the identical field. Issue #40 is reported as a
+	// difference in the blade silhouette under an identical simulation, and
+	// telling "built differently" from "drawn differently" is the first fork in
+	// that diagnosis.
+	//
+	// Folded at build time rather than per frame because 08-grass scatters
+	// 166844 instances, which is 2.7 MB; hashing that every frame would be a
+	// diagnostic that changes what it measures.
+	bakeCount int
+	bakeHash  Hasher
+
 	// models is what InitGrass loaded to build Variants, set by InitGrass
 	// itself rather than by CreateGrassFromModels (a caller building a
 	// GrassSystem directly owns its own models and its own teardown). Recorded
@@ -374,6 +392,7 @@ func CreateGrassFromModels(r *Renderer, models []*Model, weights []float32, hm G
 	var variants []GrassVariant
 	total := 0
 	tileCount := 0
+	bakeHash := NewHash
 	for vi, model := range models {
 		if len(model.Meshes) == 0 || len(variantInstances[vi]) == 0 {
 			continue
@@ -395,14 +414,24 @@ func CreateGrassFromModels(r *Renderer, models []*Model, weights []float32, hm G
 			InstanceCount:  len(instances),
 			Tiles:          tiles,
 		})
+		// Hashed here rather than from the GrassVariant, which does not keep
+		// the instances: they are uploaded and dropped. See bakeHash.
+		bakeHash = bakeHash.Int(vi).Int(len(instances)).Int(len(tiles))
+		bakeHash = HashPOD(bakeHash, instances)
+		for _, t := range tiles {
+			bakeHash = bakeHash.Int(t.FirstInstance).Int(t.Count).Vec3(t.Center).Float32(t.Radius)
+		}
+
 		total += len(instances)
 		tileCount += len(tiles)
 	}
 
 	log.Printf("Flora: %d instances across %d variants (%d culling tiles)", total, len(variants), tileCount)
 	return &GrassSystem{
-		Variants: variants,
-		Texture:  sharedTexture,
+		Variants:  variants,
+		Texture:   sharedTexture,
+		bakeCount: total,
+		bakeHash:  bakeHash,
 	}, nil
 }
 

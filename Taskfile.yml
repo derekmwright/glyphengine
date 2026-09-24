@@ -830,6 +830,43 @@ tasks:
         prov "frames never drawn"          GLYPHENGINE_PROVOKE_SKIP_FRAMES     3,40,88    12-particles  90
         prov "a stalled cold start"        GLYPHENGINE_PROVOKE_STALL           20:40ms    08-grass     150 -timeofday 0.0
         prov "draw list reversed"          GLYPHENGINE_PROVOKE_DRAW_ORDER      reverse    09-water      90 -plume -ghost -marker -submerged
+        # Memory a shader can read before anything has written it, made
+        # visible. The cloud history and the bloom chain are cleared once when
+        # they are created and bound by a descriptor set every frame after
+        # that; clearing them to BLACK hides any dependence on their contents,
+        # because black is also what a fresh allocation usually holds. This
+        # clears them to grey instead, so a read that should not be happening
+        # reaches the picture. See GLYPHENGINE_PROVOKE_PRIME in
+        # renderer/bloom.go and docs/agents/state-trace.md.
+        #
+        # It is here because of issue #40: a render that differs on the first
+        # run of a session and on no later one is, on the face of it, the one
+        # run whose allocations did not come back holding the previous run's
+        # identical contents. That is now a variable rather than a wait, and
+        # the answer on this repo is that the primed value reaches nothing --
+        # not even frame 1, where it would be 80 % of the cloud layer if it
+        # did.
+        #
+        # Verified by breaking it, which is why the three-frame entries are
+        # here: seeding r.prevVP with the current VP on cloud frame 0 lets the
+        # first frame reproject against a history nothing has rendered into,
+        # and the primed grey becomes 80 % of that frame's cloud layer.
+        # Measured against the quiet capture of the same broken build, as
+        # differing channel samples out of 1280x720x4 = 3686400:
+        #
+        #   08-grass -timeofday 0.0, 1 frame     1324071 samples, max delta 164
+        #   08-grass -timeofday 0.0, 3 frames    1323991 samples, max delta 133
+        #   08-grass -timeofday 0.0, 150 frames      567 samples, max delta 1
+        #   12-particles, 3 frames                732280 samples, max delta 130
+        #   12-particles, 90 frames                    2 samples, max delta 1
+        #
+        # The long runs do catch it, by two samples and one level -- the
+        # history decays by 0.8 a frame, so it is nearly gone by frame 90. The
+        # short runs are what make this a check rather than a coin toss.
+        prov "sampled images primed grey"  GLYPHENGINE_PROVOKE_PRIME           0.5        08-grass       3 -timeofday 0.0
+        prov "sampled images primed grey"  GLYPHENGINE_PROVOKE_PRIME           0.5        08-grass     150 -timeofday 0.0
+        prov "sampled images primed grey"  GLYPHENGINE_PROVOKE_PRIME           0.5        12-particles   3
+        prov "sampled images primed grey"  GLYPHENGINE_PROVOKE_PRIME           0.5        12-particles  90
         # A rebuild with the UI glow layer on. The layer's images, bloom chain,
         # framebuffers and resolve sets are all destroyed and remade here, and
         # unlike the cloud history none of it is supposed to carry anything
@@ -915,6 +952,46 @@ tasks:
         }
         for ex in "08-grass" "08-grass -timeofday 0.0" "08-grass -timeofday 0.03" "09-water" "12-particles" "06-skinned -demo" "15-kitchen-sink -demo" "09-water -plume -ghost -marker -submerged" "18-translucent" "13-ui" "10-text" "19-instanced" "21-streetlights" "24-custom-passes" "25-lod-forest" "25-lod-forest -gpu"; do
           drawseq "$ex"
+        done
+
+        # What the grass was BUILT from, not the order it was drawn in.
+        #
+        # Everything above compares a frame's submissions. None of it can see a
+        # scatter that put blades somewhere else while leaving the same number
+        # in each tile -- grass= records the tile draw sequence, not the
+        # instances -- and none of it can see an impostor atlas that baked
+        # differently, though past GrassLOD.ImpostorDistance the atlas IS the
+        # grass. Issue #40 is a night capture where 41 % of the pixels moved
+        # with an identical simulation behind them, reported as a difference in
+        # the blade silhouette, which is exactly the pair of things nothing here
+        # was looking at.
+        #
+        # Verified by breaking it, both fields at once: folding the process's
+        # own start time into GrassSystem.bakeHash and grassImpostor.atlasHash
+        # makes both cases below report a difference on all 90 lines and the
+        # gate exit 1.
+        floraseq() {
+          set -- $1
+          name=$1; shift
+          seq=$((seq+1))
+          t1=$d/flora$seq.1.trace; t2=$d/flora$seq.2.trace
+          GLYPHENGINE_FIXED_FRAME_TIME=16.667ms GLYPHENGINE_STATE_TRACE=$t1 go run ./$name -frames 90 $* >/dev/null 2>&1
+          GLYPHENGINE_FIXED_FRAME_TIME=16.667ms GLYPHENGINE_STATE_TRACE=$t2 go run ./$name -frames 90 $* >/dev/null 2>&1
+          for key in grassbake grassatlas; do
+            go run ../cmd/tracefield -key $key -in $t1 -out $d/f1.$key || { status=1; continue; }
+            go run ../cmd/tracefield -key $key -in $t2 -out $d/f2.$key || { status=1; continue; }
+            if samefile $d/f1.$key $d/f2.$key; then
+              echo "$name $*: $key identical"
+            else
+              echo "$name $*: $key DIFFERS between two runs"
+              diff $d/f1.$key $d/f2.$key | head -4
+              echo "  traces: examples/$t1 and examples/$t2"
+              status=1
+            fi
+          done
+        }
+        for ex in "08-grass -timeofday 0.0" "08-grass -timeofday 0.28"; do
+          floraseq "$ex"
         done
         # Prove this comparison can say no on real traces and not only on the
         # constructed files above. Without the fixed clock the model matrices
