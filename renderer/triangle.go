@@ -8,7 +8,7 @@ import (
 
 // This file implements the classic Vulkan "hello triangle" as a self-contained
 // diagnostic. It exists to answer one question with no ambiguity: does the
-// instance -> device -> swapchain -> render pass -> pipeline -> command buffer
+// instance -> device -> swapchain -> dynamic rendering -> pipeline -> command buffer
 // -> submit -> present path actually work on this machine?
 //
 // It deliberately uses nothing else. The shader hardcodes its three vertices
@@ -23,10 +23,10 @@ import (
 // what is supposed to be the simplest possible smoke test.
 
 // createTrianglePipeline builds a depth-less, vertex-buffer-less pipeline for
-// the diagnostic triangle, reusing the renderer's main render pass and MSAA
+// the diagnostic triangle, reusing the renderer's scene attachment formats and MSAA
 // sample count so it exercises the real swapchain configuration.
 func createTrianglePipeline(
-	deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass,
+	deviceDriver core1_0.DeviceDriver, sh ShaderSet, formats renderingFormats,
 	extent core1_0.Extent2D,
 	samples core1_0.SampleCountFlags,
 ) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
@@ -104,9 +104,8 @@ func createTrianglePipeline(
 				core1_0.DynamicStateScissor,
 			},
 		},
-		Layout:     layout,
-		RenderPass: renderPass,
-		Subpass:    0,
+		Layout:      layout,
+		NextOptions: renderingOptions(formats),
 	})
 	if err != nil {
 		deviceDriver.DestroyPipelineLayout(layout, nil)
@@ -136,7 +135,7 @@ func (r *Renderer) DrawTriangle() error {
 	}
 
 	if r.trianglePipeline == nil {
-		pipeline, layout, err := createTrianglePipeline(r.deviceDriver, r.shaders, r.renderPass, r.sc.extent, r.msaaSamples)
+		pipeline, layout, err := createTrianglePipeline(r.deviceDriver, r.shaders, r.sceneFormats, r.sc.extent, r.msaaSamples)
 		if err != nil {
 			return err
 		}
@@ -167,7 +166,7 @@ func (r *Renderer) DrawTriangle() error {
 	if _, err := r.deviceDriver.ResetCommandBuffer(cmdBuf, 0); err != nil {
 		return err
 	}
-	if err := r.recordTriangle(cmdBuf, r.framebuffers[imageIndex], r.tonemapFor(imageIndex)); err != nil {
+	if err := r.recordTriangle(cmdBuf, r.sceneTargets[imageIndex], r.tonemapFor(imageIndex)); err != nil {
 		return err
 	}
 
@@ -200,31 +199,14 @@ func (r *Renderer) DrawTriangle() error {
 	return nil
 }
 
-// recordTriangle records a single render pass that clears and draws 3 vertices.
-func (r *Renderer) recordTriangle(cmdBuf core1_0.CommandBuffer, framebuffer core1_0.Framebuffer, tonemap tonemapPass) error {
+// recordTriangle records the HDR triangle and its tonemap to the swapchain.
+func (r *Renderer) recordTriangle(cmdBuf core1_0.CommandBuffer, target *renderingTarget, tonemap tonemapPass) error {
 	if _, err := r.deviceDriver.BeginCommandBuffer(cmdBuf, core1_0.CommandBufferBeginInfo{}); err != nil {
 		return err
 	}
 
-	// Clear value count must match the render pass attachment count: color +
-	// depth, plus the resolve attachment when MSAA is enabled.
-	clearValues := []core1_0.ClearValue{
-		core1_0.ClearValueFloat{0.02, 0.02, 0.04, 1.0},
-		core1_0.ClearValueDepthStencil{Depth: 0.0, Stencil: 0},
-	}
-	if r.msaa != nil {
-		clearValues = append(clearValues, core1_0.ClearValueFloat{0, 0, 0, 1})
-	}
-
-	err := r.deviceDriver.CmdBeginRenderPass(cmdBuf, core1_0.SubpassContentsInline, core1_0.RenderPassBeginInfo{
-		RenderPass:  r.renderPass,
-		Framebuffer: framebuffer,
-		RenderArea: core1_0.Rect2D{
-			Offset: core1_0.Offset2D{X: 0, Y: 0},
-			Extent: r.sc.extent,
-		},
-		ClearValues: clearValues,
-	})
+	r.cmdScratch.colorClear = core1_0.ClearValueFloat{0.02, 0.02, 0.04, 1}
+	err := target.begin(r.deviceDriver, r.cmdScratch.dynamic, cmdBuf)
 	if err != nil {
 		return err
 	}
@@ -242,9 +224,11 @@ func (r *Renderer) recordTriangle(cmdBuf core1_0.CommandBuffer, framebuffer core
 	})
 	r.deviceDriver.CmdDraw(cmdBuf, 3, 1, 0, 0)
 
-	r.deviceDriver.CmdEndRenderPass(cmdBuf)
+	if err := target.end(r.deviceDriver, r.cmdScratch.dynamic, cmdBuf); err != nil {
+		return err
+	}
 
-	// The scene render pass writes the HDR target, so even the diagnostic
+	// Scene rendering writes the HDR target, so even the diagnostic
 	// triangle needs resolving or nothing reaches the swapchain.
 	if err := recordTonemap(r.deviceDriver, cmdBuf, tonemap, r.tonemapPipelineLayout, r.sc.extent, nil, 0, nil, &r.cmdScratch); err != nil {
 		return err

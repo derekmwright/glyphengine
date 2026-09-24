@@ -40,7 +40,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: procedural
-verified: 2026-09-24 # storage buffers, sampler probes, recreation and custompasses gate
+verified: 2026-09-24 # storage buffers, sampler probes, dynamic rendering and explicit barriers
 ---
 
 # Application render targets, graphics and compute passes
@@ -324,7 +324,7 @@ through `DrawFrame`. Only `Mesh`, `Model` and `Texture` are used. `MVP` is
 ignored because the engine supplies VP separately. `Texture` always supplies
 set 0 binding 0 using its existing descriptor set; pass inputs at set 2 stay
 independent. A mesh pass with no draws still begins
-and ends its render pass, including a requested clear. Fullscreen passes draw
+and ends dynamic rendering, including a requested clear. Fullscreen passes draw
 one triangle; supplying mesh draws to one is an error at `DrawFrame`.
 
 ## History, resize and lifetime
@@ -337,7 +337,7 @@ a pass skips its whole graph node; frame indices continue to advance.
 
 `*RenderTarget` and its `Texture()` pointer remain valid through resize.
 Relative targets are reallocated on swapchain recreation and their history
-starts over. Fixed-size images survive. Descriptors and framebuffers are
+starts over. Fixed-size images survive. Descriptors and Go-side rendering bindings are
 rebuilt against replacement views. Use `Extent()` for the current dimensions.
 Recreated target samplers retain `Filter` and `Wrap`, and the stable
 `Texture()` is updated with a descriptor set referencing the new view and
@@ -358,10 +358,11 @@ are returned by `Renderer.Destroy`. The renderer owns scene colour and depth;
 these borrowed views cannot be destroyed independently.
 
 Creation/destruction marks the graph dirty. After the next frame fence wait,
-the renderer compiles new declarations, uses cached render passes and builds
-replacement framebuffers. Old framebuffers retire through `DeferDestroy`;
-cached render passes survive until renderer destruction. Pipeline construction
-uses the same compiled description immediately at `CreateAppPass`.
+the renderer compiles new declarations and rebuilds Go-side attachment bindings.
+It creates no render-pass or framebuffer objects. Pipeline construction uses
+formats and sample counts from the same compiled description immediately at
+`CreateAppPass`. Explicit graph barriers handle attachment entry/exit, including
+return to sampled layouts. See [ADR 0009](../adr/0009-execute-render-passes-with-dynamic-rendering.md).
 
 `Timed` reserves one of 16 application timing entries shared by graphics and
 compute. A seventeenth active
@@ -380,8 +381,8 @@ HDR/depth filter and additive composite against disabled passes. It requires
 nonzero terrain pixels with at least 4/255 contrast. `-history` exercises
 self-reading history; `-churn -provoke-recreate` replaces resources every 30
 frames while resizing. `task determinism` repeats both ordinary and history
-runs. The recording fixture pins 3331 calls with application passes against
-3299 without them, and reports zero recording allocations at 7, 97 and 511
+runs. The recording fixture pins 3382 calls with application passes against
+3342 without them, and reports zero recording allocations at 7, 97 and 511
 engine draws.
 
 With `-compute`, a pre-scene dispatch reads the R16F pattern, applies a 3x3 box
@@ -392,7 +393,7 @@ compare frames 2/60 (at least 4/255 visible change) and frames 200/260 (exact
 convergence across the whole capture). `task determinism` repeats both compute and compute-plus-history
 runs. Compute is included in churn and resize when the flag is set.
 
-The graphics-plus-compute recording fixture pins 3339 calls against 3331 for
+The graphics-plus-compute recording fixture pins 3390 calls against 3382 for
 graphics alone: four compute commands, two incoming barrier groups, one layout
 return barrier and one additional scene-input barrier. Both kinds together
 still record zero allocations at 7, 97 and 511 engine draws.

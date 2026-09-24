@@ -6,171 +6,6 @@ import (
 	"github.com/vkngwrapper/core/v3/core1_0"
 )
 
-// sceneEntryDependency is the dependency pair BOTH scene-sized render passes
-// declare, and they have to declare the same pair.
-//
-// Render pass compatibility, which is what lets a pipeline created against one
-// pass be bound inside the other, allows the two to differ only in load and
-// store operations and in image layouts (Vulkan spec, Render Pass
-// Compatibility). Subpass dependencies are not on that list, so two passes with
-// different dependencies are incompatible however identical their attachments
-// are. The validation layer says so in as many words:
-//
-//	VUID-vkCmdDrawIndexed-renderPass-02684: RenderPasses incompatible ...
-//	First srcStageMask is ...TRANSFER..., but second srcStageMask is ...
-//
-// which is how the blended draws that now run inside the water pass were caught
-// the first time they were recorded there. The alternative was a second copy of
-// five pipelines built against the water pass to say the same thing.
-//
-// The masks are the union of what the two passes separately needed: the scene
-// pass's colour and depth attachment writes, and the water pass's wait on the
-// transfer that produced its refraction source. A union is safe in the
-// direction that matters — each pass still waits for everything it used to, and
-// waiting for a little more at the top of a pass is not measurable here.
-func sceneEntryDependency() []core1_0.SubpassDependency {
-	return []core1_0.SubpassDependency{{
-		SrcSubpass: core1_0.SubpassExternal,
-		DstSubpass: 0,
-		SrcStageMask: core1_0.PipelineStageTransfer | core1_0.PipelineStageColorAttachmentOutput |
-			core1_0.PipelineStageEarlyFragmentTests | core1_0.PipelineStageLateFragmentTests,
-		DstStageMask: core1_0.PipelineStageFragmentShader | core1_0.PipelineStageColorAttachmentOutput |
-			core1_0.PipelineStageEarlyFragmentTests,
-		SrcAccessMask: core1_0.AccessTransferWrite | core1_0.AccessColorAttachmentWrite |
-			core1_0.AccessDepthStencilAttachmentWrite,
-		DstAccessMask: core1_0.AccessShaderRead | core1_0.AccessColorAttachmentRead |
-			core1_0.AccessColorAttachmentWrite | core1_0.AccessDepthStencilAttachmentRead |
-			core1_0.AccessDepthStencilAttachmentWrite,
-	}, {
-		// 02-cube and 09-water, 60 fixed frames at 1280x720/4x: adding this
-		// exit dependency removes 60 scene/water -> tonemap RAW reports each.
-		// The scene is also copied for refraction and its MSAA/depth loaded
-		// by water, so make those attachment writes available to both uses.
-		SrcSubpass: 0, DstSubpass: core1_0.SubpassExternal,
-		SrcStageMask: core1_0.PipelineStageColorAttachmentOutput |
-			core1_0.PipelineStageEarlyFragmentTests | core1_0.PipelineStageLateFragmentTests,
-		DstStageMask: core1_0.PipelineStageFragmentShader | core1_0.PipelineStageColorAttachmentOutput |
-			core1_0.PipelineStageEarlyFragmentTests | core1_0.PipelineStageLateFragmentTests | core1_0.PipelineStageTransfer,
-		SrcAccessMask: core1_0.AccessColorAttachmentWrite | core1_0.AccessDepthStencilAttachmentWrite,
-		DstAccessMask: core1_0.AccessShaderRead | core1_0.AccessColorAttachmentRead | core1_0.AccessColorAttachmentWrite |
-			core1_0.AccessDepthStencilAttachmentRead | core1_0.AccessDepthStencilAttachmentWrite | core1_0.AccessTransferRead,
-	}}
-}
-
-// createRenderPass builds a single-subpass render pass. When samples > Samples1,
-// it uses 3 attachments (MSAA color, depth, resolve); otherwise 2 (color, depth).
-func createRenderPass(deviceDriver core1_0.DeviceDriver, imageFormat core1_0.Format, depthFormat core1_0.Format, samples core1_0.SampleCountFlags) (core1_0.RenderPass, error) {
-	msaa := samples != core1_0.Samples1
-
-	var attachments []core1_0.AttachmentDescription
-	var subpasses []core1_0.SubpassDescription
-
-	if msaa {
-		attachments = []core1_0.AttachmentDescription{
-			// Attachment 0: Multisample color (render target)
-			//
-			// Stored rather than discarded so the water pass can load the
-			// opaque scene and blend onto it. Without water in the frame this
-			// costs a write of a buffer nobody reads.
-			{
-				Format:         imageFormat,
-				Samples:        samples,
-				LoadOp:         core1_0.AttachmentLoadOpClear,
-				StoreOp:        core1_0.AttachmentStoreOpStore,
-				StencilLoadOp:  core1_0.AttachmentLoadOpDontCare,
-				StencilStoreOp: core1_0.AttachmentStoreOpDontCare,
-				InitialLayout:  core1_0.ImageLayoutUndefined,
-				FinalLayout:    core1_0.ImageLayoutColorAttachmentOptimal,
-			},
-			// Attachment 1: Depth (multisample)
-			//
-			// Also stored: the water pass depth-tests against it so a hill in
-			// front of a lake still hides the lake.
-			{
-				Format:         depthFormat,
-				Samples:        samples,
-				LoadOp:         core1_0.AttachmentLoadOpClear,
-				StoreOp:        core1_0.AttachmentStoreOpStore,
-				StencilLoadOp:  core1_0.AttachmentLoadOpDontCare,
-				StencilStoreOp: core1_0.AttachmentStoreOpDontCare,
-				InitialLayout:  core1_0.ImageLayoutUndefined,
-				FinalLayout:    core1_0.ImageLayoutDepthStencilAttachmentOptimal,
-			},
-			// Attachment 2: Resolve / swapchain (single-sample)
-			{
-				Format:         imageFormat,
-				Samples:        core1_0.Samples1,
-				LoadOp:         core1_0.AttachmentLoadOpDontCare,
-				StoreOp:        core1_0.AttachmentStoreOpStore,
-				StencilLoadOp:  core1_0.AttachmentLoadOpDontCare,
-				StencilStoreOp: core1_0.AttachmentStoreOpDontCare,
-				InitialLayout:  core1_0.ImageLayoutUndefined,
-				FinalLayout:    core1_0.ImageLayoutShaderReadOnlyOptimal,
-			},
-		}
-		subpasses = []core1_0.SubpassDescription{
-			{
-				PipelineBindPoint: core1_0.PipelineBindPointGraphics,
-				ColorAttachments: []core1_0.AttachmentReference{
-					{Attachment: 0, Layout: core1_0.ImageLayoutColorAttachmentOptimal},
-				},
-				DepthStencilAttachment: &core1_0.AttachmentReference{
-					Attachment: 1, Layout: core1_0.ImageLayoutDepthStencilAttachmentOptimal,
-				},
-				ResolveAttachments: []core1_0.AttachmentReference{
-					{Attachment: 2, Layout: core1_0.ImageLayoutColorAttachmentOptimal},
-				},
-			},
-		}
-	} else {
-		attachments = []core1_0.AttachmentDescription{
-			{
-				Format:         imageFormat,
-				Samples:        core1_0.Samples1,
-				LoadOp:         core1_0.AttachmentLoadOpClear,
-				StoreOp:        core1_0.AttachmentStoreOpStore,
-				StencilLoadOp:  core1_0.AttachmentLoadOpDontCare,
-				StencilStoreOp: core1_0.AttachmentStoreOpDontCare,
-				InitialLayout:  core1_0.ImageLayoutUndefined,
-				FinalLayout:    core1_0.ImageLayoutShaderReadOnlyOptimal,
-			},
-			{
-				Format:         depthFormat,
-				Samples:        core1_0.Samples1,
-				LoadOp:         core1_0.AttachmentLoadOpClear,
-				StoreOp:        core1_0.AttachmentStoreOpStore,
-				StencilLoadOp:  core1_0.AttachmentLoadOpDontCare,
-				StencilStoreOp: core1_0.AttachmentStoreOpDontCare,
-				InitialLayout:  core1_0.ImageLayoutUndefined,
-				FinalLayout:    core1_0.ImageLayoutDepthStencilAttachmentOptimal,
-			},
-		}
-		subpasses = []core1_0.SubpassDescription{
-			{
-				PipelineBindPoint: core1_0.PipelineBindPointGraphics,
-				ColorAttachments: []core1_0.AttachmentReference{
-					{Attachment: 0, Layout: core1_0.ImageLayoutColorAttachmentOptimal},
-				},
-				DepthStencilAttachment: &core1_0.AttachmentReference{
-					Attachment: 1, Layout: core1_0.ImageLayoutDepthStencilAttachmentOptimal,
-				},
-			},
-		}
-	}
-
-	renderPass, _, err := deviceDriver.CreateRenderPass(nil, core1_0.RenderPassCreateInfo{
-		Attachments:         attachments,
-		Subpasses:           subpasses,
-		SubpassDependencies: sceneEntryDependency(),
-	})
-	if err != nil {
-		return core1_0.RenderPass{}, err
-	}
-
-	log.Println("Render pass created")
-	return renderPass, nil
-}
-
 // farPlaneDepthState is the depth configuration for everything that draws at the
 // far plane after all opaque geometry: the sky dome and the starfield.
 //
@@ -259,8 +94,8 @@ func createSkyPipelineLayout(deviceDriver core1_0.DeviceDriver, texSetLayout, sh
 // function that had to agree on reverse-Z, culling, and the push constant range.
 // They are one pipeline with a different material concept plugged into set 0, and
 // a fourth copy is how one of them quietly ends up with the wrong compare op.
-func createLitVariantPipeline(deviceDriver core1_0.DeviceDriver, vertSpv, fragSpv []byte, label string, renderPass core1_0.RenderPass, extent core1_0.Extent2D, set0Layout, shadowSetLayout core1_0.DescriptorSetLayout, samples core1_0.SampleCountFlags, cull core1_0.CullModeFlags, blend bool) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
-	return createLitVariantPipelineWithInput(deviceDriver, vertSpv, fragSpv, label, renderPass, extent,
+func createLitVariantPipeline(deviceDriver core1_0.DeviceDriver, vertSpv, fragSpv []byte, label string, formats renderingFormats, extent core1_0.Extent2D, set0Layout, shadowSetLayout core1_0.DescriptorSetLayout, samples core1_0.SampleCountFlags, cull core1_0.CullModeFlags, blend bool) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
+	return createLitVariantPipelineWithInput(deviceDriver, vertSpv, fragSpv, label, formats, extent,
 		set0Layout, shadowSetLayout, samples, cull, blend,
 		[]core1_0.VertexInputBindingDescription{vertexBindingDescription()}, vertexAttributeDescriptions())
 }
@@ -268,7 +103,7 @@ func createLitVariantPipeline(deviceDriver core1_0.DeviceDriver, vertSpv, fragSp
 // createLitVariantPipelineWithInput is createLitVariantPipeline with the vertex
 // input state supplied, which is what the instanced variant needs: a second
 // per-instance binding carrying the model matrix the ordinary path pushes.
-func createLitVariantPipelineWithInput(deviceDriver core1_0.DeviceDriver, vertSpv, fragSpv []byte, label string, renderPass core1_0.RenderPass, extent core1_0.Extent2D, set0Layout, shadowSetLayout core1_0.DescriptorSetLayout, samples core1_0.SampleCountFlags, cull core1_0.CullModeFlags, blend bool, bindings []core1_0.VertexInputBindingDescription, attrs []core1_0.VertexInputAttributeDescription, coverage ...bool) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
+func createLitVariantPipelineWithInput(deviceDriver core1_0.DeviceDriver, vertSpv, fragSpv []byte, label string, formats renderingFormats, extent core1_0.Extent2D, set0Layout, shadowSetLayout core1_0.DescriptorSetLayout, samples core1_0.SampleCountFlags, cull core1_0.CullModeFlags, blend bool, bindings []core1_0.VertexInputBindingDescription, attrs []core1_0.VertexInputAttributeDescription, coverage ...bool) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
 		Code: bytesToUint32Slice(vertSpv),
 	})
@@ -371,9 +206,8 @@ func createLitVariantPipelineWithInput(deviceDriver core1_0.DeviceDriver, vertSp
 				core1_0.DynamicStateScissor,
 			},
 		},
-		Layout:     pipelineLayout,
-		RenderPass: renderPass,
-		Subpass:    0,
+		Layout:      pipelineLayout,
+		NextOptions: renderingOptions(formats),
 	})
 	if err != nil {
 		deviceDriver.DestroyPipelineLayout(pipelineLayout, nil)
@@ -387,34 +221,34 @@ func createLitVariantPipelineWithInput(deviceDriver core1_0.DeviceDriver, vertSp
 // createGraphicsPipeline creates the main scene pipeline with depth testing,
 // back-face culling, and push constants for per-object MVP + tint + lighting.
 // The litPipelineLayout uses: set 0 = texture, set 1 = shadow (UBO + sampler).
-func createGraphicsPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, extent core1_0.Extent2D, texSetLayout core1_0.DescriptorSetLayout, shadowSetLayout core1_0.DescriptorSetLayout, samples core1_0.SampleCountFlags, cullMode ...core1_0.CullModeFlags) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
+func createGraphicsPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, formats renderingFormats, extent core1_0.Extent2D, texSetLayout core1_0.DescriptorSetLayout, shadowSetLayout core1_0.DescriptorSetLayout, samples core1_0.SampleCountFlags, cullMode ...core1_0.CullModeFlags) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
 	cull := core1_0.CullModeBack
 	if len(cullMode) > 0 {
 		cull = cullMode[0]
 	}
 	return createLitVariantPipeline(deviceDriver, sh.LitVert, sh.LitFrag, "Graphics",
-		renderPass, extent, texSetLayout, shadowSetLayout, samples, cull, false)
+		formats, extent, texSetLayout, shadowSetLayout, samples, cull, false)
 }
 
 // createTerrainPipeline creates the terrain splat pipeline: same vertex stage,
 // vertex format, depth, and culling as the lit pipeline, but a fragment stage
 // that blends multiple detail textures by a splat map. Layout: set 0 = terrain
 // material (4 samplers), set 1 = shadow.
-func createTerrainPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, extent core1_0.Extent2D, terrainSetLayout core1_0.DescriptorSetLayout, shadowSetLayout core1_0.DescriptorSetLayout, samples core1_0.SampleCountFlags) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
+func createTerrainPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, formats renderingFormats, extent core1_0.Extent2D, terrainSetLayout core1_0.DescriptorSetLayout, shadowSetLayout core1_0.DescriptorSetLayout, samples core1_0.SampleCountFlags) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
 	return createLitVariantPipeline(deviceDriver, sh.LitVert, sh.TerrainFrag, "Terrain",
-		renderPass, extent, terrainSetLayout, shadowSetLayout, samples, core1_0.CullModeBack, false)
+		formats, extent, terrainSetLayout, shadowSetLayout, samples, core1_0.CullModeBack, false)
 }
 
 // createMaterialPipeline creates the material pipeline: the lit path with normal,
 // metallic-roughness, and occlusion maps. Layout: set 0 = material (4 samplers +
 // a per-material UBO), set 1 = shadow.
-func createMaterialPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, extent core1_0.Extent2D, materialSetLayout core1_0.DescriptorSetLayout, shadowSetLayout core1_0.DescriptorSetLayout, samples core1_0.SampleCountFlags, cullMode ...core1_0.CullModeFlags) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
+func createMaterialPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, formats renderingFormats, extent core1_0.Extent2D, materialSetLayout core1_0.DescriptorSetLayout, shadowSetLayout core1_0.DescriptorSetLayout, samples core1_0.SampleCountFlags, cullMode ...core1_0.CullModeFlags) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
 	cull := core1_0.CullModeBack
 	if len(cullMode) > 0 {
 		cull = cullMode[0]
 	}
 	return createLitVariantPipeline(deviceDriver, sh.LitVert, sh.LitMaterialFrag, "Material",
-		renderPass, extent, materialSetLayout, shadowSetLayout, samples, cull, false)
+		formats, extent, materialSetLayout, shadowSetLayout, samples, cull, false)
 }
 
 // createTranslucentPipeline is the lit pipeline with the water pipeline's depth
@@ -429,7 +263,7 @@ func createMaterialPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, ren
 // DoubleSided is a component a game can already put on an entity, and a
 // translucent pipeline that ignored it would cull the back faces of a glass box
 // and leave nothing where its far wall should be.
-func createTranslucentPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, extent core1_0.Extent2D, texSetLayout core1_0.DescriptorSetLayout, shadowSetLayout core1_0.DescriptorSetLayout, samples core1_0.SampleCountFlags, cullMode ...core1_0.CullModeFlags) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
+func createTranslucentPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, formats renderingFormats, extent core1_0.Extent2D, texSetLayout core1_0.DescriptorSetLayout, shadowSetLayout core1_0.DescriptorSetLayout, samples core1_0.SampleCountFlags, cullMode ...core1_0.CullModeFlags) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
 	cull := core1_0.CullModeBack
 	label := "Translucent"
 	if len(cullMode) > 0 {
@@ -437,7 +271,7 @@ func createTranslucentPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, 
 		label = "Translucent double-sided"
 	}
 	return createLitVariantPipeline(deviceDriver, sh.LitVert, sh.LitFrag, label,
-		renderPass, extent, texSetLayout, shadowSetLayout, samples, cull, true)
+		formats, extent, texSetLayout, shadowSetLayout, samples, cull, true)
 }
 
 // createInstancedPipeline is the lit pipeline for InstanceSets: the same
@@ -449,7 +283,7 @@ func createTranslucentPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, 
 // of the pipeline is deliberately identical to the opaque lit one, so an
 // instanced prop is lit, fogged and shadowed exactly as the same mesh drawn
 // individually would be -- which is the property that lets the two be compared.
-func createInstancedPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, extent core1_0.Extent2D, texSetLayout core1_0.DescriptorSetLayout, shadowSetLayout core1_0.DescriptorSetLayout, samples core1_0.SampleCountFlags, cullMode ...core1_0.CullModeFlags) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
+func createInstancedPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, formats renderingFormats, extent core1_0.Extent2D, texSetLayout core1_0.DescriptorSetLayout, shadowSetLayout core1_0.DescriptorSetLayout, samples core1_0.SampleCountFlags, cullMode ...core1_0.CullModeFlags) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
 	cull := core1_0.CullModeBack
 	label := "Instanced"
 	if len(cullMode) > 0 {
@@ -457,14 +291,14 @@ func createInstancedPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, re
 		label = "Instanced double-sided"
 	}
 	return createLitVariantPipelineWithInput(deviceDriver, sh.LitInstancedVert, sh.LitFrag, label,
-		renderPass, extent, texSetLayout, shadowSetLayout, samples, cull, false,
+		formats, extent, texSetLayout, shadowSetLayout, samples, cull, false,
 		[]core1_0.VertexInputBindingDescription{vertexBindingDescription(), instanceBindingDescription()},
 		instanceAttributeDescriptions())
 }
 
 // createOverlayPipeline creates a pipeline for HUD/overlay geometry with no
 // depth testing and no back-face culling, sharing the same pipeline layout.
-func createOverlayPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
+func createOverlayPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, formats renderingFormats, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
 		Code: bytesToUint32Slice(sh.MeshVert),
 	})
@@ -529,9 +363,8 @@ func createOverlayPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, rend
 				core1_0.DynamicStateScissor,
 			},
 		},
-		Layout:     pipelineLayout,
-		RenderPass: renderPass,
-		Subpass:    0,
+		Layout:      pipelineLayout,
+		NextOptions: renderingOptions(formats),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, err
@@ -557,7 +390,7 @@ func createOverlayPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, rend
 // geometry as well as cloud; it does not, because geometry writes alpha 1.0,
 // and the result was a sun disc drawn on top of the hills it had set behind.
 
-func createCelestialPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
+func createCelestialPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, formats renderingFormats, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
 		Code: bytesToUint32Slice(sh.MeshVert),
 	})
@@ -641,9 +474,8 @@ func createCelestialPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, re
 				core1_0.DynamicStateScissor,
 			},
 		},
-		Layout:     pipelineLayout,
-		RenderPass: renderPass,
-		Subpass:    0,
+		Layout:      pipelineLayout,
+		NextOptions: renderingOptions(formats),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, err
@@ -655,7 +487,7 @@ func createCelestialPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, re
 
 // createStarsPipeline creates a pipeline for procedural starfield rendering:
 // no vertex input, depth-tested against the far plane, additive blending.
-func createStarsPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
+func createStarsPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, formats renderingFormats, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
 		Code: bytesToUint32Slice(sh.StarsVert),
 	})
@@ -731,9 +563,8 @@ func createStarsPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, render
 				core1_0.DynamicStateScissor,
 			},
 		},
-		Layout:     pipelineLayout,
-		RenderPass: renderPass,
-		Subpass:    0,
+		Layout:      pipelineLayout,
+		NextOptions: renderingOptions(formats),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, err
@@ -745,7 +576,7 @@ func createStarsPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, render
 
 // createSkyPipeline creates a pipeline for procedural sky dome rendering:
 // no vertex input, depth-tested against the far plane, opaque.
-func createSkyPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
+func createSkyPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, formats renderingFormats, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
 		Code: bytesToUint32Slice(sh.SkyVert),
 	})
@@ -806,9 +637,8 @@ func createSkyPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPa
 				core1_0.DynamicStateScissor,
 			},
 		},
-		Layout:     pipelineLayout,
-		RenderPass: renderPass,
-		Subpass:    0,
+		Layout:      pipelineLayout,
+		NextOptions: renderingOptions(formats),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, err
@@ -861,7 +691,7 @@ func overlayBlend(premultiplied bool) core1_0.PipelineColorBlendAttachmentState 
 	}
 }
 
-func createMSDFPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags, premultiplied bool) (core1_0.Pipeline, error) {
+func createMSDFPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, formats renderingFormats, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags, premultiplied bool) (core1_0.Pipeline, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
 		Code: bytesToUint32Slice(sh.MsdfVert),
 	})
@@ -923,9 +753,8 @@ func createMSDFPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderP
 				core1_0.DynamicStateScissor,
 			},
 		},
-		Layout:     pipelineLayout,
-		RenderPass: renderPass,
-		Subpass:    0,
+		Layout:      pipelineLayout,
+		NextOptions: renderingOptions(formats),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, err
@@ -939,7 +768,7 @@ func createMSDFPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderP
 // depth tested, using grass.vert + grass.frag with alpha-to-coverage so distant
 // blades dissolve via MSAA coverage. Two vertex bindings: binding 0 = Vertex
 // (per-vertex), binding 1 = GrassInstance (per-instance).
-func createGrassPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, litPipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
+func createGrassPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, formats renderingFormats, litPipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
 		Code: bytesToUint32Slice(sh.GrassVert),
 	})
@@ -1026,9 +855,8 @@ func createGrassPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, render
 				core1_0.DynamicStateScissor,
 			},
 		},
-		Layout:     litPipelineLayout,
-		RenderPass: renderPass,
-		Subpass:    0,
+		Layout:      litPipelineLayout,
+		NextOptions: renderingOptions(formats),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, err
@@ -1041,7 +869,7 @@ func createGrassPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, render
 // createParticlePipeline creates a pipeline for instanced billboard particles:
 // additive blend, depth test ON / write OFF, no culling.
 // Two vertex bindings: binding 0 = Vertex (per-vertex quad), binding 1 = ParticleInstance (per-instance).
-func createParticlePipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
+func createParticlePipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, formats renderingFormats, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
 		Code: bytesToUint32Slice(sh.ParticleVert),
 	})
@@ -1139,9 +967,8 @@ func createParticlePipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, ren
 				core1_0.DynamicStateScissor,
 			},
 		},
-		Layout:     pipelineLayout,
-		RenderPass: renderPass,
-		Subpass:    0,
+		Layout:      pipelineLayout,
+		NextOptions: renderingOptions(formats),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, err
@@ -1175,7 +1002,7 @@ func createSkinnedPipelineLayout(deviceDriver core1_0.DeviceDriver, texSetLayout
 // layout. The fragment shader is a parameter because there are two -- the plain
 // one and the material variant -- and they differ only in what set 0 holds.
 // Both put the shadow sampler at set 2, because set 1 is the joint UBO.
-func createSkinnedPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, fragSpv []byte, renderPass core1_0.RenderPass, skinnedPipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags, blend bool) (core1_0.Pipeline, error) {
+func createSkinnedPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, fragSpv []byte, formats renderingFormats, skinnedPipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags, blend bool) (core1_0.Pipeline, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
 		Code: bytesToUint32Slice(sh.SkinnedLitVert),
 	})
@@ -1247,9 +1074,8 @@ func createSkinnedPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, frag
 				core1_0.DynamicStateScissor,
 			},
 		},
-		Layout:     skinnedPipelineLayout,
-		RenderPass: renderPass,
-		Subpass:    0,
+		Layout:      skinnedPipelineLayout,
+		NextOptions: renderingOptions(formats),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, err
@@ -1261,7 +1087,7 @@ func createSkinnedPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, frag
 
 // createUIPipeline creates a pipeline for textured UI panels: no depth test,
 // no culling, alpha blending enabled, using ui.vert + ui.frag shaders.
-func createUIPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags, premultiplied bool) (core1_0.Pipeline, error) {
+func createUIPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, formats renderingFormats, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags, premultiplied bool) (core1_0.Pipeline, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
 		Code: bytesToUint32Slice(sh.UIVert),
 	})
@@ -1323,9 +1149,8 @@ func createUIPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPas
 				core1_0.DynamicStateScissor,
 			},
 		},
-		Layout:     pipelineLayout,
-		RenderPass: renderPass,
-		Subpass:    0,
+		Layout:      pipelineLayout,
+		NextOptions: renderingOptions(formats),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, err
@@ -1348,7 +1173,7 @@ func createUIPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPas
 // Blending stays enabled even when the shader composites the refracted scene
 // itself: the surface still fades out at the shoreline, and that fade has to
 // reach the framebuffer somehow.
-func createWaterPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, litPipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
+func createWaterPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, formats renderingFormats, litPipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
 		Code: bytesToUint32Slice(sh.WaterVert),
 	})
@@ -1423,9 +1248,8 @@ func createWaterPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, render
 				core1_0.DynamicStateScissor,
 			},
 		},
-		Layout:     litPipelineLayout,
-		RenderPass: renderPass,
-		Subpass:    0,
+		Layout:      litPipelineLayout,
+		NextOptions: renderingOptions(formats),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, err
@@ -1439,7 +1263,7 @@ func createWaterPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, render
 // blended additively over the frame.
 //
 // It runs in the water render pass rather than one of its own, which is what
-// the renderPass parameter has to be: godray.frag samples the scene copy that
+// the sceneFormats parameter has to be: godray.frag samples the scene copy that
 // pass makes, and a pass of its own would need a second copy for nothing. See
 // recordLightShafts for where in that pass it goes and why.
 //
@@ -1451,7 +1275,7 @@ func createWaterPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, render
 //
 // No depth test: the shafts are light in the air between the eye and everything
 // else, so there is nothing for them to be behind.
-func createGodRayPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
+func createGodRayPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, formats renderingFormats, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
 		Code: bytesToUint32Slice(sh.SkyVert),
 	})
@@ -1515,9 +1339,8 @@ func createGodRayPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, rende
 				core1_0.DynamicStateScissor,
 			},
 		},
-		Layout:     pipelineLayout,
-		RenderPass: renderPass,
-		Subpass:    0,
+		Layout:      pipelineLayout,
+		NextOptions: renderingOptions(formats),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, err
@@ -1544,7 +1367,7 @@ func createGodRayPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, rende
 // is deliberate -- a depth state that drifted from the sky's would put the
 // beam on pixels the dome is not on, and reverse-Z makes that the kind of
 // mistake that draws nothing at all rather than something slightly wrong.
-func createSkyVolumetricPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, renderPass core1_0.RenderPass, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
+func createSkyVolumetricPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, formats renderingFormats, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
 		Code: bytesToUint32Slice(sh.SkyVert),
 	})
@@ -1618,9 +1441,8 @@ func createSkyVolumetricPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet
 				core1_0.DynamicStateScissor,
 			},
 		},
-		Layout:     pipelineLayout,
-		RenderPass: renderPass,
-		Subpass:    0,
+		Layout:      pipelineLayout,
+		NextOptions: renderingOptions(formats),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, err

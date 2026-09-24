@@ -40,7 +40,7 @@ const (
 	passCount
 )
 
-// PassSceneResolve and PassWaterResolve bracket vkCmdEndRenderPass and nothing
+// PassSceneResolve and PassWaterResolve bracket vkCmdEndRendering and nothing
 // else. Ending a multisampled pass is where its colour resolves, which is real
 // GPU time that belongs to no draw, and for a long time it was charged to
 // whichever pass happened to close last: PassOverlay closed after the scene

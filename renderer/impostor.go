@@ -82,10 +82,7 @@ func (r *Renderer) recordImpostorBake(a *ImpostorAtlas, mesh *Mesh, texture *Tex
 		return err
 	}
 	imp := a.atlas
-	if err = r.deviceDriver.CmdBeginRenderPass(cmd, core1_0.SubpassContentsInline, core1_0.RenderPassBeginInfo{
-		RenderPass: imp.renderPass, Framebuffer: imp.fb, RenderArea: core1_0.Rect2D{Extent: imp.extent},
-		ClearValues: []core1_0.ClearValue{core1_0.ClearValueFloat{0, 0, 0, 0}, core1_0.ClearValueDepthStencil{Depth: 0}},
-	}); err != nil {
+	if err = imp.target.begin(r.deviceDriver, r.cmdScratch.dynamic, cmd); err != nil {
 		return err
 	}
 	r.deviceDriver.CmdBindPipeline(cmd, core1_0.PipelineBindPointGraphics, imp.pipeline)
@@ -119,6 +116,8 @@ func (r *Renderer) recordImpostorBake(a *ImpostorAtlas, mesh *Mesh, texture *Tex
 			r.deviceDriver.CmdDraw(cmd, mesh.VertexCount, 1, 0, 0)
 		}
 	}
-	r.deviceDriver.CmdEndRenderPass(cmd)
+	if err := imp.target.end(r.deviceDriver, r.cmdScratch.dynamic, cmd); err != nil {
+		return err
+	}
 	return r.endSingleTimeCommands(cmd)
 }

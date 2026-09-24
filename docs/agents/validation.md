@@ -17,7 +17,7 @@ requires:
   - vulkan-runtime
   - vulkan-sdk
 assets: none
-verified: 2026-09-24
+verified: 2026-09-24 # dynamic rendering, explicit barriers and resource lifetime
 ---
 
 # Enable Vulkan validation and find resource leaks
@@ -107,7 +107,7 @@ Core validation checks API use, layouts and object lifetime, but does not
 track whether the writes one draw makes are available to the next draw.
 Synchronization validation adds that hazard analysis. An image can have the
 right layout and still have a read-after-write or write-after-write hazard:
-a render pass's automatic layout transition is itself a write.
+an explicit image layout transition is itself a write.
 
 ```sh
 GLYPHENGINE_VALIDATION=1 GLYPHENGINE_SYNC_VALIDATION=1 ./mygame
@@ -137,11 +137,10 @@ the cloud/scene final-transition reads; incoming attachment-write access fixed
 the cloud/tonemap DONT_CARE loads. The same run is now silent. UI glow and
 water require the same visibility on their outputs.
 
-The graph derives an incoming/outgoing dependency pair. It includes actual
-consumer shader stages, transfer reads, attachment loads and attachment reuse;
-optional nodes and persistent next-frame reads cannot escape the scopes.
-Non-nil `Node.Dependencies` still replaces the whole pair. Scene and water
-share an identical pair because their pipelines must remain compatible.
+The graph derives explicit entry/exit image barriers. They include declared
+consumer shader stages and preceding readers, including optional and next-frame
+uses. Scene and water pipelines share attachment formats and sample counts;
+their synchronization scopes no longer participate in pipeline compatibility.
 
 `task syncvalidate` reuses the entire `validate` matrix, including opt-in
 paths, provoked swapchain rebuilds, CPU/GPU LOD replacement and indexed indirect draws, then runs
@@ -171,7 +170,7 @@ Two consequences worth knowing when adding a resource to `New`:
   later. A step pushed out of order unwinds out of order.
 - **Read the resource through `r` inside the closure** rather than capturing
   the value. `recreateSwapchain` replaces the swapchain, depth buffer, MSAA
-  targets, and framebuffers on every resize; a closure that captured the
+  targets, and rendering bindings on every resize; a closure that captured the
   originals would destroy stale handles and leak the live ones.
 
 Resources created *after* `New` — textures, meshes, the lazy diagnostic
@@ -263,7 +262,7 @@ complete or returns the same wrapped error again — never a nil pointer.
 Proven two ways:
 
 - **GPU-free**, in `renderer/recreateswapchain_test.go`: a fake driver fails a
-  named call (`AllocateDescriptorSets`, `CreateImage`, `CreateFramebuffer`) on
+  named call (`AllocateDescriptorSets`, `CreateImage`, `CreateImageView`) on
   the Nth invocation, and the test counts every Vulkan object kind created
   against how many were destroyed.
 - **On the GPU**, by wrapping the real device driver so the Nth
@@ -318,6 +317,17 @@ error. Its own partial-failure case (a `CreateImageView` failing partway
 through the per-image loop) is still fixed — the swapchain and the views made
 before the failure are given back — just checked under `task validate`
 instead of GPU-free.
+
+## Dynamic rendering
+
+Every graphics path uses VK_KHR_dynamic_rendering. Core validation checks
+pipeline formats, attachment bindings and explicit layouts; synchronization
+validation checks entry/exit visibility, including optional/history reuse.
+There are no VkRenderPass or VkFramebuffer allocations to fail or retire.
+`TestResizeCreatesNoRenderPassesOrFramebuffers` keeps counters for both as
+regression traps while the resize tests inject failures into remaining resource
+and descriptor allocations. Resolve timing tests require only CmdEndRendering
+inside SceneResolve/WaterResolve, with exit barriers after their end timestamps.
 
 ## Failure modes
 

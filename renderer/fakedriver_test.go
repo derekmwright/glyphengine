@@ -4,6 +4,7 @@ import (
 	"github.com/vkngwrapper/core/v3/common"
 	"github.com/vkngwrapper/core/v3/core1_0"
 	"github.com/vkngwrapper/core/v3/loader"
+	"github.com/vkngwrapper/extensions/v3/khr_dynamic_rendering"
 )
 
 // fakeHandles hands out small, deterministic, distinct Vulkan handles with no
@@ -28,6 +29,14 @@ func (h *fakeHandles) descSet() core1_0.DescriptorSet {
 }
 func (h *fakeHandles) pipeline() core1_0.Pipeline {
 	return core1_0.InternalPipeline(0, loader.VkPipeline(h.n()), 0)
+}
+
+// Keep draw handles at their pre-migration identities despite removed objects.
+func (h *fakeHandles) pipelineSkipping(removed int) core1_0.Pipeline {
+	for range removed {
+		h.n()
+	}
+	return h.pipeline()
 }
 func (h *fakeHandles) layout() core1_0.PipelineLayout {
 	return core1_0.InternalPipelineLayout(0, loader.VkPipelineLayout(h.n()), 0)
@@ -58,9 +67,10 @@ func (h *fakeHandles) commandBuffer() core1_0.CommandBuffer {
 type fakeDriver struct {
 	core1_0.DeviceDriver
 
-	hashing bool
-	calls   int
-	h       Hasher
+	drawsOnly bool
+	hashing   bool
+	calls     int
+	h         Hasher
 }
 
 const (
@@ -99,35 +109,58 @@ func (d *fakeDriver) EndCommandBuffer(cb core1_0.CommandBuffer) (common.VkResult
 	return core1_0.VKSuccess, nil
 }
 
-func (d *fakeDriver) CmdBeginRenderPass(cb core1_0.CommandBuffer, contents core1_0.SubpassContents, o core1_0.RenderPassBeginInfo) error {
+func (d *fakeDriver) CmdBeginRendering(cb core1_0.CommandBuffer, o khr_dynamic_rendering.RenderingInfo) error {
+	if d.drawsOnly {
+		return nil
+	}
+
 	d.fold(opBeginRP)
 	if d.hashing {
-		d.h = d.h.Int(int(contents)).Uint64(uint64(o.RenderPass.Handle())).Uint64(uint64(o.Framebuffer.Handle())).
-			Int(o.RenderArea.Offset.X).Int(o.RenderArea.Offset.Y).Int(o.RenderArea.Extent.Width).Int(o.RenderArea.Extent.Height)
-		for _, cv := range o.ClearValues {
-			// core1_0.ClearValue is an interface; commandScratch holds the
-			// dynamic colour clear by pointer to avoid reboxing it every
-			// frame (see commandScratch.colorClear), so both the value and
-			// pointer forms have to fold to the same hash -- this is folding
-			// argument VALUES, and a pointer's target is still a value.
-			switch v := cv.(type) {
-			case core1_0.ClearValueFloat:
-				d.h = d.h.Byte('f').Float32s(v[:])
-			case *core1_0.ClearValueFloat:
-				d.h = d.h.Byte('f').Float32s(v[:])
-			case core1_0.ClearValueDepthStencil:
-				d.h = d.h.Byte('d').Float32(v.Depth).Int(int(v.Stencil))
-			case *core1_0.ClearValueDepthStencil:
-				d.h = d.h.Byte('d').Float32(v.Depth).Int(int(v.Stencil))
-			default:
-				d.h = d.h.Byte('?')
-			}
+		d.h = d.h.Int(int(o.Flags)).Int(o.LayerCount).Int(int(o.ViewMask)).Int(o.RenderArea.Offset.X).Int(o.RenderArea.Offset.Y).Int(o.RenderArea.Extent.Width).Int(o.RenderArea.Extent.Height).Int(len(o.ColorAttachments))
+		for _, a := range o.ColorAttachments {
+			d.hashAttachment(a)
+		}
+		if o.DepthAttachment != nil {
+			d.h = d.h.Byte('d')
+			d.hashAttachment(*o.DepthAttachment)
+		}
+		if o.StencilAttachment != nil {
+			d.h = d.h.Byte('s')
+			d.hashAttachment(*o.StencilAttachment)
 		}
 	}
 	return nil
 }
+func (d *fakeDriver) hashAttachment(a khr_dynamic_rendering.RenderingAttachmentInfo) {
+	d.h = d.h.Uint64(uint64(a.ImageView.Handle())).Int(int(a.ImageLayout)).Int(int(a.ResolveMode)).Uint64(uint64(a.ResolveImageView.Handle())).Int(int(a.ResolveImageLayout)).Int(int(a.LoadOp)).Int(int(a.StoreOp))
+	switch v := a.ClearValue.(type) {
+	case core1_0.ClearValueFloat:
+		d.h = d.h.Byte('f').Float32s(v[:])
+	case *core1_0.ClearValueFloat:
+		d.h = d.h.Byte('f').Float32s(v[:])
+	case core1_0.ClearValueDepthStencil:
+		d.h = d.h.Byte('d').Float32(v.Depth).Int(int(v.Stencil))
+	default:
+		d.h = d.h.Byte('?')
+	}
+}
+func (d *fakeDriver) CmdEndRendering(cb core1_0.CommandBuffer) {
+	if d.drawsOnly {
+		return
+	}
+	d.fold(opEndRP)
+}
 
-func (d *fakeDriver) CmdEndRenderPass(cb core1_0.CommandBuffer) { d.fold(opEndRP) }
+func (h *fakeHandles) depthTarget(size, layer int) *renderingTarget {
+	id := h.n()
+	return depthRenderingTarget(core1_0.InternalImage(0, loader.VkImage(id), 0), core1_0.InternalImageView(0, loader.VkImageView(id), 0), core1_0.FormatD32SignedFloat, layer, core1_0.Extent2D{Width: size, Height: size})
+}
+func (h *fakeHandles) colorTarget() *renderingTarget {
+	id := h.n()
+	t := newRenderingTarget(core1_0.Extent2D{Width: 640, Height: 360})
+	t.info.ColorAttachments = []khr_dynamic_rendering.RenderingAttachmentInfo{attachmentInfo(core1_0.InternalImageView(0, loader.VkImageView(id), 0), false, core1_0.AttachmentLoadOpDontCare, core1_0.AttachmentStoreOpStore, nil)}
+	return t
+}
 
 func (d *fakeDriver) CmdBindPipeline(cb core1_0.CommandBuffer, bp core1_0.PipelineBindPoint, p core1_0.Pipeline) {
 	d.fold(opBindPipeline)
@@ -213,6 +246,10 @@ func (d *fakeDriver) CmdDrawIndexed(cb core1_0.CommandBuffer, indexCount, instan
 }
 
 func (d *fakeDriver) CmdPipelineBarrier(cb core1_0.CommandBuffer, src, dst core1_0.PipelineStageFlags, deps core1_0.DependencyFlags, mem []core1_0.MemoryBarrier, bufMem []core1_0.BufferMemoryBarrier, imgMem []core1_0.ImageMemoryBarrier) error {
+	if d.drawsOnly {
+		return nil
+	}
+
 	d.fold(opBarrier)
 	if d.hashing {
 		d.h = d.h.Int(int(src)).Int(int(dst)).Int(int(deps)).Int(len(mem)).Int(len(bufMem)).Int(len(imgMem))

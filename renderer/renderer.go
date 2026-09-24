@@ -11,6 +11,7 @@ import (
 	"github.com/vkngwrapper/core/v3/common"
 	"github.com/vkngwrapper/core/v3/core1_0"
 	"github.com/vkngwrapper/extensions/v3/ext_debug_utils"
+	"github.com/vkngwrapper/extensions/v3/khr_dynamic_rendering"
 	"github.com/vkngwrapper/extensions/v3/khr_surface"
 	khr_surface_loader "github.com/vkngwrapper/extensions/v3/khr_surface/loader"
 	"github.com/vkngwrapper/extensions/v3/khr_swapchain"
@@ -19,7 +20,7 @@ import (
 )
 
 // Renderer manages the Vulkan rendering pipeline: instance, device, swapchain,
-// render pass, graphics pipelines, and per-frame synchronization.
+// dynamic rendering, graphics pipelines, and per-frame synchronization.
 type Renderer struct {
 	win *window.Window
 
@@ -47,7 +48,7 @@ type Renderer struct {
 	// about the picture has moved just because the next rebuild has not
 	// completed yet.
 	lastExtent             core1_0.Extent2D
-	renderPass             core1_0.RenderPass
+	sceneFormats           renderingFormats
 	pipelineLayout         core1_0.PipelineLayout // non-lit (stars, overlay, msdf, ui)
 	litPipelineLayout      core1_0.PipelineLayout // lit static: set 0=tex, set 1=shadow
 	pipeline               core1_0.Pipeline
@@ -124,8 +125,7 @@ type Renderer struct {
 	appWrites                     [1]core1_0.WriteDescriptorSet
 	appInfos                      [1]core1_0.DescriptorImageInfo
 	depthResolve                  *sceneDepthResources
-	waterRenderPass               core1_0.RenderPass
-	waterFramebuffers             []core1_0.Framebuffer
+	waterFormats                  renderingFormats
 	sceneColor                    *sceneColorTarget
 	grass                         *GrassSystem
 	// waterPlanes is scratch for the per-frame split of blended draws onto
@@ -155,7 +155,7 @@ type Renderer struct {
 	particlePipeline      core1_0.Pipeline
 	particles             *ParticleSystem
 	shadow                *shadowResources
-	framebuffers          []core1_0.Framebuffer
+	sceneTargets          []*renderingTarget
 	commandPool           core1_0.CommandPool
 	commandBuffers        [maxFramesInFlight]core1_0.CommandBuffer
 	sync                  *syncObjects
@@ -181,9 +181,8 @@ type Renderer struct {
 	hdr                   *hdrTarget
 	tonemapSetLayout      core1_0.DescriptorSetLayout
 	tonemapPipelineLayout core1_0.PipelineLayout
-	tonemapRenderPass     core1_0.RenderPass
+	tonemapFormats        renderingFormats
 	tonemapPipeline       core1_0.Pipeline
-	tonemapFramebuffers   []core1_0.Framebuffer
 
 	// Exposure and curve for the tonemap pass; see SetTonemap.
 	exposure     float32
@@ -196,17 +195,17 @@ type Renderer struct {
 	// cloudFrame counts frames for the cloud history ping-pong, and prevVP is
 	// the view-projection that frame was rendered with. Both exist only for
 	// temporal reprojection.
-	cloudFrame      int
-	prevVP          [16]float32
-	prevCloudTime   float32
-	cloudRenderPass core1_0.RenderPass
-	cloudPipeline   core1_0.Pipeline
+	cloudFrame    int
+	prevVP        [16]float32
+	prevCloudTime float32
+	cloudFormats  renderingFormats
+	cloudPipeline core1_0.Pipeline
 
 	// bloom is the mip chain the glare passes run through, composited by the
 	// tonemap resolve. Off by default; see SetBloom and bloom.go.
 	bloom                  *bloomTarget
-	bloomDownRenderPass    core1_0.RenderPass
-	bloomUpRenderPass      core1_0.RenderPass
+	bloomDownFormats       renderingFormats
+	bloomUpFormats         renderingFormats
 	bloomPrefilterPipeline core1_0.Pipeline
 	bloomDownPipeline      core1_0.Pipeline
 	bloomUpPipeline        core1_0.Pipeline
@@ -221,7 +220,7 @@ type Renderer struct {
 	// nil unless WithUIGlowLayer was passed, and everything about the feature
 	// is skipped when it is. See uilayer.go.
 	uiLayer             *uiLayerTarget
-	uiLayerRenderPass   core1_0.RenderPass
+	uiLayerFormats      renderingFormats
 	uiLayerUIPipeline   core1_0.Pipeline
 	uiLayerMSDFPipeline core1_0.Pipeline
 	uiResolvePipeline   core1_0.Pipeline
@@ -328,7 +327,7 @@ type Renderer struct {
 	// the two can never drift apart.
 	//
 	// Steps read resources through r rather than capturing them, because
-	// recreateSwapchain replaces the swapchain, depth, MSAA, and framebuffers
+	// recreateSwapchain replaces the swapchain, depth, MSAA, and rendering bindings
 	// after New has already pushed their teardown.
 	initStack []func()
 
@@ -480,7 +479,7 @@ func WithMSAASamples(n int) Option {
 // How the glow LOOKS is a per-frame decision and lives in SetUIGlow and
 // SetUIExposure.
 //
-// Off by default, and free when off: no images, no framebuffers, no descriptor
+// Off by default, and free when off: no images, no descriptor
 // sets, no pipelines, and nothing extra recorded. A UI element's Glow is
 // likewise inert without it -- the swapchain is 8 bits per channel, so with no
 // layer there is nowhere for a value above 1 to be.
@@ -497,7 +496,7 @@ func WithUIGlowLayer() Option {
 }
 
 // New initializes the full Vulkan rendering stack: instance, surface, device,
-// swapchain, render pass, pipelines, framebuffers, command buffers, and sync
+// swapchain, pipelines, rendering bindings, command buffers, and sync
 // objects. Call Destroy on the result.
 //
 // Every failure is wrapped with the step that produced it, because a bare
@@ -690,8 +689,8 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 
 	// Step 6b: MSAA color images (when MSAA is enabled). These are the scene
 	// pass's colour attachment and resolve into the HDR target, so they carry
-	// hdrFormat rather than the swapchain's — a framebuffer's attachments must
-	// match the formats its render pass declares.
+	// hdrFormat rather than the swapchain's: attachments must match the
+	// pipeline's dynamic-rendering formats.
 	if r.msaaSamples != core1_0.Samples1 {
 		r.msaa, err = createMSAAResources(r.instanceDriver, r.deviceDriver, r.physicalDevice, r.sc.extent, hdrFormat, r.msaaSamples, len(r.sc.imageViews))
 		if err != nil {
@@ -744,11 +743,7 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	r.onInit(func() { r.shadow.destroy(r.deviceDriver) })
 
 	// Step 8: Render pass + pipeline
-	r.renderPass, err = createRenderPass(r.deviceDriver, hdrFormat, r.depth.format, r.msaaSamples)
-	if err != nil {
-		return nil, fmt.Errorf("renderer: create render pass: %w", err)
-	}
-	r.onInit(func() { r.deviceDriver.DestroyRenderPass(r.renderPass, nil) })
+	r.sceneFormats = colorDepthFormats(hdrFormat, r.depth.format)
 
 	// Non-lit set-0 layout for stars, overlay, MSDF and UI. The sky's layout
 	// adds the shadow/light set below.
@@ -759,7 +754,7 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	r.onInit(func() { r.deviceDriver.DestroyPipelineLayout(r.pipelineLayout, nil) })
 
 	// Lit pipeline layout (set 0 = texture, set 1 = shadow) and lit pipeline
-	r.pipeline, r.litPipelineLayout, err = createGraphicsPipeline(r.deviceDriver, r.shaders, r.renderPass, r.sc.extent, r.descriptorSetLayout, r.shadow.descriptorSetLayout, r.msaaSamples)
+	r.pipeline, r.litPipelineLayout, err = createGraphicsPipeline(r.deviceDriver, r.shaders, r.sceneFormats, r.sc.extent, r.descriptorSetLayout, r.shadow.descriptorSetLayout, r.msaaSamples)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create lit pipeline: %w", err)
 	}
@@ -771,7 +766,7 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	// call returns its own. Discarding it with _ leaked a VkPipelineLayout for
 	// the life of the process — invisible without validation, since nothing
 	// else depends on it. Keep it and destroy it.
-	r.litDoubleSidedPipeline, r.litDoubleSidedPipelineLayout, err = createGraphicsPipeline(r.deviceDriver, r.shaders, r.renderPass, r.sc.extent, r.descriptorSetLayout, r.shadow.descriptorSetLayout, r.msaaSamples, 0)
+	r.litDoubleSidedPipeline, r.litDoubleSidedPipelineLayout, err = createGraphicsPipeline(r.deviceDriver, r.shaders, r.sceneFormats, r.sc.extent, r.descriptorSetLayout, r.shadow.descriptorSetLayout, r.msaaSamples, 0)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create double-sided lit pipeline: %w", err)
 	}
@@ -781,7 +776,7 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	})
 
 	// Terrain splat pipeline: set 0 = 4 terrain samplers, set 1 = shadow.
-	r.terrainPipeline, r.terrainPipelineLayout, err = createTerrainPipeline(r.deviceDriver, r.shaders, r.renderPass, r.sc.extent, r.terrainSetLayout, r.shadow.descriptorSetLayout, r.msaaSamples)
+	r.terrainPipeline, r.terrainPipelineLayout, err = createTerrainPipeline(r.deviceDriver, r.shaders, r.sceneFormats, r.sc.extent, r.terrainSetLayout, r.shadow.descriptorSetLayout, r.msaaSamples)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create terrain pipeline: %w", err)
 	}
@@ -791,7 +786,7 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	})
 
 	// Material pipeline: set 0 = material (4 maps + a UBO), set 1 = shadow.
-	r.materialPipeline, r.materialPipelineLayout, err = createMaterialPipeline(r.deviceDriver, r.shaders, r.renderPass, r.sc.extent, r.materialSetLayout, r.shadow.descriptorSetLayout, r.msaaSamples)
+	r.materialPipeline, r.materialPipelineLayout, err = createMaterialPipeline(r.deviceDriver, r.shaders, r.sceneFormats, r.sc.extent, r.materialSetLayout, r.shadow.descriptorSetLayout, r.msaaSamples)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create material pipeline: %w", err)
 	}
@@ -800,7 +795,7 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 		r.deviceDriver.DestroyPipelineLayout(r.materialPipelineLayout, nil)
 	})
 
-	r.materialDoubleSidedPipeline, r.materialDoubleSidedPipelineLayout, err = createMaterialPipeline(r.deviceDriver, r.shaders, r.renderPass, r.sc.extent, r.materialSetLayout, r.shadow.descriptorSetLayout, r.msaaSamples, 0)
+	r.materialDoubleSidedPipeline, r.materialDoubleSidedPipelineLayout, err = createMaterialPipeline(r.deviceDriver, r.shaders, r.sceneFormats, r.sc.extent, r.materialSetLayout, r.shadow.descriptorSetLayout, r.msaaSamples, 0)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create double-sided material pipeline: %w", err)
 	}
@@ -809,7 +804,7 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 		r.deviceDriver.DestroyPipelineLayout(r.materialDoubleSidedPipelineLayout, nil)
 	})
 
-	r.translucentPipeline, r.translucentPipelineLayout, err = createTranslucentPipeline(r.deviceDriver, r.shaders, r.renderPass, r.sc.extent, r.descriptorSetLayout, r.shadow.descriptorSetLayout, r.msaaSamples)
+	r.translucentPipeline, r.translucentPipelineLayout, err = createTranslucentPipeline(r.deviceDriver, r.shaders, r.sceneFormats, r.sc.extent, r.descriptorSetLayout, r.shadow.descriptorSetLayout, r.msaaSamples)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create translucent pipeline: %w", err)
 	}
@@ -818,7 +813,7 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 		r.deviceDriver.DestroyPipelineLayout(r.translucentPipelineLayout, nil)
 	})
 
-	r.translucentDoubleSidedPipeline, r.translucentDoubleSidedPipelineLayout, err = createTranslucentPipeline(r.deviceDriver, r.shaders, r.renderPass, r.sc.extent, r.descriptorSetLayout, r.shadow.descriptorSetLayout, r.msaaSamples, 0)
+	r.translucentDoubleSidedPipeline, r.translucentDoubleSidedPipelineLayout, err = createTranslucentPipeline(r.deviceDriver, r.shaders, r.sceneFormats, r.sc.extent, r.descriptorSetLayout, r.shadow.descriptorSetLayout, r.msaaSamples, 0)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create double-sided translucent pipeline: %w", err)
 	}
@@ -827,7 +822,7 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 		r.deviceDriver.DestroyPipelineLayout(r.translucentDoubleSidedPipelineLayout, nil)
 	})
 
-	r.instancedPipeline, r.instancedPipelineLayout, err = createInstancedPipeline(r.deviceDriver, r.shaders, r.renderPass, r.sc.extent, r.descriptorSetLayout, r.shadow.descriptorSetLayout, r.msaaSamples)
+	r.instancedPipeline, r.instancedPipelineLayout, err = createInstancedPipeline(r.deviceDriver, r.shaders, r.sceneFormats, r.sc.extent, r.descriptorSetLayout, r.shadow.descriptorSetLayout, r.msaaSamples)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create instanced pipeline: %w", err)
 	}
@@ -836,7 +831,7 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 		r.deviceDriver.DestroyPipelineLayout(r.instancedPipelineLayout, nil)
 	})
 
-	r.instancedDoubleSidedPipeline, r.instancedDoubleSidedPipelineLayout, err = createInstancedPipeline(r.deviceDriver, r.shaders, r.renderPass, r.sc.extent, r.descriptorSetLayout, r.shadow.descriptorSetLayout, r.msaaSamples, 0)
+	r.instancedDoubleSidedPipeline, r.instancedDoubleSidedPipelineLayout, err = createInstancedPipeline(r.deviceDriver, r.shaders, r.sceneFormats, r.sc.extent, r.descriptorSetLayout, r.shadow.descriptorSetLayout, r.msaaSamples, 0)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create double-sided instanced pipeline: %w", err)
 	}
@@ -882,19 +877,19 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 		r.impostorAtlases = nil
 	})
 
-	r.overlayPipeline, err = createOverlayPipeline(r.deviceDriver, r.shaders, r.renderPass, r.pipelineLayout, r.sc.extent, r.msaaSamples)
+	r.overlayPipeline, err = createOverlayPipeline(r.deviceDriver, r.shaders, r.sceneFormats, r.pipelineLayout, r.sc.extent, r.msaaSamples)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create overlay pipeline: %w", err)
 	}
 	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.overlayPipeline, nil) })
 
-	r.celestialPipeline, err = createCelestialPipeline(r.deviceDriver, r.shaders, r.renderPass, r.pipelineLayout, r.sc.extent, r.msaaSamples)
+	r.celestialPipeline, err = createCelestialPipeline(r.deviceDriver, r.shaders, r.sceneFormats, r.pipelineLayout, r.sc.extent, r.msaaSamples)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create celestial pipeline: %w", err)
 	}
 	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.celestialPipeline, nil) })
 
-	r.starsPipeline, err = createStarsPipeline(r.deviceDriver, r.shaders, r.renderPass, r.pipelineLayout, r.sc.extent, r.msaaSamples)
+	r.starsPipeline, err = createStarsPipeline(r.deviceDriver, r.shaders, r.sceneFormats, r.pipelineLayout, r.sc.extent, r.msaaSamples)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create stars pipeline: %w", err)
 	}
@@ -908,7 +903,7 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	}
 	r.onInit(func() { r.deviceDriver.DestroyPipelineLayout(r.skyPipelineLayout, nil) })
 
-	r.skyPipeline, err = createSkyPipeline(r.deviceDriver, r.shaders, r.renderPass, r.skyPipelineLayout, r.sc.extent, r.msaaSamples)
+	r.skyPipeline, err = createSkyPipeline(r.deviceDriver, r.shaders, r.sceneFormats, r.skyPipelineLayout, r.sc.extent, r.msaaSamples)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create sky pipeline: %w", err)
 	}
@@ -918,7 +913,7 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	// which is the shot this whole feature exists for. See skyvolumetric.frag
 	// for why it is a draw of its own rather than part of the dome.
 
-	r.skyVolumetricPipeline, err = createSkyVolumetricPipeline(r.deviceDriver, r.shaders, r.renderPass, r.skyPipelineLayout, r.sc.extent, r.msaaSamples)
+	r.skyVolumetricPipeline, err = createSkyVolumetricPipeline(r.deviceDriver, r.shaders, r.sceneFormats, r.skyPipelineLayout, r.sc.extent, r.msaaSamples)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create sky volumetric pipeline: %w", err)
 	}
@@ -930,7 +925,7 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	}
 	r.onInit(func() { r.deviceDriver.DestroyPipelineLayout(r.skinnedPipelineLayout, nil) })
 
-	r.skinnedPipeline, err = createSkinnedPipeline(r.deviceDriver, r.shaders, r.shaders.SkinnedLitFrag, r.renderPass, r.skinnedPipelineLayout, r.sc.extent, r.msaaSamples, false)
+	r.skinnedPipeline, err = createSkinnedPipeline(r.deviceDriver, r.shaders, r.shaders.SkinnedLitFrag, r.sceneFormats, r.skinnedPipelineLayout, r.sc.extent, r.msaaSamples, false)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create skinned pipeline: %w", err)
 	}
@@ -943,7 +938,7 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	// There is no double-sided twin, and that is deliberate rather than an
 	// omission: the opaque skinned path does not have one either, so adding one
 	// here would make a translucent character more capable than a solid one.
-	r.skinnedTranslucentPipeline, err = createSkinnedPipeline(r.deviceDriver, r.shaders, r.shaders.SkinnedLitFrag, r.renderPass, r.skinnedPipelineLayout, r.sc.extent, r.msaaSamples, true)
+	r.skinnedTranslucentPipeline, err = createSkinnedPipeline(r.deviceDriver, r.shaders, r.shaders.SkinnedLitFrag, r.sceneFormats, r.skinnedPipelineLayout, r.sc.extent, r.msaaSamples, true)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create translucent skinned pipeline: %w", err)
 	}
@@ -958,19 +953,19 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	}
 	r.onInit(func() { r.deviceDriver.DestroyPipelineLayout(r.skinnedMaterialPipelineLayout, nil) })
 
-	r.skinnedMaterialPipeline, err = createSkinnedPipeline(r.deviceDriver, r.shaders, r.shaders.SkinnedLitMaterialFrag, r.renderPass, r.skinnedMaterialPipelineLayout, r.sc.extent, r.msaaSamples, false)
+	r.skinnedMaterialPipeline, err = createSkinnedPipeline(r.deviceDriver, r.shaders, r.shaders.SkinnedLitMaterialFrag, r.sceneFormats, r.skinnedMaterialPipelineLayout, r.sc.extent, r.msaaSamples, false)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create skinned material pipeline: %w", err)
 	}
 	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.skinnedMaterialPipeline, nil) })
 
-	r.grassImpostorPipeline, err = createGrassImpostorPipeline(r.deviceDriver, r.shaders, r.renderPass, r.litPipelineLayout, r.sc.extent, r.msaaSamples)
+	r.grassImpostorPipeline, err = createGrassImpostorPipeline(r.deviceDriver, r.shaders, r.sceneFormats, r.litPipelineLayout, r.sc.extent, r.msaaSamples)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create grass impostor pipeline: %w", err)
 	}
 	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.grassImpostorPipeline, nil) })
 
-	r.grassPipeline, err = createGrassPipeline(r.deviceDriver, r.shaders, r.renderPass, r.litPipelineLayout, r.sc.extent, r.msaaSamples)
+	r.grassPipeline, err = createGrassPipeline(r.deviceDriver, r.shaders, r.sceneFormats, r.litPipelineLayout, r.sc.extent, r.msaaSamples)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create grass pipeline: %w", err)
 	}
@@ -1074,26 +1069,23 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	if err != nil {
 		return nil, fmt.Errorf("renderer: build frame graph: %w", err)
 	}
-	r.onInit(func() { r.frameGraph.destroyPasses(r.deviceDriver) })
 	r.frameGraph.sizeScratch(&r.cmdScratch)
-	r.waterRenderPass, err = r.frameGraph.renderPass(r.deviceDriver, graphWater)
-	if err != nil {
-		return nil, fmt.Errorf("renderer: create water render pass: %w", err)
-	}
+	r.cmdScratch.dynamic = khr_dynamic_rendering.CreateExtensionDriverFromCoreDriver(r.deviceDriver)
+	r.waterFormats = r.frameGraph.pipelineFormats(graphWater)
 
-	r.waterPipeline, err = createWaterPipeline(r.deviceDriver, r.shaders, r.waterRenderPass, r.litPipelineLayout, r.sc.extent, r.msaaSamples)
+	r.waterPipeline, err = createWaterPipeline(r.deviceDriver, r.shaders, r.waterFormats, r.litPipelineLayout, r.sc.extent, r.msaaSamples)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create water pipeline: %w", err)
 	}
 	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.waterPipeline, nil) })
 
-	r.godRayPipeline, err = createGodRayPipeline(r.deviceDriver, r.shaders, r.waterRenderPass, r.pipelineLayout, r.sc.extent, r.msaaSamples)
+	r.godRayPipeline, err = createGodRayPipeline(r.deviceDriver, r.shaders, r.waterFormats, r.pipelineLayout, r.sc.extent, r.msaaSamples)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create god ray pipeline: %w", err)
 	}
 	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.godRayPipeline, nil) })
 
-	r.particlePipeline, err = createParticlePipeline(r.deviceDriver, r.shaders, r.renderPass, r.pipelineLayout, r.sc.extent, r.msaaSamples)
+	r.particlePipeline, err = createParticlePipeline(r.deviceDriver, r.shaders, r.sceneFormats, r.pipelineLayout, r.sc.extent, r.msaaSamples)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create particle pipeline: %w", err)
 	}
@@ -1105,32 +1097,22 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 		r.deviceDriver.DestroyPipeline(r.particlePipeline, nil)
 	})
 
-	// Step 9: Framebuffers + command buffers
-	var msaaViews []core1_0.ImageView
-	if r.msaa != nil {
-		msaaViews = r.msaa.views
-	}
+	// Step 9: Tail pipelines, targets and command buffers
 
-	// Migrated pipelines use descriptions from the graph's render pass cache.
-	r.bloomDownRenderPass, err = r.frameGraph.renderPass(r.deviceDriver, graphBloom)
-	if err != nil {
-		return nil, fmt.Errorf("renderer: create bloom downsample render pass: %w", err)
-	}
+	// Pipelines use attachment formats from the compiled graph.
+	r.bloomDownFormats = r.frameGraph.pipelineFormats(graphBloom)
 
-	r.bloomUpRenderPass, err = r.frameGraph.renderPass(r.deviceDriver, graphBloom+bloomLevels)
-	if err != nil {
-		return nil, fmt.Errorf("renderer: create bloom upsample render pass: %w", err)
-	}
+	r.bloomUpFormats = r.frameGraph.pipelineFormats(graphBloom + bloomLevels)
 
 	for _, p := range []struct {
 		dst      *core1_0.Pipeline
 		frag     []byte
-		pass     core1_0.RenderPass
+		pass     renderingFormats
 		additive bool
 	}{
-		{&r.bloomPrefilterPipeline, r.shaders.BloomPrefilterFrag, r.bloomDownRenderPass, false},
-		{&r.bloomDownPipeline, r.shaders.BloomDownFrag, r.bloomDownRenderPass, false},
-		{&r.bloomUpPipeline, r.shaders.BloomUpFrag, r.bloomUpRenderPass, true},
+		{&r.bloomPrefilterPipeline, r.shaders.BloomPrefilterFrag, r.bloomDownFormats, false},
+		{&r.bloomDownPipeline, r.shaders.BloomDownFrag, r.bloomDownFormats, false},
+		{&r.bloomUpPipeline, r.shaders.BloomUpFrag, r.bloomUpFormats, true},
 	} {
 		*p.dst, err = createBloomPipeline(r.deviceDriver, r.shaders, p.frag, p.pass, r.pipelineLayout, p.additive)
 		if err != nil {
@@ -1142,13 +1124,10 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 
 	// The cloud pass reuses the bloom downsample pass's shape: one half-float
 	// colour attachment, contents discarded, ending sampleable.
-	r.cloudRenderPass, err = r.frameGraph.renderPass(r.deviceDriver, graphBloom)
-	if err != nil {
-		return nil, fmt.Errorf("renderer: create cloud render pass: %w", err)
-	}
+	r.cloudFormats = r.frameGraph.pipelineFormats(graphBloom)
 
 	r.clouds, err = createCloudTargets(r.instanceDriver, r.deviceDriver, r.physicalDevice,
-		r.descriptorPool, r.descriptorSetLayout, r.cloudRenderPass, r.sc.extent, cloudBufferCount,
+		r.descriptorPool, r.descriptorSetLayout, r.sc.extent, cloudBufferCount,
 		// The lit pipelines' per-frame UBO, bound at binding 1 of the cloud
 		// sets so sky.frag and clouds.frag read the sky palette out of the
 		// very buffer applyFog reads it from. createShadowResources runs well
@@ -1161,34 +1140,23 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	r.onInit(func() { r.clouds.destroy(r.deviceDriver) })
 
 	r.cloudPipeline, err = createBloomPipeline(r.deviceDriver, r.shaders, r.shaders.CloudsFrag,
-		r.cloudRenderPass, r.pipelineLayout, false)
+		r.cloudFormats, r.pipelineLayout, false)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create cloud pipeline: %w", err)
 	}
 	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.cloudPipeline, nil) })
 
-	r.tonemapRenderPass, err = r.frameGraph.renderPass(r.deviceDriver, graphTonemap)
-	if err != nil {
-		return nil, fmt.Errorf("renderer: create tonemap render pass: %w", err)
-	}
+	r.tonemapFormats = r.frameGraph.pipelineFormats(graphTonemap)
 
 	r.tonemapPipeline, err = createResolvePipeline(r.deviceDriver, r.shaders, r.shaders.TonemapFrag, "Tonemap",
-		r.tonemapRenderPass, r.tonemapPipelineLayout, r.sc.extent, false)
+		r.tonemapFormats, r.tonemapPipelineLayout, r.sc.extent, false)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create tonemap pipeline: %w", err)
 	}
 	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.tonemapPipeline, nil) })
 
-	// The screen-space overlay pipelines belong to the tonemap pass, not the
-	// scene pass, which is why they are built down here rather than with the
-	// other pipelines above: a pipeline is tied to the render pass it was
-	// created against, and these draw onto the resolved swapchain image.
-	//
-	// Samples1 rather than r.msaaSamples for the same reason: a pipeline's
-	// rasterization sample count has to match the samples of the attachments in
-	// the render pass it is created against, and MSAA is resolved into the HDR
-	// target well before the tonemap runs, so the swapchain attachment here is
-	// single-sampled.
+	// Screen-space overlays target the single-sample swapchain format. Scene
+	// pipelines instead use the HDR format and the scene's rasterization samples.
 	//
 	// What that costs was measured rather than assumed, capturing each example
 	// either side of the move under a fixed frame clock:
@@ -1210,52 +1178,40 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	// scene exposure, and stops feeding bloom. Antialiasing a panel edge is the
 	// UI shader's job anyway, the way the glyph edge is already the distance
 	// field's.
-	r.msdfPipeline, err = createMSDFPipeline(r.deviceDriver, r.shaders, r.tonemapRenderPass, r.pipelineLayout, r.sc.extent, core1_0.Samples1, false)
+	r.msdfPipeline, err = createMSDFPipeline(r.deviceDriver, r.shaders, r.tonemapFormats, r.pipelineLayout, r.sc.extent, core1_0.Samples1, false)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create MSDF pipeline: %w", err)
 	}
 	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.msdfPipeline, nil) })
 
-	r.uiPipeline, err = createUIPipeline(r.deviceDriver, r.shaders, r.tonemapRenderPass, r.pipelineLayout, r.sc.extent, core1_0.Samples1, false)
+	r.uiPipeline, err = createUIPipeline(r.deviceDriver, r.shaders, r.tonemapFormats, r.pipelineLayout, r.sc.extent, core1_0.Samples1, false)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create UI pipeline: %w", err)
 	}
 	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.uiPipeline, nil) })
 
-	// The UI glow layer, when a game asked for one. Everything here is skipped
-	// otherwise: no render pass, no pipelines, no images, no descriptor sets,
-	// and nothing recorded per frame.
-	//
-	// The two overlay pipelines are built a SECOND time, against the layer's
-	// render pass rather than the tonemap's. They have to be: a pipeline is tied
-	// to the render pass it was created against, and these two passes differ in
-	// the only thing that matters for compatibility -- the layer is
-	// R16G16B16A16_SFLOAT and the swapchain is B8G8R8A8_SRGB. Binding the
-	// tonemap pass's UI pipeline inside the layer pass is a validation error at
-	// DRAW time, not at creation, and the frame still presents; see
-	// docs/agents/overlay-composite.md.
+	// UI glow uses separate pipelines for the half-float layer format. The
+	// tonemap UI pipelines use the swapchain format. Both use one sample, but
+	// their attachment formats must match the destination at draw time.
 	if r.uiGlowRequested {
-		r.uiLayerRenderPass, err = r.frameGraph.renderPass(r.deviceDriver, graphUILayer)
-		if err != nil {
-			return nil, fmt.Errorf("renderer: %w", err)
-		}
+		r.uiLayerFormats = r.frameGraph.pipelineFormats(graphUILayer)
 
-		r.uiLayerUIPipeline, err = createUIPipeline(r.deviceDriver, r.shaders, r.uiLayerRenderPass, r.pipelineLayout, r.sc.extent, core1_0.Samples1, true)
+		r.uiLayerUIPipeline, err = createUIPipeline(r.deviceDriver, r.shaders, r.uiLayerFormats, r.pipelineLayout, r.sc.extent, core1_0.Samples1, true)
 		if err != nil {
 			return nil, fmt.Errorf("renderer: create UI layer panel pipeline: %w", err)
 		}
 		r.onInit(func() { r.deviceDriver.DestroyPipeline(r.uiLayerUIPipeline, nil) })
 
-		r.uiLayerMSDFPipeline, err = createMSDFPipeline(r.deviceDriver, r.shaders, r.uiLayerRenderPass, r.pipelineLayout, r.sc.extent, core1_0.Samples1, true)
+		r.uiLayerMSDFPipeline, err = createMSDFPipeline(r.deviceDriver, r.shaders, r.uiLayerFormats, r.pipelineLayout, r.sc.extent, core1_0.Samples1, true)
 		if err != nil {
 			return nil, fmt.Errorf("renderer: create UI layer text pipeline: %w", err)
 		}
 		r.onInit(func() { r.deviceDriver.DestroyPipeline(r.uiLayerMSDFPipeline, nil) })
 
-		// Against the TONEMAP render pass, because this is the draw that lands
+		// Using the swapchain format, because this is the draw that lands
 		// on the swapchain, one command after the scene's own resolve.
 		r.uiResolvePipeline, err = createResolvePipeline(r.deviceDriver, r.shaders, r.shaders.UIResolveFrag, "UI resolve",
-			r.tonemapRenderPass, r.tonemapPipelineLayout, r.sc.extent, true)
+			r.tonemapFormats, r.tonemapPipelineLayout, r.sc.extent, true)
 		if err != nil {
 			return nil, fmt.Errorf("renderer: create UI resolve pipeline: %w", err)
 		}
@@ -1264,15 +1220,6 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 
 	// The scene draws into the HDR views; only the tonemap pass touches the
 	// swapchain.
-	r.framebuffers, err = createFramebuffers(r.deviceDriver, r.renderPass, r.hdr.views, r.depth.views, msaaViews, r.sc.extent)
-	if err != nil {
-		return nil, fmt.Errorf("renderer: create framebuffers: %w", err)
-	}
-	r.onInit(func() {
-		for _, fb := range r.framebuffers {
-			r.deviceDriver.DestroyFramebuffer(fb, nil)
-		}
-	})
 
 	r.gpuTimer, err = newGPUTimer(r.instanceDriver, r.deviceDriver, r.physicalDevice, r.indices.graphicsFamily)
 	if err != nil {
@@ -1304,10 +1251,10 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	}
 
 	if err := r.bindGraphTargets(); err != nil {
-		return nil, fmt.Errorf("renderer: create graph framebuffers: %w", err)
+		return nil, fmt.Errorf("renderer: bind graph targets: %w", err)
 	}
 	r.onInit(func() { r.destroyAppResources() })
-	r.onInit(func() { r.releaseGraphFramebuffers() })
+	r.onInit(func() { r.releaseGraphBindings() })
 
 	cmdBufs, err := createCommandBuffers(r.deviceDriver, r.commandPool, maxFramesInFlight)
 	if err != nil {
@@ -1422,7 +1369,7 @@ func (r *Renderer) InitGrass(fsys fs.FS, hm GrassHeightmap, originX, originZ, wo
 // buffers, exactly the hazard DestroyModel's own deferral exists for (see
 // docs/agents/models.md). So the whole release goes through DeferDestroy and
 // runs only once every frame that could have been in flight at the moment of
-// the swap has retired -- nothing in it may run while a set or a framebuffer
+// the swap has retired -- nothing in it may run while a descriptor set
 // still names the resource it is about to destroy.
 //
 // Inside the deferred callback: the atlas first (grassImpostor.destroy frees
@@ -1564,7 +1511,7 @@ func (r *Renderer) Minimized() bool {
 }
 
 // recreateSwapchain tears down and rebuilds the swapchain, depth buffer, and
-// framebuffers after a resize or when the surface becomes out of date.
+// rendering bindings after a resize or when the surface becomes out of date.
 //
 // A failure at any step past the swapchain itself unwinds everything this
 // call built, through rebuildSwapchainTargets's undo stack, and gives the
@@ -1606,11 +1553,7 @@ func (r *Renderer) recreateSwapchain() error {
 	// after a previous attempt unwound partway through) and because it is
 	// what keeps Destroy from freeing a handle destroyed here a second time
 	// if a step below fails before reaching that field's recreation.
-	for _, fb := range r.framebuffers {
-		r.deviceDriver.DestroyFramebuffer(fb, nil)
-	}
-	r.framebuffers = nil
-	r.releaseGraphFramebuffers()
+	r.releaseGraphBindings()
 	r.releaseAppResizeTargets()
 	r.uiLayer.destroy(r.deviceDriver)
 	r.uiLayer = nil
@@ -1708,11 +1651,6 @@ func (r *Renderer) rebuildSwapchainTargets(oldExtent core1_0.Extent2D, undo *reb
 	}
 	// Else: r.msaa is already nil, from recreateSwapchain's teardown section.
 
-	var msaaViews []core1_0.ImageView
-	if r.msaa != nil {
-		msaaViews = r.msaa.views
-	}
-
 	// The HDR and bloom targets are swapchain-sized, so they go with it. Both
 	// chains and the sets that point into them are size-dependent, so both
 	// are rebuilt together.
@@ -1751,7 +1689,7 @@ func (r *Renderer) rebuildSwapchainTargets(oldExtent core1_0.Extent2D, undo *reb
 		r.clouds.destroy(r.deviceDriver)
 		r.clouds = nil
 		r.clouds, err = createCloudTargets(r.instanceDriver, r.deviceDriver, r.physicalDevice,
-			r.descriptorPool, r.descriptorSetLayout, r.cloudRenderPass, r.sc.extent, cloudBufferCount,
+			r.descriptorPool, r.descriptorSetLayout, r.sc.extent, cloudBufferCount,
 			r.shadow.lightVPBuffers)
 		if err != nil {
 			return fmt.Errorf("renderer: recreate cloud targets: %w", err)
@@ -1771,8 +1709,8 @@ func (r *Renderer) rebuildSwapchainTargets(oldExtent core1_0.Extent2D, undo *reb
 	}
 
 	// The UI glow layer is swapchain-sized too, so it goes with it -- images,
-	// bloom chain, framebuffers and the resolve's descriptor sets, which name
-	// specific views and would otherwise sample freed ones. Its render pass and
+	// bloom chain, rendering bindings and the resolve's descriptor sets, which name
+	// specific views and would otherwise sample freed ones. Its formats and
 	// its three pipelines survive: the extent reaches them through dynamic
 	// viewport and scissor state, exactly as it does for the tonemap pass's.
 	if r.uiGlowRequested {
@@ -1792,17 +1730,6 @@ func (r *Renderer) rebuildSwapchainTargets(oldExtent core1_0.Extent2D, undo *reb
 		return fmt.Errorf("renderer: recreate tonemap sets: %w", err)
 	}
 
-	r.framebuffers, err = createFramebuffers(r.deviceDriver, r.renderPass, r.hdr.views, r.depth.views, msaaViews, r.sc.extent)
-	if err != nil {
-		return fmt.Errorf("renderer: recreate framebuffers: %w", err)
-	}
-	undo.push(func() {
-		for _, fb := range r.framebuffers {
-			r.deviceDriver.DestroyFramebuffer(fb, nil)
-		}
-		r.framebuffers = nil
-	})
-
 	if r.sc.captureCapable {
 		r.sceneColor, err = createSceneColorTarget(r.instanceDriver, r.deviceDriver, r.physicalDevice,
 			r.descriptorPool, r.descriptorSetLayout, r.sc.extent, hdrFormat, r.maxAnisotropy)
@@ -1821,9 +1748,9 @@ func (r *Renderer) rebuildSwapchainTargets(oldExtent core1_0.Extent2D, undo *reb
 		}
 	}
 	if err := r.bindGraphTargets(); err != nil {
-		return fmt.Errorf("renderer: recreate graph framebuffers: %w", err)
+		return fmt.Errorf("renderer: rebind graph targets: %w", err)
 	}
-	undo.push(func() { r.releaseGraphFramebuffers() })
+	undo.push(func() { r.releaseGraphBindings() })
 
 	return nil
 }
@@ -2046,7 +1973,7 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 		return err
 	}
 	recordStart := time.Now()
-	err = recordCommandBuffer(r.deviceDriver, cmdBuf, r.renderPass, r.framebuffers[imageIndex], r.pipeline, r.litDoubleSidedPipeline, r.translucentPipeline, r.translucentDoubleSidedPipeline, r.skinnedTranslucentPipeline, r.instancedPipeline, r.instancedDoubleSidedPipeline, r.overlayPipeline, r.skyPipeline, r.skyVolumetricPipeline, r.starsPipeline, r.celestialPipeline, r.uiPipeline, r.msdfPipeline, r.skinnedPipeline, r.grassPipeline, r.waterPipeline, r.godRayPipeline, r.frameGraph, imageIndex, r.sceneColor,
+	err = recordCommandBuffer(r.deviceDriver, cmdBuf, r.sceneTargets[imageIndex], r.pipeline, r.litDoubleSidedPipeline, r.translucentPipeline, r.translucentDoubleSidedPipeline, r.skinnedTranslucentPipeline, r.instancedPipeline, r.instancedDoubleSidedPipeline, r.overlayPipeline, r.skyPipeline, r.skyVolumetricPipeline, r.starsPipeline, r.celestialPipeline, r.uiPipeline, r.msdfPipeline, r.skinnedPipeline, r.grassPipeline, r.waterPipeline, r.godRayPipeline, r.frameGraph, imageIndex, r.sceneColor,
 		func(cb core1_0.CommandBuffer) error { return r.recordClouds(cb, lighting, f) },
 		r.cloudSetFor(f),
 		r.bloomFor(imageIndex), r.tonemapFor(imageIndex), r.particlePipeline, r.terrainPipeline, r.materialPipelines(), &r.stats, r.pipelineLayout, r.skyPipelineLayout, r.litPipelineLayout, r.skinnedPipelineLayout, r.terrainPipelineLayout, r.sc.extent, draws, overlays, celestials, uiOverlays, msdfOverlays, lighting, split, r.fallbackTexture, r.milkyWayTex, r.shadow, r.grass, r.grassLOD, r.grassImpostor, r.grassImpostorPipeline, r.particles, f, r.msaa != nil, r.gpuTimer, r.trace, &r.cmdScratch)

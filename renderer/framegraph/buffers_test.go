@@ -17,18 +17,15 @@ func TestBufferDrawFixture(t *testing.T) {
 	g.AddNode(Node{Name: "draw", Kind: Graphics, Uses: []Use{{Resource: b, Access: VertexRead}, {Resource: b, Access: IndirectRead}, {Resource: color, Access: ColorWrite}}})
 	p := mustBuild(t, g)
 	equal(t, "initial write", len(p.Steps[0].Barriers), 0)
-	equal(t, "draw barriers", p.Steps[1].Barriers, []Barrier{
+	equal(t, "draw barriers", p.Steps[1].Barriers[:2], []Barrier{
 		{Resource: b, Buffer: true, Size: 4096, SrcStage: core1_0.PipelineStageComputeShader, DstStage: core1_0.PipelineStageVertexInput, SrcAccess: core1_0.AccessShaderWrite, DstAccess: core1_0.AccessVertexAttributeRead},
 		{Resource: b, Buffer: true, Size: 4096, SrcStage: core1_0.PipelineStageComputeShader | core1_0.PipelineStageVertexInput, DstStage: core1_0.PipelineStageDrawIndirect, SrcAccess: core1_0.AccessShaderWrite | core1_0.AccessVertexAttributeRead, DstAccess: core1_0.AccessIndirectCommandRead},
 	})
 	equal(t, "usage", p.Resources[b].BufferDesc.Usage, core1_0.BufferUsageStorageBuffer|core1_0.BufferUsageVertexBuffer|core1_0.BufferUsageIndirectBuffer)
+	equal(t, "attachment entry", p.Steps[1].Barriers[2].NewLayout, core1_0.ImageLayoutColorAttachmentOptimal)
 	equal(t, "buffer has no prime", p.Resources[b].Prime, false)
 	equal(t, "buffer not an attachment", len(p.Steps[1].RenderPass.Attachments), 1)
-	for _, d := range p.Steps[1].RenderPass.Dependencies {
-		if d.DstAccessMask&(core1_0.AccessIndirectCommandRead|core1_0.AccessVertexAttributeRead) != 0 {
-			t.Fatal("buffer consumption became a subpass dependency")
-		}
-	}
+
 	equal(t, "no layout return", len(p.FinalBarriers), 0)
 	equal(t, "repeat build", mustBuild(t, g), p)
 }

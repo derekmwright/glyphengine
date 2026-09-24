@@ -39,14 +39,13 @@ func TestAppComputeCreationUnwinds(t *testing.T) {
 	create := func(d *resizeFakeDriver) (*Renderer, error) {
 		r := newResizeFixture(d, 3)
 		r.depth = &depthResources{format: core1_0.FormatD32SignedFloat}
-		r.frameGraph.cache = make(map[framegraph.RenderPassKey]core1_0.RenderPass)
 		target, err := r.CreateRenderTarget(RenderTargetDesc{Name: "compute target", Format: TargetR32F, Scale: 1, Storage: true, History: true})
 		if err == nil {
 			_, err = r.CreateAppCompute(AppComputeDesc{Name: "compute fixture", Stage: StageBeforeScene, Comp: computeCode(t), Reads: []*Texture{target.Texture()}, Writes: []*RenderTarget{target}})
 		}
 		return r, err
 	}
-	cleanup := func(r *Renderer, d *resizeFakeDriver) { r.destroyAppResources(); r.frameGraph.destroyPasses(d) }
+	cleanup := func(r *Renderer, d *resizeFakeDriver) { r.destroyAppResources() }
 	r, err := create(control)
 	if err != nil {
 		t.Fatal(err)
@@ -123,8 +122,13 @@ func TestAppComputeStreams(t *testing.T) {
 // calls (3299 -> 3317); application/UI/volumetric additions are unchanged.
 // Removing only that fix restores 0x0db1df67cfc2a68b and fails
 // TestPointShadowUsesInstanceTransforms (6 instances, want 18).
-const goldenAppComputeStreamHash Hasher = 0x04f6db66707221ea
-const goldenAppComputeCalls = 3357
+// Dynamic rendering (#120): full-stream hashes include explicit attachment
+// barriers and CmdBegin/EndRendering. Base 3317 -> 3342 calls; depth 3353,
+// application 3382, compute 3390, glow 3442, volumetric 3348, GPU LOD 1746.
+// TestMigrationDrawStreams independently pins every non-rendering/barrier call
+// to the measured pre-migration stream, including all draw-side arguments.
+const goldenAppComputeStreamHash Hasher = 0x42a9ec47c9236b15
+const goldenAppComputeCalls = 3390
 
 func TestAppComputeAllocs(t *testing.T) {
 	for _, n := range []int{7, 97, 511} {
@@ -291,7 +295,6 @@ func TestAppComputeFrameBindingsAndDestroy(t *testing.T) {
 	r := newResizeFixture(d.resizeFakeDriver, 3)
 	r.deviceDriver = d
 	r.depth = &depthResources{format: core1_0.FormatD32SignedFloat}
-	r.frameGraph.cache = make(map[framegraph.RenderPassKey]core1_0.RenderPass)
 	r.fallbackTexture = &Texture{view: d.h.imageView(), sampler: d.h.sampler()}
 	target, err := r.CreateRenderTarget(RenderTargetDesc{Name: "storage", Format: TargetR32F, Scale: 1, History: true, Storage: true})
 	if err != nil {
@@ -330,7 +333,7 @@ func TestAppComputeFrameBindingsAndDestroy(t *testing.T) {
 	r.DestroyAppCompute(nil)
 	r.flushAllDeferred()
 	r.destroyAppResources()
-	r.frameGraph.destroyPasses(d)
+
 	assertBalanced(t, d.resizeFakeDriver)
 	t.Log("waited compute sets select previous sampled/current storage images; 0 descriptor allocations; destroying an output retires its writer")
 }

@@ -333,7 +333,7 @@ func writeTonemapSets(
 //
 // blend is premultiplied "over": the source is already scaled by its own alpha
 // (see ui.frag), so the source factor is One rather than SrcAlpha.
-func createResolvePipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, frag []byte, label string, renderPass core1_0.RenderPass, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, blend bool) (core1_0.Pipeline, error) {
+func createResolvePipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, frag []byte, label string, formats renderingFormats, pipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, blend bool) (core1_0.Pipeline, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
 		Code: bytesToUint32Slice(sh.SkyVert),
 	})
@@ -389,9 +389,8 @@ func createResolvePipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, frag
 		DynamicState: &core1_0.PipelineDynamicStateCreateInfo{
 			DynamicStates: []core1_0.DynamicState{core1_0.DynamicStateViewport, core1_0.DynamicStateScissor},
 		},
-		Layout:     pipelineLayout,
-		RenderPass: renderPass,
-		Subpass:    0,
+		Layout:      pipelineLayout,
+		NextOptions: renderingOptions(formats),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, fmt.Errorf("create %s pipeline: %w", label, err)
@@ -402,16 +401,15 @@ func createResolvePipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, frag
 
 func (r *Renderer) tonemapFor(imageIndex int) tonemapPass {
 	return tonemapPass{
-		renderPass:  r.tonemapRenderPass,
-		pipeline:    r.tonemapPipeline,
-		framebuffer: r.tonemapFramebuffers[imageIndex],
-		layout:      r.tonemapPipelineLayout,
-		set:         r.hdr.tonemapSets[imageIndex],
-		exposure:    r.exposure,
-		curve:       r.tonemapCurve,
-		white:       r.tonemapWhite,
-		bloom:       r.bloomIntensity,
-		ui:          r.uiLayerFor(imageIndex),
+		pipeline: r.tonemapPipeline,
+		target:   r.frameGraph.nodes[r.frameGraph.engine[graphTonemap]].targets[imageIndex],
+		layout:   r.tonemapPipelineLayout,
+		set:      r.hdr.tonemapSets[imageIndex],
+		exposure: r.exposure,
+		curve:    r.tonemapCurve,
+		white:    r.tonemapWhite,
+		bloom:    r.bloomIntensity,
+		ui:       r.uiLayerFor(imageIndex),
 	}
 }
 
@@ -462,11 +460,7 @@ func recordTonemap(
 	scratch *commandScratch,
 ) error {
 	timer.begin(deviceDriver, cmdBuf, frame, PassTonemap)
-	if err := deviceDriver.CmdBeginRenderPass(cmdBuf, core1_0.SubpassContentsInline, core1_0.RenderPassBeginInfo{
-		RenderPass:  tonemap.renderPass,
-		Framebuffer: tonemap.framebuffer,
-		RenderArea:  core1_0.Rect2D{Offset: core1_0.Offset2D{X: 0, Y: 0}, Extent: extent},
-	}); err != nil {
+	if err := tonemap.target.begin(deviceDriver, scratch.dynamic, cmdBuf); err != nil {
 		return err
 	}
 	recordTonemapDraw(deviceDriver, cmdBuf, tonemap, pipelineLayout, extent, scratch)
@@ -478,8 +472,7 @@ func recordTonemap(
 		timer.end(deviceDriver, cmdBuf, frame, PassComposite)
 	}
 
-	deviceDriver.CmdEndRenderPass(cmdBuf)
-	return nil
+	return tonemap.target.end(deviceDriver, scratch.dynamic, cmdBuf)
 }
 
 // Tonemap returns the current exposure, curve and white point, as last set by

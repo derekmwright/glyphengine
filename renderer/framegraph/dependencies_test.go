@@ -1,61 +1,38 @@
 package framegraph
 
 import (
-	"testing"
-
 	"github.com/vkngwrapper/core/v3/core1_0"
+	"testing"
 )
 
-// Verified to fail on 2026-09-24: removing outgoingDependency leaves one
-// dependency, missing exit stages 1024 -> 1152 and accesses 256 -> 416.
-func TestUILayerDependencyPair(t *testing.T) {
+// Negative controls: omitting entry or exit emission reports 0 barriers, want 1
+// in this UI clear/composite graph (2026-09-24). Both directions are required.
+func TestUILayerAttachmentBarriers(t *testing.T) {
 	g := New()
-	d := colorImage("UI layer")
+	d := colorImage("UI")
 	d.Persistent = true
 	id := g.AddImage(d)
-	g.AddNode(Node{Name: "UI layer", Kind: Graphics, Optional: true, Uses: []Use{{Resource: id, Access: ColorWrite, Clear: &Clear{}, Discard: true}}})
+	g.AddNode(Node{Name: "UI", Kind: Graphics, Optional: true, Uses: []Use{{Resource: id, Access: ColorWrite, Discard: true, Clear: &Clear{}}}})
 	g.AddNode(Node{Name: "composite", Kind: Legacy, Uses: []Use{{Resource: id, Access: SampledRead}}})
 	p := mustBuild(t, g)
-	equal(t, "UI entry and exit", p.Steps[0].RenderPass.Dependencies, []core1_0.SubpassDependency{{
-		SrcSubpass: core1_0.SubpassExternal, DstSubpass: 0,
-		SrcStageMask:  core1_0.PipelineStageFragmentShader | core1_0.PipelineStageColorAttachmentOutput,
-		DstStageMask:  core1_0.PipelineStageFragmentShader | core1_0.PipelineStageColorAttachmentOutput,
-		SrcAccessMask: core1_0.AccessShaderRead | core1_0.AccessColorAttachmentWrite,
-		DstAccessMask: core1_0.AccessShaderRead | core1_0.AccessColorAttachmentRead | core1_0.AccessColorAttachmentWrite,
-	}, {
-		SrcSubpass: 0, DstSubpass: core1_0.SubpassExternal,
-		SrcStageMask:  core1_0.PipelineStageColorAttachmentOutput,
-		DstStageMask:  core1_0.PipelineStageFragmentShader | core1_0.PipelineStageColorAttachmentOutput,
-		SrcAccessMask: core1_0.AccessColorAttachmentWrite,
-		DstAccessMask: core1_0.AccessShaderRead | core1_0.AccessColorAttachmentRead | core1_0.AccessColorAttachmentWrite,
-	}})
+	entry, exit := p.Steps[0].Barriers, p.Steps[0].AfterBarriers
+	equal(t, "entry count", len(entry), 1)
+	equal(t, "exit count", len(exit), 1)
+	equal(t, "wait for previous readers", entry[0].SrcAccess, core1_0.AccessShaderRead)
+	equal(t, "attachment entry", entry[0].NewLayout, core1_0.ImageLayoutColorAttachmentOptimal)
+	equal(t, "write visibility", exit[0].SrcAccess, core1_0.AccessColorAttachmentWrite)
+	equal(t, "restores sampled layout", exit[0].NewLayout, core1_0.ImageLayoutShaderReadOnlyOptimal)
 }
 
-// The same removal fails all three consumer cases with a missing pair.
 func TestAttachmentExitCoversConsumerStages(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		kind   NodeKind
-		access Access
-		stage  core1_0.PipelineStageFlags
-		mask   core1_0.AccessFlags
-	}{
-		{"copy", Transfer, TransferSrc, core1_0.PipelineStageTransfer, core1_0.AccessTransferRead},
-		{"compute", Compute, SampledRead, core1_0.PipelineStageComputeShader, core1_0.AccessShaderRead},
-		{"vertex", Graphics, SampledRead, core1_0.PipelineStageVertexShader, core1_0.AccessShaderRead},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			g := New()
-			g.AddImage(colorImage("output"))
-			g.AddNode(Node{Name: "producer", Kind: Graphics, Uses: []Use{{Access: ColorWrite}}})
-			g.AddNode(Node{Name: "consumer", Kind: tc.kind, Uses: []Use{{Access: tc.access, Stages: tc.stage}}})
-			p := mustBuild(t, g)
-			deps := p.Steps[0].RenderPass.Dependencies
-			if len(deps) != 2 {
-				t.Fatalf("missing dependency pair: %v", deps)
-			}
-			equal(t, "consumer stage", deps[1].DstStageMask&tc.stage, tc.stage)
-			equal(t, "consumer access", deps[1].DstAccessMask&tc.mask, tc.mask)
-		})
+	for _, stage := range []core1_0.PipelineStageFlags{core1_0.PipelineStageVertexShader, core1_0.PipelineStageFragmentShader, core1_0.PipelineStageComputeShader} {
+		g := New()
+		g.AddImage(colorImage("output"))
+		g.AddNode(Node{Name: "produce", Kind: Graphics, Uses: []Use{{Access: ColorWrite}}})
+		g.AddNode(Node{Name: "read", Kind: Graphics, Uses: []Use{{Access: SampledRead, Stages: stage}}})
+		p := mustBuild(t, g)
+		b := p.Steps[0].AfterBarriers[0]
+		equal(t, "consumer stage", b.DstStage&stage, stage)
+		equal(t, "shader visibility", b.DstAccess, core1_0.AccessShaderRead)
 	}
 }

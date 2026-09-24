@@ -4,6 +4,7 @@ import (
 	"unsafe"
 
 	"github.com/vkngwrapper/core/v3/core1_0"
+	"github.com/vkngwrapper/extensions/v3/khr_dynamic_rendering"
 )
 
 // commandScratch is the long-lived storage recordCommandBuffer and its
@@ -48,7 +49,8 @@ import (
 // stack array would have contained, which is what a game's push constants
 // have always been.
 type commandScratch struct {
-	pc [pushConstantSize / 4]float32
+	dynamic khr_dynamic_rendering.ExtensionDriver
+	pc      [pushConstantSize / 4]float32
 
 	// shadowPC is the depth-only pass's smaller block: light-space MVP plus
 	// model, 128 bytes. Every shadow draw fills all 32 floats itself, so this
@@ -65,13 +67,8 @@ type commandScratch struct {
 	viewport1 [1]core1_0.Viewport
 	scissor1  [1]core1_0.Rect2D
 
-	// clearValues is sized for the main pass's widest case: colour, depth, and
-	// the MSAA resolve attachment Vulkan requires a (Loadop DontCare, but
-	// still counted) clear value for.
-	clearValues [3]core1_0.ClearValue
-
 	// colorClear backs the main pass's colour clear. core1_0.ClearValue is an
-	// INTERFACE, so passing a core1_0.ClearValueFloat VALUE to beginRenderPass
+	// INTERFACE, so passing a core1_0.ClearValueFloat VALUE to RenderingAttachmentInfo
 	// boxes it -- unlike DescriptorSet/Buffer, which are concrete structs, a
 	// value stored in an interface needs its own heap home unless the
 	// interface holds a pointer instead. The sky colour changes every frame
@@ -161,18 +158,6 @@ func (s *commandScratch) bindDescriptorSets(d core1_0.DeviceDriver, cmdBuf core1
 func (s *commandScratch) bindVertexBuffers(d core1_0.DeviceDriver, cmdBuf core1_0.CommandBuffer, firstBinding int, buffers ...core1_0.Buffer) {
 	n := copy(s.vertexBufs[:], buffers)
 	d.CmdBindVertexBuffers(cmdBuf, firstBinding, s.vertexBufs[:n], vertexBufferOffsets[:n])
-}
-
-// beginRenderPass begins a render pass with up to len(s.clearValues) clear
-// values, held in scratch rather than a per-call slice literal.
-func (s *commandScratch) beginRenderPass(d core1_0.DeviceDriver, cmdBuf core1_0.CommandBuffer, contents core1_0.SubpassContents, renderPass core1_0.RenderPass, fb core1_0.Framebuffer, area core1_0.Rect2D, clears ...core1_0.ClearValue) error {
-	n := copy(s.clearValues[:], clears)
-	return d.CmdBeginRenderPass(cmdBuf, contents, core1_0.RenderPassBeginInfo{
-		RenderPass:  renderPass,
-		Framebuffer: fb,
-		RenderArea:  area,
-		ClearValues: s.clearValues[:n],
-	})
 }
 
 // pipelineBarrier is the image-only convenience form. The graph executor also

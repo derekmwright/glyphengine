@@ -32,10 +32,10 @@ func fixtureReverseZProjection(fovDegrees, aspect, near, far float32) mgl32.Mat4
 // a small and a large n is what TestRecordCommandBufferAllocsAreConstant needs
 // to tell "zero per draw" apart from "zero because there were only a few".
 type frame struct {
-	graph                                                                                          *frameGraph
-	cmdBuf                                                                                         core1_0.CommandBuffer
-	renderPass, waterRenderPass                                                                    core1_0.RenderPass
-	framebuffer, waterFramebuffer                                                                  core1_0.Framebuffer
+	graph  *frameGraph
+	cmdBuf core1_0.CommandBuffer
+
+	target                                                                                         *renderingTarget
 	pipeline, litDoubleSidedPipeline                                                               core1_0.Pipeline
 	translucentPipeline, translucentDoubleSidedPipeline, skinnedTranslucentPipel                   core1_0.Pipeline
 	instancedPipeline, instancedDoubleSidedPipeline                                                core1_0.Pipeline
@@ -113,10 +113,11 @@ func fakeInstanceSet(h *fakeHandles, mesh *Mesh, count int, boundRadius float32)
 	return &InstanceSet{Mesh: mesh, buffer: h.buffer(), count: count, boundRadius: boundRadius}
 }
 
+// Skipped h.n() slots retain baseline draw handle identities after deleting
+// render-pass/framebuffer fields. TestMigrationDrawStreams checks their values.
 func fakeShadowResources(h *fakeHandles) *shadowResources {
 	s := &shadowResources{
-		renderPass:            h.renderPass(),
-		pipeline:              h.pipeline(),
+		pipeline:              h.pipelineSkipping(1),
 		skinnedPipeline:       h.pipeline(),
 		instancedPipeline:     h.pipeline(),
 		pipelineLayout:        h.layout(),
@@ -125,10 +126,10 @@ func fakeShadowResources(h *fakeHandles) *shadowResources {
 	for f := 0; f < maxFramesInFlight; f++ {
 		s.descriptorSets[f] = h.descSet()
 		for c := 0; c < ShadowCascades; c++ {
-			s.framebuffers[f][c] = h.framebuffer()
+			s.targets[f][c] = h.depthTarget(ShadowMapSize, c)
 		}
 		for face := 0; face < 6; face++ {
-			s.cubeFramebuffers[f][face] = h.framebuffer()
+			s.cubeTargets[f][face] = h.depthTarget(PointShadowMapSize, face)
 		}
 	}
 	return s
@@ -298,11 +299,7 @@ func buildFrame(n int) *frame {
 
 	fx := &frame{
 		cmdBuf:                         h.commandBuffer(),
-		renderPass:                     h.renderPass(),
-		waterRenderPass:                h.renderPass(),
-		framebuffer:                    h.framebuffer(),
-		waterFramebuffer:               h.framebuffer(),
-		pipeline:                       h.pipeline(),
+		pipeline:                       h.pipelineSkipping(4),
 		litDoubleSidedPipeline:         h.pipeline(),
 		translucentPipeline:            h.pipeline(),
 		translucentDoubleSidedPipeline: h.pipeline(),
@@ -327,7 +324,7 @@ func buildFrame(n int) *frame {
 		sceneImage:                     h.image(),
 		bloom:                          bloomPass{enabled: false},
 		tonemap: tonemapPass{
-			renderPass: h.renderPass(), pipeline: h.pipeline(), framebuffer: h.framebuffer(),
+			pipeline: h.pipelineSkipping(1), target: h.colorTarget(),
 			set: h.descSet(), layout: h.layout(), exposure: 1, curve: 1, white: 4, bloom: 0,
 		},
 		mat: materialPipelines{

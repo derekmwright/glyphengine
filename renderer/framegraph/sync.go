@@ -80,21 +80,9 @@ func stateForLayout(layout core1_0.ImageLayout) imageState {
 	return s
 }
 
-func needsBarrier(n Node, u compiledUse, before, after imageState) bool {
+func needsBarrier(u compiledUse, before, after imageState) bool {
 	if u.Access == Present && before.layout == after.layout {
 		return false
-	}
-	if u.Access == SampledRead && before.pass && before.layout == after.layout && n.Kind == Graphics {
-		// The reader's incoming dependency covers the attachment writer; the
-		// producer's outgoing dependency also orders its final transition.
-		// Optional joins can include earlier readers. Read-after-read needs no
-		// ordering, but keep those stages in the tracked state for later writers.
-		producer := before
-		producer.stage = before.writeStage
-		producer.access &= core1_0.AccessColorAttachmentWrite | core1_0.AccessDepthStencilAttachmentWrite
-		if incomingCovers(n.Dependencies, producer, after) {
-			return false
-		}
 	}
 	const writeAccess = core1_0.AccessShaderWrite | core1_0.AccessTransferWrite |
 		core1_0.AccessColorAttachmentWrite | core1_0.AccessDepthStencilAttachmentWrite
@@ -134,73 +122,4 @@ func groupUndefinedBarriers(barriers []Barrier) {
 		}
 		start = end
 	}
-}
-
-func bloomDependency() core1_0.SubpassDependency {
-	return core1_0.SubpassDependency{
-		SrcSubpass: core1_0.SubpassExternal, DstSubpass: 0,
-		SrcStageMask:  core1_0.PipelineStageColorAttachmentOutput,
-		DstStageMask:  core1_0.PipelineStageFragmentShader | core1_0.PipelineStageColorAttachmentOutput,
-		SrcAccessMask: core1_0.AccessColorAttachmentWrite,
-		// The initial layout transition must precede DONT_CARE/CLEAR writes,
-		// not only LOAD reads. 02-cube/60 fixed frames: cloud WAW reports
-		// 60 -> 0 by adding ColorAttachmentWrite.
-		DstAccessMask: core1_0.AccessShaderRead | core1_0.AccessColorAttachmentRead | core1_0.AccessColorAttachmentWrite,
-	}
-}
-
-// outgoingDependency makes attachment writes and final-layout transitions
-// visible to their consumers. Include every declared use of each attachment:
-// optional consumers can be skipped, and persistent images can be read next
-// frame. Attachment reuse is included even when the next frame discards it;
-// DONT_CARE is a write, not an absence of access. This also gives all levels
-// of a bloom chain one compatible dependency pair for the render-pass cache.
-// Measured on 13-ui -glow on, 60 fixed frames at 1280x720/4x: removing derived
-// exits produces 660 RAW messages across clouds/UI/glow; intact, it reports 0.
-func (g *Graph) outgoingDependency(ni int, uses [][]compiledUse) core1_0.SubpassDependency {
-	d := core1_0.SubpassDependency{SrcSubpass: 0, DstSubpass: core1_0.SubpassExternal}
-	for _, u := range uses[ni] {
-		if !attachment(u.Access) {
-			continue
-		}
-		producer := accessState(Graphics, u.Use)
-		d.SrcStageMask |= producer.stage
-		d.SrcAccessMask |= producer.access & (core1_0.AccessColorAttachmentWrite | core1_0.AccessDepthStencilAttachmentWrite)
-		reuse := ColorLoadWrite
-		if isDepth(u.Access) {
-			reuse = DepthLoadWrite
-		}
-		next := accessState(Graphics, Use{Access: reuse})
-		d.DstStageMask |= next.stage
-		d.DstAccessMask |= next.access
-		for j, consumers := range uses {
-			for _, consumer := range consumers {
-				if consumer.Resource == u.Resource {
-					next = accessState(g.nodes[j].Kind, consumer.Use)
-					d.DstStageMask |= next.stage
-					d.DstAccessMask |= next.access
-				}
-			}
-		}
-	}
-	// Attachment-free graphics declarations can still describe sampled inputs.
-	if d.SrcStageMask == 0 {
-		d.SrcStageMask, d.DstStageMask = core1_0.PipelineStageTopOfPipe, core1_0.PipelineStageBottomOfPipe
-	}
-	return d
-}
-
-func incomingCovers(deps []core1_0.SubpassDependency, before, after imageState) bool {
-	// Read accesses in the old state need execution ordering, not availability.
-	const writes = core1_0.AccessColorAttachmentWrite | core1_0.AccessDepthStencilAttachmentWrite |
-		core1_0.AccessShaderWrite | core1_0.AccessTransferWrite
-	for _, d := range deps {
-		if d.SrcSubpass == core1_0.SubpassExternal && d.DstSubpass == 0 &&
-			d.SrcStageMask&before.stage == before.stage && d.DstStageMask&after.stage == after.stage &&
-			d.SrcAccessMask&(before.access&writes) == before.access&writes &&
-			d.DstAccessMask&after.access == after.access {
-			return true
-		}
-	}
-	return false
 }

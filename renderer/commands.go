@@ -1,7 +1,6 @@
 package renderer
 
 import (
-	"fmt"
 	"log"
 	"math"
 	"slices"
@@ -304,49 +303,7 @@ func (d *RenderObject) worldBoundSphere() (cx, cy, cz, r float32) {
 // Renderer.New checks the device limit and fails with a clear message.
 const pushConstantSize = 256
 
-// createFramebuffers creates one framebuffer per scene colour view, each
-// referencing its own colour and depth attachments. The views passed in are the
-// HDR targets, not the swapchain -- only the tonemap pass draws to the
-// swapchain -- but there is still one per swapchain image so a frame can be
-// recorded while another is presenting.
-func createFramebuffers(deviceDriver core1_0.DeviceDriver, renderPass core1_0.RenderPass, imageViews []core1_0.ImageView, depthViews []core1_0.ImageView, msaaViews []core1_0.ImageView, extent core1_0.Extent2D) ([]core1_0.Framebuffer, error) {
-	framebuffers := make([]core1_0.Framebuffer, len(imageViews))
-
-	for i, view := range imageViews {
-		var attachments []core1_0.ImageView
-		if msaaViews != nil {
-			// MSAA: [msaaColor, depth, resolve(hdr)]
-			attachments = []core1_0.ImageView{msaaViews[i], depthViews[i], view}
-		} else {
-			// No MSAA: [color(hdr), depth]
-			attachments = []core1_0.ImageView{view, depthViews[i]}
-		}
-		fb, _, err := deviceDriver.CreateFramebuffer(nil, core1_0.FramebufferCreateInfo{
-			RenderPass:  renderPass,
-			Attachments: attachments,
-			Width:       extent.Width,
-			Height:      extent.Height,
-			Layers:      1,
-		})
-		if err != nil {
-			// Give back whatever this call already made rather than leaving it
-			// for the caller: recreateSwapchain calls this on every rebuild, not
-			// just at startup, and it has nothing to destroy since a failure
-			// here means framebuffers is never assigned.
-			for _, made := range framebuffers[:i] {
-				deviceDriver.DestroyFramebuffer(made, nil)
-			}
-			return nil, fmt.Errorf("create framebuffer %d: %w", i, err)
-		}
-		framebuffers[i] = fb
-	}
-
-	log.Printf("Created %d framebuffers", len(framebuffers))
-	return framebuffers, nil
-}
-
-// createCommandPool creates a command pool for the graphics queue family with
-// per-buffer reset support.
+// createCommandPool enables per-buffer reset on the graphics queue family.
 func createCommandPool(deviceDriver core1_0.DeviceDriver, graphicsFamily int) (core1_0.CommandPool, error) {
 	pool, _, err := deviceDriver.CreateCommandPool(nil, core1_0.CommandPoolCreateInfo{
 		Flags:            core1_0.CommandPoolCreateResetBuffer,
@@ -452,11 +409,10 @@ const (
 // materialPipelines is: recordCommandBuffer's parameter list is long enough
 // already.
 type tonemapPass struct {
-	renderPass  core1_0.RenderPass
-	pipeline    core1_0.Pipeline
-	framebuffer core1_0.Framebuffer
-	set         core1_0.DescriptorSet
-	layout      core1_0.PipelineLayout
+	pipeline core1_0.Pipeline
+	target   *renderingTarget
+	set      core1_0.DescriptorSet
+	layout   core1_0.PipelineLayout
 
 	exposure float32
 	curve    float32
@@ -496,8 +452,7 @@ type materialPipelines struct {
 func recordCommandBuffer(
 	deviceDriver core1_0.DeviceDriver,
 	cmdBuf core1_0.CommandBuffer,
-	renderPass core1_0.RenderPass,
-	framebuffer core1_0.Framebuffer,
+	target *renderingTarget,
 	pipeline core1_0.Pipeline,
 	litDoubleSidedPipeline core1_0.Pipeline,
 	translucentPipeline core1_0.Pipeline,
@@ -579,7 +534,7 @@ func recordCommandBuffer(
 	}
 
 	// Clouds first, at half resolution, into their own target. The sky pass
-	// samples it; the render pass's external dependency orders the two.
+	// samples it; the cloud target's exit barrier orders the two.
 	timer.begin(deviceDriver, cmdBuf, frame, PassClouds)
 	if err := recordCloudsFn(cmdBuf); err != nil {
 		return err
@@ -595,8 +550,7 @@ func recordCommandBuffer(
 		Extent: core1_0.Extent2D{Width: ShadowMapSize, Height: ShadowMapSize},
 	}
 	for cascade := 0; cascade < ShadowCascades; cascade++ {
-		err = scratch.beginRenderPass(deviceDriver, cmdBuf, core1_0.SubpassContentsInline, shadow.renderPass,
-			shadow.framebuffers[frame][cascade], shadowCascadeArea, core1_0.ClearValueDepthStencil{Depth: 1.0, Stencil: 0})
+		err = shadow.targets[frame][cascade].begin(deviceDriver, scratch.dynamic, cmdBuf)
 		if err != nil {
 			return err
 		}
@@ -684,7 +638,9 @@ func recordCommandBuffer(
 				shadow.pipelineLayout, shadowViewport, shadowScissor, draws, cvp, cascadeFrustum, scratch)
 		}
 
-		deviceDriver.CmdEndRenderPass(cmdBuf)
+		if err := shadow.targets[frame][cascade].end(deviceDriver, scratch.dynamic, cmdBuf); err != nil {
+			return err
+		}
 	}
 
 	// ── Point light cube shadow pass (6 faces) ──
@@ -724,16 +680,11 @@ func recordCommandBuffer(
 		}
 		scratch.cubeCasters = casters
 
-		cubeArea := core1_0.Rect2D{
-			Offset: core1_0.Offset2D{X: 0, Y: 0},
-			Extent: core1_0.Extent2D{Width: PointShadowMapSize, Height: PointShadowMapSize},
-		}
 		for face := 0; face < 6; face++ {
 			faceVP := ComputeCubeFaceVP(lightPos, lighting.PointRange, face)
 			faceFrustum := ExtractFrustum(faceVP)
 
-			err = scratch.beginRenderPass(deviceDriver, cmdBuf, core1_0.SubpassContentsInline, shadow.renderPass,
-				shadow.cubeFramebuffers[frame][face], cubeArea, core1_0.ClearValueDepthStencil{Depth: 1.0, Stencil: 0})
+			err = shadow.cubeTargets[frame][face].begin(deviceDriver, scratch.dynamic, cmdBuf)
 			if err != nil {
 				return err
 			}
@@ -787,7 +738,9 @@ func recordCommandBuffer(
 
 			recordInstancedShadow(deviceDriver, stats, cmdBuf, shadow.instancedPipeline,
 				shadow.pipelineLayout, cubeViewport, cubeScissor, draws, faceVP, faceFrustum, scratch)
-			deviceDriver.CmdEndRenderPass(cmdBuf)
+			if err := shadow.cubeTargets[frame][face].end(deviceDriver, scratch.dynamic, cmdBuf); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -798,17 +751,8 @@ func recordCommandBuffer(
 			return err
 		}
 	}
-	mainArea := core1_0.Rect2D{Offset: core1_0.Offset2D{X: 0, Y: 0}, Extent: extent}
 	scratch.colorClear = core1_0.ClearValueFloat{lighting.SkyColor[0], lighting.SkyColor[1], lighting.SkyColor[2], lighting.SkyColor[3]}
-	mainDepthClear := core1_0.ClearValueDepthStencil{Depth: 0.0, Stencil: 0}
-	if msaaEnabled {
-		// 3rd clear value for the resolve attachment (LoadOpDontCare, but Vulkan requires the count to match)
-		err = scratch.beginRenderPass(deviceDriver, cmdBuf, core1_0.SubpassContentsInline, renderPass, framebuffer, mainArea,
-			&scratch.colorClear, mainDepthClear, core1_0.ClearValueFloat{0, 0, 0, 1})
-	} else {
-		err = scratch.beginRenderPass(deviceDriver, cmdBuf, core1_0.SubpassContentsInline, renderPass, framebuffer, mainArea,
-			&scratch.colorClear, mainDepthClear)
-	}
+	err = target.begin(deviceDriver, scratch.dynamic, cmdBuf)
 	if err != nil {
 		return err
 	}
@@ -1401,8 +1345,11 @@ func recordCommandBuffer(
 	// neither charged to whichever pass happens to close last nor left as an
 	// unexplained gap between the passes' sum and the frame total.
 	timer.begin(deviceDriver, cmdBuf, frame, PassSceneResolve)
-	deviceDriver.CmdEndRenderPass(cmdBuf)
+	scratch.dynamic.CmdEndRendering(cmdBuf)
 	timer.end(deviceDriver, cmdBuf, frame, PassSceneResolve)
+	if err := target.finish(deviceDriver, cmdBuf); err != nil {
+		return err
+	}
 
 	graph.frame = graphFrame{
 		driver: deviceDriver, cmd: cmdBuf, imageIndex: imageIndex, frame: frame,
@@ -1556,14 +1503,9 @@ func recordOverlays(
 // positional handles of two repeated types would be easy to transpose in a way
 // only the validation layer would catch.
 //
-// Every pipeline here was created against the SCENE render pass and is bound
-// inside the water one. That is legal because the two passes are render pass
-// compatible: same attachment count, formats, sample counts, subpass references
-// and subpass dependencies, differing only in load and store ops and in image
-// layouts, which compatibility explicitly allows. The dependency is the part
-// that is easy to get wrong and the layer does catch — see sceneEntryDependency,
-// which exists so the two passes cannot drift apart. Building a second set of
-// identical pipelines would double their startup cost to say the same thing.
+// Scene and water bind the same pipelines because their color/depth formats and
+// sample counts match. Load/store operations and image layouts are per-rendering
+// bindings, independent of pipeline creation.
 type overWater struct {
 	translucent        core1_0.Pipeline
 	translucentDouble  core1_0.Pipeline

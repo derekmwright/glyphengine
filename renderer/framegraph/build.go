@@ -34,7 +34,6 @@ type imageState struct {
 	layout        core1_0.ImageLayout
 	stage         core1_0.PipelineStageFlags
 	access        core1_0.AccessFlags
-	pass          bool
 	writeStage    core1_0.PipelineStageFlags
 	visibleStage  core1_0.PipelineStageFlags
 	visibleAccess core1_0.AccessFlags
@@ -93,20 +92,19 @@ func (g *Graph) Build() (*Plan, error) {
 		if d.Imported {
 			layout = d.InitialLayout
 		}
-		states[i] = stateForLayout(layout)
+		states[i] = g.restingState(ResourceID(i), layout, uses)
 	}
 	for ni, n := range g.nodes {
 		if g.groupStarts(ni) {
 			copy(groupEntry, states)
 			clear(groupTouched)
 		}
-		step := Step{Node: NodeID(ni), Barriers: make([]Barrier, 0)}
+		step := Step{Node: NodeID(ni), Barriers: make([]Barrier, 0), AfterBarriers: make([]Barrier, 0)}
 		if n.Timed {
 			p.Timed = append(p.Timed, NodeID(ni))
 		}
 		if n.Kind == Graphics {
 			step.RenderPass = g.renderPass(ni, uses, p.Resources, states)
-			n.Dependencies = step.RenderPass.Dependencies
 		}
 		for _, u := range uses[ni] {
 			r := &p.Resources[u.Resource]
@@ -123,22 +121,26 @@ func (g *Graph) Build() (*Plan, error) {
 				states[u.Resource] = after
 				continue
 			}
-			if attachment(u.Access) {
+			if attachment(u.Access) && n.Kind == Legacy {
 				after.layout = r.Resting
-				after.pass = true
 			}
 			if n.Kind == Legacy && u.FinalLayout != core1_0.ImageLayoutUndefined {
 				after.layout = u.FinalLayout
-			}
-			if n.Optional && n.OptionalGroup == 0 && before.layout != after.layout {
-				return nil, g.fail(n.Name, u.Resource, "optional node must be layout-neutral")
 			}
 			barrierBefore := before
 			if u.Discard && u.Access == TransferDst {
 				barrierBefore = stateForLayout(core1_0.ImageLayoutUndefined)
 			}
-			if n.Kind != Legacy && !attachment(u.Access) && needsBarrier(n, u, barrierBefore, after) {
+			if n.Kind != Legacy && needsBarrier(u, barrierBefore, after) {
 				step.Barriers = append(step.Barriers, barrier(u.Resource, barrierBefore, after))
+			}
+			if n.Kind == Graphics && attachment(u.Access) && after.layout != r.Resting {
+				rest := g.restingState(u.Resource, r.Resting, uses)
+				step.AfterBarriers = append(step.AfterBarriers, barrier(u.Resource, after, rest))
+				after = rest
+			}
+			if n.Optional && n.OptionalGroup == 0 && before.layout != after.layout {
+				return nil, g.fail(n.Name, u.Resource, "optional node must be layout-neutral")
 			}
 			if !writes(u.Access) && before.layout == after.layout && before.access == after.access {
 				// A later writer must wait for every reader, including readers in
@@ -165,12 +167,13 @@ func (g *Graph) Build() (*Plan, error) {
 				}
 			}
 		}
+		groupUndefinedBarriers(step.AfterBarriers)
 		groupUndefinedBarriers(step.Barriers)
 		p.Steps[ni] = step
 	}
 	for i, s := range states {
 		if summaries[i].used && s.layout != p.Resources[i].Resting {
-			p.FinalBarriers = append(p.FinalBarriers, barrier(ResourceID(i), s, stateForLayout(p.Resources[i].Resting)))
+			p.FinalBarriers = append(p.FinalBarriers, barrier(ResourceID(i), s, g.restingState(ResourceID(i), p.Resources[i].Resting, uses)))
 		}
 	}
 	groupUndefinedBarriers(p.FinalBarriers)
@@ -220,7 +223,6 @@ func (g *Graph) validateReads(uses [][]compiledUse) error {
 func optionalState(before, after imageState) imageState {
 	// Retain every reader for a later writer. A later sampler only needs the
 	// writers made available; a skipped path containing reads adds no RAW hazard.
-	after.pass = (after.pass || after.writeStage == 0) && (before.pass || before.writeStage == 0)
 	after.writeStage |= before.writeStage
 	after.stage |= before.stage
 	after.access |= before.access
@@ -273,9 +275,6 @@ func (g *Graph) validate() ([][]compiledUse, []resourceUses, error) {
 		}
 		if n.Kind < Graphics || n.Kind > Legacy {
 			return nil, nil, g.fail(n.Name, -1, "unknown node kind")
-		}
-		if n.Kind != Graphics && n.Dependencies != nil {
-			return nil, nil, g.fail(n.Name, -1, "dependencies require a graphics node")
 		}
 		for _, u := range n.Uses {
 			if u.Resource < 0 || int(u.Resource) >= len(g.images) {
@@ -357,26 +356,7 @@ func (g *Graph) validate() ([][]compiledUse, []resourceUses, error) {
 			s.onlyResolve = s.onlyResolve && u.HasResolve
 			s.lastLayout = accessState(n.Kind, u.Use).layout
 		}
-		if n.AttachmentOrder != nil {
-			if n.Kind != Graphics {
-				return nil, nil, g.fail(n.Name, -1, "attachment order requires a graphics node")
-			}
-			attachments := make(map[ResourceID]bool)
-			for _, u := range all[ni] {
-				if attachment(u.Access) {
-					attachments[u.Resource] = true
-				}
-			}
-			if len(n.AttachmentOrder) != len(attachments) {
-				return nil, nil, g.fail(n.Name, -1, "attachment order must list every attachment exactly once")
-			}
-			for _, id := range n.AttachmentOrder {
-				if !attachments[id] {
-					return nil, nil, g.fail(n.Name, id, "attachment order contains an unknown or duplicate attachment")
-				}
-				delete(attachments, id)
-			}
-		}
+
 	}
 	return all, summaries, nil
 }
@@ -439,4 +419,23 @@ func usageFor(a Access) core1_0.ImageUsageFlags {
 	default:
 		return 0
 	}
+}
+
+// A resting sampled layout must be visible to all declared shader readers,
+// including vertex reads and consumers in the next submission.
+func (g *Graph) restingState(id ResourceID, layout core1_0.ImageLayout, uses [][]compiledUse) imageState {
+	s := stateForLayout(layout)
+	for ni, node := range uses {
+		for _, u := range node {
+			if u.Resource == id {
+				next := accessState(g.nodes[ni].Kind, u.Use)
+				if next.layout == layout {
+					s.stage |= next.stage
+					s.access |= next.access
+					s.writeStage |= next.writeStage
+				}
+			}
+		}
+	}
+	return s
 }

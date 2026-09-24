@@ -38,10 +38,10 @@ func withAppFrame(fx *frame, passes bool, compute ...bool) *frame {
 	fx.graph = g
 	for i := range g.nodes {
 		n := &g.nodes[i]
-		n.framebuffers = []core1_0.Framebuffer{h.framebuffer()}
+		h.n() // Preserve the old fixture's subsequent draw handles.
 		n.extent = fx.extent
 		if n.app != nil || i == g.depthNode {
-			n.pass = h.renderPass()
+			h.n()
 		}
 	}
 	for i := range g.images {
@@ -63,8 +63,13 @@ func withAppFrame(fx *frame, passes bool, compute ...bool) *frame {
 // calls (3299 -> 3317); application/UI/volumetric additions are unchanged.
 // Removing only that fix restores 0x0db1df67cfc2a68b and fails
 // TestPointShadowUsesInstanceTransforms (6 instances, want 18).
-const goldenSceneDepthStreamHash Hasher = 0x47dfc330b0b34eae
-const goldenAppPassStreamHash Hasher = 0xba0a7a3199a5239b
+// Dynamic rendering (#120): full-stream hashes include explicit attachment
+// barriers and CmdBegin/EndRendering. Base 3317 -> 3342 calls; depth 3353,
+// application 3382, compute 3390, glow 3442, volumetric 3348, GPU LOD 1746.
+// TestMigrationDrawStreams independently pins every non-rendering/barrier call
+// to the measured pre-migration stream, including all draw-side arguments.
+const goldenSceneDepthStreamHash Hasher = 0xa09ed6adcc0491ab
+const goldenAppPassStreamHash Hasher = 0x3dcd635efb9f373c
 
 func TestAppPassStreams(t *testing.T) {
 	base := &fakeDriver{hashing: true}
@@ -76,7 +81,7 @@ func TestAppPassStreams(t *testing.T) {
 		passes bool
 		hash   Hasher
 		extra  int
-	}{{"scene-depth", false, goldenSceneDepthStreamHash, 8}, {"app-passes", true, goldenAppPassStreamHash, 32}} {
+	}{{"scene-depth", false, goldenSceneDepthStreamHash, 11}, {"app-passes", true, goldenAppPassStreamHash, 40}} {
 		t.Run(test.name, func(t *testing.T) {
 			d := &fakeDriver{hashing: true}
 			if err := withAppFrame(buildFrame(97), test.passes).record(d, 1); err != nil {

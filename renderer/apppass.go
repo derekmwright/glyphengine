@@ -230,10 +230,7 @@ func (r *Renderer) CreateAppPass(d AppPassDesc) (_ *AppPass, err error) {
 		return nil, e
 	}
 	index := f.appNode(p)
-	rp, e := f.renderPass(r.deviceDriver, index)
-	if e != nil {
-		return nil, e
-	}
+	rp := f.pipelineFormats(index)
 	p.pipeline, p.layout, err = createAppPipeline(r.deviceDriver, d, rp, r.descriptorSetLayout, r.shadow.descriptorSetLayout, r.appSetLayout, f.plan.Steps[index].RenderPass.Samples)
 	if err != nil {
 		return nil, fmt.Errorf("app pass %q: pipeline: %w", d.Name, err)

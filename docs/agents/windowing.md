@@ -28,10 +28,17 @@ requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-07-28
+verified: 2026-09-24 # triangle under dynamic rendering on Windows
 ---
 
 # Create a window
+
+The renderer requires `VK_KHR_dynamic_rendering`, its `dynamicRendering`
+feature and extension dependencies. Startup names the driver and any missing
+capability. Vulkan 1.0 plus these extensions is sufficient; a Vulkan 1.3 core
+API is not required. MoltenVK portability handling remains enabled when
+advertised, but the same capabilities are required there; macOS is untested.
+See [ADR 0009](../adr/0009-execute-render-passes-with-dynamic-rendering.md).
 
 ```go
 package main

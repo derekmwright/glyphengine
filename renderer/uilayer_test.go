@@ -70,20 +70,24 @@ func withUILayer(fx *frame, glow bool) *frame {
 		strength = 0.7
 	}
 	sets := make([]core1_0.DescriptorSet, bloomLevels)
-	downFB := make([]core1_0.Framebuffer, bloomLevels)
-	upFB := make([]core1_0.Framebuffer, bloomLevels)
+	downFB := make([]*renderingTarget, bloomLevels)
+	upFB := make([]*renderingTarget, bloomLevels)
 	for i := 0; i < bloomLevels; i++ {
 		sets[i] = h.descSet()
-		downFB[i] = h.framebuffer()
-		upFB[i] = h.framebuffer()
+		downFB[i] = h.colorTarget()
+		upFB[i] = h.colorTarget()
 	}
 	if fx.graph == nil {
 		fx.initGraph()
 	}
 	layer := &fx.graph.nodes[graphUILayer]
-	layer.pass, layer.framebuffers[0], layer.extent = h.renderPass(), h.framebuffer(), fx.extent
+	h.n()
+	h.n()
+	layer.extent = fx.extent
+	layer.targets[0] = fx.graph.bindRenderingTarget(graphUILayer, 0)
 	uiPipeline, msdfPipeline, layout := h.pipeline(), h.pipeline(), h.layout()
-	downPass, upPass := h.renderPass(), h.renderPass()
+	h.n()
+	h.n()
 	fx.tonemap.ui = &uiLayerPass{
 		uiPipeline:   uiPipeline,
 		msdfPipeline: msdfPipeline,
@@ -110,11 +114,13 @@ func withUILayer(fx *frame, glow bool) *frame {
 	}
 	for level := range bloomLevels {
 		n := &fx.graph.nodes[graphUIGlow+level]
-		n.pass, n.framebuffers[0], n.extent = downPass, downFB[level], fx.tonemap.ui.bloom.extents[level]
+		n.extent = fx.tonemap.ui.bloom.extents[level]
+		n.targets[0] = fx.graph.bindRenderingTarget(graphUIGlow+level, 0)
 	}
 	for level := bloomLevels - 2; level >= 0; level-- {
 		n := &fx.graph.nodes[graphUIGlow+bloomLevels+(bloomLevels-2-level)]
-		n.pass, n.framebuffers[0], n.extent = upPass, upFB[level], fx.tonemap.ui.bloom.extents[level]
+		n.extent = fx.tonemap.ui.bloom.extents[level]
+		n.targets[0] = fx.graph.bindRenderingTarget(graphUIGlow+bloomLevels+(bloomLevels-2-level), 0)
 	}
 	return fx
 }
@@ -139,7 +145,12 @@ func withUILayer(fx *frame, glow bool) *frame {
 // calls (3299 -> 3317); application/UI/volumetric additions are unchanged.
 // Removing only that fix restores 0x0db1df67cfc2a68b and fails
 // TestPointShadowUsesInstanceTransforms (6 instances, want 18).
-const goldenUILayerStreamHash = Hasher(0x77fcc98c39c6cbde)
+// Dynamic rendering (#120): full-stream hashes include explicit attachment
+// barriers and CmdBegin/EndRendering. Base 3317 -> 3342 calls; depth 3353,
+// application 3382, compute 3390, glow 3442, volumetric 3348, GPU LOD 1746.
+// TestMigrationDrawStreams independently pins every non-rendering/barrier call
+// to the measured pre-migration stream, including all draw-side arguments.
+const goldenUILayerStreamHash = Hasher(0x7fef5dfb40903441)
 
 // TestUILayerStreamIsPinned is the layer-on half of "nothing changed": the
 // extra render pass, the two overlay pipelines bound inside it, the bloom chain

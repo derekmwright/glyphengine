@@ -26,9 +26,14 @@ func (d *timingDriver) CmdWriteTimestamp(_ core1_0.CommandBuffer, _ core1_0.Pipe
 	d.events = append(d.events, fmt.Sprintf("%s:%s", Pass(q/2), edge))
 }
 
-func (d *timingDriver) CmdEndRenderPass(cb core1_0.CommandBuffer) {
+func (d *timingDriver) CmdEndRendering(cb core1_0.CommandBuffer) {
 	d.events = append(d.events, "endpass")
-	d.fakeDriver.CmdEndRenderPass(cb)
+	d.fakeDriver.CmdEndRendering(cb)
+}
+
+func (d *timingDriver) CmdPipelineBarrier(cb core1_0.CommandBuffer, src, dst core1_0.PipelineStageFlags, flags core1_0.DependencyFlags, memory []core1_0.MemoryBarrier, buffers []core1_0.BufferMemoryBarrier, images []core1_0.ImageMemoryBarrier) error {
+	d.events = append(d.events, "barrier")
+	return d.fakeDriver.CmdPipelineBarrier(cb, src, dst, flags, memory, buffers, images)
 }
 
 func (d *timingDriver) CmdDraw(cb core1_0.CommandBuffer, vertexCount, instanceCount int, firstVertex, firstInstance uint32) {
@@ -67,7 +72,7 @@ func between(t *testing.T, events []string, p Pass) []string {
 // bracket of its own.
 //
 // Verified to fail: moving PassOverlay's closing timestamp back below the scene
-// pass's vkCmdEndRenderPass reports "overlay holds a pass end".
+// pass's vkCmdEndRendering reports "overlay holds a pass end".
 func TestAPassEndIsTimedAsAResolveAndNothingElse(t *testing.T) {
 	fx := buildFrame(61)
 	fx.timer = &gpuTimer{supported: true}

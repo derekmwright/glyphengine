@@ -6,6 +6,7 @@ import (
 	"unsafe"
 
 	"github.com/vkngwrapper/core/v3/core1_0"
+	"github.com/vkngwrapper/extensions/v3/khr_dynamic_rendering"
 )
 
 // cloudTarget is the half-resolution buffer the cloud raymarch renders into,
@@ -24,7 +25,7 @@ type cloudTarget struct {
 	images  []core1_0.Image
 	memory  []core1_0.DeviceMemory
 	views   []core1_0.ImageView
-	fbs     []core1_0.Framebuffer
+	targets []*renderingTarget
 	sampler core1_0.Sampler
 
 	// sets is indexed [buffer][frame in flight] and flattened, because the two
@@ -44,9 +45,9 @@ func (t *cloudTarget) set(buf, frame int) core1_0.DescriptorSet {
 }
 
 // bufferCount is how many half-resolution targets the ping-pong holds. Taken
-// from the framebuffers rather than from the constant so the indexing here
+// from the targets rather than from the constant so the indexing here
 // cannot outlive a change to it.
-func (t *cloudTarget) bufferCount() int { return len(t.fbs) }
+func (t *cloudTarget) bufferCount() int { return len(t.images) }
 
 // cloudBufferCount is how many half-resolution buffers the ping-pong needs.
 //
@@ -72,7 +73,6 @@ func createCloudTargets(
 	physicalDevice core1_0.PhysicalDevice,
 	descriptorPool core1_0.DescriptorPool,
 	texSetLayout core1_0.DescriptorSetLayout,
-	renderPass core1_0.RenderPass,
 	full core1_0.Extent2D,
 	count int,
 	envBuffers [maxFramesInFlight]core1_0.Buffer,
@@ -104,18 +104,10 @@ func createCloudTargets(
 		t.memory = append(t.memory, mem)
 		t.views = append(t.views, view)
 
-		fb, _, err := deviceDriver.CreateFramebuffer(nil, core1_0.FramebufferCreateInfo{
-			RenderPass:  renderPass,
-			Attachments: []core1_0.ImageView{view},
-			Width:       t.extent.Width,
-			Height:      t.extent.Height,
-			Layers:      1,
-		})
-		if err != nil {
-			t.destroy(deviceDriver)
-			return nil, fmt.Errorf("create cloud framebuffer %d: %w", i, err)
-		}
-		t.fbs = append(t.fbs, fb)
+		target := newRenderingTarget(t.extent)
+		target.info.ColorAttachments = []khr_dynamic_rendering.RenderingAttachmentInfo{attachmentInfo(view, false, core1_0.AttachmentLoadOpDontCare, core1_0.AttachmentStoreOpStore, nil)}
+		target.transition(img, core1_0.ImageAspectColor, 0, core1_0.ImageLayoutShaderReadOnlyOptimal, core1_0.ImageLayoutShaderReadOnlyOptimal)
+		t.targets = append(t.targets, target)
 	}
 
 	// One set per (buffer, frame in flight) pair: see the note on cloudTarget.
@@ -253,9 +245,6 @@ func (t *cloudTarget) destroy(deviceDriver core1_0.DeviceDriver) {
 	// recreateSwapchain), so they leaked more slowly than the rest -- a real
 	// resize rather than any out-of-date swapchain -- but they leaked.
 	freeSets(deviceDriver, t.sets)
-	for _, fb := range t.fbs {
-		deviceDriver.DestroyFramebuffer(fb, nil)
-	}
 	for _, v := range t.views {
 		deviceDriver.DestroyImageView(v, nil)
 	}
@@ -268,23 +257,15 @@ func (t *cloudTarget) destroy(deviceDriver core1_0.DeviceDriver) {
 	if t.sampler.Handle() != 0 {
 		deviceDriver.DestroySampler(t.sampler, nil)
 	}
-	t.fbs, t.views, t.memory, t.images, t.sets = nil, nil, nil, nil, nil
+	t.targets, t.views, t.memory, t.images, t.sets = nil, nil, nil, nil, nil
 	t.sampler = core1_0.Sampler{}
 }
 
 // recordClouds marches the cloud layer into the half-resolution target and
 // blends it with the previous frame's result.
 //
-// Recorded before the scene render pass, in its own pass. The render pass's
-// external dependency -- colour writes before fragment reads -- is what orders
-// it against the sky draw that samples it, so no explicit barrier is needed.
-//
-// It runs every frame even when the layer is disabled, because a pass that
-// sometimes does not run leaves its target in an undefined layout while the sky
-// still binds it every frame. That is the trap the bloom chain and the sky-view
-// tables both fell into. With both cloud controls at zero, the shader writes
-// fully transmissive pixels and the composite is a no-op, at a cost of a quarter-resolution
-// fullscreen triangle.
+// Recorded before scene rendering. Explicit entry and exit barriers order the
+// cloud color writes and subsequent sky sampling.
 func (r *Renderer) recordClouds(cmdBuf core1_0.CommandBuffer, lighting SceneLighting, frame int) error {
 	t := r.clouds
 	// Indexed by a frame counter rather than the swapchain image index: the
@@ -292,11 +273,7 @@ func (r *Renderer) recordClouds(cmdBuf core1_0.CommandBuffer, lighting SceneLigh
 	// history chain has to be strictly the previous frame's.
 	idx := r.cloudFrame % t.bufferCount()
 
-	if err := r.deviceDriver.CmdBeginRenderPass(cmdBuf, core1_0.SubpassContentsInline, core1_0.RenderPassBeginInfo{
-		RenderPass:  r.cloudRenderPass,
-		Framebuffer: t.fbs[idx],
-		RenderArea:  core1_0.Rect2D{Offset: core1_0.Offset2D{X: 0, Y: 0}, Extent: t.extent},
-	}); err != nil {
+	if err := t.targets[idx].begin(r.deviceDriver, r.cmdScratch.dynamic, cmdBuf); err != nil {
 		return err
 	}
 	r.deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, r.cloudPipeline)
@@ -340,8 +317,7 @@ func (r *Renderer) recordClouds(cmdBuf core1_0.CommandBuffer, lighting SceneLigh
 		unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize))
 
 	r.deviceDriver.CmdDraw(cmdBuf, 3, 1, 0, 0)
-	r.deviceDriver.CmdEndRenderPass(cmdBuf)
-	return nil
+	return t.targets[idx].end(r.deviceDriver, r.cmdScratch.dynamic, cmdBuf)
 }
 
 // cloudSetFor is the descriptor the sky pass samples the cloud layer through:

@@ -62,7 +62,7 @@ func gpuFrame(t *testing.T, n int) (*frame, *Renderer, []RenderObject) {
 		t.Fatal(err)
 	}
 	for i := range fx.graph.nodes {
-		fx.graph.nodes[i].framebuffers = make([]core1_0.Framebuffer, 1)
+		fx.graph.nodes[i].targets = []*renderingTarget{newRenderingTarget(fx.extent)}
 	}
 	for i := range fx.graph.images {
 		fx.graph.images[i].images = make([]core1_0.Image, 1)
@@ -76,6 +76,11 @@ func gpuFrame(t *testing.T, n int) (*frame, *Renderer, []RenderObject) {
 
 // Verified break: removing indexed indirect submission changes the 40-placement
 // stream from 1721 calls / ea9a8852d29ae8ce to 1710 / 07dbac282af4b0ac.
+// Dynamic rendering (#120): full-stream hashes include explicit attachment
+// barriers and CmdBegin/EndRendering. Base 3317 -> 3342 calls; depth 3353,
+// application 3382, compute 3390, glow 3442, volumetric 3348, GPU LOD 1746.
+// TestMigrationDrawStreams independently pins every non-rendering/barrier call
+// to the measured pre-migration stream, including all draw-side arguments.
 func TestGPULODStreamAndAllocation(t *testing.T) {
 	for _, n := range []int{40, 160} {
 		fx, r, input := gpuFrame(t, n)
@@ -85,7 +90,7 @@ func TestGPULODStreamAndAllocation(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Logf("GPU LOD n=%d: %d calls hash %#x", n, d.calls, d.h)
-		if n == 40 && (d.calls != 1721 || d.h != 0xea9a8852d29ae8ce) {
+		if n == 40 && (d.calls != 1746 || d.h != 0x79ba242a27987ced) {
 			t.Errorf("pin fixture: %d %#x", d.calls, d.h)
 		}
 		d.hashing = false

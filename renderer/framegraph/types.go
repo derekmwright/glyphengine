@@ -124,11 +124,6 @@ type Node struct {
 	// boundaries. Zero retains the per-node Optional behavior.
 	OptionalGroup int
 	Timed         bool
-	Dependencies  []core1_0.SubpassDependency // Nil derives; non-nil replaces, even empty.
-	// AttachmentOrder overrides the default colour/resolve/depth order. Existing
-	// scene pipelines use colour/depth/resolve, and compatibility includes refs.
-	// A non-nil override must list every attachment exactly once.
-	AttachmentOrder []ResourceID
 }
 
 type Graph struct {
@@ -160,8 +155,6 @@ func (g *Graph) AddBuffer(d BufferDesc) ResourceID {
 func (g *Graph) AddNode(n Node) NodeID {
 	n.Optional = n.Optional || n.OptionalGroup != 0
 	n.Uses = slices.Clone(n.Uses)
-	n.Dependencies = slices.Clone(n.Dependencies)
-	n.AttachmentOrder = slices.Clone(n.AttachmentOrder)
 	for i := range n.Uses {
 		if n.Uses[i].Clear != nil {
 			c := *n.Uses[i].Clear
@@ -189,9 +182,10 @@ type ResourceInfo struct {
 }
 
 type Step struct {
-	Node       NodeID
-	Barriers   []Barrier
-	RenderPass *RenderPassDesc
+	Node          NodeID
+	Barriers      []Barrier
+	AfterBarriers []Barrier
+	RenderPass    *RenderPassDesc
 }
 
 type Barrier struct {
@@ -205,16 +199,14 @@ type Barrier struct {
 
 type RenderPassDesc struct {
 	// Attachments are colours in Use order, then resolves in colour order,
-	// then depth, unless Node.AttachmentOrder overrides it. Framebuffers and
-	// pipeline creation must use this same order.
-	Attachments  []AttachmentDesc
-	Color        []int
-	Resolve      []int // Parallel to Color; -1 means unused.
-	Depth        int   // -1 means unused.
-	Dependencies []core1_0.SubpassDependency
-	Extent       Extent
-	Samples      core1_0.SampleCountFlags
-	Clears       []Clear // Parallel to Attachments.
+	// then depth. Colour references define pipeline output locations.
+	Attachments []AttachmentDesc
+	Color       []int
+	Resolve     []int // Parallel to Color; -1 means unused.
+	Depth       int   // -1 means unused.
+	Extent      Extent
+	Samples     core1_0.SampleCountFlags
+	Clears      []Clear // Parallel to Attachments.
 }
 
 type AttachmentDesc struct {

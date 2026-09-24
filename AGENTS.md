@@ -48,6 +48,9 @@ deliberate: `go get` of the engine never pulls example code or assets, while
    `CompareOpGreater`. Geometry authored for a conventional `0.0 → 1.0` depth
    range will fail the depth test and silently draw nothing.
 6. **CGo is required** (`CGO_ENABLED=1`, a C compiler, and the Vulkan runtime).
+   The GPU/driver must support `VK_KHR_dynamic_rendering`, `dynamicRendering`
+   and its enabled dependency extensions; there is no render-pass fallback.
+   See [ADR 0009](docs/adr/0009-execute-render-passes-with-dynamic-rendering.md).
    Builds with `CGO_ENABLED=0` will fail.
 7. **Convex hulls belong on `Static` entities only.** The parallel movement
    phase (`Scene.MoveCharactersParallel`) runs hull narrow-phase tests against

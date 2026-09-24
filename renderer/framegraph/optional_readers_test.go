@@ -15,8 +15,8 @@ func TestOptionalBloomRetainsAttachmentVisibility(t *testing.T) {
 		g.nodes[i].Optional = true
 	}
 	p := mustBuild(t, g)
-	for _, s := range p.Steps {
-		equal(t, "barriers", len(s.Barriers), 0)
+	for _, s := range p.Steps[1 : len(p.Steps)-1] {
+		equal(t, "restores optional attachment", len(s.AfterBarriers), 1)
 	}
 	equal(t, "final barriers", len(p.FinalBarriers), 0)
 }
@@ -30,11 +30,9 @@ func TestOptionalAttachmentDoesNotHideSkippedStorageWriter(t *testing.T) {
 	before := accessState(Compute, Use{Access: StorageWrite})
 	after := accessState(Graphics, Use{Access: ColorWrite})
 	before.layout, after.layout = d.InitialLayout, d.InitialLayout
-	after.pass = true
 	merged := optionalState(before, after)
 	read := accessState(Graphics, Use{Access: SampledRead})
-	if !needsBarrier(Node{Kind: Graphics, Dependencies: []core1_0.SubpassDependency{bloomDependency()}},
-		compiledUse{Use: Use{Access: SampledRead}}, merged, read) {
+	if !needsBarrier(compiledUse{Use: Use{Access: SampledRead}}, merged, read) {
 		t.Fatal("colour dependency hid the skipped compute writer")
 	}
 	equal(t, "all writer stages", merged.writeStage, before.stage|after.stage)

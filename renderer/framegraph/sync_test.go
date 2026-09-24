@@ -34,7 +34,7 @@ func TestStorageAndTransferHazards(t *testing.T) {
 		OldLayout: core1_0.ImageLayoutGeneral, NewLayout: core1_0.ImageLayoutGeneral})
 	equal(t, "stage override", p.Steps[4].Barriers[0].DstStage, core1_0.PipelineStageVertexShader)
 	equal(t, "restore copy layout", p.FinalBarriers, []Barrier{{Resource: 0,
-		SrcStage: core1_0.PipelineStageTransfer, DstStage: core1_0.PipelineStageFragmentShader | core1_0.PipelineStageComputeShader,
+		SrcStage: core1_0.PipelineStageTransfer, DstStage: core1_0.PipelineStageVertexShader | core1_0.PipelineStageFragmentShader | core1_0.PipelineStageComputeShader,
 		SrcAccess: core1_0.AccessTransferRead, DstAccess: core1_0.AccessShaderRead,
 		OldLayout: core1_0.ImageLayoutTransferSrcOptimal, NewLayout: core1_0.ImageLayoutShaderReadOnlyOptimal}})
 	// A render pass's fragment dependency cannot synchronize a compute sampler.
@@ -43,7 +43,7 @@ func TestStorageAndTransferHazards(t *testing.T) {
 	g.AddNode(Node{Name: "draw", Kind: Graphics, Uses: []Use{{Access: ColorWrite}}})
 	g.AddNode(Node{Name: "compute sample", Kind: Compute, Uses: []Use{{Access: SampledRead}}})
 	p = mustBuild(t, g)
-	equal(t, "compute visibility", p.Steps[1].Barriers[0].DstStage, core1_0.PipelineStageComputeShader)
+	equal(t, "compute visibility", p.Steps[0].AfterBarriers[0].DstStage&core1_0.PipelineStageComputeShader, core1_0.PipelineStageComputeShader)
 }
 
 // Verified to fail: assigning derived Usage instead of ORing it drops the
@@ -151,11 +151,11 @@ func TestAttachmentEntryWaitsForStorageAndTransfer(t *testing.T) {
 		g.AddNode(Node{Name: "produce", Kind: tc.kind, Uses: []Use{{Access: tc.access}}})
 		g.AddNode(Node{Name: "load", Kind: Graphics, Uses: []Use{{Access: ColorLoadWrite}}})
 		p := mustBuild(t, g)
-		equal(t, "no attachment barrier", len(p.Steps[1].Barriers), 0)
-		dep := p.Steps[1].RenderPass.Dependencies[0]
-		equal(t, "source stage", dep.SrcStageMask&tc.stage, tc.stage)
-		equal(t, "source write visibility", dep.SrcAccessMask&tc.mask, tc.mask)
-		equal(t, "load/write destination", dep.DstAccessMask&(core1_0.AccessColorAttachmentRead|core1_0.AccessColorAttachmentWrite), core1_0.AccessColorAttachmentRead|core1_0.AccessColorAttachmentWrite)
+		equal(t, "attachment barrier", len(p.Steps[1].Barriers), 1)
+		dep := p.Steps[1].Barriers[0]
+		equal(t, "source stage", dep.SrcStage&tc.stage, tc.stage)
+		equal(t, "source write visibility", dep.SrcAccess&tc.mask, tc.mask)
+		equal(t, "load/write destination", dep.DstAccess&(core1_0.AccessColorAttachmentRead|core1_0.AccessColorAttachmentWrite), core1_0.AccessColorAttachmentRead|core1_0.AccessColorAttachmentWrite)
 	}
 	g := New()
 	g.AddImage(depthImage("sampled depth"))
@@ -163,7 +163,7 @@ func TestAttachmentEntryWaitsForStorageAndTransfer(t *testing.T) {
 	g.AddNode(Node{Name: "write depth", Kind: Graphics, Uses: []Use{{Access: DepthWrite}}})
 	g.AddNode(Node{Name: "read depth", Kind: Graphics, Uses: []Use{{Access: SampledRead}, {Resource: 1, Access: DepthWrite}}})
 	p := mustBuild(t, g)
-	equal(t, "derived depth dependency already covers the read", len(p.Steps[1].Barriers), 0)
+	equal(t, "other depth entry", len(p.Steps[1].Barriers), 1)
 }
 
 // Verified to fail: using ColorAttachmentOutput as the fallback source stage

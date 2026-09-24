@@ -4,7 +4,6 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/derekmwright/glyphengine/renderer/framegraph"
 	"github.com/vkngwrapper/core/v3/core1_0"
 )
 
@@ -36,24 +35,18 @@ func appResizeFixture(d *resizeFakeDriver) *Renderer {
 func TestAppTargetRebuildFailures(t *testing.T) {
 	control := newResizeFakeDriver()
 	r := appResizeFixture(control)
-	oldCache := appCacheKeys(r)
 	var undo rebuildUndo
 	if err := r.rebuildSwapchainTargets(r.sc.extent, &undo); err != nil {
 		t.Fatal(err)
 	}
 	counts := control.calls
 	undo.unwind()
-	freeNewAppPasses(r, oldCache)
 	assertBalanced(t, control)
 	// Cached render passes deliberately outlive each rebuild attempt.
-	for _, call := range []string{"CreateImage", "AllocateMemory", "CreateImageView", "CreateSampler", "AllocateDescriptorSets", "CreateFramebuffer"} {
+	for _, call := range []string{"CreateImage", "AllocateMemory", "CreateImageView", "CreateSampler", "AllocateDescriptorSets"} {
 		for at := 1; at <= counts[call]; at++ {
 			d := newResizeFakeDriver()
 			r := appResizeFixture(d)
-			old := make(map[framegraph.RenderPassKey]bool)
-			for k := range r.frameGraph.cache {
-				old[k] = true
-			}
 			d.failCall, d.failAt = call, at
 			var undo rebuildUndo
 			err := r.rebuildSwapchainTargets(r.sc.extent, &undo)
@@ -64,12 +57,6 @@ func TestAppTargetRebuildFailures(t *testing.T) {
 			// The lazy depth resource and cache may have been constructed before
 			// the failing framebuffer; both remain renderer-owned until shutdown.
 			r.depthResolve.releaseTargets()
-			for k, p := range r.frameGraph.cache {
-				if !old[k] {
-					d.DestroyRenderPass(p, nil)
-					delete(r.frameGraph.cache, k)
-				}
-			}
 			assertBalanced(t, d)
 		}
 		t.Logf("%s: all %d creation sites unwind without leaks", call, counts[call])
@@ -79,7 +66,6 @@ func TestAppTargetRebuildFailures(t *testing.T) {
 func TestAppTargetsSurviveResize(t *testing.T) {
 	d := newResizeFakeDriver()
 	r := appResizeFixture(d)
-	oldCache := appCacheKeys(r)
 	var first rebuildUndo
 	if err := r.rebuildSwapchainTargets(r.sc.extent, &first); err != nil {
 		t.Fatal(err)
@@ -88,7 +74,7 @@ func TestAppTargetsSurviveResize(t *testing.T) {
 	ptr := relative.Texture()
 	fixedImage := fixed.color.images[0]
 	oldImage := relative.color.images[0]
-	r.releaseGraphFramebuffers()
+	r.releaseGraphBindings()
 	r.releaseAppResizeTargets()
 	if fixed.color.images[0] != fixedImage {
 		t.Fatal("fixed target was retired on resize")
@@ -117,22 +103,5 @@ func TestAppTargetsSurviveResize(t *testing.T) {
 	// owners. Their destroy methods tolerate the already returned target sets.
 	undo.unwind()
 	first.unwind()
-	freeNewAppPasses(r, oldCache)
 	assertBalanced(t, d)
-}
-
-func appCacheKeys(r *Renderer) map[framegraph.RenderPassKey]bool {
-	out := make(map[framegraph.RenderPassKey]bool)
-	for k := range r.frameGraph.cache {
-		out[k] = true
-	}
-	return out
-}
-func freeNewAppPasses(r *Renderer, old map[framegraph.RenderPassKey]bool) {
-	for k, p := range r.frameGraph.cache {
-		if !old[k] {
-			r.deviceDriver.DestroyRenderPass(p, nil)
-			delete(r.frameGraph.cache, k)
-		}
-	}
 }

@@ -41,7 +41,8 @@ go get github.com/derekmwright/glyphengine
 
 - **Go 1.26+**
 - **CGo enabled and a C compiler.** `CGO_ENABLED=0` will not build.
-- **Vulkan runtime** and a GPU that supports it
+- **Vulkan runtime** and a GPU/driver supporting **VK_KHR_dynamic_rendering**,
+  its `dynamicRendering` feature and extension dependencies (see [ADR 0009](docs/adr/0009-execute-render-passes-with-dynamic-rendering.md))
 - [go-task](https://taskfile.dev), for the repo's build targets
 - Optional: the **Vulkan SDK**, for the validation layer and for recompiling
   shaders
@@ -50,7 +51,7 @@ go get github.com/derekmwright/glyphengine
 |---|---|
 | Windows | Supported, and where development happens |
 | Linux | Blocked upstream. `vkngwrapper/core` v3.1.1 is missing an `unsafe` import in `system_nonwindows.go` and does not compile. The fix is merged on `main`; tracking a tag in [vkngwrapper/core#13](https://github.com/vkngwrapper/core/issues/13). |
-| macOS | Untested. Expect missing CGo flags and no MoltenVK portability handling. |
+| macOS | Untested. MoltenVK portability enumeration/subset handling is present; its driver must support the required dynamic-rendering capabilities. |
 
 ## Hello, triangle
 
