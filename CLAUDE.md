@@ -24,6 +24,7 @@ task smoke     # renders real frames of every example
 task validate  # every example under the Vulkan validation layer, must be silent
 task hud       # the HUD is still legible over water, bloom and the tonemap
 task sky       # the sun and moon are behind the terrain, not on top of it
+task custompasses # application light/compute/fog passes: visible, confined, repeatable and validation-clean
 task waterblend # a flame in front of the lake is not painted over by it
 task lights    # clustered and brute-force light renderers match exactly
 task nightlight # warm lamps stay warm on the ground at night

@@ -27,13 +27,13 @@ api:
   - renderer.SceneColor
   - renderer.SceneDepth
   - renderer.GPUTimings
-example: cmd/apppasscheck
-run: go run ./cmd/apppasscheck -compute -frames 300 -churn -provoke-recreate -validate
+example: examples/24-custom-passes
+run: task example:24-custom-passes -- -timings
 requires:
   - cgo
   - vulkan-runtime
 assets: procedural
-verified: 2026-09-23 # rechecked with compute dispatches
+verified: 2026-09-23 # worked example and custompasses gate
 ---
 
 # Application render targets, graphics and compute passes
@@ -309,3 +309,52 @@ The graphics-plus-compute recording fixture pins 3339 calls against 3331 for
 graphics alone: four compute commands, two incoming barrier groups, one layout
 return barrier and one additional scene-input barrier. Both kinds together
 still record zero allocations at 7, 97 and 511 engine draws.
+
+## Walkthrough
+
+[`24-custom-passes`](../../examples/24-custom-passes/main.go) builds a plain
+plaza with three shadow-casting boxes. All effect policy lives in the example;
+copy its shaders and these five steps into a game:
+
+1. **Accumulate a light pattern.** `CreateRenderTarget` allocates a half-size
+   `TargetR16F` image. `CreateAppPass` schedules a mesh pass at
+   `StageBeforeScene` with `BlendAdditive`; `SetDraws` retains three quads whose
+   models sweep in world XZ. Their soft edges and overlaps sum into the image.
+2. **Smooth it over time.** A second `CreateRenderTarget` requests `TargetR32F`,
+   `Storage: true`, and `History: true`. `CreateAppCompute` is created after the
+   pattern at the same stage, reads the pattern and its own previous image,
+   and writes an exponential average. Each `LateUpdate` uses `Extent()` and
+   `SetDispatch((w+7)/8, (h+7)/8, 1)` and supplies the blend factor through
+   `SetPushConstants`. The shader bounds-checks every invocation. A pending
+   window resize also contributes to the dispatch bounds; history resets on
+   recreation.
+3. **Light the scene with it.** `renderer.DefaultShaders()` supplies the existing
+   shader set; replace only `LitFrag` and pass it through `glyph.WithShaders`.
+   `SetShaderTarget(0, smoothed)` binds the field at set 1, binding 7. The copied
+   lit shader adds a world-XZ lookup and modulates only ground lighting,
+   retaining the engine's shadows. Because it is a history target, scene
+   sampling sees the previous write, one frame behind the current compute.
+4. **Scatter and composite fog.** `SceneColor()` and `SceneDepth()` become
+   `Reads` for a half-size `TargetRGBA16F` fullscreen `CreateAppPass` at
+   `StageBeforeBloom`. Inverse VP reconstructs distance from reverse-Z; the
+   light colour and scene colour supply the scattered light. A second
+   `CreateAppPass` uses `Target: nil`, `Load: true`, and `BlendAdditive` to add
+   that target to HDR. Its four low-resolution neighbours are weighted by
+   similarity to full-resolution scene depth, retaining silhouettes. A shallow
+   fog bank touches the horizon and leaves the upper sky clear.
+5. **Measure the work.** Every descriptor sets `Timed: true`. With `-timings`,
+   `ResetGPUTimings()` drops the first 30 frames and `MeanGPUTimings().App`
+   prints the four named graphics/compute brackets when the run ends.
+
+`-passes off` creates no application targets or passes and uses the ordinary
+lit shader, giving the same scene as a control. `-frames` and `-screenshot`
+work as in the other examples; `GLYPHENGINE_FIXED_FRAME_TIME=16.667ms` makes the
+fixed-tick rectangle paths and temporal smoothing repeatable.
+
+`task custompasses` captures frame 120 twice with passes on and once with them
+off. It checks a visible ground change (at least 8/255 in 30000 pixels), a
+visible fog band, unchanged upper sky, and byte-identical repeat captures. It
+also requires silence from validation through three swapchain recreations.
+The captures remain in `.task/custompasses/` for inspection. The renderer
+releases all example resources at shutdown; effects removed earlier should
+use `DestroyAppPass`/`DestroyAppCompute`, then `DestroyRenderTarget`.

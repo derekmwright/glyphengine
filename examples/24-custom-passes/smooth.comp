@@ -1,0 +1,12 @@
+#version 450
+layout(set=2, binding=0) uniform sampler2D pattern;  // Reads[0], current R16F
+layout(set=2, binding=1) uniform sampler2D previous; // Reads[1], previous history image
+layout(set=2, binding=4, r32f) uniform writeonly image2D field; // Writes[0], other image
+layout(push_constant) uniform AppPush { layout(offset=128) vec4 data[8]; } pc;
+layout(local_size_x=8, local_size_y=8) in;
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, imageSize(field)))) return;
+    float value = mix(texelFetch(previous, p, 0).r, texelFetch(pattern, p, 0).r, pc.data[0].x);
+    imageStore(field, p, vec4(value));
+}
