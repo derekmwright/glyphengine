@@ -1437,6 +1437,9 @@ tasks:
         [ "$rebuilds" -ge 3 ] || { cat $d/validation.log; exit 1; }
         echo "24-custom-passes: recreate at 15,60,90; 0 validation messages"
         echo "captures and logs kept in .task/custompasses"
+      - |
+        cd ..
+        go run ./cmd/apppasscheck -filter -frames 24 -validate -provoke-recreate -screenshot .task/custompasses/filter.png
 
   shafts:
     desc: "Check that light shafts reach through the gaps between occluders"

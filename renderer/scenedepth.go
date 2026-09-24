@@ -59,7 +59,7 @@ func (r *Renderer) ensureSceneDepth() error {
 	}
 	if s.color == nil {
 		var err error
-		s.color, err = r.newAppImages(core1_0.FormatR32SignedFloat, core1_0.ImageAspectColor, r.sc.extent, len(r.sc.imageViews), true)
+		s.color, err = r.newAppImages(core1_0.FormatR32SignedFloat, core1_0.ImageAspectColor, r.sc.extent, len(r.sc.imageViews), appImageOptions{sampled: true})
 		if err != nil {
 			return fmt.Errorf("scene depth target: %w", err)
 		}

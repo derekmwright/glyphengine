@@ -6,6 +6,8 @@ capability: rendering
 status: experimental
 api:
   - renderer.RenderTargetDesc
+  - renderer.TargetFilter
+  - renderer.TargetWrap
   - renderer.CreateRenderTarget
   - renderer.DestroyRenderTarget
   - renderer.RenderTarget.Texture
@@ -38,7 +40,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: procedural
-verified: 2026-09-24 # application storage buffers and synchronization churn
+verified: 2026-09-24 # storage buffers, sampler probes, recreation and custompasses gate
 ---
 
 # Application render targets, graphics and compute passes
@@ -67,6 +69,25 @@ Formats are `TargetR16F`, `TargetRG16F`, `TargetRGBA16F`, `TargetR32F`, and
 `Depth: true` adds a single-sample depth attachment, cleared to reverse-Z zero
 when its pass clears and retained when the pass loads. Newly allocated target
 contents, including history, start at zero.
+
+`Filter` selects both minification and magnification: `FilterNearest` (the
+zero/default value) or `FilterLinear`. `Wrap` selects U and V addressing:
+`WrapClampToEdge` (the zero/default value) or `WrapRepeat`. These options also
+apply to storage and history targets. For a periodic field:
+
+```go
+field, err := r.CreateRenderTarget(renderer.RenderTargetDesc{
+    Name: "periodic field", Format: renderer.TargetR16F, Width: 256, Height: 256,
+    Filter: renderer.FilterLinear, Wrap: renderer.WrapRepeat,
+})
+```
+
+Linear filtering requires the format's optimal-tiling
+`SampledImageFilterLinear` feature. Creation checks it before allocating and
+returns an error naming `Filter`, the format and target when unsupported.
+Linear on a 32-bit float target (`TargetR32F` or `TargetRGBA32F`) fails at
+create on devices without the feature; use 16-bit floats for fields you filter.
+Unknown filter and wrap values return errors naming `Filter` or `Wrap`.
 
 | Stage | Available inputs and destination |
 |---|---|
@@ -105,6 +126,10 @@ not inspect its GPU descriptor before then. The node remains enabled for the
 renderer lifetime. It stores the scene's reverse-Z depth in R32F: 1 is near,
 0 is far/background. With MSAA it takes the maximum sample. It captures
 opaque scene depth before water, whose pipeline does not write depth.
+Scene depth always uses nearest/clamp sampling so reverse-Z values stay exact
+instead of interpolating across geometry edges. Scene colour retains the HDR
+sampler's existing linear/clamp behavior. Application target options affect
+neither borrowed scene texture.
 
 ## Compute dispatches
 
@@ -314,6 +339,9 @@ a pass skips its whole graph node; frame indices continue to advance.
 Relative targets are reallocated on swapchain recreation and their history
 starts over. Fixed-size images survive. Descriptors and framebuffers are
 rebuilt against replacement views. Use `Extent()` for the current dimensions.
+Recreated target samplers retain `Filter` and `Wrap`, and the stable
+`Texture()` is updated with a descriptor set referencing the new view and
+sampler, including both history instances.
 
 `SetShaderTexture` and `SetShaderTarget` record intent. They update only the
 frame slot whose fence was waited on. Nil restores the fallback. Sampling an
@@ -368,6 +396,15 @@ The graphics-plus-compute recording fixture pins 3339 calls against 3331 for
 graphics alone: four compute commands, two incoming barrier groups, one layout
 return barrier and one additional scene-input barrier. Both kinds together
 still record zero allocations at 7, 97 and 511 engine draws.
+
+`go run ./cmd/apppasscheck -filter -validate -provoke-recreate` writes four
+known values into 2x2 R16F targets and samples fractional and out-of-range
+coordinates into a 12x4 chart. It checks nearest/linear crossed with
+clamp/repeat, plus `SetShaderTarget` sampling of a storage/history target.
+The nearest/clamp row is a visible control. Captured values must be within
+1/255 of the expected samples, both before and after recreation; fixed images
+survive while relative samplers and descriptors are replaced. `task custompasses`
+runs this check and keeps its chart in `.task/custompasses/filter.png`.
 
 ## Walkthrough
 
