@@ -212,7 +212,7 @@ func (r *Renderer) recordGrassBake(gs *GrassSystem, imp *grassImpostor, cellSize
 			// scatters the geometry out of clip -- an empty atlas that looks
 			// exactly like a transparent one.
 			r.deviceDriver.CmdBindIndexBuffer(cmdBuf, v.Mesh.indexBuffer, 0, v.Mesh.indexType)
-			r.deviceDriver.CmdDrawIndexed(cmdBuf, v.Mesh.IndexCount, 1, 0, 0, 0)
+			r.deviceDriver.CmdDrawIndexed(cmdBuf, v.Mesh.IndexCount, 1, v.Mesh.firstIndex, v.Mesh.vertexOffset, 0)
 		} else {
 			r.deviceDriver.CmdDraw(cmdBuf, v.Mesh.VertexCount, 1, 0, 0)
 		}

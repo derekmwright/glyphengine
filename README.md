@@ -221,6 +221,7 @@ task example:22-level         # a level loaded from one glTF: extras, KHR_lights
 task example:23-shadow-coverage # distant off-camera casters with independent shadow coverage/depth
 task example:24-custom-passes # application render targets, graphics/compute passes and depth-aware fog
 task example:25-lod-forest     # per-instance culling, distance levels, dithered fades and baked impostors
+task example:26-mesh-ranges    # distinct patches as separate meshes, shared arena ranges or indirect batches
 ```
 
 ## Building

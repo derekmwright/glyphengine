@@ -121,6 +121,8 @@ func createLogicalDevice(instanceDriver core1_0.CoreInstanceDriver, physicalDevi
 		EnabledFeatures: &core1_0.PhysicalDeviceFeatures{
 			SamplerAnisotropy:                 supported.SamplerAnisotropy,
 			ShaderStorageImageExtendedFormats: supported.ShaderStorageImageExtendedFormats,
+			MultiDrawIndirect:                 supported.MultiDrawIndirect,
+			DrawIndirectFirstInstance:         supported.DrawIndirectFirstInstance,
 		},
 	})
 	if err != nil {

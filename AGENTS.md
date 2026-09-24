@@ -186,6 +186,7 @@ are that pipeline's own real-Blender fixture, in the same spirit as
 | `task custompasses` | Application light/compute/fog passes are visible, confined, repeatable and validation-clean (needs a GPU) |
 | `task waterblend` | A blended effect in front of the water is not painted over by it (needs a GPU) |
 | `task bench` | Per-pass GPU and per-phase CPU cost over a fixed scene set (needs a GPU) |
+| `task ranges` | Shared mesh ranges, both index widths, indirect/instanced/LOD equivalence and deferred replacement (needs a GPU) |
 | `task lod` | CPU/GPU LOD culling, fades, impostors, exact indexed/nonindexed captures, replacement lifetime and interleaved performance (needs a GPU) |
 | `task lights` | Clustered and brute-force light renderers produce byte-identical images (needs a GPU) |
 | `task nightlight` | Warm lamps stay warm on the ground after the night shift (needs a GPU) |

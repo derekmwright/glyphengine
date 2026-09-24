@@ -108,7 +108,7 @@ func (s *InstanceSetLOD) createGPU() error {
 		if err = g.readback[f].create(r, g.commands[f].size, core1_0.BufferUsageTransferDst, true); err != nil {
 			return err
 		}
-		if err = g.uniform[f].create(r, 64, core1_0.BufferUsageUniformBuffer, true); err != nil {
+		if err = g.uniform[f].create(r, 128, core1_0.BufferUsageUniformBuffer, true); err != nil {
 			return err
 		}
 		if err = g.scratch[f].create(r, (s.capacity*6+((s.capacity+63)/64)*9)*4, core1_0.BufferUsageStorageBuffer, false); err != nil {
@@ -171,7 +171,7 @@ func (s *InstanceSetLOD) prepareGPU(frustum Frustum, eye [3]float32, frame int) 
 	g.pc[31] = math.Float32frombits(uint32(len(s.placements)))
 	g.pc[32] = math.Float32frombits(uint32(s.capacity))
 	g.pc[34] = math.Float32frombits(uint32(s.dropped))
-	params := unsafe.Slice((*byte)(g.uniform[frame].mapped), 64)
+	params := unsafe.Slice((*byte)(g.uniform[frame].mapped), 128)
 	clear(params)
 	for i, l := range s.levels {
 		binary.LittleEndian.PutUint32(params[i*4:], math.Float32bits(l.MaxDistance))
@@ -180,6 +180,8 @@ func (s *InstanceSetLOD) prepareGPU(frustum Frustum, eye [3]float32, frame int) 
 		n := 6
 		if i < len(s.levels) {
 			m := s.levels[i].Mesh
+			binary.LittleEndian.PutUint32(params[64+i*4:], m.firstIndex)
+			binary.LittleEndian.PutUint32(params[96+i*4:], uint32(m.vertexOffset))
 			n = m.VertexCount
 			if m.IndexCount > 0 {
 				n = m.IndexCount

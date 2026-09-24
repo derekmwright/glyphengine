@@ -111,7 +111,7 @@ func (r *Renderer) recordImpostorBake(a *ImpostorAtlas, mesh *Mesh, texture *Tex
 		pc[32], pc[33], pc[34] = 1, 1, 1
 		r.deviceDriver.CmdPushConstants(cmd, r.pipelineLayout, core1_0.StageVertex|core1_0.StageFragment, 0, unsafe.Slice((*byte)(unsafe.Pointer(&pc[0])), pushConstantSize))
 		if mesh.IndexCount > 0 {
-			r.deviceDriver.CmdDrawIndexed(cmd, mesh.IndexCount, 1, 0, 0, 0)
+			r.deviceDriver.CmdDrawIndexed(cmd, mesh.IndexCount, 1, mesh.firstIndex, mesh.vertexOffset, 0)
 		} else {
 			r.deviceDriver.CmdDraw(cmd, mesh.VertexCount, 1, 0, 0)
 		}

@@ -151,7 +151,7 @@ func recordTranslucent(
 		stats.addDraw(1, d.Mesh.IndexCount, d.Mesh.VertexCount)
 		if d.Mesh.IndexCount > 0 {
 			deviceDriver.CmdBindIndexBuffer(cmdBuf, d.Mesh.indexBuffer, 0, d.Mesh.indexType)
-			deviceDriver.CmdDrawIndexed(cmdBuf, d.Mesh.IndexCount, 1, 0, 0, 0)
+			deviceDriver.CmdDrawIndexed(cmdBuf, d.Mesh.IndexCount, 1, d.Mesh.firstIndex, d.Mesh.vertexOffset, 0)
 		} else {
 			deviceDriver.CmdDraw(cmdBuf, d.Mesh.VertexCount, 1, 0, 0)
 		}

@@ -45,6 +45,7 @@ type InstanceSet struct {
 	Mesh     *Mesh
 	lod      *InstanceSetLOD
 	lodLevel int
+	batch    *meshRangeBatch
 
 	buffer         core1_0.Buffer
 	offset         int

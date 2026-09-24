@@ -45,6 +45,16 @@ api:
   - renderer.ResourceCounts.InstanceSets
   - renderer.ResourceCounts.LODSets
   - renderer.ResourceCounts.ImpostorAtlases
+  - renderer.MeshArenaDesc
+  - renderer.MeshArena
+  - renderer.MeshArena.Alloc
+  - renderer.MeshArena.Free
+  - renderer.MeshArena.Stats
+  - renderer.Renderer.CreateMeshArena
+  - renderer.Renderer.DestroyMeshArena
+  - renderer.Renderer.SetMeshRangeBatching
+  - renderer.ResourceCounts.MeshArenas
+  - renderer.ResourceCounts.MeshRanges
 example: examples/08-grass
 run: task example:08-grass
 requires:
@@ -55,6 +65,148 @@ verified: 2026-09-24
 ---
 
 # Treat a loaded model as geometry, not only as a draw call
+
+## Shared geometry storage and independent draw ranges
+
+Distinct chunks can share one device-local vertex buffer and one index buffer
+while retaining an ordinary `*Mesh` for every range:
+
+```go
+arena, err := r.CreateMeshArena(renderer.MeshArenaDesc{
+    Name: "world chunks", Vertices: 500_000, Indices: 3_000_000, Index32: true,
+})
+if err != nil { return err }
+mesh, err := arena.Alloc(vertices, indices) // []Vertex, []uint32
+if err != nil { return err }
+// Use mesh in RenderObject.Mesh or MeshRef, with this chunk's own transform.
+usedVertices, usedIndices, ranges := arena.Stats()
+_, _, _ = usedVertices, usedIndices, ranges
+```
+
+Capacity is fixed and measured in vertices/indices. Input indices are local to
+the supplied vertices. `Index32: false` stores uint16 indices and rejects any
+local index above 65535; an arena can still contain more than 65536 vertices,
+because every draw carries its own base vertex. Bounds are computed from each
+range's vertices. `firstIndex` and base vertex are carried through ordinary,
+shadow, translucent, instanced, CPU/GPU LOD, application, overlay and bake
+recorders. Camera-relative placement stays in the game's transform: subtract a
+large camera origin in high precision before converting to float32.
+
+Ranges are **immutable**. A changed patch is a new `Alloc` and a `Free` of the
+old mesh after replacing all its draws. `UpdateMeshData` rejects ranges; the
+existing dynamic mesh API is separate. Allocation is first-fit with coalescing:
+fragmented free space may be too small even when aggregate capacity would fit.
+Reserve headroom for replacements while old ranges are still in flight.
+Failures name the arena, and a failed allocation returns its reserved spans.
+
+All arena operations require the renderer thread. `Alloc` uses one staging
+buffer and one graphics-queue submission for both slices, with transfer
+barriers and synchronous completion. It waits for earlier graphics work too.
+Do not build a per-frame streaming loop on this upload: that should wait for
+issue #95's asynchronous uploader. The measured cost of one 1089-vertex,
+6144-index patch is recorded with the benchmark below.
+
+Remove all draws borrowing a range before `arena.Free(mesh)` (or
+`r.DestroyMesh(mesh)`). Reuse waits out all frames in flight, and `Stats` includes
+retiring ranges until then. `r.DestroyMeshArena(arena)` panics with the arena's
+name if any range has not been freed; after all frees are queued, destruction
+may be queued immediately behind them. Both release operations are idempotent.
+`ResourceCounts.MeshArenas` and `.MeshRanges` include deferred resources;
+`.Meshes` continues to count standalone meshes. Renderer shutdown also sweeps
+arenas that the application did not release explicitly.
+
+### Measuring distinct geometry submission
+
+`task bench -- -scene patches -repeat 4 -json .task/patches.json` runs 100,
+400 and 1600 distinct patches of 2048 triangles each. At each size it interleaves
+separate meshes, arena ranges and indirect batches, retaining every sample.
+The scene uses a grid, camera-relative transforms, fixed 16.667 ms time,
+1280x720 MSAA4, and disables patch shadow casting to isolate geometry
+submission. Draw counts include any other scene geometry and are reported
+separately from allocated patches. Geometry bytes and buffer counts exclude
+transient upload staging and the renderer's common resources.
+
+The rule set before measuring: ship batching only if at 400 patches it saves
+more CPU recording time than the within-mode run range and does not increase
+GPU time outside the measured scatter. CPU total includes waits; recording and
+GPU total remain separate metrics.
+
+Measured 2026-09-24 on Windows 11 / RX 7900 XTX / Go 1.27 at commit `daff3b7`
+plus this change, four interleaved trials per mode and size, 200 frames each,
+nothing else on the GPU (the bench refuses to sample while another engine
+process is running). Draws include the sky and cloud passes' own geometry.
+
+| N | Mode | Draws | CPU record ms mean (min..max) | GPU total ms mean (min..max) | CPU total ms mean | Alloc ms/patch mean | Geometry buffers |
+|---:|---|---:|---|---|---:|---:|---:|
+| 100 | separate | 101 | 0.026 (0.013..0.043) | 0.201 (0.196..0.207) | 16.441 | 2.014 | 200 |
+| 100 | ranges | 101 | 0.058 (0.023..0.093) | 0.190 (0.186..0.195) | 16.432 | 0.712 | 2 |
+| 100 | indirect | 2 | 0.041 (0.015..0.070) | 0.186 (0.183..0.192) | 16.441 | 0.698 | 2 |
+| 400 | separate | 401 | 0.316 (0.061..0.556) | 0.604 (0.603..0.605) | 16.442 | 1.876 | 800 |
+| 400 | ranges | 401 | 0.157 (0.076..0.234) | 0.579 (0.577..0.582) | 16.439 | 0.666 | 2 |
+| 400 | indirect | 2 | 0.050 (0.008..0.107) | 0.583 (0.583..0.583) | 16.441 | 0.735 | 2 |
+| 1600 | separate | 1601 | 1.399 (1.337..1.460) | 1.557 (1.556..1.558) | 16.465 | 1.993 | 3200 |
+| 1600 | ranges | 1601 | 1.210 (1.093..1.279) | 1.294 (1.291..1.297) | 16.434 | 0.640 | 2 |
+| 1600 | indirect | 2 | 0.046 (0.000..0.081) | 1.286 (1.285..1.287) | 16.439 | 0.636 | 2 |
+
+CPU total is the fixed 16.667 ms frame minus present overhead in every row:
+the frame is GPU-wait bound, so recording cost only matters once it exceeds
+the wait. One `Alloc` of a 1089-vertex, 6144-index patch costs about 0.65 ms
+against about 1.9 ms for a separate `CreateIndexedMesh32`, because one staging
+buffer and one submission carry both slices instead of two of each.
+
+The rule's outcome, applied as written: **not met at 400, met at 1600.** At
+400 patches the batch saves 0.27 ms of recording against separate meshes and
+0.11 ms against plain ranges, but the separate-mode recording time itself
+ranged over 0.50 ms across four trials, so the saving is inside the scatter of
+the baseline. At 1600 the batch saves 1.35 ms against separate meshes and
+1.16 ms against ranges, both well outside the 0.12 to 0.19 ms within-mode
+ranges, with GPU time unchanged against ranges (1.286 versus 1.294 ms). GPU
+time never rose in any row. Batching therefore ships **opt-in and off by
+default** rather than as the recommended path: at the consumer's count today
+it is not distinguishable from noise, and a game that grows toward a few
+thousand ranges can turn it on and measure. Ranges alone, without batching,
+cut GPU time by 4 % at 400 and 17 % at 1600 against separate meshes; the
+driver's cost of switching vertex and index buffers per draw is the likely
+reason, and that saving comes free with the arena.
+
+Batching is opt-in with `r.SetMeshRangeBatching(true)`. It groups adjacent
+plain-lit, opaque ranges from one arena with identical texture, tint and
+material factors, using the existing instance vertex layout for each model
+matrix. `MVP` must correspond to `SceneLighting.VP * Model`. Per-range bounds
+still select each shadow view independently. Skinning, PBR material maps,
+terrain splat materials, water, translucency and application passes retain
+their existing draw paths. As with ordinary instancing, batched geometry is
+recorded after individual opaque geometry; do not rely on coplanar draw order.
+The instance shader evaluates VP * (Model * vertex), while individual draws use
+a CPU-combined MVP. Exact equality is tested on the three-range fixture below;
+it is not a promise for arbitrary matrices. The 400-patch frame-30 grid differs
+at 29 of 921600 pixels between direct and indirect, maximum channel 6/255,
+mean absolute channel difference 0.00001266/255.
+
+Mapped transforms and indirect arguments have separate storage for every frame
+in flight, written only after that slot's fence. Each shadow view gets disjoint
+arguments. Multi-draw requires both `multiDrawIndirect` and
+`drawIndirectFirstInstance`; otherwise the same prepared ranges use direct
+indexed draws. Calls split at `maxDrawIndirectCount`. No indirect-count
+extension or compute shader is needed for CPU-written commands.
+
+`task ranges` compares three distinct shapes and independent transforms against
+separate meshes, with both index widths, repeated allocation/free while frames
+are in flight, repeated indirect captures and a missing-middle visibility
+control. The control changes 7200 pixels (floor 1000); all equivalent captures
+have identical RGBA bytes. Unit tests pin the indexed offsets and exercise
+fragmentation, overflow, creation/upload failure unwind, deferred reuse,
+material boundaries, fallback and per-view command storage. The balance
+meta-check detects an omitted destroy for every new resource kind.
+Ordinary instancing and both CPU/GPU LOD also match that fixture exactly under
+synchronization validation. The benchmark itself requires at least 1000 pixels
+to differ from the background by 20/255; reversing its winding was verified to
+fail with zero visible pixels, despite reporting nonzero draw/triangle counts.
+
+See [shared mesh storage](../adr/0010-shared-mesh-storage-and-range-submission.md)
+for ownership and [instancing](instancing.md) for repeated geometry.
+
+## Loaded model geometry
 
 `LoadGLTF` returns a `*Model` whose `Meshes` are one `ModelMesh` per primitive.
 An exporter splits a model by material, so one structure typically arrives as

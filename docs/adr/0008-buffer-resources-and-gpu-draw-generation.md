@@ -78,3 +78,14 @@ for deterministic output and CPU cost independent of placement count.
 - Fixed-clock forest frame 61: atomic append differed in four channel samples
   from CPU (maximum 5/255) and one between repeats (1/255); stable scatter
   produced zero differing channel samples in both comparisons.
+
+## Addendum — 2026-09-24
+
+[0010](0010-shared-mesh-storage-and-range-submission.md) adds shared immutable
+geometry ranges. GPU LOD's existing indexed arguments now carry each mesh's
+firstIndex and vertexOffset; nonindexed commands remain unchanged. Distinct
+range submission is measured using CPU-written indirect commands and the
+existing instance vertex layout, with independent storage per frame slot and
+per shadow view. The staged uploader also accepts offset copies so an arena
+allocation uploads vertices and indices in one submission. The benchmark and
+shipping decision are recorded on the [models page](../agents/models.md).

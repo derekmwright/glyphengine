@@ -42,7 +42,7 @@ func gpuFrame(t *testing.T, n int) (*frame, *Renderer, []RenderObject) {
 	for f := range maxFramesInFlight {
 		g.sets = append(g.sets, h.descSet())
 		for i, b := range []*lodBuffer{&g.output[f], &g.commands[f], &g.readback[f], &g.uniform[f], &g.scratch[f]} {
-			b.size = []int{n * 80 * 4, 84, 84, 64, (n*6 + ((n+63)/64)*9) * 4}[i]
+			b.size = []int{n * 80 * 4, 84, 84, 128, (n*6 + ((n+63)/64)*9) * 4}[i]
 			b.buffer = h.buffer()
 			bytes := make([]byte, b.size)
 			b.mapped = unsafe.Pointer(&bytes[0])
