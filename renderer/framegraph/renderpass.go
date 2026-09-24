@@ -22,6 +22,20 @@ func (g *Graph) renderPass(ni int, uses [][]compiledUse, resources []ResourceInf
 		// Explicit dependencies remain byte-for-byte caller-owned policy.
 		for _, u := range uses[ni] {
 			before := states[u.Resource]
+			if attachment(u.Access) {
+				// A sampled attachment can be read by an earlier node or the
+				// preceding frame. The next clear/discard must wait for readers
+				// too. In particular this retains the UI layer's former override.
+				for j, consumers := range uses {
+					for _, consumer := range consumers {
+						if consumer.Resource == u.Resource && consumer.Access == SampledRead {
+							reader := accessState(g.nodes[j].Kind, consumer.Use)
+							d.Dependencies[0].SrcStageMask |= reader.stage
+							d.Dependencies[0].SrcAccessMask |= reader.access
+						}
+					}
+				}
+			}
 			if attachment(u.Access) && (before.layout == core1_0.ImageLayoutGeneral ||
 				before.access&(core1_0.AccessShaderWrite|core1_0.AccessTransferRead|core1_0.AccessTransferWrite) != 0) {
 				// Attachments cannot use an image barrier, so a preceding storage
@@ -41,6 +55,7 @@ func (g *Graph) renderPass(ni int, uses [][]compiledUse, resources []ResourceInf
 				dep.DstAccessMask |= core1_0.AccessDepthStencilAttachmentRead | core1_0.AccessDepthStencilAttachmentWrite
 			}
 		}
+		d.Dependencies = append(d.Dependencies, g.outgoingDependency(ni, uses))
 	}
 	appendAttachment := func(u compiledUse) int {
 		r := resources[u.Resource]

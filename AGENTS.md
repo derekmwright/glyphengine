@@ -175,6 +175,7 @@ are that pipeline's own real-Blender fixture, in the same spirit as
 | `task lint` | gofmt, then `go vet -unsafeptr=false` |
 | `task smoke` | Renders real frames of every example, exits non-zero on failure |
 | `task validate` | Every example under the Vulkan validation layer; must be completely silent (needs a GPU and the SDK) |
+| `task syncvalidate` | The validation matrix plus application compute churn under synchronization validation; must be silent (needs a GPU and the SDK) |
 | `task determinism` | Renders repeat byte for byte under a fixed frame clock, and the recorded draw sequence repeats with them (needs a GPU) |
 | `task reload` | A level swapped for a freshly loaded copy never drops a frame's geometry (needs a GPU) |
 | `task sky` | Celestial bodies are occluded by terrain, not drawn over it (needs a GPU) |

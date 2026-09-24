@@ -24,7 +24,7 @@ requires:
   - vulkan-runtime
   - vulkan-sdk
 assets: procedural
-verified: 2026-09-23 # rechecked with compute dispatches
+verified: 2026-09-24 # rechecked with synchronization validation
 ---
 
 # Record the renderer's frame graph
@@ -32,6 +32,7 @@ verified: 2026-09-23 # rechecked with compute dispatches
 ```sh
 go test ./renderer/framegraph ./renderer -count=1
 task validate
+task syncvalidate
 task determinism
 ```
 
@@ -155,7 +156,8 @@ identity. Both bloom chains share downsample and upsample descriptions;
 the legacy clouds also use the cached downsample description. Water, UI clear
 and tonemap have separate descriptions. There are four cached objects with
 the UI layer disabled and five with it enabled. Water supplies
-`sceneEntryDependency()` and colour/depth/resolve `AttachmentOrder` explicitly;
+the shared incoming/outgoing pair from `sceneEntryDependency()` and
+colour/depth/resolve `AttachmentOrder` explicitly;
 `TestFrameGraphWaterOrderCompatibleWithLegacyScene` checks compatibility with
 the actual legacy render-pass constructor.
 

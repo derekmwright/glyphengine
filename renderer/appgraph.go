@@ -19,8 +19,9 @@ type appGraphTarget struct{ write, read, depth framegraph.ResourceID }
 // Scene: 640x360, 4x MSAA, plus a quad at (0,-0.7,0.1) scaled (0.8,0.1,1),
 // with WaterParams{WaveLength: 2, AbsorptionDepth: 1}; count RAW messages per
 // producer with VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT.
-// The legacy pass's implicit outgoing dependency ends at bottom-of-pipe, so
-// incoming color-output scope alone does not include its final transition.
+// Before issue #109 the legacy pass's implicit outgoing dependency ended at
+// bottom-of-pipe, so incoming color-output scope alone missed its final
+// transition. Scene/water now declare an explicit exit dependency too.
 func appDependency() []core1_0.SubpassDependency {
 	return []core1_0.SubpassDependency{{SrcSubpass: core1_0.SubpassExternal, DstSubpass: 0,
 		SrcStageMask:  core1_0.PipelineStageAllCommands | core1_0.PipelineStageVertexShader | core1_0.PipelineStageFragmentShader | core1_0.PipelineStageColorAttachmentOutput | core1_0.PipelineStageEarlyFragmentTests | core1_0.PipelineStageLateFragmentTests | core1_0.PipelineStageTransfer,

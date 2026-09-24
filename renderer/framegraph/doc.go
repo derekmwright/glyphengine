@@ -12,8 +12,11 @@
 // Attachments transition inside a render pass, never through image barriers.
 // In particular, a copied HDR target can enter a load pass in TransferSrcOptimal
 // and leave it shader-readable. Non-attachment uses carry explicit barriers.
-// The default incoming dependency matches the renderer's bloom passes; tonemap,
-// UI and scene/water supply their own dependencies for pipeline compatibility.
+// Derived incoming dependencies order attachment writes/loads and preceding
+// sampled reads. Outgoing dependencies expose attachment writes and final-layout
+// transitions to declared consumers and attachment reuse, including optional and
+// next-frame uses. Scene/water and application passes override the complete pair
+// for pipeline compatibility; even an explicit empty override is preserved.
 //
 // Each maximal adjacent run of Step.Barriers with identical SrcStage and
 // DstStage is one pipeline-barrier call, retaining resource order. The same

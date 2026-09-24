@@ -2,8 +2,8 @@
 id: vulkan-validation
 title: Enable Vulkan validation and find resource leaks
 summary: >
-  Turn on the Khronos validation layer to catch API misuse and undestroyed
-  objects, either from code or from the environment for an already-built binary.
+  Turn on the Khronos validation layer to catch API misuse, undestroyed objects
+  and synchronization hazards, from code or the environment for an already-built binary.
 capability: rendering
 status: stable
 since: v0.2.0
@@ -17,7 +17,7 @@ requires:
   - vulkan-runtime
   - vulkan-sdk
 assets: none
-verified: 2026-09-19
+verified: 2026-09-24
 ---
 
 # Enable Vulkan validation and find resource leaks
@@ -100,6 +100,60 @@ task validate
 Every example is expected to be completely silent, so the gate is strict on
 purpose. It needs a GPU and the SDK, so it is deliberately not part of
 `task ci`.
+
+## Synchronization validation
+
+Core validation checks API use, layouts and object lifetime, but does not
+track whether the writes one draw makes are available to the next draw.
+Synchronization validation adds that hazard analysis. An image can have the
+right layout and still have a read-after-write or write-after-write hazard:
+a render pass's automatic layout transition is itself a write.
+
+```sh
+GLYPHENGINE_VALIDATION=1 GLYPHENGINE_SYNC_VALIDATION=1 ./mygame
+task syncvalidate
+```
+
+The sync flag only takes effect when validation is requested as well. In
+`renderer.New`, before `createInstance`, it sets `VK_LAYER_VALIDATE_SYNC=1`
+in the process environment, then restores the previous value immediately
+after instance creation. The Khronos layer reads its `validate_sync` setting
+from that variable; no wrapper extension or `pNext` structure is required.
+Startup logs `Vulkan synchronization validation enabled
+(VK_LAYER_VALIDATE_SYNC=1)` when the layer was enabled with this request.
+
+Verified on Windows with Vulkan SDK **1.3.268.0**,
+`VK_LAYER_KHRONOS_validation` API version **1.3.268**, implementation **1**.
+Its installed `Bin/VkLayer_khronos_validation.json` documents `validate_sync`.
+The [Khronos setting guide](https://github.com/KhronosGroup/Vulkan-ValidationLayers/blob/main/docs/updating_from_VK_EXT_validation_features.md)
+also maps synchronization validation to this environment variable. On that
+SDK the separate alpha `sync_queue_submit` check defaults off; this gate uses
+the documented synchronization-validation setting and the layer's defaults.
+
+The setting was verified against a real failure before fixing it: 60 fixed
+frames of `02-cube` at 1280x720, 4x MSAA reported **240** synchronization
+messages versus zero with core validation alone. Outgoing dependencies fixed
+the cloud/scene final-transition reads; incoming attachment-write access fixed
+the cloud/tonemap DONT_CARE loads. The same run is now silent. UI glow and
+water require the same visibility on their outputs.
+
+The graph derives an incoming/outgoing dependency pair. It includes actual
+consumer shader stages, transfer reads, attachment loads and attachment reuse;
+optional nodes and persistent next-frame reads cannot escape the scopes.
+Non-nil `Node.Dependencies` still replaces the whole pair. Scene and water
+share an identical pair because their pipelines must remain compatible.
+
+`task syncvalidate` reuses the entire `validate` matrix, including opt-in
+paths, provoked swapchain rebuilds and `25-lod-forest -replace`, then runs
+`cmd/apppasscheck -compute -churn -provoke-recreate -validate -frames 300`. Both gates
+prove the log counter can detect a synthetic validation message and check
+that the requested layer actually started. Every warning or error fails the
+gate; no synchronization diagnostics are filtered out.
+
+The gate was broken by removing the shared scene/water outgoing dependency
+while preserving pass compatibility: `01-triangle` reported 30
+`SYNC-HAZARD-READ-AFTER-WRITE` messages in 30 frames, and Task exited 201
+(the checker shell exited 1). No false-positive exclusions remain.
 
 ## How teardown stays correct
 
