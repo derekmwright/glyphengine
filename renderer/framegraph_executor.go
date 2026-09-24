@@ -43,7 +43,7 @@ type graphNode struct {
 // stay here, with indexed bindings so execution never looks up a cache key.
 type frameGraph struct {
 	beforeShadows                          int
-	lodTimer                               *AppPass
+	lodTimer, uploadTimer                  *AppPass
 	lodBuffers                             map[framegraph.ResourceID]graphImage
 	storage                                map[*StorageBuffer]framegraph.ResourceID
 	declarations                           []framegraph.Node

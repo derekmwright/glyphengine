@@ -1073,8 +1073,10 @@ func (e *Engine) LogTimingsTSV(label string) {
 		fmt.Fprintf(&b, "	gpu_%s	%.3f", renderer.Pass(p), ms)
 	}
 	for _, a := range g.App {
-		if a.Name == "lodselect" {
-			fmt.Fprintf(&b, "\tgpu_lodselect\t%.3f", a.Ms)
+		// The engine's own timed nodes, by name. Application passes are the
+		// game's business and their labels would collide with a column.
+		if a.Name == "lodselect" || a.Name == "upload" {
+			fmt.Fprintf(&b, "	gpu_%s	%.3f", a.Name, a.Ms)
 		}
 	}
 	st := e.renderer.Stats()

@@ -27,6 +27,16 @@ type RenderStats struct {
 	// ShadowCasters is how many draws the shadow cascades rendered, summed over
 	// cascades, so it can exceed the number of objects in the scene.
 	ShadowCasters int
+
+	// UploadsSkipped is how many draws this frame named a mesh whose streamed
+	// upload had not completed yet, and so were not recorded at all. Steady
+	// nonzero means geometry is being published faster than it can land; a
+	// spike right after a burst of AllocAsync calls is the normal shape.
+	//
+	// Written after the recorder rather than by it: the counters are reset at
+	// the start of recording, and the draws are dropped before it. See
+	// Renderer.dropStreaming.
+	UploadsSkipped int
 }
 
 // reset zeroes the counters at the start of a frame.

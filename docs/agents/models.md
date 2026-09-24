@@ -48,11 +48,19 @@ api:
   - renderer.MeshArenaDesc
   - renderer.MeshArena
   - renderer.MeshArena.Alloc
+  - renderer.MeshArena.AllocAsync
   - renderer.MeshArena.Free
   - renderer.MeshArena.Stats
   - renderer.Renderer.CreateMeshArena
   - renderer.Renderer.DestroyMeshArena
   - renderer.Renderer.SetMeshRangeBatching
+  - renderer.Renderer.CreateIndexedMeshAsync
+  - renderer.Renderer.CreateIndexedMesh32Async
+  - renderer.Renderer.UploadStorageBufferAsync
+  - renderer.UploadTicket
+  - renderer.UploadTicket.Ready
+  - renderer.RenderStats.UploadsSkipped
+  - renderer.ResourceCounts.PendingUploads
   - renderer.ResourceCounts.MeshArenas
   - renderer.ResourceCounts.MeshRanges
 example: examples/08-grass
@@ -61,7 +69,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: bundled
-verified: 2026-09-24
+verified: 2026-09-24 # streamed uploads measured and gated
 ---
 
 # Treat a loaded model as geometry, not only as a draw call
@@ -102,9 +110,10 @@ Failures name the arena, and a failed allocation returns its reserved spans.
 All arena operations require the renderer thread. `Alloc` uses one staging
 buffer and one graphics-queue submission for both slices, with transfer
 barriers and synchronous completion. It waits for earlier graphics work too.
-Do not build a per-frame streaming loop on this upload: that should wait for
-issue #95's asynchronous uploader. The measured cost of one 1089-vertex,
-6144-index patch is recorded with the benchmark below.
+Do not build a per-frame streaming loop on this upload: use `AllocAsync` and
+the [streamed uploads](#streaming-geometry-in-while-frames-render) below. The
+measured cost of one 1089-vertex, 6144-index patch is recorded with the
+benchmark below.
 
 Remove all draws borrowing a range before `arena.Free(mesh)` (or
 `r.DestroyMesh(mesh)`). Reuse waits out all frames in flight, and `Stats` includes
@@ -205,6 +214,175 @@ fail with zero visible pixels, despite reporting nonzero draw/triangle counts.
 
 See [shared mesh storage](../adr/0010-shared-mesh-storage-and-range-submission.md)
 for ownership and [instancing](instancing.md) for repeated geometry.
+
+## Streaming geometry in while frames render
+
+Every synchronous device-local upload ends in a `vkQueueWaitIdle` on the
+graphics queue, and an indexed mesh goes through it twice -- once for its
+vertices, once for its indices. A game that generates terrain on a worker and
+publishes patches as they arrive pays that idle per buffer, which is why the
+reported consumer avoided the device-local path altogether and kept
+host-visible copies per frame in flight instead.
+
+The asynchronous constructors return before the copy runs:
+
+```go
+mesh, ticket, err := r.CreateIndexedMesh32Async(vertices, indices) // []Vertex, []uint32
+if err != nil { return err }
+// ... later, on any frame:
+if ticket.Ready() {
+    // the device-local buffers hold the data
+}
+```
+
+| Synchronous | Asynchronous |
+|---|---|
+| `CreateIndexedMesh` | `CreateIndexedMeshAsync` |
+| `CreateIndexedMesh32` | `CreateIndexedMesh32Async` |
+| `MeshArena.Alloc` | `MeshArena.AllocAsync` |
+| `UploadStorageBuffer` | `UploadStorageBufferAsync` |
+
+Each one allocates its destination, copies the caller's bytes into a staging
+buffer immediately -- so the slices may be reused or dropped on return, exactly
+as with the synchronous path -- and queues the copy. The next `DrawFrame`, after
+its fence wait, records every queued copy into that frame's command buffer as
+one batch, before shadows, GPU LOD selection or any scene work. The staging
+buffers are released, and the tickets become ready, when that frame's fence is
+next waited on. Nothing waits for a queue.
+
+The synchronous constructors are unchanged and remain the right choice for
+load-time geometry, where waiting is free and a ticket is one more thing to
+carry.
+
+### Measuring streamed uploads
+
+`task bench -- -scene stream -repeat 3 -json .task/stream.json` publishes 400
+patches of 2048 triangles, two per rendered frame, over 300 frames at 1280x720
+MSAA4 under a fixed 16.667 ms clock, and interleaves the three paths
+A/B/C/A/B/C with every sample retained. All three end up drawing the same 401
+draws. The bench refuses to sample while another engine process is running.
+
+Measured 2026-09-24 on Windows 11 / RX 7900 XTX / Go 1.27 at commit `a2c4b44`
+plus this change, three interleaved trials per mode, nothing else on the GPU.
+"Upload CPU" is wall time inside the constructor call, divided by every frame
+of the run; "submit CPU" is the engine's own `cpu_submit` phase, which is where
+claiming the batch, retiring staging and the skip filter land.
+
+| Mode | Upload CPU ms/frame | Submit CPU ms/frame | Frame max ms | Frame p99 ms | Frame median ms | GPU total ms | GPU upload ms | Buffers |
+|---|---|---|---|---|---|---|---|---:|
+| synchronous | 9.630 (9.550..9.679) | 0.206 | 27.639 (27.417..27.825) | 18.479 (17.985..18.784) | 16.656 | 0.449 (0.446..0.454) | — | 804 |
+| dynamic | 1.471 (1.341..1.710) | 0.520 | 18.370 (17.913..19.191) | 17.868 (17.664..18.239) | 16.661 | 0.907 (0.824..1.055) | — | 1608 |
+| asynchronous | 1.377 (1.327..1.465) | 0.544 | 18.820 (17.914..20.419) | 17.886 (17.689..18.143) | 16.657 | 0.450 (0.449..0.451) | 0.007 | 804 |
+
+Per patch that is 7.22 ms synchronous, 1.10 ms dynamic and 1.03 ms
+asynchronous. The synchronous figure is the one worth looking at twice: the
+same `CreateIndexedMesh32` costs about 1.9 ms per patch in the benchmark above,
+where every patch is built in `Init` before a frame has ever been submitted.
+Publishing *while frames render* is what makes it 7.2 ms, because the queue it
+waits to drain now has a frame in it. That is the cost issue #95 reported, and
+it is why a number taken at load time understates it by nearly four times.
+
+**The claim the run supports.** The batch removes the per-mesh stall:
+
+- Upload CPU falls from 9.630 to 1.377 ms per frame, a saving of 8.25 ms
+  against within-mode ranges of 0.13 and 0.14 ms. What is left is the staging
+  allocation and the host copy, which is what the dynamic path pays too
+  (1.471 ms).
+- Frame-time **maximum** separates cleanly: the synchronous runs never came in
+  under 27.4 ms and the other two never went over 20.5 ms. The median is
+  16.66 ms in every row -- the frame is vsync-paced, so the mean frame time
+  says nothing at all here -- and the p99 differs by under 0.6 ms, inside the
+  scatter. The maximum is the only frame-time statistic that separates them,
+  and it does not separate asynchronous from dynamic.
+- GPU cost is the static path's, not the workaround's: 0.450 against 0.449 ms
+  for synchronous and 0.907 ms for dynamic, whose host-visible buffers the GPU
+  reads over the bus every frame. The batch's own transfer bracket is 0.007 ms.
+- Memory is the static path's too: 804 buffers against the dynamic path's 1608,
+  because that path keeps a vertex and index buffer per frame in flight.
+- `PendingUploads` is 0 at the end of every run, and 800 draws were held back
+  over the 400 patches -- exactly two frames each, which is the frames in
+  flight and therefore the designed latency, not a backlog.
+
+So the asynchronous path costs what the dynamic workaround costs on the CPU,
+what the synchronous path costs on the GPU and in memory, and removes the
+27 ms frames. The one thing it does not do is beat the dynamic path on
+frame-time spikes; on this workload the two are indistinguishable there.
+
+### A mesh is not drawn until its upload lands
+
+`Ready` exists so a game can publish geometry on its own terms, but forgetting
+to check it is not a correctness problem. The renderer drops any draw whose
+mesh is still being copied into, before the draw list reaches the water split,
+LOD selection, range batching or the recorder, and counts the drop in
+`Stats().UploadsSkipped`. A late patch is a visibly missing patch for a frame
+or two, never geometry read out of a buffer mid-copy.
+
+The rule covers every mesh the draw would make the GPU read, not only
+`RenderObject.Mesh`: an `InstanceSet` is dropped while the mesh it binds is
+uploading, and an `InstanceSetLOD` while **any** of its levels is, because
+which level gets bound is decided after the list is filtered and a camera that
+moved could pick the one still in flight.
+
+A steady nonzero `UploadsSkipped` means patches are being published faster than
+they can land; a spike right after a burst of publishing is the normal shape.
+The check costs one integer comparison on a frame with nothing in flight, and
+the draw lists are handed back untouched.
+
+A storage buffer has no draw to skip, so `UploadStorageBufferAsync` gives that
+guarantee only through its ticket: a compute pass reading the buffer will run
+whether or not the new contents have arrived.
+
+### Threading
+
+All of it is on the renderer thread, exactly like every other constructor here.
+The worker generates, and hands the finished slices over through a channel; the
+renderer thread receives them and calls the constructor. What the asynchronous
+path removes is the *stall*, not the thread affinity -- see
+[game loop](game-loop.md) for where in a frame that handover belongs.
+
+`Ready` is likewise a renderer-thread read. It is a plain bool behind a pointer,
+written when the batch retires, with no synchronisation of its own.
+
+### Retirement and cancellation
+
+`ResourceCounts.PendingUploads` is the staging the uploader is holding: copies
+enqueued, recorded, or waiting out the fence of the submission that carried
+them. It returns to zero a few frames after the last publish, and a streaming
+game's steady value is roughly the publish rate times the frames in flight.
+
+`DestroyMesh` and `MeshArena.Free` accept a mesh whose upload has not landed. A
+copy that is still only queued is dropped and its staging returned at once; one
+already recorded into a command buffer that will run keeps its destination
+alive behind the same deferred countdown every other retirement uses, so the
+copy always has somewhere to land.
+
+### Barriers
+
+The batch is one engine-owned transfer node at the head of the frame graph. Its
+copies sit between at most two barrier groups, one `CmdPipelineBarrier` each,
+rather than the per-buffer submit-and-idle the synchronous path uses:
+
+- A **trailing** group makes the writes visible to vertex attribute and index
+  reads later in the same command buffer. Every mesh destination is in it.
+- A **leading** group is emitted only for destinations a frame still in flight
+  may be reading -- an arena range beside ranges being drawn, or a storage
+  buffer. A freshly created buffer has no reader to wait for, so a batch of
+  `CreateIndexedMesh32Async` calls records exactly one barrier group.
+
+Streamed storage buffers are frame-graph resources, so they are handled the
+other way round: the node declares `TransferDst` on them and the compiler
+derives the barriers to whatever actually reads them, on both sides. See
+[frame graph](frame-graph.md). Mesh and arena buffers are not declared in the
+graph and cannot be without rebuilding the plan per created mesh, which is why
+the node emits their group itself.
+
+The first asynchronous upload of a renderer's life marks the graph dirty, so
+the node's timer bracket and any streamed storage buffer's declaration appear
+in the next rebuild. That rebuild happens before the frame that records the
+copy, so even the first upload is recorded in the frame after its enqueue. A
+program that never streams records exactly the command buffer it always did:
+`TestAppPassStreams` and `TestAppComputeStreams` pin that at the level of
+driver calls and their arguments.
 
 ## Loaded model geometry
 

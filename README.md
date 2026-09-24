@@ -222,6 +222,7 @@ task example:23-shadow-coverage # distant off-camera casters with independent sh
 task example:24-custom-passes # application render targets, graphics/compute passes and depth-aware fog
 task example:25-lod-forest     # per-instance culling, distance levels, dithered fades and baked impostors
 task example:26-mesh-ranges    # distinct patches as separate meshes, shared arena ranges or indirect batches
+task example:27-streaming      # patches uploaded while frames render: synchronous, dynamic or batched
 ```
 
 ## Building

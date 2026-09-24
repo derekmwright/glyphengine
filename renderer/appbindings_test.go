@@ -118,7 +118,10 @@ func TestAppTimingsWriteDisabledEdges(t *testing.T) {
 				t.Fatalf("enabled=%v app query %d written %d times", enabled, i, counts[appQueryBase(1)+i])
 			}
 		}
-		if len(d.resets) != 4 || d.resets[3] != 4 {
+		// Three timed passes: the fixture's two plus the engine's streamed
+		// upload node, whose edges are written even on a frame that queued
+		// nothing -- the loop above checks exactly that.
+		if len(d.resets) != 4 || d.resets[3] != 6 {
 			t.Fatalf("app reset range: %v", d.resets)
 		}
 		t.Logf("enabled=%v: all %d app timestamp edges written once", enabled, 2*len(passes))
@@ -146,7 +149,13 @@ func TestAppHistoryVisibility(t *testing.T) {
 		if b.Resource != f.targets[target].read || b.SrcAccess&core1_0.AccessColorAttachmentWrite == 0 || b.DstStage&core1_0.PipelineStageVertexShader == 0 || b.NewLayout != core1_0.ImageLayoutShaderReadOnlyOptimal {
 			t.Fatalf("history=%v: incomplete visibility: %+v", history, b)
 		}
-		if f.declarations[0].Kind != framegraph.Legacy {
+		producer := -1
+		for i, n := range f.declarations {
+			if n.Kind == framegraph.Legacy && n.Name == "application previous-frame state" {
+				producer = i
+			}
+		}
+		if producer < 0 || producer >= f.engine[graphLegacy] {
 			t.Fatal("previous submission has no declared producer")
 		}
 	}

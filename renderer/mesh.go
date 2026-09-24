@@ -26,6 +26,12 @@ type Mesh struct {
 	BoundCenter [3]float32 // object-space bounding sphere center
 	BoundRadius float32    // object-space bounding sphere radius (0 = skip culling)
 
+	// upload is the streamed copy this mesh is still waiting for, and nil
+	// once it has landed (or for a mesh created synchronously). The recorder
+	// reads exactly this: a non-nil upload means the draw is skipped, so a
+	// game that never checks its ticket still cannot read a buffer mid-copy.
+	upload *UploadTicket
+
 	destroyed bool
 }
 
@@ -245,6 +251,85 @@ func (r *Renderer) CreateIndexedMesh32(vertices []Vertex, indices []uint32) (*Me
 	return m, nil
 }
 
+// CreateIndexedMeshAsync is CreateIndexedMesh without the queue wait: it
+// allocates the device-local buffers, copies the data into staging
+// immediately, and queues the copies for the next DrawFrame, which records
+// every queued copy as one batch. The mesh is usable right away and is simply
+// not drawn until its ticket is ready.
+//
+// The caller may reuse or drop vertices and indices as soon as this returns;
+// their bytes are already in staging. Renderer thread only, like every other
+// constructor here -- a worker hands geometry over through a channel and the
+// renderer thread calls this. See docs/agents/models.md.
+func (r *Renderer) CreateIndexedMeshAsync(vertices []Vertex, indices []uint16) (*Mesh, *UploadTicket, error) {
+	if len(indices) == 0 {
+		return nil, nil, fmt.Errorf("streamed mesh: indices must be nonempty")
+	}
+	idata := unsafe.Slice((*byte)(unsafe.Pointer(&indices[0])), len(indices)*2)
+	return r.createIndexedMeshAsync(vertices, idata, len(indices), core1_0.IndexTypeUInt16)
+}
+
+// CreateIndexedMesh32Async is CreateIndexedMesh32 without the queue wait; see
+// CreateIndexedMeshAsync.
+func (r *Renderer) CreateIndexedMesh32Async(vertices []Vertex, indices []uint32) (*Mesh, *UploadTicket, error) {
+	if len(indices) == 0 {
+		return nil, nil, fmt.Errorf("streamed mesh: indices must be nonempty")
+	}
+	idata := unsafe.Slice((*byte)(unsafe.Pointer(&indices[0])), len(indices)*4)
+	return r.createIndexedMeshAsync(vertices, idata, len(indices), core1_0.IndexTypeUInt32)
+}
+
+// createIndexedMeshAsync allocates both destinations and queues one staged
+// upload carrying both. One staging buffer for the pair, not one each: the
+// synchronous path's two separate submissions are exactly what issue #95 is
+// about, and splitting the staging here would put the vertex and index data
+// on separate tickets for no gain.
+func (r *Renderer) createIndexedMeshAsync(vertices []Vertex, idata []byte, indexCount int, kind core1_0.IndexType) (*Mesh, *UploadTicket, error) {
+	if len(vertices) == 0 {
+		return nil, nil, fmt.Errorf("streamed mesh: vertices must be nonempty")
+	}
+	vbufSize := len(vertices) * sizeOf[Vertex]()
+	vdata := unsafe.Slice((*byte)(unsafe.Pointer(&vertices[0])), vbufSize)
+
+	vbuf, vmem, err := r.createBuffer(vbufSize,
+		core1_0.BufferUsageVertexBuffer|core1_0.BufferUsageTransferDst, core1_0.MemoryPropertyDeviceLocal)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create vertex buffer: %w", err)
+	}
+	ibuf, imem, err := r.createBuffer(len(idata),
+		core1_0.BufferUsageIndexBuffer|core1_0.BufferUsageTransferDst, core1_0.MemoryPropertyDeviceLocal)
+	if err != nil {
+		r.deviceDriver.FreeMemory(vmem, nil)
+		r.deviceDriver.DestroyBuffer(vbuf, nil)
+		return nil, nil, fmt.Errorf("create index buffer: %w", err)
+	}
+
+	center, radius := computeBoundingSphere(vertices)
+	m := &Mesh{
+		vertexBuffer: vbuf,
+		vertexMemory: vmem,
+		VertexCount:  len(vertices),
+		indexBuffer:  ibuf,
+		indexMemory:  imem,
+		IndexCount:   indexCount,
+		indexType:    kind,
+		BoundCenter:  center,
+		BoundRadius:  radius,
+	}
+	// Freshly created buffers: no frame in flight can be reading them, so the
+	// batch needs no leading barrier for this destination.
+	ticket, err := r.queueUpload([]bufferUpload{{buffer: vbuf, data: vdata}, {buffer: ibuf, data: idata}}, m, false, false)
+	if err != nil {
+		r.deviceDriver.FreeMemory(imem, nil)
+		r.deviceDriver.DestroyBuffer(ibuf, nil)
+		r.deviceDriver.FreeMemory(vmem, nil)
+		r.deviceDriver.DestroyBuffer(vbuf, nil)
+		return nil, nil, err
+	}
+	r.meshes = append(r.meshes, m)
+	return m, ticket, nil
+}
+
 // dynamicMesh holds per-frame-in-flight buffer sets for a mesh whose contents
 // change at runtime (text, UI panels, overlays). Updates are staged CPU-side
 // and flushed in DrawFrame after the frame's fence wait, then the Mesh is
@@ -426,6 +511,25 @@ func (r *Renderer) DestroyMesh(m *Mesh) {
 	if dm, ok := r.dynamicMeshes[m]; ok {
 		delete(r.dynamicMeshes, m)
 		r.DeferDestroy(func() { dm.destroy(r.deviceDriver) })
+		return
+	}
+
+	// A mesh whose upload has not landed may still be named by a copy already
+	// recorded into a command buffer that will run, so its buffers cannot be
+	// freed here the way a settled mesh's are. cancelUpload drops the copy if
+	// it is still only queued; the deferred free covers the case where it is
+	// not, because DeferDestroy's countdown outlasts the batch's own.
+	if m.upload != nil {
+		r.cancelUpload(m)
+		vbuf, vmem, ibuf, imem := m.vertexBuffer, m.vertexMemory, m.indexBuffer, m.indexMemory
+		r.DeferDestroy(func() {
+			if ibuf.Handle() != 0 {
+				r.deviceDriver.DestroyBuffer(ibuf, nil)
+				r.deviceDriver.FreeMemory(imem, nil)
+			}
+			r.deviceDriver.DestroyBuffer(vbuf, nil)
+			r.deviceDriver.FreeMemory(vmem, nil)
+		})
 		return
 	}
 	// A mesh created without indices leaves indexBuffer zeroed, whose handle
