@@ -264,12 +264,20 @@ tasks:
           label=$ex
           if [ $# -gt 0 ]; then label="$ex $*"; fi
           out=$(go run ./$ex -frames 30 "$@" 2>&1) || { echo "$label: FAILED TO RUN"; echo "$out"; status=1; return; }
+          if ! echo "$out" | grep -q "Vulkan validation layer enabled"; then
+            echo "$label: VALIDATION LAYER DID NOT RUN"; echo "$out"; status=1; return
+          fi
+          if [ "$GLYPHENGINE_SYNC_VALIDATION" = "1" ] && ! echo "$out" | grep -q "Vulkan synchronization validation enabled"; then
+            echo "$label: SYNCHRONIZATION VALIDATION DID NOT RUN"; echo "$out"; status=1; return
+          fi
           msgs=$(echo "$out" | grep -cE "VULKAN (ERROR|WARNING)" || true)
           leaks=$(echo "$out" | grep -c "has not been destroyed" || true)
           if [ "$msgs" -ne 0 ]; then
             echo "$label: $msgs validation message(s), $leaks of them leaked objects"
             echo "$out" | grep -E "VULKAN (ERROR|WARNING)" | head -20
             status=1
+            # Sync failures usually repeat on every subsequent scene.
+            if [ "$GLYPHENGINE_SYNC_VALIDATION" = "1" ]; then exit 1; fi
           else
             echo "$label: clean"
           fi
@@ -466,6 +474,27 @@ tasks:
         check 25-lod-forest -replace
         unset GLYPHENGINE_PROVOKE_RECREATE_FRAMES
         exit $status
+
+  syncvalidate:
+    desc: "Run the validation suite with synchronization hazard detection (needs GPU and SDK)"
+    cmds:
+      # Reuse the complete example/variant/rebuild matrix and its message-counter
+      # self-check, so new validate cases also run under synchronization validation.
+      # Explicit assignments also override inherited =0 settings. An internal
+      # task: call evaluates the callee's environment independently, and Task's
+      # env map alone does not override the caller's process environment.
+      # Broken 2026-09-24: remove sceneEntryDependency's outgoing element
+      # (keeping scene/water compatible). 01-triangle/30 fixed frames reports
+      # 30 SYNC-HAZARD-READ-AFTER-WRITE messages; task exits 201 (shell 1).
+      - GLYPHENGINE_VALIDATION=1 GLYPHENGINE_SYNC_VALIDATION=1 GLYPHENGINE_FIXED_FRAME_TIME=16.667ms task --silent validate
+      - |
+        probe=$(echo "VULKAN ERROR: self-check" | grep -cE "VULKAN (ERROR|WARNING)" || true)
+        if [ "$probe" != "1" ]; then echo "SELF-CHECK: cannot count validation messages"; exit 1; fi
+        out=$(GLYPHENGINE_VALIDATION=1 GLYPHENGINE_SYNC_VALIDATION=1 GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./cmd/apppasscheck -compute -churn -provoke-recreate -validate -frames 300 2>&1) || { echo "$out"; exit 1; }
+        echo "$out" | grep -q "Vulkan synchronization validation enabled" || { echo "$out"; exit 1; }
+        msgs=$(echo "$out" | grep -cE "VULKAN (ERROR|WARNING)" || true)
+        if [ "$msgs" != "0" ]; then echo "$out"; exit 1; fi
+        echo "apppasscheck -compute -churn -provoke-recreate: clean"
 
   reload:
     desc: "Check that swapping a level for a freshly loaded copy never drops a frame's geometry"

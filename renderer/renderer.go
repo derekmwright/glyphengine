@@ -538,9 +538,18 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	}()
 
 	// Step 1: Vulkan instance
-	instanceDriver, gotValidation, err := createInstance(w, r.appName, r.appVersion, validationSetting(r.validation))
+	wantValidation := validationSetting(r.validation)
+	restoreValidation, syncValidation, err := configureSyncValidation(wantValidation)
 	if err != nil {
 		return nil, err
+	}
+	instanceDriver, gotValidation, err := createInstance(w, r.appName, r.appVersion, wantValidation)
+	restoreValidation()
+	if err != nil {
+		return nil, err
+	}
+	if gotValidation && syncValidation {
+		log.Print("Vulkan synchronization validation enabled (VK_LAYER_VALIDATE_SYNC=1)")
 	}
 	r.instanceDriver = instanceDriver
 	r.validation = gotValidation

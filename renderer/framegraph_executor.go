@@ -157,7 +157,7 @@ func newFrameGraph(samples core1_0.SampleCountFlags, depthFormat, swapchainForma
 	// scene pass and composite over the surface rather than under it; blendSplit
 	// decides which draws come here and which stay before the copy (waterorder.go).
 	add(framegraph.Node{Name: "water", Kind: framegraph.Graphics, OptionalGroup: 1, Timed: true,
-		Dependencies: []core1_0.SubpassDependency{sceneEntryDependency()}, AttachmentOrder: order,
+		Dependencies: sceneEntryDependency(), AttachmentOrder: order,
 		Uses: []framegraph.Use{{Resource: f.color, Access: framegraph.ColorLoadWrite, HasResolve: msaa, ResolveTo: f.hdr},
 			{Resource: f.depth, Access: framegraph.DepthLoadWrite}, {Resource: f.copy, Access: framegraph.SampledRead}}},
 		func(c *graphFrame) {
@@ -185,11 +185,11 @@ func newFrameGraph(samples core1_0.SampleCountFlags, depthFormat, swapchainForma
 	// overwrite their level and so may discard it, while each upsample adds
 	// into a level the downsample already wrote and so must load it -- which is
 	// why an upsample's target arrives in ShaderReadOnly, having been a sampled
-	// source a moment ago, rather than undefined. The derived incoming
-	// dependency is what orders the chain: each stage's colour writes must be
-	// visible to the next stage's sampling. Without it the levels are written
-	// and read with no synchronisation at all, which on some drivers looks
-	// correct and on others produces a glow one frame stale.
+	// source a moment ago, rather than undefined. The derived dependency pair
+	// orders the attachment accesses and exposes the final layout transition
+	// to the next sampler. The shared cloud/downsample pass lost 60 RAW reports
+	// over 60 fixed 02-cube frames when its exit dependency was added; the old
+	// incoming dependency alone did not make that transition visible.
 	chain := func(name string, source framegraph.ResourceID, ids *[bloomLevels]framegraph.ResourceID, ui bool, pass Pass) {
 		first := len(f.nodes)
 		for level := range bloomLevels {
@@ -243,20 +243,14 @@ func newFrameGraph(samples core1_0.SampleCountFlags, depthFormat, swapchainForma
 	// A DontCare load would leave the previous frame's HUD under this one, and
 	// an opaque clear would paint a black rectangle over the whole scene.
 	//
-	// The explicit dependency is the bloom shape with the sampling stage on the
-	// source side, for a reason the derived one would miss: this image was a
-	// sampled source a moment ago -- the previous frame's composite and glow
-	// prefilter both read it -- and the clear must not start before those
-	// reads have finished. The draw closure is recordUIComposite with a
-	// different destination and premultiplied output, deliberately the same
+	// The compiler includes the previous composite/prefilter reads in the
+	// incoming dependency and exposes this pass's writes on exit. 13-ui -glow on,
+	// 60 fixed frames: the old incoming-only override produced 60 RAW reports;
+	// deriving both dependencies produces none. The draw closure is
+	// recordUIComposite with a different destination and premultiplied output, the same
 	// function as the swapchain path so panels, nine-slice fills, texture mode
 	// and text keep behaving identically whichever one is on.
 	add(framegraph.Node{Name: "UI layer", Kind: framegraph.Graphics, Optional: true, Timed: true,
-		Dependencies: []core1_0.SubpassDependency{{SrcSubpass: core1_0.SubpassExternal, DstSubpass: 0,
-			SrcStageMask:  core1_0.PipelineStageFragmentShader | core1_0.PipelineStageColorAttachmentOutput,
-			DstStageMask:  core1_0.PipelineStageColorAttachmentOutput,
-			SrcAccessMask: core1_0.AccessShaderRead | core1_0.AccessColorAttachmentWrite,
-			DstAccessMask: core1_0.AccessColorAttachmentWrite | core1_0.AccessColorAttachmentRead}},
 		Uses: []framegraph.Use{{Resource: f.ui, Access: framegraph.ColorWrite, Clear: &framegraph.Clear{}, Discard: true}}},
 		func(c *graphFrame) {
 			p := c.tonemap.ui
@@ -272,6 +266,8 @@ func newFrameGraph(samples core1_0.SampleCountFlags, depthFormat, swapchainForma
 	// Single sample and no depth: MSAA was already resolved into the HDR
 	// target, and a fullscreen triangle has nothing to depth-test against.
 	// The swapchain attachment discards because every pixel is written.
+	// 02-cube/60 fixed frames: the former sampling-only entry produced 60 WAW
+	// reports at the DONT_CARE load; derived ColorAttachmentWrite access removes them.
 	//
 	// Screen-space UI is composited inside this pass, after the resolve, in
 	// its own timer interval adjacent to the tonemap's. With the glow layer on,
@@ -280,9 +276,6 @@ func newFrameGraph(samples core1_0.SampleCountFlags, depthFormat, swapchainForma
 	// the UI on screen twice, which reads as the HUD having gained contrast
 	// rather than as a double draw.
 	add(framegraph.Node{Name: "tonemap and composite", Kind: framegraph.Graphics, Timed: true,
-		Dependencies: []core1_0.SubpassDependency{{SrcSubpass: core1_0.SubpassExternal, DstSubpass: 0,
-			SrcStageMask: core1_0.PipelineStageColorAttachmentOutput, DstStageMask: core1_0.PipelineStageFragmentShader,
-			SrcAccessMask: core1_0.AccessColorAttachmentWrite, DstAccessMask: core1_0.AccessShaderRead}},
 		Uses: []framegraph.Use{{Resource: f.hdr, Access: framegraph.SampledRead}, {Resource: f.bloom[0], Access: framegraph.SampledRead},
 			{Resource: f.ui, Access: framegraph.SampledRead}, {Resource: f.uiBloom[0], Access: framegraph.SampledRead},
 			{Resource: f.swapchain, Access: framegraph.ColorWrite, Discard: true}}},

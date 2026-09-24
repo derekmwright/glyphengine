@@ -22,6 +22,7 @@ worse than no page — an agent will trust it.
 task ci        # lint, build, test, race
 task smoke     # renders real frames of every example
 task validate  # every example under the Vulkan validation layer, must be silent
+task syncvalidate # synchronization hazards, including rebuilds and compute churn, must be silent
 task hud       # the HUD is still legible over water, bloom and the tonemap
 task sky       # the sun and moon are behind the terrain, not on top of it
 task custompasses # application light/compute/fog passes: visible, confined, repeatable and validation-clean

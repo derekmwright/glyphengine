@@ -93,6 +93,15 @@ func sceneDependency() []core1_0.SubpassDependency {
 		SrcAccessMask: core1_0.AccessTransferWrite | core1_0.AccessColorAttachmentWrite | core1_0.AccessDepthStencilAttachmentWrite,
 		DstAccessMask: core1_0.AccessShaderRead | core1_0.AccessColorAttachmentRead | core1_0.AccessColorAttachmentWrite |
 			core1_0.AccessDepthStencilAttachmentRead | core1_0.AccessDepthStencilAttachmentWrite,
+	}, {
+		SrcSubpass: 0, DstSubpass: core1_0.SubpassExternal,
+		SrcStageMask: core1_0.PipelineStageColorAttachmentOutput |
+			core1_0.PipelineStageEarlyFragmentTests | core1_0.PipelineStageLateFragmentTests,
+		DstStageMask: core1_0.PipelineStageFragmentShader | core1_0.PipelineStageColorAttachmentOutput |
+			core1_0.PipelineStageEarlyFragmentTests | core1_0.PipelineStageLateFragmentTests | core1_0.PipelineStageTransfer,
+		SrcAccessMask: core1_0.AccessColorAttachmentWrite | core1_0.AccessDepthStencilAttachmentWrite,
+		DstAccessMask: core1_0.AccessShaderRead | core1_0.AccessColorAttachmentRead | core1_0.AccessColorAttachmentWrite |
+			core1_0.AccessDepthStencilAttachmentRead | core1_0.AccessDepthStencilAttachmentWrite | core1_0.AccessTransferRead,
 	}}
 }
 
@@ -213,6 +222,8 @@ func bloomGraph(levels int) *Graph {
 // ShaderReadOnly (5) instead of Undefined (0) on the first downsample attachment.
 // Removing incoming colour-write availability separately produces one barrier
 // instead of zero, proving the no-barrier assertion depends on synchronization.
+// Removing outgoingDependency on 2026-09-24 fails the pinned pair: one
+// dependency instead of two (exit stages 1024 -> 1152, accesses 256 -> 416).
 func TestBloomChainNeedsNoBarriers(t *testing.T) {
 	// Five targets is today's prefilter + four down + four up; six targets also
 	// checks a prefilter + five down + five up without baking in a chain length.
@@ -233,10 +244,16 @@ func TestBloomChainNeedsNoBarriers(t *testing.T) {
 			equal(t, "final", rp.Attachments[0].FinalLayout, core1_0.ImageLayoutShaderReadOnlyOptimal)
 			equal(t, "dependency", rp.Dependencies, []core1_0.SubpassDependency{{
 				SrcSubpass: core1_0.SubpassExternal, DstSubpass: 0,
+				SrcStageMask:  core1_0.PipelineStageColorAttachmentOutput | core1_0.PipelineStageFragmentShader,
+				DstStageMask:  core1_0.PipelineStageFragmentShader | core1_0.PipelineStageColorAttachmentOutput,
+				SrcAccessMask: core1_0.AccessColorAttachmentWrite | core1_0.AccessShaderRead,
+				DstAccessMask: core1_0.AccessShaderRead | core1_0.AccessColorAttachmentRead | core1_0.AccessColorAttachmentWrite,
+			}, {
+				SrcSubpass: 0, DstSubpass: core1_0.SubpassExternal,
 				SrcStageMask:  core1_0.PipelineStageColorAttachmentOutput,
 				DstStageMask:  core1_0.PipelineStageFragmentShader | core1_0.PipelineStageColorAttachmentOutput,
 				SrcAccessMask: core1_0.AccessColorAttachmentWrite,
-				DstAccessMask: core1_0.AccessShaderRead | core1_0.AccessColorAttachmentRead,
+				DstAccessMask: core1_0.AccessShaderRead | core1_0.AccessColorAttachmentRead | core1_0.AccessColorAttachmentWrite,
 			}})
 		}
 		equal(t, "final barriers", len(p.FinalBarriers), 0)
@@ -245,15 +262,20 @@ func TestBloomChainNeedsNoBarriers(t *testing.T) {
 
 // Verified to fail: using General for presented resources reports final layout
 // 1 instead of 1000001002. Removing the last-use guard also fails all three tails.
+// Removing outgoingDependency also fails the pinned pair: the exit with stages
+// 1024 -> 9216 and accesses 256 -> 384 is absent (2026-09-24).
 func TestTonemapPresentsSwapchain(t *testing.T) {
 	g := New()
 	d := colorImage("swapchain")
 	d.Imported, d.Format = true, core1_0.FormatB8G8R8A8SRGB
 	id := g.AddImage(d)
 	deps := []core1_0.SubpassDependency{{SrcSubpass: core1_0.SubpassExternal, DstSubpass: 0,
-		SrcStageMask: core1_0.PipelineStageColorAttachmentOutput, DstStageMask: core1_0.PipelineStageFragmentShader,
-		SrcAccessMask: core1_0.AccessColorAttachmentWrite, DstAccessMask: core1_0.AccessShaderRead}}
-	g.AddNode(Node{Name: "tonemap", Kind: Graphics, Dependencies: deps, Uses: []Use{{Resource: id, Access: ColorWrite}}})
+		SrcStageMask: core1_0.PipelineStageColorAttachmentOutput, DstStageMask: core1_0.PipelineStageFragmentShader | core1_0.PipelineStageColorAttachmentOutput,
+		SrcAccessMask: core1_0.AccessColorAttachmentWrite, DstAccessMask: core1_0.AccessShaderRead | core1_0.AccessColorAttachmentRead | core1_0.AccessColorAttachmentWrite},
+		{SrcSubpass: 0, DstSubpass: core1_0.SubpassExternal,
+			SrcStageMask: core1_0.PipelineStageColorAttachmentOutput, DstStageMask: core1_0.PipelineStageColorAttachmentOutput | core1_0.PipelineStageBottomOfPipe,
+			SrcAccessMask: core1_0.AccessColorAttachmentWrite, DstAccessMask: core1_0.AccessColorAttachmentRead | core1_0.AccessColorAttachmentWrite}}
+	g.AddNode(Node{Name: "tonemap", Kind: Graphics, Uses: []Use{{Resource: id, Access: ColorWrite}}})
 	g.AddNode(Node{Name: "present", Kind: Legacy, Uses: []Use{{Resource: id, Access: Present}}})
 	p := mustBuild(t, g)
 	equal(t, "swapchain final", p.Steps[0].RenderPass.Attachments[0].FinalLayout, core1_0.ImageLayout(1000001002))
