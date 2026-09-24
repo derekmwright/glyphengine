@@ -17,7 +17,7 @@ requires:
   - vulkan-runtime
   - vulkan-sdk
 assets: none
-verified: 2026-09-24 # dynamic rendering, explicit barriers and resource lifetime
+verified: 2026-09-24 # dynamic rendering, explicit barriers, resource lifetime, the trace's atlas readback
 ---
 
 # Enable Vulkan validation and find resource leaks
@@ -373,6 +373,36 @@ inside SceneResolve/WaterResolve, with exit barriers after their end timestamps.
   half-built target" above. If you see a nil dereference on the frame after a
   `renderer: recreate ...` draw error on a tree older than that fix, this is
   it.
+
+## Running the layer and the state trace together
+
+`GLYPHENGINE_STATE_TRACE` adds work on the validated path, so the two are worth
+running together at least once after either changes. The trace's own additions
+are a readback of the grass impostor atlas at load — a device wait, a staging
+buffer, and two image barriers either side of a copy, for the `grassatlas=`
+field — and per-frame hashing that touches no Vulkan at all.
+
+Running them together is what found the one bug this investigation did find.
+`readbackImage` copies the atlas to the host, which needs
+`VK_IMAGE_USAGE_TRANSFER_SRC_BIT`, and the atlas was created without it:
+
+```
+VUID-VkImageMemoryBarrier-oldLayout-01212  newLayout TRANSFER_SRC_OPTIMAL is not compatible with ... usage flags 0x16
+VUID-vkCmdCopyImageToBuffer-srcImage-00186 srcImage ... requires VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+VUID-VkImageMemoryBarrier-oldLayout-01212  oldLayout TRANSFER_SRC_OPTIMAL is not compatible with ... usage flags 0x16
+```
+
+Three errors, on a driver that reads the image back correctly anyway, so
+`GrassImpostorAtlas` — and `08-grass -impdump`, the only way anyone checks a
+bake — had shipped like that since it was written. Nothing under the layer had
+ever called it. `createOffscreenColor` now takes the extra usage from the
+caller that needs it, and only that caller: a usage flag can change the layout
+the driver picks and the cloud targets are written and sampled every frame.
+
+Measured after the fix: three cycles of `08-grass -timeofday 0.0 -frames 150`
+under `GLYPHENGINE_VALIDATION=1` with a trace being written, six captures, zero
+`VULKAN ERROR` and zero `VULKAN WARNING` lines, all six byte-identical. Before
+it, the same six logs carried three errors each.
 
 ## Comparing captures across toolchains
 

@@ -169,12 +169,26 @@ func createCloudTargets(
 
 // createOffscreenColor allocates one half-float colour target usable as both an
 // attachment and a sampled texture.
+//
+// extraUsage is for a target something reads BACK. The grass impostor atlas is
+// the one such caller: readbackImage copies it to the host, which needs
+// TRANSFER_SRC, and without the bit the copy and the two barriers around it are
+// three validation errors on an image the driver will still happily read --
+// which is how GrassImpostorAtlas shipped, silently, because nothing that runs
+// under the layer had ever called it. Only the callers that need it pay for it;
+// a usage flag can change the layout the driver picks, and the cloud targets
+// are written and sampled every frame.
 func createOffscreenColor(
 	instanceDriver core1_0.CoreInstanceDriver,
 	deviceDriver core1_0.CoreDeviceDriver,
 	physicalDevice core1_0.PhysicalDevice,
 	extent core1_0.Extent2D,
+	extraUsage ...core1_0.ImageUsageFlags,
 ) (core1_0.Image, core1_0.DeviceMemory, core1_0.ImageView, error) {
+	usage := core1_0.ImageUsageColorAttachment | core1_0.ImageUsageSampled | core1_0.ImageUsageTransferDst
+	for _, u := range extraUsage {
+		usage |= u
+	}
 	var (
 		zi core1_0.Image
 		zm core1_0.DeviceMemory
@@ -188,9 +202,10 @@ func createOffscreenColor(
 		ArrayLayers: 1,
 		Samples:     core1_0.Samples1,
 		Tiling:      core1_0.ImageTilingOptimal,
-		// TransferDst only for the one-time clear that gives the buffer a
-		// defined layout before the first frame samples it as history.
-		Usage:         core1_0.ImageUsageColorAttachment | core1_0.ImageUsageSampled | core1_0.ImageUsageTransferDst,
+		// TransferDst is for the one-time clear that gives the buffer a
+		// defined layout before the first frame samples it as history; see
+		// extraUsage for the rest.
+		Usage:         usage,
 		SharingMode:   core1_0.SharingModeExclusive,
 		InitialLayout: core1_0.ImageLayoutUndefined,
 	})

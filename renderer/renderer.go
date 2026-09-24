@@ -163,6 +163,14 @@ type Renderer struct {
 	msaa                  *msaaResources
 	msaaSamples           core1_0.SampleCountFlags
 
+	// deviceIdent is the GPU and driver this process got, folded once at
+	// startup and emitted as part of the trace's config= field. A driver
+	// update, or a different GPU picked on a hybrid machine, changes what
+	// every shader compiles to while leaving the simulation and the draw
+	// sequence identical -- and none of it shows up anywhere else in the
+	// trace, so two runs that straddled one would have diffed clean.
+	deviceIdent Hasher
+
 	// lastFenceWait is how long the previous DrawFrame blocked on the in-flight
 	// fence and on acquiring a swapchain image. The engine folds it into its own
 	// CPU breakdown, where it is the number that separates "the GPU is the
@@ -639,6 +647,18 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 		} else {
 			log.Printf("MSAA: %dx", r.msaaSamples)
 		}
+
+		// Folded here because props is already in hand; see deviceIdent. The
+		// pipeline cache UUID is the field that moves on a driver update
+		// without the name or the version necessarily moving with it.
+		r.deviceIdent = NewHash.
+			Bytes([]byte(props.DriverName)).
+			Uint64(uint64(props.DriverVersion)).
+			Uint64(uint64(props.APIVersion)).
+			Int(int(props.VendorID)).
+			Int(int(props.DeviceID)).
+			Int(int(props.DriverType)).
+			Bytes(props.PipelineCacheUUID[:])
 
 		if instanceDriver.GetPhysicalDeviceFeatures(r.physicalDevice).SamplerAnisotropy {
 			r.maxAnisotropy = props.Limits.MaxSamplerAnisotropy
@@ -1956,6 +1976,7 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 	// staging copy instead would hide it.
 	if t := r.trace; t != nil {
 		r.traceStreamedBuffers(t)
+		r.traceStaticGPUState(t)
 		traceLighting(t, lighting)
 	}
 
@@ -2056,6 +2077,50 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 // contents hash. Go randomises map iteration per range, so if that order ever
 // reached the image the contents hash alone would say the data matched while
 // the picture did not -- which is the exact shape of bug this is hunting.
+// traceStaticGPUState records the parts of what the GPU was handed that do not
+// move from frame to frame: what the grass bake produced, what the impostor
+// atlas holds, and the device and swapchain configuration every pipeline was
+// built against.
+//
+// Constant within a run, and that is why they are here. The trace is diffed
+// BETWEEN two runs, and a value that never moves inside one run can still be
+// the value that differs between two -- which is the shape issue #40
+// describes: an identical simulation, an identical draw sequence, and a field
+// of grass that is not the same field. Every field the trace carried before
+// these was per frame, so a bake or a swapchain that came out different was
+// invisible to it, and "the two traces are identical" said less than it read
+// as.
+func (r *Renderer) traceStaticGPUState(t *StateTrace) {
+	if r.grass != nil {
+		t.CountHash("grassbake", r.grass.bakeCount, r.grass.bakeHash)
+	}
+	if r.grassImpostor != nil {
+		t.Hash("grassatlas", r.grassImpostor.atlasHash)
+	}
+	// The negotiated configuration, not the requested one. msaaSamples is
+	// halved until the device supports it, the swapchain's format and image
+	// count come from the surface, and the depth format is whichever candidate
+	// the device took. All of them change how an alpha-to-coverage pass
+	// resolves -- and grass is one, blades dissolve through coverage rather
+	// than blending -- so a run that negotiated a different one would move
+	// every grass pixel a little while leaving the sky and the HUD alone.
+	// None of it appeared anywhere in the trace; w= and h= were the whole of
+	// what it said about the device.
+	cfg := NewHash.
+		Int(int(r.msaaSamples)).
+		Bool(r.msaa != nil).
+		Int(int(r.sc.imageFormat)).
+		Int(len(r.sc.images)).
+		Int(int(r.sc.extent.Width)).
+		Int(int(r.sc.extent.Height)).
+		Bool(r.sc.captureCapable).
+		Int(int(r.depth.format)).
+		Int(maxFramesInFlight).
+		Bool(r.bloom != nil).
+		Uint64(uint64(r.deviceIdent))
+	t.Hash("config", cfg)
+}
+
 func (r *Renderer) traceStreamedBuffers(t *StateTrace) {
 	if r.particles != nil {
 		t.CountHash("particles", len(r.particles.staging), HashPOD(NewHash, r.particles.staging))

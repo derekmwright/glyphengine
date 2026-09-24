@@ -5,6 +5,9 @@
 // dependency bump that moved this repository to 1.27 rewrote all 22
 // documentation images with zero pixel differences. Compare pixels.
 //
+// The count it prints is in pixels first and channel samples second, because
+// every figure recorded about a render here is in pixels.
+//
 //	go run ./cmd/pngsame old.png new.png   # exit 0 when identical
 package main
 
@@ -33,7 +36,13 @@ func main() {
 		fmt.Printf("%s %dx%d vs %s %dx%d: sizes differ\n", os.Args[1], a.w, a.h, os.Args[2], b.w, b.h)
 		os.Exit(1)
 	}
-	differing, maxDelta := 0, 0
+	// Counted two ways on purpose. Every measurement written down about a
+	// render in this repository -- issue #40's "382205 / 921600 pixels", the
+	// provocation table in docs/agents/state-trace.md -- is a count of
+	// PIXELS, and this reported only channel samples, which is up to four
+	// times larger. Two numbers that are not comparable are worse than one,
+	// so both are printed and each is labelled.
+	differing, pixelsDiffering, maxDelta := 0, 0, 0
 	for i := range a.pix {
 		d := int(a.pix[i]) - int(b.pix[i])
 		if d < 0 {
@@ -46,11 +55,20 @@ func main() {
 			}
 		}
 	}
+	// A pixel counts once however many of its four channels moved.
+	for i := 0; i+3 < len(a.pix); i += 4 {
+		if a.pix[i] != b.pix[i] || a.pix[i+1] != b.pix[i+1] ||
+			a.pix[i+2] != b.pix[i+2] || a.pix[i+3] != b.pix[i+3] {
+			pixelsDiffering++
+		}
+	}
 	if differing == 0 {
 		fmt.Printf("%s and %s: identical pixels (%dx%d)\n", os.Args[1], os.Args[2], a.w, a.h)
 		return
 	}
-	fmt.Printf("%s and %s: %d of %d channel samples differ, max delta %d/255\n", os.Args[1], os.Args[2], differing, len(a.pix), maxDelta)
+	fmt.Printf("%s and %s: %d of %d pixels differ (%.2f %%), %d of %d channel samples, max delta %d/255\n",
+		os.Args[1], os.Args[2], pixelsDiffering, a.w*a.h,
+		100*float64(pixelsDiffering)/float64(a.w*a.h), differing, len(a.pix), maxDelta)
 	os.Exit(1)
 }
 

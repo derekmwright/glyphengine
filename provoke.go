@@ -44,6 +44,11 @@ const (
 	// the image and every run is a coin toss.
 	provokeDrawOrderEnv = "GLYPHENGINE_PROVOKE_DRAW_ORDER"
 
+	// GLYPHENGINE_PROVOKE_PRIME is the fifth of these and is not parsed here:
+	// it belongs to the renderer, because what it changes is the value the
+	// cloud history and the bloom chain are cleared to when they are created.
+	// See renderer/bloom.go. It is named here so this list is the whole list.
+
 	// provokeStallEnv sleeps inside the first N loop frames, as
 	// "<frames>:<duration>" -- e.g. "20:40ms". It stands in for a cold GPU
 	// clocking up, a compile still finishing, or another process holding the

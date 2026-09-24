@@ -3,6 +3,8 @@ package renderer
 import (
 	"fmt"
 	"log"
+	"os"
+	"strconv"
 
 	"github.com/vkngwrapper/core/v3/core1_0"
 )
@@ -259,6 +261,44 @@ func (r *Renderer) primeBloomLayouts(t *bloomTarget) error {
 // The clear on top of the transition is worth it: the images then hold zeroes
 // rather than whatever the allocation contained, so anything that does read
 // them early gets black instead of NaN.
+// provokePrimeEnv makes primeSampledImages clear to a grey level instead of to
+// black. It is one of the GLYPHENGINE_PROVOKE_* variables; the others are in
+// the engine package's provoke.go, and this one lives here because the images
+// are here.
+//
+// The images it primes are the only device memory in the renderer a shader can
+// read before anything has written it: the cloud history is sampled by the
+// first frame's reprojection, and the bloom chain is bound by a descriptor set
+// whether or not bloom ran. Priming them to black hides any dependence on
+// that, because black is also what a fresh allocation usually holds, so a read
+// that should not happen produces the picture it would have produced anyway.
+//
+// Issue #40 is a render that differs on the FIRST run of a session and on no
+// later one -- precisely the run whose allocations did not come back holding
+// the previous run's identical contents. This makes "uninitialised memory
+// reached the picture" answerable on demand instead of by waiting for a
+// session: a capture taken with it set must be byte-identical to one taken
+// without it.
+const provokePrimeEnv = "GLYPHENGINE_PROVOKE_PRIME"
+
+// primeClearColor is what primeSampledImages clears to. Black unless
+// GLYPHENGINE_PROVOKE_PRIME names a level; an unparseable value is reported
+// rather than ignored, because a provocation that quietly did not happen turns
+// a passing gate into a lie.
+func primeClearColor() core1_0.ClearValueFloat {
+	v := os.Getenv(provokePrimeEnv)
+	if v == "" {
+		return core1_0.ClearValueFloat{0, 0, 0, 1}
+	}
+	f, err := strconv.ParseFloat(v, 32)
+	if err != nil || f < 0 {
+		log.Printf("%s=%q is not a non-negative level, ignoring", provokePrimeEnv, v)
+		return core1_0.ClearValueFloat{0, 0, 0, 1}
+	}
+	log.Printf("%s=%v: sampled images primed to grey rather than black", provokePrimeEnv, f)
+	return core1_0.ClearValueFloat{float32(f), float32(f), float32(f), 1}
+}
+
 func (r *Renderer) primeSampledImages(images []core1_0.Image) error {
 	if len(images) == 0 {
 		return nil
@@ -297,9 +337,10 @@ func (r *Renderer) primeSampledImages(images []core1_0.Image) error {
 
 	r.deviceDriver.CmdPipelineBarrier(cmdBuf,
 		core1_0.PipelineStageTopOfPipe, core1_0.PipelineStageTransfer, 0, nil, nil, toDst)
+	primed := primeClearColor()
 	for _, img := range images {
 		r.deviceDriver.CmdClearColorImage(cmdBuf, img, core1_0.ImageLayoutTransferDstOptimal,
-			core1_0.ClearValueFloat{0, 0, 0, 1}, rng)
+			primed, rng)
 	}
 	r.deviceDriver.CmdPipelineBarrier(cmdBuf,
 		core1_0.PipelineStageTransfer, core1_0.PipelineStageFragmentShader, 0, nil, nil, toRead)

@@ -994,6 +994,20 @@ func recordCommandBuffer(
 		scratch.pc[51] = 1.0 // roughness = fully matte
 		scratch.pc[55] = 0.0 // metallic = non-metal
 		scratch.pushConstants(deviceDriver, cmdBuf, litPipelineLayout, core1_0.StageVertex|core1_0.StageFragment)
+		// The block every mesh draw in this pass runs against: the camera's VP,
+		// the whole lighting pack, the wind clock and the two LOD distances
+		// grass.vert culls and fades by. sky=, lights= and grasslod= each cover
+		// a part of what goes into it, but none of them covers what was
+		// actually PUSHED -- and a 256-byte block written by one pass and read
+		// by the next, which is how pc is used, is exactly where those three
+		// can all agree while the grass comes out different.
+		//
+		// The impostor path below overwrites three slots of this block before
+		// its own push; they are the billboard's size and cell index, and
+		// grass= already records every impostor draw.
+		if trace != nil {
+			trace.Hash("grasspc", NewHash.Float32s(scratch.pc[:]))
+		}
 
 		// Cull tiles against the camera frustum and the shader's hard cull
 		// distance; only visible tiles are drawn (contiguous instance ranges).

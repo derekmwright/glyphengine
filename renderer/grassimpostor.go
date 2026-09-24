@@ -46,6 +46,21 @@ type grassImpostor struct {
 	extent core1_0.Extent2D
 	cells  int // one per variant, laid out left to right
 
+	// atlasHash is the baked atlas read back and folded, filled in only when a
+	// state trace is being written -- the readback costs a device wait and a
+	// staging copy, which is not worth paying on a run nobody is diffing.
+	// Past GrassLOD.ImpostorDistance a grass pixel IS this texture, so a bake
+	// that came out different is a whole-field difference with an identical
+	// simulation and an identical draw sequence behind it. That is the shape
+	// issue #40 describes and the shape nothing in the trace could see.
+	//
+	// Folded over the 8-bit RGBA readbackImage returns, so the instrument's
+	// floor is 1/255 per channel. A bake differing by less than that could not
+	// move a field of grass by the 47/255 the issue measured either.
+	// Zero means the readback failed and the field says nothing: NewHash is
+	// what an empty hash reads as, and zero is not it.
+	atlasHash Hasher
+
 	// worldHeight and worldWidth are the size in world units of what one cell
 	// depicts, so the billboard quad can be built to match exactly.
 	worldHeight float32
@@ -123,6 +138,20 @@ func (r *Renderer) bakeGrassImpostors(gs *GrassSystem, cellSize int) (*grassImpo
 	if err := r.recordGrassBake(gs, imp, cellSize, halfWidth, tipHeight); err != nil {
 		imp.destroy(r)
 		return nil, err
+	}
+
+	// Only when someone is diffing runs; see atlasHash. A failure is logged
+	// rather than returned: losing a diagnostic must not cost the caller its
+	// impostors, because an error out of bakeGrassImpostors means grass is
+	// drawn as meshes at every distance, which would change the very picture
+	// the trace is being kept to explain.
+	if r.trace != nil {
+		atlas, err := r.readbackImage(imp.image, int(imp.extent.Width), int(imp.extent.Height))
+		if err != nil {
+			log.Printf("Grass impostor atlas readback for the state trace failed, grassatlas= will read 0: %v", err)
+		} else {
+			imp.atlasHash = NewHash.Bytes(atlas.Pix)
+		}
 	}
 
 	log.Printf("Grass impostors: %dx%d atlas, %d cells, %.2f world units tall",
@@ -548,7 +577,10 @@ func (r *Renderer) allocateBakeAtlas(imp *grassImpostor, depth bool) error {
 	}
 	imp.sampler = sampler
 
-	img, mem, view, err := createOffscreenColor(r.instanceDriver, r.deviceDriver, r.physicalDevice, imp.extent)
+	// TransferSrc because the atlas is read back: by GrassImpostorAtlas, which
+	// is how a bake is checked at all, and by the state trace's grassatlas=
+	// field. Without it both paths are validation errors.
+	img, mem, view, err := createOffscreenColor(r.instanceDriver, r.deviceDriver, r.physicalDevice, imp.extent, core1_0.ImageUsageTransferSrc)
 	if err != nil {
 		imp.destroy(r)
 		return fmt.Errorf("grass impostor image: %w", err)
