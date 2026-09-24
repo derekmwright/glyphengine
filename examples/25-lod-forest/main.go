@@ -19,22 +19,22 @@ import (
 func init() { runtime.LockOSThread() }
 
 type game struct {
-	fade                       float32
-	levels                     int
-	pose, heightmap            string
-	impostors, counts, replace bool
-	set                        *renderer.InstanceSetLOD
-	control                    *renderer.InstanceSet
-	desc                       renderer.InstanceSetLODDesc
-	placements                 []renderer.MeshInstance
-	entity                     ecs.Entity
-	witness                    mgl32.Vec3
-	time, printTime            float32
-	swaps                      int
-	baseline                   renderer.ResourceCounts
-	heightfield                *glyph.Heightmap
-	ground                     *renderer.Mesh
-	sceneSwaps                 int
+	fade                                float32
+	levels                              int
+	pose, heightmap                     string
+	impostors, counts, replace, indexed bool
+	set                                 *renderer.InstanceSetLOD
+	control                             *renderer.InstanceSet
+	desc                                renderer.InstanceSetLODDesc
+	placements                          []renderer.MeshInstance
+	entity                              ecs.Entity
+	witness                             mgl32.Vec3
+	time, printTime                     float32
+	swaps                               int
+	baseline                            renderer.ResourceCounts
+	heightfield                         *glyph.Heightmap
+	ground                              *renderer.Mesh
+	sceneSwaps                          int
 }
 
 func hash(i uint32) float32 {
@@ -47,7 +47,7 @@ func hash(i uint32) float32 {
 }
 
 // Trees are example content: cones with different tessellation and silhouettes.
-func tree(r *renderer.Renderer, segments, tiers int) (*renderer.Mesh, error) {
+func tree(r *renderer.Renderer, segments, tiers int, indexed bool) (*renderer.Mesh, error) {
 	var verts []renderer.Vertex
 	tri := func(a, b, c mgl32.Vec3, color [3]float32) {
 		n := b.Sub(a).Cross(c.Sub(a)).Normalize()
@@ -69,7 +69,17 @@ func tree(r *renderer.Renderer, segments, tiers int) (*renderer.Mesh, error) {
 		t := float32(i) / float32(tiers)
 		cone(1.2+3.9*t, 2.3-0.8*t, 1.7*(1-0.7*t), [3]float32{0.10 + 0.025*t, 0.34 + 0.07*t, 0.075})
 	}
-	m, err := r.CreateMesh(verts)
+	var m *renderer.Mesh
+	var err error
+	if indexed {
+		indices := make([]uint16, len(verts))
+		for i := range indices {
+			indices[i] = uint16(i)
+		}
+		m, err = r.CreateIndexedMesh(verts, indices)
+	} else {
+		m, err = r.CreateMesh(verts)
+	}
 	if err == nil {
 		m.BoundCenter = [3]float32{0, 3, 0}
 		// The tallest tier reaches y=6.256; LOD culling is about the base
@@ -96,7 +106,7 @@ func (g *game) Init(e *glyph.Engine) error {
 	e.C.MeshRef.Set(ent, &glyph.MeshRef{Mesh: ground, Roughness: 1})
 	e.C.NoCastShadow.Set(ent, &glyph.NoCastShadow{})
 	for i, detail := range [][2]int{{24, 9}, {8, 4}, {4, 2}} {
-		mesh, err := tree(r, detail[0], detail[1])
+		mesh, err := tree(r, detail[0], detail[1], g.indexed)
 		if err != nil {
 			return err
 		}
@@ -238,6 +248,8 @@ func (g *game) printCounts() {
 
 func main() {
 	frames := flag.Int("frames", 0, "render N frames then exit")
+	indexed := flag.Bool("indexed", false, "use indexed meshes to exercise indexed indirect draws")
+	gpu := flag.Bool("gpu", false, "select LOD on the GPU and issue indirect draws")
 	shot := flag.String("screenshot", "", "last-frame PNG path")
 	fade := flag.Float64("fade", 6, "transition width in world units")
 	levels := flag.Int("levels", 3, "3 = LOD; 1 = full-detail single-set control")
@@ -257,6 +269,8 @@ func main() {
 		log.Fatal("-replace requires LOD levels")
 	}
 	g := &game{fade: float32(*fade), levels: *levels, pose: *pose, counts: *counts, impostors: *impostors, replace: *replace, heightmap: *heightmap}
+	g.desc.GPU = *gpu
+	g.indexed = *indexed
 	opts := []glyph.Option{glyph.WithTitle("GlyphEngine - 25 LOD Forest"), glyph.WithWindowSize(*width, *height), glyph.WithMSAA(*msaa), glyph.WithProjection(50, 0.1, 800)}
 	if *frames > 0 {
 		opts = append(opts, glyph.WithMaxFrames(*frames))

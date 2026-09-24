@@ -1,0 +1,23 @@
+#version 450
+layout(set=2, binding=0) uniform sampler2D pattern;
+layout(set=2, binding=1) uniform sampler2D previous;
+layout(set=2, binding=2) uniform sampler2D modulation; // ordinary texture input
+layout(set=2, binding=4, r32f) uniform image2D output0;
+layout(push_constant) uniform ApplicationPush { layout(offset=128) vec4 data[8]; } pc;
+layout(local_size_x=8, local_size_y=8) in;
+layout(set=2,binding=8,std430) buffer A {float a[];};
+layout(set=2,binding=9,std430) buffer B {float b[];};
+layout(set=2,binding=10,std430) buffer C {float c[];};
+layout(set=2,binding=11,std430) buffer D {float d[];};
+void main() {
+    ivec2 pixel=ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size=imageSize(output0);
+    if (any(greaterThanEqual(pixel,size))) return;
+    float sum=0;
+    for (int y=-1;y<=1;y++) for (int x=-1;x<=1;x++)
+        sum+=texelFetch(pattern,clamp(pixel+ivec2(x,y),ivec2(0),size-1),0).r;
+    float value=mix(sum/9.0*texelFetch(modulation,ivec2(0),0).r,texelFetch(previous,pixel,0).r,pc.data[0].x);
+    uint i=uint(pixel.y)*672+uint(pixel.x);
+    b[i]=a[i]; c[i]=b[i]; d[i]=c[i];
+    imageStore(output0,pixel,vec4(value*d[i]));
+}

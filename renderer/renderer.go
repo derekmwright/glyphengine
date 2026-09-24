@@ -77,6 +77,9 @@ type Renderer struct {
 	// genuinely alive for the frames still in flight when the call is made.
 	instanceSets               []*InstanceSet
 	lodSets                    []*InstanceSetLOD
+	storageBuffers             []*StorageBuffer
+	gpuLODTimer                *AppPass
+	appBufferInfos             [1]core1_0.DescriptorBufferInfo
 	impostorAtlases            []*ImpostorAtlas
 	lodDraws                   []RenderObject
 	lodGeneration              uint64
@@ -2126,7 +2129,13 @@ func (r *Renderer) traceStreamedBuffers(t *StateTrace) {
 	nLOD := 0
 	for _, d := range r.lodDraws {
 		if b := d.Instances; b != nil && b.lod != nil {
-			lh = HashPOD(lh, unsafe.Slice((*MeshInstance)(b.mapped), b.count))
+			if gpu := b.lod.gpu; gpu != nil {
+				// Device-local buckets cannot be dereferenced. Trace deterministic
+				// inputs and retired counts; the image gate checks generated output.
+				lh = HashPOD(HashPOD(lh, b.lod.placements), gpu.pc[:])
+			} else {
+				lh = HashPOD(lh, unsafe.Slice((*MeshInstance)(b.mapped), b.count))
+			}
 			lh = lh.Int(b.lodLevel).Int(b.count)
 			nLOD++
 		}

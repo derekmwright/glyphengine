@@ -145,3 +145,6 @@ var ImpostorVertSpv []byte
 
 //go:embed impostor.frag.spv
 var ImpostorFragSpv []byte
+
+//go:embed lodselect.comp.spv
+var LODSelectCompSpv []byte

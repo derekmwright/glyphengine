@@ -17,11 +17,14 @@ type LODLevel struct {
 	MaxDistance float32
 }
 
-// InstanceSetLODDesc describes fixed-capacity, CPU-selected distance levels.
+// InstanceSetLODDesc describes fixed-capacity distance levels. GPU opts into
+// device selection and indirect draws, with at most eight buckets including
+// the impostor. The zero value retains CPU selection.
 // FadeWidth is the full width of a transition centred on each MaxDistance.
 // ShadowLevel selects the mesh bucket that casts shadows; -1 disables casting.
 // Impostors never cast. Meshes and the atlas are borrowed, not owned by the set.
 type InstanceSetLODDesc struct {
+	GPU         bool
 	Levels      []LODLevel
 	Impostor    *ImpostorAtlas
 	Capacity    int
@@ -32,6 +35,7 @@ type InstanceSetLODDesc struct {
 // InstanceSetLOD retains placements and per-frame GPU buckets. Use it only on
 // the renderer thread, and stop drawing it before destroying it.
 type InstanceSetLOD struct {
+	gpu                                    *gpuLOD
 	owner                                  *Renderer
 	levels                                 []LODLevel
 	impostor                               *ImpostorAtlas
@@ -54,14 +58,23 @@ type lodBucket struct {
 // including the impostor when present. Culled includes placements dropped at
 // capacity, outside the frustum, or beyond the last distance without an atlas.
 // Cross-fading placements count in both adjacent buckets. Copy drawn to retain it.
+// On GPU sets it waits for the most recently submitted frame's fence and reads
+// those counters. During Update these describe the previous submitted frame;
+// this diagnostic call can stall. Before the first submission counts are zero.
 func (s *InstanceSetLOD) Counts() (drawn []int, culled int) {
 	if s == nil {
 		return nil, 0
+	}
+	if s.gpu != nil {
+		s.latestGPUCounts()
 	}
 	return s.counts, s.culled
 }
 
 func validateLOD(d InstanceSetLODDesc) error {
+	if d.GPU && (len(d.Levels) > 8 || (d.Impostor != nil && len(d.Levels) > 7)) {
+		return fmt.Errorf("LOD: GPU mode supports at most eight buckets")
+	}
 	if d.Capacity <= 0 || d.Capacity > int(^uint(0)>>1)/meshInstanceSize {
 		return fmt.Errorf("LOD: invalid capacity %d", d.Capacity)
 	}
@@ -118,7 +131,7 @@ func newLOD(d InstanceSetLODDesc) *InstanceSetLOD {
 	return s
 }
 
-// CreateInstanceSetLOD allocates a buffer per level per frame in flight.
+// CreateInstanceSetLOD allocates per-level storage per frame in flight.
 // Placements beyond Capacity are dropped and included in Counts' culled total.
 func (r *Renderer) CreateInstanceSetLOD(d InstanceSetLODDesc, instances []MeshInstance) (*InstanceSetLOD, error) {
 	if err := validateLOD(d); err != nil {
@@ -129,6 +142,16 @@ func (r *Renderer) CreateInstanceSetLOD(d InstanceSetLODDesc, instances []MeshIn
 	}
 	s := newLOD(d)
 	s.owner = r
+	if d.GPU {
+		if err := s.createGPU(); err != nil {
+			s.destroy()
+			return nil, err
+		}
+		r.lodSets = append(r.lodSets, s)
+		r.graphDirty = true
+		r.UpdateInstanceSetLOD(s, instances)
+		return s, nil
+	}
 	for i := range s.buckets {
 		for f := range s.buckets[i].frames {
 			b := &s.buckets[i].frames[f]
@@ -155,7 +178,8 @@ func (r *Renderer) CreateInstanceSetLOD(d InstanceSetLODDesc, instances []MeshIn
 }
 
 // UpdateInstanceSetLOD copies the full placement list. Tint.w is overwritten
-// with renderer-owned coverage when the per-level buffers are filled.
+// with renderer-owned coverage when the per-level buffers are filled. GPU sets
+// stage placements with a synchronous queue submission, safe against live draws.
 func (r *Renderer) UpdateInstanceSetLOD(s *InstanceSetLOD, instances []MeshInstance) {
 	if s == nil {
 		return
@@ -166,6 +190,12 @@ func (r *Renderer) UpdateInstanceSetLOD(s *InstanceSetLOD, instances []MeshInsta
 	n := min(len(instances), s.capacity)
 	s.placements = append(s.placements[:0], instances[:n]...)
 	s.dropped = len(instances) - n
+	if s.gpu != nil && n > 0 {
+		// Updates are infrequent staged submissions; steady frames never copy placements.
+		if err := r.uploadBuffers([]core1_0.Buffer{s.gpu.placements.buffer}, unsafe.Slice((*byte)(unsafe.Pointer(&s.placements[0])), n*meshInstanceSize)); err != nil {
+			panic(fmt.Sprintf("LOD upload: %v", err))
+		}
+	}
 }
 
 // DestroyInstanceSetLOD is nil-safe and idempotent. GPU storage is released
@@ -178,6 +208,9 @@ func (r *Renderer) DestroyInstanceSetLOD(s *InstanceSetLOD) {
 		panic("LOD: destroy of foreign set")
 	}
 	s.destroyed = true
+	if s.gpu != nil {
+		r.graphDirty = true
+	}
 	r.DeferDestroy(func() {
 		s.destroy()
 		if i := slices.Index(r.lodSets, s); i >= 0 {
@@ -187,6 +220,10 @@ func (r *Renderer) DestroyInstanceSetLOD(s *InstanceSetLOD) {
 }
 
 func (s *InstanceSetLOD) destroy() {
+	if s.gpu != nil {
+		s.gpu.destroy(s.owner)
+		return
+	}
 	for i := range s.buckets {
 		for f := range s.buckets[i].frames {
 			s.buckets[i].frames[f].destroy(s.owner.deviceDriver)
@@ -315,16 +352,21 @@ func (r *Renderer) prepareLOD(draws []RenderObject, lighting SceneLighting, fram
 		}
 		if s.prepared != r.lodGeneration {
 			start := time.Now()
-			s.bucket(frustum, lighting.CameraPos)
-			r.lastLODCull += time.Since(start)
-			start = time.Now()
-			s.upload(frame)
-			r.lastLODUpload += time.Since(start)
+			if s.gpu != nil {
+				s.prepareGPU(frustum, lighting.CameraPos, frame)
+				r.lastLODCull += time.Since(start)
+			} else {
+				s.bucket(frustum, lighting.CameraPos)
+				r.lastLODCull += time.Since(start)
+				start = time.Now()
+				s.upload(frame)
+				r.lastLODUpload += time.Since(start)
+			}
 			s.prepared = r.lodGeneration
 		}
 		for i := range s.buckets {
 			b := &s.buckets[i].frames[frame]
-			if b.count == 0 {
+			if b.count == 0 && s.gpu == nil {
 				continue
 			}
 			out := d
@@ -339,4 +381,7 @@ func (r *Renderer) prepareLOD(draws []RenderObject, lighting SceneLighting, fram
 }
 
 // LastLODWork reports CPU culling/bucketing and upload time for the last frame.
+// GPU mode reports parameter preparation and compute command recording as cull;
+// it performs no per-frame placement upload. The "lodselect" GPUTimings.App entry measures
+// the GPU selection work separately from the existing engine pass brackets.
 func (r *Renderer) LastLODWork() (cull, upload time.Duration) { return r.lastLODCull, r.lastLODUpload }

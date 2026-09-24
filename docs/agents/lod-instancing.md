@@ -2,7 +2,7 @@
 id: lod-instancing
 title: Cull and select distance levels per placement
 summary: >
-  InstanceSetLOD culls placements, selects mesh distance bands and cross-fades
+  InstanceSetLOD selects on the CPU or GPU, culls placements and cross-fades
   them with ordered coverage. An optional eight-view atlas supplies far billboards.
 capability: rendering
 status: stable
@@ -31,7 +31,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: procedural
-verified: 2026-09-24
+verified: 2026-09-24 # CPU/GPU indirect path and ordered compaction
 ---
 
 # Cull and select distance levels per placement
@@ -119,7 +119,7 @@ level has no positive bound radius, frustum culling is skipped conservatively;
 distance selection still applies. A missing bound never causes the group to
 vanish because of a frustum test.
 
-`Counts()` returns the last prepared frame's per-band counts, including the
+In CPU mode, `Counts()` returns the last prepared frame's per-band counts, including the
 impostor if supplied, and a culled count. The returned slice is a read-only
 view; copy it to keep a snapshot. Fade duplicates appear in both bands, so
 the sum can exceed the number of visible placements. Culled includes the
@@ -188,9 +188,84 @@ no changes. `LitLODFrag` and ordinary `LitFrag` share `lighting.inc` for
 lighting, shadow lookup, local lights and fog. Override the LOD stages
 explicitly when the same custom lighting or deformation should apply there.
 
+## GPU selection and indirect drawing
+
+Set `InstanceSetLODDesc.GPU: true` to move frustum tests, distance selection,
+coverage and bucket generation to compute. The zero value retains CPU selection.
+The same mesh, fade, atlas, placement and shadow rules apply. `25-lod-forest -gpu`
+selects this path; add `-indexed` to exercise indexed indirect commands.
+
+GPU mode supports **eight total buckets**, including an impostor, and rejects
+an arena larger than the device's `MaxStorageBufferRange`. It owns one
+placements buffer and, per frame slot, a device-local bucket arena, indirect
+arguments, scan scratch, a small uniform and mapped counter readback. Each
+bucket has a disjoint `Capacity × 80` byte range, bound at that range's vertex
+offset. Four storage descriptors suffice regardless of bucket count. There is
+no memory aliasing between graph resources.
+
+Three dispatches classify and scan 64-placement blocks, scan the block totals
+and initialize every command, then scatter in placement order. The middle
+phase resets counts even for empty sets. Compute runs before shadows, ahead
+of application `StageBeforeScene` nodes, which retain their post-shadow position.
+The graph derives storage-to-vertex-input, storage-to-indirect-fetch and
+counter-copy barriers outside render passes. Each mesh band issues one
+`CmdDrawIndexedIndirect` or `CmdDrawIndirect`; the impostor uses
+`CmdDrawIndirect`. ShadowLevel uses that same selected bucket. Vulkan 1.0's
+single-command indirect drawing needs no optional multi-draw or indirect-count
+feature. An empty bucket still records an indirect call with zero instances.
+
+`UpdateInstanceSetLOD` uploads copied placements through a synchronous staging
+submission, ordered against earlier graphics-queue work. This can stall during
+updates; static placements have no per-frame upload. Per-frame work on the CPU
+is proportional to bucket count. Uniform and readback access happens after the
+frame slot's fence. Buffers survive resize and retire with the set.
+
+For a GPU set, `Counts()` waits for the most recently submitted frame's fence
+and reads that frame's counters; during `Update` these are the **previous
+submitted frame**, not the frame about to be drawn. Before any submission it
+returns zero. Treat this as a diagnostic API: polling it can serialize frames.
+`Stats().DrawCalls` includes empty indirect calls; its GPU LOD instance/triangle
+values estimate work from the last retired slot. Use Counts for exact submitted
+bucket counts, and do not compare indirect call count to surviving bucket count.
+
+`LastLODWork` and `cpu_lodcull` measure parameter preparation and dispatch
+recording; `cpu_lodupload` is zero in steady GPU frames. `GPUTimings.App` includes
+one `lodselect` interval over all GPU LOD sets, also emitted as `gpu_lodselect`
+by `task bench`. It has a reserved timing slot independent of the sixteen
+application slots. Existing engine `Pass` values and brackets are unchanged.
+
+At fixed forest frame 61, 1280×720, MSAA4, atomic append differed from CPU in
+four channel samples (maximum 5/255), and repeated GPU runs differed in one
+(1/255). Stable compaction makes CPU/GPU and GPU/GPU captures pixel-identical.
+Both modes also produce the same fade metrics recorded above. Disabling GPU
+coverage makes the comparison fail on 1,309,981 channel samples (maximum
+208/255), so the equality gate checks visible geometry.
+
+On 2026-09-24, RX 7900 XTX, 1280×720, 200 fixed-clock frames per run,
+`task lod` ran CPU/GPU/CPU/GPU with the GPU otherwise idle:
+
+| Run | Mode | GPU total | CPU selection/recording | CPU upload | GPU selection |
+|---|---|---:|---:|---:|---:|
+| A1 | CPU | 1.391 ms | 0.237 ms | 0.026 ms | — |
+| B1 | GPU | 1.416 ms | 0.019 ms | 0 | 0.035 ms |
+| A2 | CPU | 1.384 ms | 0.279 ms | 0.022 ms | — |
+| B2 | GPU | 1.425 ms | 0.054 ms | 0 | 0.035 ms |
+
+Mean CPU selection plus upload falls from 0.282 to 0.0365 ms (87.1%).
+Mean GPU total rises from 1.3875 to 1.4205 ms; the new GPU selection interval
+is 0.035 ms. This trades a small GPU cost for CPU work independent of placement
+count; it is not a GPU frame-time optimization.
+
+The same machine's full-suite main/branch/main/branch comparison (main
+`9088bdf`) covers 29 shared scenes. Mean GPU totals range from -2.23% to
++0.60%; the largest increase is 0.020 ms, with no systematic increase in
+existing engine pass brackets. Those scenes keep GPU LOD disabled, so the
+small decreases are not attributed to this feature. Existing engine command
+stream hashes remain unchanged.
+
 ## Cost and checks
 
-For a fixed number of levels, selection is linear in placement count. The
+For the default CPU path and a fixed number of levels, selection is linear in placement count. The
 renderer walks placements once, retains bucket scratch, then copies each
 survivor into the current frame's host-coherent buffer after its fence signals.
 Fade regions copy a placement twice. Uploading one band never overwrites the
@@ -222,8 +297,15 @@ billboards. Shadow work also drops because only the chosen bucket casts.
 `task lod` runs culling, consecutive-frame transition checks at 1×/4× samples,
 far-band visibility, byte determinism, resize/scene-swap/replacement lifetime checks and
 sequential `task bench` A/B/A/B runs. `-pose edge|pop|far`, `-impostor=false`,
-`-fade 0`, `-levels 1`, `-counts`, and `-replace` expose the controls in the
+`-fade 0`, `-levels 1`, `-counts`, `-gpu`, `-indexed`, and `-replace` expose the controls in the
 example. Captures remain in `.task/lod` for inspection. The example is also in
 `task smoke`, `task validate`, `task determinism`, and `task screenshots`.
 Use `task lod -- -reuse-bench` to rerender the correctness checks while checking
 the retained benchmark JSON instead of running the four benchmarks again.
+
+GPU storage, excluding meshes/atlas: `80 × Capacity` shared placement bytes;
+per frame slot, `80 × Capacity × buckets` output bytes, approximately
+`24 × Capacity + 36 × ceil(Capacity/64)` scan bytes, `20 × buckets + 4`
+command bytes, the same number of readback bytes, and 64 uniform bytes.
+The current implementation also retains the CPU placement and bucket scratch
+allocated by the common constructor; this is a memory cost, not per-frame work.

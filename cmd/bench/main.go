@@ -134,6 +134,7 @@ var scenes = []scene{
 	{"ui-glow", "13-ui", []string{"-glow", "on", "-frames", "200"}, "the same HUD again, three elements emitting"},
 
 	{"kitchensink", "15-kitchen-sink", []string{"-demo", "-frames", "240"}, "everything at once"},
+	{"lod-gpu", "25-lod-forest", []string{"-frames", "200", "-gpu"}, "same placements, GPU selection and indirect draws"},
 }
 
 // benchLine parses the tab-separated line LogTimingsTSV emits.

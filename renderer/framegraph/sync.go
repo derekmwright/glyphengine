@@ -36,6 +36,10 @@ func accessState(kind NodeKind, u Use) imageState {
 		s.layout, s.stage, s.access = core1_0.ImageLayoutTransferDstOptimal, core1_0.PipelineStageTransfer, core1_0.AccessTransferWrite
 	case Present:
 		s.layout, s.stage = ImageLayoutPresentSrc, core1_0.PipelineStageBottomOfPipe
+	case VertexRead:
+		s.stage, s.access = core1_0.PipelineStageVertexInput, core1_0.AccessVertexAttributeRead
+	case IndirectRead:
+		s.stage, s.access = core1_0.PipelineStageDrawIndirect, core1_0.AccessIndirectCommandRead
 	}
 	if u.Stages != 0 {
 		s.stage = u.Stages
@@ -116,13 +120,13 @@ func groupUndefinedBarriers(barriers []Barrier) {
 		}
 		stage := core1_0.PipelineStageTopOfPipe
 		for i := start; i < end; i++ {
-			if barriers[i].OldLayout != core1_0.ImageLayoutUndefined {
+			if barriers[i].Buffer || barriers[i].OldLayout != core1_0.ImageLayoutUndefined {
 				stage = barriers[i].SrcStage
 				break
 			}
 		}
 		for i := start; i < end; i++ {
-			if barriers[i].OldLayout == core1_0.ImageLayoutUndefined {
+			if !barriers[i].Buffer && barriers[i].OldLayout == core1_0.ImageLayoutUndefined {
 				barriers[i].SrcStage = stage
 			} else {
 				stage = barriers[i].SrcStage

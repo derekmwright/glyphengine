@@ -46,12 +46,15 @@ type InstanceSet struct {
 	lod      *InstanceSetLOD
 	lodLevel int
 
-	buffer    core1_0.Buffer
-	memory    core1_0.DeviceMemory
-	mapped    unsafe.Pointer
-	capacity  int
-	count     int
-	destroyed bool
+	buffer         core1_0.Buffer
+	offset         int
+	indirect       core1_0.Buffer
+	indirectOffset int
+	memory         core1_0.DeviceMemory
+	mapped         unsafe.Pointer
+	capacity       int
+	count          int
+	destroyed      bool
 
 	// Bound sphere over every instance, in world space. The draw list frustum
 	// tests this once for the set rather than once per instance.

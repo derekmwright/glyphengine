@@ -3,10 +3,12 @@ id: frame-graph
 title: Record the renderer's frame graph
 summary: >
   The renderer compiles its tail into an ordered plan and owns the Vulkan
-  render pass cache, physical image bindings, framebuffers and recording closures.
+  render pass cache, physical image/buffer bindings, framebuffers and recording closures.
 capability: rendering
 status: experimental
 api:
+  - framegraph.Graph.AddBuffer
+  - framegraph.BufferDesc
   - framegraph.Graph.Build
   - framegraph.RenderPassDesc.Key
   - framegraph.Compatible
@@ -24,7 +26,7 @@ requires:
   - vulkan-runtime
   - vulkan-sdk
 assets: procedural
-verified: 2026-09-24 # rechecked with synchronization validation
+verified: 2026-09-24 # buffer resources and GPU LOD synchronization
 ---
 
 # Record the renderer's frame graph
@@ -103,6 +105,39 @@ undo stack; fixed targets survive. Application input sets are per frame slot
 and rewritten only after its fence wait, or while the device is idle on resize.
 History binds distinct read/write instances chosen by frame index. See
 [render targets](render-targets.md) for the public and shader contracts.
+
+## Buffers and generated draws
+
+`Graph.AddBuffer(BufferDesc{Name, Size, Persistent, Imported, Usage})` returns
+the same ResourceID type as AddImage. A buffer supports StorageRead,
+StorageWrite, StorageReadWrite, TransferSrc, TransferDst, VertexRead and
+IndirectRead. Image-only accesses on buffers and VertexRead/IndirectRead on
+images are rejected. The compiler derives and ORs usage flags. Buffers have
+no layout, clear, resolve or priming transition.
+
+Transient reads require a guaranteed write. Persistent/imported contents must
+be initialized by their owner; the initial synchronization scope conservatively
+includes preceding submissions. Optional-group writes initialize only that
+group's executed path. Joins retain both paths' hazards. Read/write and
+write/write hazards emit BufferMemoryBarrier; readers are accumulated for the
+next writer. A producer's visibility to vertex input does not imply visibility
+to indirect fetch, even when both reads belong to the same node.
+
+`Barrier.Buffer`, `Offset` and `Size` identify a buffer range. The current
+compiler emits whole logical buffers and does not alias them. Graphics buffer
+reads become explicit barriers **before** render-pass begin; they never alter
+subpass dependencies or render-pass compatibility. A stage-pair group may mix
+buffer and image barriers. The executor allocates both scratch arrays from the
+plan at build time and emits one CmdPipelineBarrier per adjacent stage pair.
+Image-only pinned streams retain their original calls and arguments.
+
+GPU LOD adds engine-owned classify/prefix/scatter nodes before shadows and
+before application StageBeforeScene work. A trailing copy obtains diagnostic
+counts; a synchronization step exposes bucket vertex ranges and draw arguments
+to the hand-recorded shadow and scene passes. The prefix node also initializes
+counts, so no workgroup assumes another workgroup has already reset them.
+These nodes precede application nodes without moving application work across
+its existing shadow boundary. See [ADR 0008](../adr/0008-buffer-resources-and-gpu-draw-generation.md).
 
 ## Layouts and optional work
 

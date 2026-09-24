@@ -44,7 +44,7 @@ func recordInstanced(
 	for i := range draws {
 		d := &draws[i]
 		set := d.Instances
-		if set == nil || set.count == 0 || d.ShadowOnly {
+		if set == nil || (set.count == 0 && set.indirect.Handle() == 0) || d.ShadowOnly {
 			continue
 		}
 
@@ -87,7 +87,9 @@ func recordInstanced(
 		}
 
 		// Binding 0 is the mesh, binding 1 is the placements.
-		if atlas != nil {
+		if set.indirect.Handle() != 0 {
+			scratch.bindInstanceVertices(deviceDriver, cmdBuf, set, atlas != nil)
+		} else if atlas != nil {
 			scratch.bindVertexBuffers(deviceDriver, cmdBuf, 1, set.buffer)
 		} else {
 			scratch.bindVertexBuffers(deviceDriver, cmdBuf, 0, set.Mesh.vertexBuffer, set.buffer)
@@ -128,11 +130,19 @@ func recordInstanced(
 		scratch.pushConstants(deviceDriver, cmdBuf, litPipelineLayout, core1_0.StageVertex|core1_0.StageFragment)
 
 		if atlas != nil {
-			stats.addDraw(set.count, 0, 6)
+			stats.addInstanceDraw(set, 0, 6)
+			if set.indirect.Handle() != 0 {
+				set.drawIndirect(deviceDriver, cmdBuf)
+				continue
+			}
 			deviceDriver.CmdDraw(cmdBuf, 6, set.count, 0, 0)
 			continue
 		}
-		stats.addDraw(set.count, set.Mesh.IndexCount, set.Mesh.VertexCount)
+		stats.addInstanceDraw(set, set.Mesh.IndexCount, set.Mesh.VertexCount)
+		if set.indirect.Handle() != 0 {
+			set.drawIndirect(deviceDriver, cmdBuf)
+			continue
+		}
 		if set.Mesh.IndexCount > 0 {
 			deviceDriver.CmdBindIndexBuffer(cmdBuf, set.Mesh.indexBuffer, 0, set.Mesh.indexType)
 			deviceDriver.CmdDrawIndexed(cmdBuf, set.Mesh.IndexCount, set.count, 0, 0, 0)
@@ -171,7 +181,7 @@ func recordInstancedShadow(
 	for i := range draws {
 		d := &draws[i]
 		set := d.Instances
-		if set == nil || set.count == 0 {
+		if set == nil || (set.count == 0 && set.indirect.Handle() == 0) {
 			continue
 		}
 		if d.Emissive || d.NoCastShadow || d.IsTranslucent() {
@@ -189,7 +199,11 @@ func recordInstancedShadow(
 			bound = true
 		}
 
-		scratch.bindVertexBuffers(deviceDriver, cmdBuf, 0, set.Mesh.vertexBuffer, set.buffer)
+		if set.indirect.Handle() != 0 {
+			scratch.bindInstanceVertices(deviceDriver, cmdBuf, set, false)
+		} else {
+			scratch.bindVertexBuffers(deviceDriver, cmdBuf, 0, set.Mesh.vertexBuffer, set.buffer)
+		}
 
 		// The instanced depth stage reads the first matrix as the cascade's
 		// view-projection; the model comes from the instance attribute, so
@@ -199,7 +213,11 @@ func recordInstancedShadow(
 		copy(scratch.shadowPC[:16], cascadeVP[:])
 		scratch.pushShadowConstants(deviceDriver, cmdBuf, layout)
 
-		stats.addDraw(set.count, set.Mesh.IndexCount, set.Mesh.VertexCount)
+		stats.addInstanceDraw(set, set.Mesh.IndexCount, set.Mesh.VertexCount)
+		if set.indirect.Handle() != 0 {
+			set.drawIndirect(deviceDriver, cmdBuf)
+			continue
+		}
 		if set.Mesh.IndexCount > 0 {
 			deviceDriver.CmdBindIndexBuffer(cmdBuf, set.Mesh.indexBuffer, 0, set.Mesh.indexType)
 			deviceDriver.CmdDrawIndexed(cmdBuf, set.Mesh.IndexCount, set.count, 0, 0, 0)

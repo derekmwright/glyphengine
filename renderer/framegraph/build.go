@@ -31,11 +31,13 @@ type resourceUses struct {
 }
 
 type imageState struct {
-	layout     core1_0.ImageLayout
-	stage      core1_0.PipelineStageFlags
-	access     core1_0.AccessFlags
-	pass       bool
-	writeStage core1_0.PipelineStageFlags
+	layout        core1_0.ImageLayout
+	stage         core1_0.PipelineStageFlags
+	access        core1_0.AccessFlags
+	pass          bool
+	writeStage    core1_0.PipelineStageFlags
+	visibleStage  core1_0.PipelineStageFlags
+	visibleAccess core1_0.AccessFlags
 }
 
 // Build validates declarations first, then walks them in order. It owns every
@@ -56,6 +58,21 @@ func (g *Graph) Build() (*Plan, error) {
 	groupEntry := make([]imageState, len(g.images))
 	groupTouched := make([]bool, len(g.images))
 	for i, d := range g.images {
+		if b, ok := g.buffers[ResourceID(i)]; ok {
+			for _, node := range uses {
+				for _, u := range node {
+					if int(u.Resource) == i {
+						b.Usage |= bufferUsage(u.Access)
+					}
+				}
+			}
+			p.Resources[i] = ResourceInfo{Buffer: true, BufferDesc: b}
+			if b.Persistent || b.Imported {
+				states[i] = imageState{stage: core1_0.PipelineStageAllCommands, access: core1_0.AccessMemoryRead | core1_0.AccessMemoryWrite,
+					writeStage: core1_0.PipelineStageAllCommands}
+			}
+			continue
+		}
 		s := summaries[i]
 		d.Usage |= s.usage
 		d.Instances = max(d.Instances, 1)
@@ -98,6 +115,14 @@ func (g *Graph) Build() (*Plan, error) {
 				groupTouched[u.Resource] = true
 			}
 			after := accessState(n.Kind, u.Use)
+			if r.Buffer {
+				after = bufferUse(&step, u, before, after, r.BufferDesc.Size, n.Kind != Legacy)
+				if n.Optional && n.OptionalGroup == 0 {
+					after = optionalBufferState(before, after)
+				}
+				states[u.Resource] = after
+				continue
+			}
 			if attachment(u.Access) {
 				after.layout = r.Resting
 				after.pass = true
@@ -133,7 +158,11 @@ func (g *Graph) Build() (*Plan, error) {
 				if groupEntry[id].layout != states[id].layout {
 					return nil, g.fail(n.Name, ResourceID(id), fmt.Sprintf("optional group %d must be layout-neutral", n.OptionalGroup))
 				}
-				states[id] = optionalState(groupEntry[id], states[id])
+				if p.Resources[id].Buffer {
+					states[id] = optionalBufferState(groupEntry[id], states[id])
+				} else {
+					states[id] = optionalState(groupEntry[id], states[id])
+				}
 			}
 		}
 		groupUndefinedBarriers(step.Barriers)
@@ -165,6 +194,9 @@ func (g *Graph) validateReads(uses [][]compiledUse) error {
 	entry := make([]bool, len(g.images))
 	for i, d := range g.images {
 		written[i] = d.Persistent || (d.Imported && d.InitialLayout != core1_0.ImageLayoutUndefined)
+		if b, ok := g.buffers[ResourceID(i)]; ok {
+			written[i] = b.Persistent || b.Imported
+		}
 	}
 	for ni, n := range g.nodes {
 		if g.groupStarts(ni) {
@@ -208,6 +240,12 @@ func (g *Graph) validate() ([][]compiledUse, []resourceUses, error) {
 	summaries := make([]resourceUses, len(g.images))
 	groups := make(map[int]bool)
 	for i, d := range g.images {
+		if b, ok := g.buffers[ResourceID(i)]; ok {
+			if b.Size <= 0 {
+				return nil, nil, g.fail("<buffers>", ResourceID(i), "buffer size must be positive")
+			}
+			continue
+		}
 		fail := func(rule string) ([][]compiledUse, []resourceUses, error) {
 			return nil, nil, g.fail("<images>", ResourceID(i), rule)
 		}
@@ -243,8 +281,15 @@ func (g *Graph) validate() ([][]compiledUse, []resourceUses, error) {
 			if u.Resource < 0 || int(u.Resource) >= len(g.images) {
 				return nil, nil, g.fail(n.Name, u.Resource, "unknown resource")
 			}
-			if u.Access < SampledRead || u.Access > Present {
+			if u.Access < SampledRead || u.Access > VertexRead {
 				return nil, nil, g.fail(n.Name, u.Resource, "unknown access")
+			}
+			_, buffer := g.buffers[u.Resource]
+			if (buffer && bufferUsage(u.Access) == 0) || (!buffer && (u.Access == VertexRead || u.Access == IndirectRead)) {
+				return nil, nil, g.fail(n.Name, u.Resource, "access incompatible with resource kind")
+			}
+			if buffer && (u.HasResolve || u.FinalLayout != core1_0.ImageLayoutUndefined) {
+				return nil, nil, g.fail(n.Name, u.Resource, "buffers have no image layout or resolve")
 			}
 			if (u.Clear != nil && u.Access != ColorWrite && u.Access != DepthWrite) ||
 				(u.Discard && u.Access != ColorWrite && u.Access != DepthWrite && u.Access != TransferDst) {
@@ -262,7 +307,7 @@ func (g *Graph) validate() ([][]compiledUse, []resourceUses, error) {
 					return nil, nil, g.fail(n.Name, u.ResolveTo, "unknown resolve target")
 				}
 				d, dst := g.images[u.Resource], g.images[u.ResolveTo]
-				if dst.Samples != core1_0.Samples1 || dst.Format != d.Format || !sameExtent(dst.Extent, d.Extent) {
+				if _, buffer := g.buffers[u.ResolveTo]; buffer || dst.Samples != core1_0.Samples1 || dst.Format != d.Format || !sameExtent(dst.Extent, d.Extent) {
 					return nil, nil, g.fail(n.Name, u.ResolveTo, "resolve target must be single-sample with matching format and extent")
 				}
 				all[ni] = append(all[ni], compiledUse{Use: Use{Resource: u.ResolveTo, Access: ColorWrite, Stages: u.Stages}, resolve: true})
@@ -280,7 +325,7 @@ func (g *Graph) validate() ([][]compiledUse, []resourceUses, error) {
 				return nil, nil, g.fail(n.Name, u.Resource, "Present requires an imported image")
 			}
 			if old, ok := seen[u.Resource]; ok && (writes(old) || writes(u.Access) ||
-				accessState(n.Kind, Use{Access: old}).layout != accessState(n.Kind, u.Use).layout) {
+				(g.buffers[u.Resource].Size == 0 && accessState(n.Kind, Use{Access: old}).layout != accessState(n.Kind, u.Use).layout)) {
 				return nil, nil, g.fail(n.Name, u.Resource, "same-node read/write, repeated write, or incompatible read layouts; use a load form or StorageReadWrite")
 			}
 			seen[u.Resource] = u.Access
@@ -371,7 +416,7 @@ func restingLayout(s resourceUses) core1_0.ImageLayout {
 func attachment(a Access) bool { return a >= ColorWrite && a <= DepthLoadWrite }
 func isDepth(a Access) bool    { return a == DepthWrite || a == DepthLoadWrite }
 func reads(a Access) bool {
-	return a == SampledRead || a == StorageRead || a == StorageReadWrite || a == ColorLoadWrite || a == DepthLoadWrite || a == TransferSrc || a == Present
+	return a == SampledRead || a == StorageRead || a == StorageReadWrite || a == ColorLoadWrite || a == DepthLoadWrite || a == TransferSrc || a == Present || a == VertexRead || a == IndirectRead
 }
 func writes(a Access) bool {
 	return attachment(a) || a == StorageWrite || a == StorageReadWrite || a == TransferDst
