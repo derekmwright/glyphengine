@@ -19,6 +19,7 @@ const (
 )
 
 type graphImage struct {
+	buffers       []core1_0.Buffer
 	images        []core1_0.Image
 	views         []core1_0.ImageView
 	frameInstance bool
@@ -42,6 +43,10 @@ type graphNode struct {
 // The compiler owns only declarations. Vulkan objects and recording closures
 // stay here, with indexed bindings so execution never looks up a cache key.
 type frameGraph struct {
+	beforeShadows                          int
+	lodTimer                               *AppPass
+	lodBuffers                             map[framegraph.ResourceID]graphImage
+	storage                                map[*StorageBuffer]framegraph.ResourceID
 	declarations                           []framegraph.Node
 	engine                                 [graphTonemap + 2]int
 	targets                                map[*RenderTarget]appGraphTarget
@@ -406,13 +411,28 @@ func (f *frameGraph) sizeScratch(s *commandScratch) {
 	}
 	scan(f.plan.FinalBarriers)
 	s.barriers = make([]core1_0.ImageMemoryBarrier, width)
+	s.bufferBarriers = make([]core1_0.BufferMemoryBarrier, width)
 }
 
 func (f *frameGraph) barriers(c *graphFrame, bs []framegraph.Barrier) error {
 	for i := 0; i < len(bs); {
 		j := i
+		imageCount, bufferCount := 0, 0
 		for j < len(bs) && bs[j].SrcStage == bs[i].SrcStage && bs[j].DstStage == bs[i].DstStage {
 			b := bs[j]
+			if b.Buffer {
+				binding := f.images[b.Resource]
+				instance := 0
+				if binding.frameInstance {
+					instance = c.frame % len(binding.buffers)
+				}
+				c.scratch.bufferBarriers[bufferCount] = core1_0.BufferMemoryBarrier{
+					Buffer: binding.buffers[instance], Offset: b.Offset, Size: b.Size,
+					SrcQueueFamilyIndex: -1, DstQueueFamilyIndex: -1, SrcAccessMask: b.SrcAccess, DstAccessMask: b.DstAccess}
+				bufferCount++
+				j++
+				continue
+			}
 			images := f.images[b.Resource].images
 			instance := c.imageIndex
 			if f.images[b.Resource].frameInstance {
@@ -425,13 +445,18 @@ func (f *frameGraph) barriers(c *graphFrame, bs []framegraph.Barrier) error {
 				instance = 0
 			}
 			desc := f.plan.Resources[b.Resource].Desc
-			c.scratch.barriers[j-i] = core1_0.ImageMemoryBarrier{OldLayout: b.OldLayout, NewLayout: b.NewLayout,
+			c.scratch.barriers[imageCount] = core1_0.ImageMemoryBarrier{OldLayout: b.OldLayout, NewLayout: b.NewLayout,
 				SrcQueueFamilyIndex: -1, DstQueueFamilyIndex: -1, Image: images[instance],
 				SubresourceRange: core1_0.ImageSubresourceRange{AspectMask: desc.Aspect, LevelCount: 1, LayerCount: int(desc.Layers)},
 				SrcAccessMask:    b.SrcAccess, DstAccessMask: b.DstAccess}
+			imageCount++
 			j++
 		}
-		if err := c.scratch.pipelineBarrier(c.driver, c.cmd, bs[i].SrcStage, bs[i].DstStage, c.scratch.barriers[:j-i]...); err != nil {
+		var buffers []core1_0.BufferMemoryBarrier
+		if bufferCount > 0 {
+			buffers = c.scratch.bufferBarriers[:bufferCount]
+		}
+		if err := c.driver.CmdPipelineBarrier(c.cmd, bs[i].SrcStage, bs[i].DstStage, 0, nil, buffers, c.scratch.barriers[:imageCount]); err != nil {
 			return err
 		}
 		i = j

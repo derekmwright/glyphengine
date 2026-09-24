@@ -20,6 +20,7 @@ import (
 
 var dir = ".task/lod"
 var binary string
+var gpu bool
 var only = flag.String("only", "", "one check: cull, pop, impostor, determinism, lifetime or bench")
 var reuse = flag.Bool("reuse", false, "check existing captures without rerunning the renderer")
 var reuseBench = flag.Bool("reuse-bench", false, "reuse retained benchmark measurements while rerendering other checks")
@@ -46,19 +47,47 @@ func run() error {
 			return fmt.Errorf("build: %w\n%s", err, out)
 		}
 	}
-	for _, check := range []struct {
-		name string
-		fn   func() error
-	}{
-		{"cull", cull}, {"pop", pop}, {"impostor", impostor}, {"determinism", determinism}, {"lifetime", lifetime},
-		{"bench", bench},
-	} {
-		if *only == "" || *only == check.name {
-			if err := check.fn(); err != nil {
-				return err
+	for _, mode := range []string{"cpu", "gpu"} {
+		gpu = mode == "gpu"
+		dir = filepath.Join(".task/lod", mode)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return err
+		}
+		fmt.Printf("LOD mode=%s\n", mode)
+		for _, check := range []struct {
+			name string
+			fn   func() error
+		}{
+			{"cull", cull}, {"pop", pop}, {"impostor", impostor}, {"determinism", determinism}, {"lifetime", lifetime},
+		} {
+			if *only == "" || *only == check.name {
+				if err := check.fn(); err != nil {
+					return err
+				}
 			}
 		}
 	}
+	dir = ".task/lod"
+	if *only == "" || *only == "determinism" {
+		cmd := exec.Command("go", "run", "./cmd/pngsame", filepath.Join(dir, "cpu/repeat-a.png"), filepath.Join(dir, "gpu/repeat-a.png"))
+		out, err := cmd.CombinedOutput()
+		fmt.Print(string(out))
+		if err != nil {
+			return fmt.Errorf("CPU/GPU pixels: %w", err)
+		}
+		cmd = exec.Command("go", "run", "./cmd/pngsame", filepath.Join(dir, "cpu/indexed.png"), filepath.Join(dir, "gpu/indexed.png"))
+		out, err = cmd.CombinedOutput()
+		fmt.Print(string(out))
+		if err != nil {
+			return fmt.Errorf("CPU/GPU indexed pixels: %w", err)
+		}
+	}
+	if *only == "" || *only == "bench" {
+		if err := bench(); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -66,6 +95,9 @@ func render(label string, env []string, args ...string) ([]byte, error) {
 	path := filepath.Join(dir, label+".log")
 	if *reuse {
 		return os.ReadFile(path)
+	}
+	if gpu {
+		args = append(args, "-gpu")
 	}
 	cmd := exec.Command(binary, args...)
 	cmd.Env = append(os.Environ(), "GLYPHENGINE_BACKGROUND=1", "GLYPHENGINE_FIXED_FRAME_TIME=16.667ms", "GLYPHENGINE_VALIDATION=1")
@@ -157,7 +189,7 @@ func cull() error {
 		submitted[i][1], _ = strconv.Atoi(string(m[2]))
 		fmt.Printf("Cull levels=%d: submitted draws=%d instances=%d triangles=%s (all passes)\n", mode, submitted[i][0], submitted[i][1], m[3])
 	}
-	if submitted[0][0] >= submitted[1][0] || submitted[0][1] >= submitted[1][1] {
+	if (!gpu && submitted[0][0] >= submitted[1][0]) || submitted[0][1] >= submitted[1][1] {
 		return fmt.Errorf("cull: LOD did not reduce submitted draws and instances at the edge pose")
 	}
 	return nil
@@ -289,6 +321,9 @@ func determinism() error {
 		return fmt.Errorf("determinism: same frame differs")
 	}
 	fmt.Printf("Determinism: %d PNG bytes identical\n", len(a))
+	if err := capture("indexed", 61, "-indexed"); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -314,10 +349,10 @@ func bench() error {
 	if *reuseBench {
 		fmt.Println("Bench: checking retained measurements; no benchmark runs")
 	}
-	var sums [2]float64
-	fmt.Println("Bench (ms/frame): run mode GPU CPU-cull CPU-upload")
+	var sums, cpu [2]float64
+	fmt.Println("Bench (ms/frame): run mode GPU CPU-cull CPU-upload GPU-select")
 	for run := 1; run <= 2; run++ {
-		for mode, scene := range []string{"lod-full", "lod"} {
+		for mode, scene := range []string{"lod", "lod-gpu"} {
 			label := fmt.Sprintf("bench-%s-%d", scene, run)
 			path := filepath.Join(dir, label+".json")
 			if !*reuse && !*reuseBench {
@@ -347,15 +382,19 @@ func bench() error {
 			}
 			v := results[0].Values
 			sums[mode] += v["gpu_total"]
+			cpu[mode] += v["cpu_lodcull"] + v["cpu_lodupload"]
+			if mode == 1 && v["gpu_lodselect"] <= 0 {
+				return fmt.Errorf("bench: missing GPU selection measurement")
+			}
 			if mode == 1 && v["cpu_lodcull"]+v["cpu_lodupload"] <= 0 {
 				return fmt.Errorf("bench: missing CPU LOD measurement")
 			}
-			fmt.Printf("Bench %d %-8s %.3f %.3f %.3f\n", run, scene, v["gpu_total"], v["cpu_lodcull"], v["cpu_lodupload"])
+			fmt.Printf("Bench %d %-8s %.3f %.3f %.3f %.3f\n", run, scene, v["gpu_total"], v["cpu_lodcull"], v["cpu_lodupload"], v["gpu_lodselect"])
 		}
 	}
-	if sums[1] >= sums[0] {
-		return fmt.Errorf("bench: LOD GPU total did not drop (%.3f >= %.3f)", sums[1]/2, sums[0]/2)
+	if cpu[1] >= cpu[0]*0.5 {
+		return fmt.Errorf("bench: GPU selection must at least halve CPU selection/upload cost (%.3f >= %.3f)", cpu[1]/2, cpu[0]/2)
 	}
-	fmt.Printf("Bench mean GPU: %.3f -> %.3f ms (%.1f%% reduction)\n", sums[0]/2, sums[1]/2, 100*(1-sums[1]/sums[0]))
+	fmt.Printf("Bench mean: GPU %.3f -> %.3f ms; CPU selection/upload %.3f -> %.3f ms\n", sums[0]/2, sums[1]/2, cpu[0]/2, cpu[1]/2)
 	return nil
 }

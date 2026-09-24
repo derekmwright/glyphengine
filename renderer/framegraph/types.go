@@ -54,6 +54,15 @@ type ImageDesc struct {
 
 type Access int
 
+// BufferDesc describes one logical buffer. Persistent and imported contents
+// must be initialized by the owner before any graph reads them.
+type BufferDesc struct {
+	Name                 string
+	Size                 int
+	Persistent, Imported bool
+	Usage                core1_0.BufferUsageFlags
+}
+
 const (
 	SampledRead Access = iota + 1
 	StorageRead
@@ -66,6 +75,8 @@ const (
 	TransferSrc
 	TransferDst
 	Present
+	IndirectRead
+	VertexRead
 )
 
 type Use struct {
@@ -121,8 +132,9 @@ type Node struct {
 }
 
 type Graph struct {
-	images []ImageDesc
-	nodes  []Node
+	images  []ImageDesc
+	buffers map[ResourceID]BufferDesc
+	nodes   []Node
 }
 
 func New() *Graph { return &Graph{} }
@@ -130,6 +142,17 @@ func New() *Graph { return &Graph{} }
 func (g *Graph) AddImage(d ImageDesc) ResourceID {
 	id := ResourceID(len(g.images))
 	g.images = append(g.images, d)
+	return id
+}
+
+func (g *Graph) AddBuffer(d BufferDesc) ResourceID {
+	id := ResourceID(len(g.images))
+	// The common identity table retains names and lifetime flags for validation.
+	g.images = append(g.images, ImageDesc{Name: d.Name, Persistent: d.Persistent, Imported: d.Imported})
+	if g.buffers == nil {
+		g.buffers = make(map[ResourceID]BufferDesc)
+	}
+	g.buffers[id] = d
 	return id
 }
 
@@ -158,9 +181,11 @@ type Plan struct {
 }
 
 type ResourceInfo struct {
-	Desc    ImageDesc
-	Resting core1_0.ImageLayout
-	Prime   bool // Allocation-time transition; imported images remain owner-managed.
+	Buffer     bool
+	BufferDesc BufferDesc
+	Desc       ImageDesc
+	Resting    core1_0.ImageLayout
+	Prime      bool // Allocation-time transition; imported images remain owner-managed.
 }
 
 type Step struct {
@@ -170,6 +195,8 @@ type Step struct {
 }
 
 type Barrier struct {
+	Buffer               bool
+	Offset, Size         int
 	Resource             ResourceID
 	SrcStage, DstStage   core1_0.PipelineStageFlags
 	SrcAccess, DstAccess core1_0.AccessFlags

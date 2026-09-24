@@ -22,6 +22,11 @@ api:
   - renderer.AppCompute.SetEnabled
   - renderer.AppCompute.SetDispatch
   - renderer.AppCompute.SetPushConstants
+  - renderer.StorageBufferDesc
+  - renderer.StorageBuffer
+  - renderer.Renderer.CreateStorageBuffer
+  - renderer.Renderer.UploadStorageBuffer
+  - renderer.Renderer.DestroyStorageBuffer
   - renderer.SetShaderTexture
   - renderer.SetShaderTarget
   - renderer.SceneColor
@@ -33,7 +38,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: procedural
-verified: 2026-09-23 # worked example and custompasses gate
+verified: 2026-09-24 # application storage buffers and synchronization churn
 ---
 
 # Application render targets, graphics and compute passes
@@ -155,6 +160,60 @@ The device enables extended storage-image formats when supported. Compute
 executes on the existing graphics queue. There is no second queue and no async
 compute. The graph derives graphics-to-compute and compute-to-graphics barriers;
 a dispatch runs without a render pass.
+
+## Application storage buffers
+
+```go
+buffer, err := r.CreateStorageBuffer(renderer.StorageBufferDesc{
+    Name: "simulation data", Size: 4096, History: true,
+})
+if err != nil { return err }
+if err := r.UploadStorageBuffer(buffer, initialBytes); err != nil { return err }
+compute, err := r.CreateAppCompute(renderer.AppComputeDesc{
+    Name: "update simulation", Stage: renderer.StageBeforeScene, Comp: computeSPV,
+    Buffers: []*renderer.StorageBuffer{buffer},
+})
+```
+
+`Buffers` takes up to four distinct live buffers owned by the renderer. They
+bind as read/write storage buffers at **set 2, bindings 8–11**, independent of
+sampled inputs and storage-image outputs. The graph declares StorageReadWrite
+for each. Unprovided storage bindings must not be statically accessed by the
+shader. Read-only shaders can use `readonly` with the same API binding.
+
+```glsl
+layout(set=2, binding=8, std430) buffer Simulation {
+    vec4 values[];
+} simulation; // Buffers[0]; bindings 9, 10 and 11 are the remaining slots
+```
+
+Size must be positive and within `MaxStorageBufferRange`. Contents start at
+zero. Memory is device-local with storage, transfer-destination, vertex-buffer
+and indirect-buffer usage. `UploadStorageBuffer` stages a whole buffer or a
+prefix, preserving the tail, and initializes **both** history instances with
+the supplied bytes. It waits for earlier graphics-queue access and for the
+copy to finish before returning. Nil/foreign/destroyed buffers and oversized
+uploads return errors; a zero-byte upload is a no-op on a live buffer.
+
+`History` allocates two independent read/write copies and selects `frame % 2`
+for each binding. Unlike a target's sampled Texture view, this API has no
+separate previous-copy view: shaders read and write the selected copy, which
+contains that slot's preceding result. The two copies start at zero. Fixed
+buffer sizes and contents survive swapchain resize; only pass descriptors are
+rebuilt. Descriptor updates remain fence-scoped.
+
+Destroying a buffer destroys every referring compute pass, detaches it from
+future graphs and defers the Vulkan objects past frames in flight. Destroy
+is nil-safe and idempotent. Renderer shutdown releases any remaining buffers.
+The public API currently exposes buffers to compute; the engine's GPU LOD
+path demonstrates vertex-input and indirect consumption without exposing raw
+Vulkan handles. A public shared-mesh-range API remains future work under #96.
+
+`cmd/apppasscheck -buffers -churn -provoke-recreate -validate -frames 300`
+uses all four bindings, alternating history flags, whole/prefix uploads and
+buffer destruction that retires its compute user. The resulting visible
+pattern must retain the existing contrast/blur checks. `task syncvalidate`
+runs this check after its full example matrix.
 
 ## Fixed shader layouts
 

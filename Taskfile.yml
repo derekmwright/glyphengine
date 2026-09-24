@@ -46,7 +46,7 @@ tasks:
     desc: Compile GLSL to SPIR-V (requires VULKAN_SDK; only needed when editing shaders)
     dir: shaders
     cmds:
-      - for f in *.vert *.frag; do "${VULKAN_SDK}/bin/glslc{{.EXE}}" "$f" -o "$f.spv"; done
+      - for f in *.vert *.frag *.comp; do "${VULKAN_SDK}/bin/glslc{{.EXE}}" "$f" -o "$f.spv" || exit 1; done
       - for f in ../cmd/skyshadowcheck/*.frag; do "${VULKAN_SDK}/bin/glslc{{.EXE}}" "$f" -o "$f.spv"; done
       - for f in ../cmd/apppasscheck/*.vert ../cmd/apppasscheck/*.frag ../cmd/apppasscheck/*.comp; do "${VULKAN_SDK}/bin/glslc{{.EXE}}" "$f" -o "$f.spv"; done
       - for f in ../examples/*/*.vert ../examples/*/*.frag ../examples/*/*.comp; do [ -f "$f" ] || continue; "${VULKAN_SDK}/bin/glslc{{.EXE}}" "$f" -o "$f.spv" || exit 1; done
@@ -60,6 +60,7 @@ tasks:
       - cmd/apppasscheck/*.comp
       - shaders/*.vert
       - shaders/*.frag
+      - shaders/*.comp
       - shaders/*.inc
       - cmd/skyshadowcheck/*.frag
       - cmd/skyshadowcheck/*.inc
@@ -290,6 +291,8 @@ tasks:
         check 25-lod-forest
         check 25-lod-forest -msaa 1
         check 25-lod-forest -replace
+        check 25-lod-forest -gpu -replace
+        check 25-lod-forest -gpu -indexed
         check 23-shadow-coverage
         check 23-shadow-coverage -coverage=false
         check 23-shadow-coverage -caster=false
@@ -472,6 +475,8 @@ tasks:
         check 13-ui -glow on
         check 13-ui
         check 25-lod-forest -replace
+        check 25-lod-forest -gpu -replace
+        check 25-lod-forest -gpu -indexed
         unset GLYPHENGINE_PROVOKE_RECREATE_FRAMES
         exit $status
 
@@ -490,11 +495,11 @@ tasks:
       - |
         probe=$(echo "VULKAN ERROR: self-check" | grep -cE "VULKAN (ERROR|WARNING)" || true)
         if [ "$probe" != "1" ]; then echo "SELF-CHECK: cannot count validation messages"; exit 1; fi
-        out=$(GLYPHENGINE_VALIDATION=1 GLYPHENGINE_SYNC_VALIDATION=1 GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./cmd/apppasscheck -compute -churn -provoke-recreate -validate -frames 300 2>&1) || { echo "$out"; exit 1; }
+        out=$(GLYPHENGINE_VALIDATION=1 GLYPHENGINE_SYNC_VALIDATION=1 GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./cmd/apppasscheck -compute -buffers -churn -provoke-recreate -validate -frames 300 2>&1) || { echo "$out"; exit 1; }
         echo "$out" | grep -q "Vulkan synchronization validation enabled" || { echo "$out"; exit 1; }
         msgs=$(echo "$out" | grep -cE "VULKAN (ERROR|WARNING)" || true)
         if [ "$msgs" != "0" ]; then echo "$out"; exit 1; fi
-        echo "apppasscheck -compute -churn -provoke-recreate: clean"
+        echo "apppasscheck -compute -buffers -churn -provoke-recreate: clean"
 
   reload:
     desc: "Check that swapping a level for a freshly loaded copy never drops a frame's geometry"
@@ -758,7 +763,7 @@ tasks:
         # run to run, which no other entry here would notice because no other
         # entry turns the march on. -skylamp is in it because the sky's march
         # is a second copy of the jitter in a second shader.
-        for ex in "08-grass" "08-grass -timeofday 0.0" "08-grass -timeofday 0.03" "09-water" "12-particles" "06-skinned -demo" "15-kitchen-sink -demo" "09-water -plume -ghost -marker -submerged" "09-water -time 0.72 -yaw 1.771 -pitch -0.185 -pillars" "13-ui -glow on" "21-streetlights -volumetric 1 -lampvolumetric 1 -skylamp" "24-custom-passes" "25-lod-forest"; do
+        for ex in "08-grass" "08-grass -timeofday 0.0" "08-grass -timeofday 0.03" "09-water" "12-particles" "06-skinned -demo" "15-kitchen-sink -demo" "09-water -plume -ghost -marker -submerged" "09-water -time 0.72 -yaw 1.771 -pitch -0.185 -pillars" "13-ui -glow on" "21-streetlights -volumetric 1 -lampvolumetric 1 -skylamp" "24-custom-passes" "25-lod-forest" "25-lod-forest -gpu"; do
           set -- $ex
           name=$1; shift
           shot 16.667ms $name a "$*"
@@ -920,7 +925,7 @@ tasks:
             status=1
           fi
         }
-        for ex in "08-grass" "08-grass -timeofday 0.0" "08-grass -timeofday 0.03" "09-water" "12-particles" "06-skinned -demo" "15-kitchen-sink -demo" "09-water -plume -ghost -marker -submerged" "18-translucent" "13-ui" "10-text" "19-instanced" "21-streetlights" "24-custom-passes" "25-lod-forest"; do
+        for ex in "08-grass" "08-grass -timeofday 0.0" "08-grass -timeofday 0.03" "09-water" "12-particles" "06-skinned -demo" "15-kitchen-sink -demo" "09-water -plume -ghost -marker -submerged" "18-translucent" "13-ui" "10-text" "19-instanced" "21-streetlights" "24-custom-passes" "25-lod-forest" "25-lod-forest -gpu"; do
           drawseq "$ex"
         done
         # Prove this comparison can say no on real traces and not only on the

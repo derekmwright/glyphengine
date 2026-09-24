@@ -216,6 +216,9 @@ func (d *fakeDriver) CmdPipelineBarrier(cb core1_0.CommandBuffer, src, dst core1
 	d.fold(opBarrier)
 	if d.hashing {
 		d.h = d.h.Int(int(src)).Int(int(dst)).Int(int(deps)).Int(len(mem)).Int(len(bufMem)).Int(len(imgMem))
+		for _, b := range bufMem {
+			d.h = d.h.Int(int(b.SrcAccessMask)).Int(int(b.DstAccessMask)).Int(b.SrcQueueFamilyIndex).Int(b.DstQueueFamilyIndex).Uint64(uint64(b.Buffer.Handle())).Int(b.Offset).Int(b.Size)
+		}
 		for _, b := range imgMem {
 			d.h = d.h.Int(int(b.SrcAccessMask)).Int(int(b.DstAccessMask)).Int(int(b.OldLayout)).Int(int(b.NewLayout)).
 				Int(b.SrcQueueFamilyIndex).Int(b.DstQueueFamilyIndex).Uint64(uint64(b.Image.Handle())).

@@ -245,7 +245,7 @@ func createDescriptorPool(deviceDriver core1_0.DeviceDriver, maxSets int) (core1
 				// one of each per frame in flight. Fixed rather than
 				// swapchain-scaled -- that descriptor set is allocated once
 				// in createShadowResources and never reallocated on resize.
-				DescriptorCount: lightStorageBuffersPerSet * maxFramesInFlight,
+				DescriptorCount: lightStorageBuffersPerSet*maxFramesInFlight + 4*maxAppTimings*maxFramesInFlight + 128,
 			},
 		},
 	})

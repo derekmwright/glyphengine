@@ -59,7 +59,8 @@ type commandScratch struct {
 	// material draw's set 0 (material) + set 1 (joints) + set 2 (shadow).
 	descSets [3]core1_0.DescriptorSet
 	// vertexBufs is sized for the widest bind: a mesh plus its instance buffer.
-	vertexBufs [2]core1_0.Buffer
+	vertexBufs    [2]core1_0.Buffer
+	vertexOffsets [2]int
 
 	viewport1 [1]core1_0.Viewport
 	scissor1  [1]core1_0.Rect2D
@@ -83,7 +84,8 @@ type commandScratch struct {
 	// TestRecordCommandBufferAllocsAreConstant reports 1 alloc/op instead of 0.
 	colorClear core1_0.ClearValueFloat
 	// barriers is allocated once from the plan's widest barrier group.
-	barriers []core1_0.ImageMemoryBarrier
+	barriers       []core1_0.ImageMemoryBarrier
+	bufferBarriers []core1_0.BufferMemoryBarrier
 
 	imageCopy [1]core1_0.ImageCopy
 
@@ -173,8 +175,8 @@ func (s *commandScratch) beginRenderPass(d core1_0.DeviceDriver, cmdBuf core1_0.
 	})
 }
 
-// pipelineBarrier issues an image-memory-only barrier (the only kind this
-// recorder ever needs) with up to len(s.barriers) barriers.
+// pipelineBarrier is the image-only convenience form. The graph executor also
+// submits bufferBarriers, sharing the same preallocated stage-pair scratch.
 func (s *commandScratch) pipelineBarrier(d core1_0.DeviceDriver, cmdBuf core1_0.CommandBuffer, src, dst core1_0.PipelineStageFlags, barriers ...core1_0.ImageMemoryBarrier) error {
 	n := copy(s.barriers[:], barriers)
 	return d.CmdPipelineBarrier(cmdBuf, src, dst, 0, nil, nil, s.barriers[:n])

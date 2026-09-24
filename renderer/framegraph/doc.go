@@ -1,4 +1,4 @@
-// Package framegraph compiles an ordered list of image uses without a device.
+// Package framegraph compiles ordered image and buffer uses without a device.
 // It does not record commands, reorder nodes, alias memory, or choose instances.
 //
 // A resource rests in ShaderReadOnlyOptimal if sampled, General if used for
@@ -6,6 +6,10 @@
 // PresentSrc. Persistent images start there and need a one-time transition.
 // Imports start in their declared InitialLayout. Other images start Undefined
 // every frame, so their contents cannot be read before a guaranteed write.
+// Buffers have no layout or priming transition. Persistent/imported buffers
+// begin with a conservative preceding-submission memory scope. Buffer hazards
+// use pipeline barriers, including graphics vertex and indirect reads before
+// render-pass entry. Buffer and image barriers share stage-pair grouping.
 // Priming establishes a layout, not valid history pixels: the owner must also
 // initialize any history contents its shaders read.
 //

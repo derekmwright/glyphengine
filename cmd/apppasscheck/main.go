@@ -38,14 +38,17 @@ var filter []byte
 //go:embed blur.comp.spv
 var blur []byte
 
+//go:embed buffers.comp.spv
+var bufferBlur []byte
+
 //go:embed add.frag.spv
 var add []byte
 
 type options struct {
-	frames                                                int
-	screenshot                                            string
-	recreate, churn, validate, disabled, history, compute bool
-	msaa                                                  int
+	frames                                                         int
+	screenshot                                                     string
+	recreate, churn, validate, disabled, history, compute, buffers bool
+	msaa                                                           int
 }
 
 func main() {
@@ -60,7 +63,11 @@ func main() {
 	flag.IntVar(&o.msaa, "msaa", 4, "sample count")
 	flag.BoolVar(&o.history, "history", false, "exercise a target reading its own previous frame")
 	flag.BoolVar(&o.compute, "compute", false, "blur and accumulate the pattern with a compute pass")
+	flag.BoolVar(&o.buffers, "buffers", false, "exercise four storage buffers with history, staged updates and churn")
 	flag.Parse()
+	if o.buffers {
+		o.compute = true
+	}
 	var messages bytes.Buffer
 	log.SetOutput(io.MultiWriter(os.Stderr, &messages))
 	err := run(o)
@@ -103,6 +110,11 @@ func run(o options) error {
 	light := renderer.SceneLighting{VP: mgl32.Ident4(), InvVP: mgl32.Ident4(), SkyColor: [4]float32{0.02, 0.03, 0.04, 1}}
 	var compute *renderer.AppCompute
 	var computed *renderer.RenderTarget
+	var buffers []*renderer.StorageBuffer
+	bufferData := make([]byte, 672*384*4)
+	for i := 0; i < len(bufferData); i += 4 {
+		binary.LittleEndian.PutUint32(bufferData[i:], math.Float32bits(1))
+	}
 	var temporal = make(map[int]image.Image)
 	var targets []*renderer.RenderTarget
 	var passes []*renderer.AppPass
@@ -141,7 +153,22 @@ func run(o options) error {
 				return err
 			}
 			targets = append(targets, computed)
-			compute, err = r.CreateAppCompute(renderer.AppComputeDesc{Name: "compute blur", Stage: renderer.StageBeforeScene, Comp: blur, Reads: []*renderer.Texture{t.Texture(), computed.Texture(), r.FallbackTexture()}, Writes: []*renderer.RenderTarget{computed}, Timed: true})
+			code := blur
+			if o.buffers {
+				code = bufferBlur
+				buffers = nil
+				for i := 0; i < 4; i++ {
+					b, e := r.CreateStorageBuffer(renderer.StorageBufferDesc{Name: fmt.Sprintf("probe %d", i), Size: len(bufferData) + 16, History: i%2 == 1})
+					if e != nil {
+						return e
+					}
+					buffers = append(buffers, b)
+				}
+				if err = r.UploadStorageBuffer(buffers[0], bufferData); err != nil {
+					return err
+				}
+			}
+			compute, err = r.CreateAppCompute(renderer.AppComputeDesc{Name: "compute blur", Stage: renderer.StageBeforeScene, Comp: code, Buffers: buffers, Reads: []*renderer.Texture{t.Texture(), computed.Texture(), r.FallbackTexture()}, Writes: []*renderer.RenderTarget{computed}, Timed: true})
 			if err != nil {
 				return err
 			}
@@ -175,6 +202,9 @@ func run(o options) error {
 	}
 	for frame := 0; frame < o.frames; frame++ {
 		if o.churn && frame > 0 && frame%30 == 0 {
+			for _, b := range buffers {
+				r.DestroyStorageBuffer(b)
+			}
 			r.DestroyAppCompute(compute)
 			for _, p := range passes {
 				r.DestroyAppPass(p)
@@ -183,6 +213,11 @@ func run(o options) error {
 				r.DestroyRenderTarget(t)
 			}
 			if err = create(); err != nil {
+				return err
+			}
+		}
+		if o.buffers && frame%15 == 0 {
+			if err = r.UploadStorageBuffer(buffers[0], bufferData[:64]); err != nil {
 				return err
 			}
 		}

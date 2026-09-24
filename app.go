@@ -1072,6 +1072,11 @@ func (e *Engine) LogTimingsTSV(label string) {
 	for p, ms := range g.Pass {
 		fmt.Fprintf(&b, "	gpu_%s	%.3f", renderer.Pass(p), ms)
 	}
+	for _, a := range g.App {
+		if a.Name == "lodselect" {
+			fmt.Fprintf(&b, "\tgpu_lodselect\t%.3f", a.Ms)
+		}
+	}
 	st := e.renderer.Stats()
 	fmt.Fprintf(&b, "	n_draws	%d	n_instances	%d	n_triangles	%d	n_grasstiles	%d	n_grassculled	%d",
 		st.DrawCalls, st.Instances, st.Triangles, st.GrassTilesDrawn, st.GrassTilesCulled)

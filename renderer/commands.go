@@ -569,6 +569,14 @@ func recordCommandBuffer(
 	stats.reset()
 	timer.reset(deviceDriver, cmdBuf, frame)
 	timer.begin(deviceDriver, cmdBuf, frame, frameQuery)
+	if graph.beforeShadows > 0 {
+		graph.frame = graphFrame{driver: deviceDriver, cmd: cmdBuf, imageIndex: imageIndex, frame: frame, extent: extent, scratch: scratch, timer: timer, stats: stats, shadowDS: shadow.descriptorSets[frame], lighting: lighting}
+		timer.beginApp(deviceDriver, cmdBuf, frame, graph.lodTimer)
+		if err := graph.executeSteps(0, graph.beforeShadows); err != nil {
+			return err
+		}
+		timer.endApp(deviceDriver, cmdBuf, frame, graph.lodTimer)
+	}
 
 	// Clouds first, at half resolution, into their own target. The sky pass
 	// samples it; the render pass's external dependency orders the two.
@@ -786,7 +794,7 @@ func recordCommandBuffer(
 	// ── Main render pass ──
 	if graph.engine[graphLegacy] > 0 {
 		graph.frame = graphFrame{driver: deviceDriver, cmd: cmdBuf, imageIndex: imageIndex, frame: frame, extent: extent, scratch: scratch, timer: timer, stats: stats, shadowDS: shadow.descriptorSets[frame], lighting: lighting}
-		if err := graph.executeSteps(0, graph.engine[graphLegacy]); err != nil {
+		if err := graph.executeSteps(graph.beforeShadows, graph.engine[graphLegacy]); err != nil {
 			return err
 		}
 	}

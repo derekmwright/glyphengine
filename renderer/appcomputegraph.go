@@ -9,6 +9,9 @@ import (
 
 func (r *Renderer) appendComputeGraph(f *frameGraph, p *AppCompute, group int, appendNode func(framegraph.Node, graphNode)) {
 	n := framegraph.Node{Name: p.desc.Name, Kind: framegraph.Compute, OptionalGroup: group, Timed: p.desc.Timed}
+	for _, b := range p.desc.Buffers {
+		n.Uses = append(n.Uses, framegraph.Use{Resource: f.storage[b], Access: framegraph.StorageReadWrite})
+	}
 	read := func(t *Texture) {
 		if t == nil || t.destroyed {
 			return

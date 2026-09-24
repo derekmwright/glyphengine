@@ -144,8 +144,8 @@ Non-nil `Node.Dependencies` still replaces the whole pair. Scene and water
 share an identical pair because their pipelines must remain compatible.
 
 `task syncvalidate` reuses the entire `validate` matrix, including opt-in
-paths, provoked swapchain rebuilds and `25-lod-forest -replace`, then runs
-`cmd/apppasscheck -compute -churn -provoke-recreate -validate -frames 300`. Both gates
+paths, provoked swapchain rebuilds, CPU/GPU LOD replacement and indexed indirect draws, then runs
+`cmd/apppasscheck -compute -buffers -churn -provoke-recreate -validate -frames 300`. Both gates
 prove the log counter can detect a synthetic validation message and check
 that the requested layer actually started. Every warning or error fails the
 gate; no synchronization diagnostics are filtered out.

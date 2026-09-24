@@ -53,4 +53,21 @@ func (s *RenderStats) addDraw(instances, indexCount, vertexCount int) {
 // they describe what the frame asked the GPU to do, not what survived early-Z.
 // Overdraw is deliberately not here — measuring it needs a GPU query the engine
 // does not run, and a guessed number would be worse than none.
+// GPU LOD commands are counted immediately, including empty indirect commands;
+// their instance/triangle estimates use the last retired slot's counters.
 func (r *Renderer) Stats() RenderStats { return r.stats }
+
+// Indirect commands are counted even when empty. Their work estimate uses the
+// last retired frame slot; reading current GPU counts here would serialize frames.
+func (s *RenderStats) addInstanceDraw(set *InstanceSet, indices, vertices int) {
+	if set.indirect.Handle() == 0 {
+		s.addDraw(set.count, indices, vertices)
+		return
+	}
+	if indices > 0 {
+		vertices = indices
+	}
+	s.DrawCalls++
+	s.Instances += set.count
+	s.Triangles += set.count * (vertices / 3)
+}

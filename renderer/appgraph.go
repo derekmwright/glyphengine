@@ -54,6 +54,10 @@ func (f *frameGraph) appNode(p *AppPass) int {
 }
 
 func (r *Renderer) extendAppGraph(f *frameGraph, g *framegraph.Graph) error {
+	f.storage = make(map[*StorageBuffer]framegraph.ResourceID)
+	for _, b := range r.storageBuffers {
+		f.storage[b] = g.AddBuffer(framegraph.BufferDesc{Name: b.desc.Name, Size: b.desc.Size, Persistent: true})
+	}
 	f.targets = make(map[*RenderTarget]appGraphTarget)
 	for _, t := range r.appTargets {
 		format, _ := targetFormat(t.desc.Format)
@@ -85,6 +89,7 @@ func (r *Renderer) extendAppGraph(f *frameGraph, g *framegraph.Graph) error {
 		f.declarations = append(f.declarations, n)
 		f.nodes = append(f.nodes, b)
 	}
+	r.appendGPULODGraph(f, g, appendNode)
 	read := func(uses []framegraph.Use, id framegraph.ResourceID) []framegraph.Use {
 		for _, u := range uses {
 			if u.Resource == id {
@@ -253,10 +258,13 @@ func (r *Renderer) replaceAppGraph(deferOld bool) error {
 	f.sizeScratch(&r.cmdScratch)
 	if r.gpuTimer != nil {
 		r.gpuTimer.apps = r.appPasses
+		if f.lodTimer != nil {
+			r.gpuTimer.apps = append(append([]*AppPass{}, r.appPasses...), f.lodTimer)
+		}
 		if r.gpuTimer.appSums == nil {
 			r.gpuTimer.appSums = make(map[*AppPass]appTimingSum)
 		}
-		for _, p := range r.appPasses {
+		for _, p := range r.gpuTimer.apps {
 			if p.desc.Timed {
 				if _, ok := r.gpuTimer.appSums[p]; !ok {
 					r.gpuTimer.appSums[p] = appTimingSum{}
@@ -274,6 +282,12 @@ func (r *Renderer) replaceAppGraph(deferOld bool) error {
 
 func (r *Renderer) bindAppGraphImages() {
 	f := r.frameGraph
+	for id, b := range f.lodBuffers {
+		f.images[id] = b
+	}
+	for b, id := range f.storage {
+		f.images[id] = graphImage{buffers: b.buffers, frameInstance: b.desc.History}
+	}
 	for _, t := range r.appTargets {
 		ids := f.targets[t]
 		f.images[ids.write] = graphImage{images: t.color.images, views: t.color.views, frameInstance: t.desc.History}
@@ -370,6 +384,10 @@ func (r *Renderer) destroyAppResources() {
 		p.release()
 	}
 	r.appPasses = nil
+	for _, b := range r.storageBuffers {
+		b.release()
+	}
+	r.storageBuffers = nil
 	if r.depthResolve != nil {
 		r.depthResolve.destroy()
 	}

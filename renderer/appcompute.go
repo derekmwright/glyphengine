@@ -10,14 +10,16 @@ import (
 
 // AppComputeDesc schedules a compute dispatch on the graphics queue. Reads are
 // sampled at set 2 bindings 0..3; Writes are storage images at bindings 4..7.
+// Buffers supplies up to four read/write storage buffers at bindings 8..11.
 // Calls require the renderer thread, as do application graphics passes.
 type AppComputeDesc struct {
-	Name   string
-	Stage  PassStage
-	Comp   []byte
-	Reads  []*Texture
-	Writes []*RenderTarget
-	Timed  bool
+	Name    string
+	Stage   PassStage
+	Comp    []byte
+	Reads   []*Texture
+	Writes  []*RenderTarget
+	Buffers []*StorageBuffer
+	Timed   bool
 }
 
 // AppCompute shares ordering, timing and lifetime with application graphics work.
@@ -47,6 +49,17 @@ func (r *Renderer) validateAppCompute(d AppComputeDesc) error {
 	}
 	if len(d.Writes) > 4 {
 		return fail("Writes", "at most four outputs")
+	}
+	if len(d.Buffers) > 4 {
+		return fail("Buffers", "at most four buffers")
+	}
+	for i, b := range d.Buffers {
+		if b == nil || b.r != r || b.destroyed {
+			return fail("Buffers", "requires live buffers of this renderer")
+		}
+		if slices.Contains(d.Buffers[:i], b) {
+			return fail("Buffers", "duplicate buffer")
+		}
 	}
 	for i, t := range d.Writes {
 		if t == nil {
@@ -81,6 +94,7 @@ func (r *Renderer) CreateAppCompute(d AppComputeDesc) (_ *AppCompute, err error)
 		return nil, fmt.Errorf("app compute %q: input layout: %w", d.Name, err)
 	}
 	d.Reads, d.Writes = slices.Clone(d.Reads), slices.Clone(d.Writes)
+	d.Buffers = slices.Clone(d.Buffers)
 	c := &AppCompute{desc: d}
 	p := &AppPass{r: r, desc: AppPassDesc{Name: d.Name, Stage: d.Stage, Reads: d.Reads, Timed: d.Timed}, enabled: true, compute: c}
 	c.pass = p
@@ -116,11 +130,14 @@ func (r *Renderer) ensureComputeLayout() error {
 	if r.computeSetLayout.Handle() != 0 {
 		return nil
 	}
-	bindings := make([]core1_0.DescriptorSetLayoutBinding, 8)
+	bindings := make([]core1_0.DescriptorSetLayoutBinding, 12)
 	for i := range bindings {
 		kind := core1_0.DescriptorTypeCombinedImageSampler
 		if i >= 4 {
 			kind = core1_0.DescriptorTypeStorageImage
+		}
+		if i >= 8 {
+			kind = core1_0.DescriptorTypeStorageBuffer
 		}
 		bindings[i] = core1_0.DescriptorSetLayoutBinding{Binding: i, DescriptorType: kind, DescriptorCount: 1, StageFlags: core1_0.StageCompute}
 	}
@@ -173,6 +190,17 @@ func (p *AppCompute) record(c *graphFrame) {
 }
 
 func (r *Renderer) flushComputeOutputs(p *AppCompute, set core1_0.DescriptorSet, frame int) error {
+	for i, b := range p.desc.Buffers {
+		instance := 0
+		if b.desc.History {
+			instance = frame % 2
+		}
+		r.appBufferInfos[0] = core1_0.DescriptorBufferInfo{Buffer: b.buffers[instance], Range: b.desc.Size}
+		r.appWrites[0] = core1_0.WriteDescriptorSet{DstSet: set, DstBinding: 8 + i, DescriptorType: core1_0.DescriptorTypeStorageBuffer, BufferInfo: r.appBufferInfos[:]}
+		if err := r.deviceDriver.UpdateDescriptorSets(r.appWrites[:], nil); err != nil {
+			return err
+		}
+	}
 	// Unused storage bindings are not accessed by the shader and need no dummy
 	// image. A live writer owns every referenced target until its sets retire.
 	for i, t := range p.desc.Writes {
