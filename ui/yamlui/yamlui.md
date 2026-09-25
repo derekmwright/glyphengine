@@ -49,6 +49,7 @@ Container widget. Arranges children in a layout. Optionally renders a nine-slice
 | `bg_color` | [3]float | — | Flat solid-color quad fallback when no `nine_slice` is set |
 | `visible` | string | — | Template. `"false"` or `"0"` hides widget and all children |
 | `overlay` | string | — | ID of sibling — positions this widget at the same Y as that sibling (vertical layout only) |
+| `indicator` | block | — | Driven overlay effect. See [Indicator](#indicator) |
 | `children` | list | — | Child widget definitions |
 
 **Rendering priority:** If `nine_slice` is set, renders a nine-slice panel. If only `bg_color` is set, renders a flat colored rectangle. If neither, the panel is invisible (layout-only container).
@@ -109,6 +110,8 @@ Interactive widget with nine-slice background and optional centered label. Emits
 | `fg_color` | [3]float | — | Label text color |
 | `on_click` | string | — | Event value emitted on click |
 | `disabled` | string | — | Template. `"true"` or `"1"` disables interaction |
+| `state` | string | — | Template bool. Anything but `"true"`/`"1"` multiplies the tint by 0.45 |
+| `indicator` | block | — | Driven overlay effect. See [Indicator](#indicator) |
 | `children` | list | — | Child widgets (e.g., nested `icon`) |
 | `flex` | float | — | Proportional sizing |
 | `visible` | string | — | Visibility template |
@@ -127,6 +130,8 @@ Renders a sprite texture via the IconBuilder callback.
 | `color` | [3]float | [0,0,0] | Tint color |
 | `color_key` | string | — | Dynamic color binding |
 | `opacity` | float | 1.0 | Alpha |
+| `state` | string | — | Template bool. Anything but `"true"`/`"1"` multiplies the sprite tint by 0.45 |
+| `indicator` | block | — | Driven overlay effect. See [Indicator](#indicator) |
 | `visible` | string | — | Visibility template |
 
 ### scroll_view
@@ -168,6 +173,147 @@ Single-line text entry with placeholder, focus, and keyboard handling.
 
 Click focuses the input. Enter emits a `"submit"` event with the typed text. Escape clears and defocuses.
 
+## Indicator
+
+An optional block on `panel`, `button` and `icon` that draws a **driven overlay
+effect** over the widget: a cooldown sweep, a wipe, or a tint, bound to a value
+the game updates every frame.
+
+```yaml
+- widget: icon
+  id: slot_1
+  sprite: "{ability_1_icon}"
+  width: 64
+  height: 64
+  state: "{ability_1_active}"      # template bool; false dims the sprite
+  indicator:
+    type: sweep                    # roll | sweep | tint
+    direction: clockwise           # sweep: clockwise | counterclockwise
+    start: -90                     # sweep: degrees; -90 is twelve o'clock
+    shape: square                  # sweep: square (default) | circle
+    fill: remaining                # remaining (default) | elapsed
+    value: "{ability_1_cooldown}"  # template number
+    max: "{ability_1_cooldown_max}"
+    color: "#000000"
+    opacity: { start: 0.6, end: 0.0 }
+```
+
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `type` | string | **required** | `roll`, `sweep` or `tint` |
+| `direction` | string | — | `roll`: `up`, `down`, `left`, `right`, or a number of degrees. **Required.** `sweep`: `clockwise` (default) or `counterclockwise`. Not used by `tint` |
+| `start` | float | -90 | `sweep` only. Where the fan starts, in degrees. -90 is twelve o'clock |
+| `shape` | string | `square` | `sweep` only. `square` clips the fan to the widget's own edge, `circle` to the circle inscribed in it |
+| `fill` | string | `remaining` | `remaining` covers `frac` (a cooldown that unwinds), `elapsed` covers `1 - frac` (a bar that fills in). Not used by `tint` |
+| `value` | string | — | Current value. Template: `"{cooldown}"` |
+| `max` | string | — | Maximum value. Template: `"{cooldown_max}"` |
+| `color` | string | `#000000` | Overlay colour, `#rrggbb`. The same space a `color:` triple is in — each channel is the hex digit pair over 255 |
+| `opacity` | block | opaque | `{ start, end }`. `start` is the alpha at `frac` 1, `end` the alpha at `frac` 0 |
+
+### Semantics
+
+`frac = clamp(value / max, 0, 1)`.
+
+- **`frac` 0 draws nothing at all.** A finished cooldown leaves the widget
+  exactly as a YAML with no `indicator:` block would — byte for byte on the
+  frame, which `task indicator` checks.
+- **`max <= 0` draws nothing either**, rather than dividing. That is the state a
+  game is in on its first frame, before it has bound anything.
+- **`roll`** covers `frac` of the widget rect as a wipe starting at the edge the
+  direction points *from*: `down` at 0.5 covers the **top** half, and the
+  covered band's lower boundary rises as the value falls. A number rotates the
+  wipe axis — 0 is `right`, 90 is `down`, 180 is `left`, 270 is `up`, and 45 is
+  a diagonal cut from the top-left corner. The boundary sits at `frac` of the
+  rect's extent *projected onto the axis*, which is what makes a rotated axis a
+  rotation of the same wipe rather than a different shape.
+- **`sweep`** covers `frac` of a full turn as a fan from the widget's centre,
+  starting at `start` and unwinding in `direction`. With the default
+  `shape: square` the fan's rim is on the widget's own perimeter, so the corners
+  darken too; `shape: circle` clips it to the inscribed circle instead, for a
+  round icon or a ring. A quarter turn from -90 clockwise is exactly the
+  top-right quadrant, corner included.
+- **`tint`** multiplies the widget's colour by `color` at the interpolated
+  alpha and adds **no geometry**: at alpha 0 the widget is untouched, at 1 it is
+  fully multiplied, and in between it crossfades.
+- **`opacity`** interpolates on `frac`, not on coverage, so a cooldown fades out
+  as it expires. Omit the block for a fully opaque overlay.
+
+### Draw order
+
+Within one widget: **widget, sprite, indicator, text**. Everything the indicator
+draws goes into the same render-object stream as the widget's own nine-slice and
+its sprite, immediately after them, so it covers the artwork; labels are in the
+text stream, which the renderer composites after every UI panel, so they stay
+readable over it.
+
+### `state`
+
+`state` is a separate statement from the indicator and from `disabled`:
+
+- `disabled` means the widget cannot be used, and multiplies the tint by 0.4.
+- `state` means a toggle is off, and multiplies it by 0.45. The widget is still
+  clickable.
+- The indicator draws regardless of either. An ability that is switched off
+  still shows its cooldown.
+
+### Errors
+
+The indicator block is validated at **load**, and the errors name the widget —
+by its `id` where it has one, by its type where it does not. This is the only
+part of the package that rejects anything; everything else tolerates a missing
+binding. It is strict because a typo here renders a plausible frame rather than
+a failure:
+
+```
+yamlui: load hud.yaml: widget "slot_1": indicator: unknown key "colour"
+yamlui: load hud.yaml: widget "slot_1": indicator: unknown type "spin" (want roll, sweep or tint)
+yamlui: load hud.yaml: widget "slot_1": indicator: unknown direction "clockwise" for type roll (want up, down, left, right or a number of degrees)
+yamlui: load hud.yaml: widget "slot_1": indicator: shape is only used by type sweep, not roll
+yamlui: load hud.yaml: widget "slot_1": indicator: color "#12345" is not a #rrggbb colour
+```
+
+An `indicator:` on any widget other than `panel`, `button` or `icon`, and a
+`state:` on anything but `button` or `icon`, are rejected the same way.
+
+### What the host has to supply
+
+An indicator is geometry with an alpha, and `renderer.Vertex` has no alpha
+channel — the value can only ride on a render object's `Opacity`. So the widget
+tree needs a third builder callback beside `PanelFn` and `IconFn`:
+
+```go
+tree.ShapeFn = func(verts []renderer.Vertex, idxs []uint16, opacity float32) []renderer.UIRenderObject {
+    mesh := pool.take(verts, idxs)          // the host owns the mesh
+    return []renderer.UIRenderObject{{
+        RenderObject: renderer.RenderObject{Mesh: mesh, MVP: proj},
+        Opacity:      opacity,
+    }}
+}
+```
+
+Without `ShapeFn` an `indicator:` draws nothing, exactly as a `sprite:` draws
+nothing without `IconFn`. `type: tint` is the exception — it changes the
+widget's own colour and needs no builder.
+
+`examples/13-ui` has a working pair of callbacks and a mesh pool behind its
+`-yamlui` flag; `go run ./13-ui -yamlui cooldown` runs the whole block against a
+clock.
+
+### Building one in Go
+
+`SetChildren` takes `WidgetDef` structs rather than YAML, so it does not run the
+unmarshaller and therefore applies none of the defaults above and performs none
+of the validation. Two consequences for an action bar assembled in Go:
+
+- Set `Start` explicitly for a sweep. The zero value is three o'clock, not
+  twelve.
+- An all-zero `Opacity` is read as fully opaque, because an indicator that is
+  invisible at every value is never what anyone means.
+
+Everything else — the direction words, the colour, the fill — is resolved from
+the strings on every draw, so a block built in Go behaves exactly like the same
+block written in YAML.
+
 ## Layout Algorithm
 
 ### Vertical (default)
@@ -196,6 +342,12 @@ A child with `overlay: "sibling_id"` is positioned at the same Y as the referenc
 
 Text and some properties support `{key}` placeholder syntax. At render time, all `{key}` occurrences are replaced with bound string values.
 
+`{{key}}` resolves too, and means the same thing. It is accepted because the
+doubled form is common in other UI dialects and because getting it wrong is
+silent: replacing the single-brace form inside a doubled one leaves `{5}`
+behind, which is not a number, not a bool and not an error either. `{key}` is
+the house spelling.
+
 ```yaml
 text: "{char_name}"           # Replaced with bound value of "char_name"
 text: "{hp} / {max_hp}"       # Multiple placeholders in one string
@@ -213,6 +365,9 @@ visible: "{show_panel}"       # "false"/"0" hides widget
 | `BindFloat(key, v)` | `{key}` in value/max | Float for progress bars |
 | `BindInt(key, v)` | `{key}` in text | Integer display |
 | `BindColor(key, color)` | via `color_key`/`fg_color_key` | Dynamic [3]float32 color |
+
+`value`, `max` and `state` on an indicator resolve through the same three:
+`BindFloat` for the two numbers, `Bind` with `"true"`/`"false"` for the state.
 
 ### Color Bindings
 

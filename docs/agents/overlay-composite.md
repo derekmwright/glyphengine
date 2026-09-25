@@ -33,6 +33,10 @@ api:
   - renderer.PanelLayer.Glow
   - ui.Label.Glow
   - ui.Button.Glow
+  - yamlui.WidgetTree.BuildAt
+  - yamlui.ShapeBuilder
+  - yamlui.WidgetTree.ShapeFn
+  - yamlui.IndicatorDef
   - renderer.ShaderSet.UIResolveFrag
   - renderer.PassUILayer
   - renderer.PassUIGlow
@@ -74,6 +78,33 @@ resolved, which means:
   of its OWN, over a layer of its own, without ever reaching the scene's — see
   [giving the UI its own HDR layer](#giving-the-ui-its-own-hdr-layer).
 - **They are not multisampled.** See the cost below.
+
+## Where a YAML widget tree's draws go
+
+`ui/yamlui` builds a widget tree from a file and returns the draws rather than
+issuing them — `BuildAt` hands back four streams and the caller decides what
+becomes of each:
+
+| Stream | Goes to | Holds |
+| --- | --- | --- |
+| `[]UIRenderObject` | `SetUIOverlays` | nine-slice panels, sprites, indicators |
+| `[]Vertex` + `[]uint16` | one mesh of the caller's, then `SetUIOverlays` | flat `bg_color` panels and progress-bar fills |
+| `[]TextLine` | `MSDFText`, then `SetMSDFOverlays` | every label |
+
+The package owns no GPU resources and imports nothing from `ui`. It calls back
+into `PanelFn`, `IconFn` and `ShapeFn` to turn geometry into render objects, so
+everything above about a UI colour, the antialiased edge and the glow layer
+applies to a YAML-built HUD unchanged.
+
+`ShapeFn` is the one an `indicator:` block needs. It exists because
+`renderer.Vertex` has no alpha channel: an indicator's alpha is interpolated
+from a bound value and can only ride on `UIRenderObject.Opacity`, which means it
+has to be its own render object rather than more triangles in the vertex stream.
+That also fixes its place in the frame — it lands in the panel stream directly
+after the sprite it covers, and before every label, which is where the widget's
+own draw order puts it. The schema, the geometry and the failure modes are in
+[`ui/yamlui/yamlui.md`](../../ui/yamlui/yamlui.md#indicator); `task indicator`
+is the gate, and `go run ./13-ui -yamlui cooldown` is it in motion.
 
 ## What the world-space channel gets
 

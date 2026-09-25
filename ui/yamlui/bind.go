@@ -6,12 +6,20 @@ import (
 )
 
 // resolve replaces all {key} placeholders in template with values from bindings.
+//
+// {{key}} is accepted as well, and has to be replaced first: replacing the
+// single-brace form inside a doubled one leaves {value} behind, which is not a
+// number, not a bool, and not an error either -- a cooldown written that way
+// reads as zero on every frame and simply never runs. The doubled form appears
+// in enough UI dialects to be worth accepting rather than failing silently;
+// {key} is the house spelling.
 func resolve(template string, bindings map[string]string) string {
 	if !strings.Contains(template, "{") {
 		return template
 	}
 	result := template
 	for k, v := range bindings {
+		result = strings.ReplaceAll(result, "{{"+k+"}}", v)
 		result = strings.ReplaceAll(result, "{"+k+"}", v)
 	}
 	return result
