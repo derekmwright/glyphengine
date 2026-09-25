@@ -257,7 +257,7 @@ func (r *Renderer) LoadGLTF(fsys fs.FS, name string) (*Model, error) {
 // split: a document's textures are the expensive part of opening it and the
 // part a server, a navmesh baker or a level validator has no use for.
 func (r *Renderer) uploadModel(rd *gltfRead) error {
-	textures, err := r.uploadGLTFImages(rd.doc, rd.base)
+	textures, err := r.uploadGLTFImages(rd)
 	if err != nil {
 		return fmt.Errorf("load gltf images: %w", err)
 	}
@@ -499,12 +499,21 @@ func dataImageIndices(doc *gltf.Document) map[int]bool {
 // can prove the read skips it without a device: the read succeeds on bytes
 // this rejects.
 //
+// skip names image indices the caller already has a texture for, which is how
+// the shared-image cache (issue #136) saves the DECODE and not only the
+// upload: a trim sheet twenty documents reference is read off disk and turned
+// into pixels once, and the other nineteen never open the file. Nil decodes
+// everything, which is what every caller outside uploadGLTFImages wants.
+//
 // A pure function of the document and its directory: no Renderer, no GPU.
-func decodeGLTFImages(doc *gltf.Document, base fs.FS) (map[int]*decodedImage, error) {
+func decodeGLTFImages(doc *gltf.Document, base fs.FS, skip map[int]bool) (map[int]*decodedImage, error) {
 	decoded := make(map[int]*decodedImage)
 	for i, img := range doc.Images {
 		var imgBytes []byte
 
+		if skip[i] {
+			continue
+		}
 		if img.BufferView != nil {
 			// GLB-embedded image
 			bv := doc.BufferViews[*img.BufferView]
@@ -537,22 +546,81 @@ func decodeGLTFImages(doc *gltf.Document, base fs.FS) (map[int]*decodedImage, er
 	return decoded, nil
 }
 
-// uploadGLTFImages decodes all images in the document and uploads them as GPU
-// textures. Returns a map from image index to Texture.
-func (r *Renderer) uploadGLTFImages(doc *gltf.Document, base fs.FS) (map[int]*Texture, error) {
-	decoded, err := decodeGLTFImages(doc, base)
+// uploadGLTFImages decodes the images this document still needs and uploads
+// them as GPU textures. Returns a map from image index to Texture.
+//
+// An external image already uploaded for another document -- same filesystem,
+// same cleaned path, same wrap mode, same sRGB/data choice -- is not decoded
+// and not uploaded again; the existing texture is handed back with one more
+// share counted against it (issue #136). See gltfTextureKey for why those four
+// fields and not fewer, and DestroyModel for the release.
+//
+// Failure unwinds: every share this call took is given back before the error
+// leaves, so a document that fails on its fifth image does not pin the four
+// textures it already had. That is a NEW obligation the cache creates -- a
+// leaked texture used to be freed at shutdown, but a leaked SHARE is a cache
+// entry that never goes away.
+func (r *Renderer) uploadGLTFImages(rd *gltfRead) (map[int]*Texture, error) {
+	doc := rd.doc
+	dataImages := dataImageIndices(doc)
+	wrapModes, wrapConflicts := imageWrapModes(doc)
+	keys := gltfImageKeys(rd, dataImages, wrapModes)
+
+	// Decide what NOT to decode before decoding anything. An image is skipped
+	// when the cache already holds its key, and also when an earlier image in
+	// this same document has the same key -- a document that lists one URI
+	// twice decodes it once, and the loop below then hands both indices the
+	// texture the first one created.
+	var skip map[int]bool
+	if len(keys) > 0 {
+		skip = make(map[int]bool, len(keys))
+		seen := make(map[gltfTextureKey]bool, len(keys))
+		for i := range doc.Images {
+			key, ok := keys[i]
+			if !ok {
+				continue
+			}
+			if seen[key] || r.gltfTextureCache[key] != nil {
+				skip[i] = true
+			}
+			seen[key] = true
+		}
+	}
+
+	decoded, err := decodeGLTFImages(doc, rd.base, skip)
 	if err != nil {
 		return nil, err
 	}
 
 	textures := make(map[int]*Texture)
-	dataImages := dataImageIndices(doc)
-	wrapModes, wrapConflicts := imageWrapModes(doc)
+	// acquired is every share taken here, one entry per image index satisfied
+	// -- the same counting modelResources does, which is what lets the unwind
+	// below and DestroyModel both be a plain walk.
+	var acquired []*Texture
+	fail := func(err error) (map[int]*Texture, error) {
+		for _, t := range acquired {
+			r.releaseGLTFTexture(t)
+		}
+		return nil, err
+	}
 
 	// doc.Images order, not map order: an upload failure names an image index,
 	// and the textures created before it have to be the same set on every run
 	// for that to mean anything.
 	for i, img := range doc.Images {
+		key, cacheable := keys[i]
+		if cacheable {
+			// Looked up HERE and not only in the skip pass above, because the
+			// entry may have been created by an earlier image of this very
+			// document. Registering a second one under the same key would
+			// orphan the first and leave the release deleting a live entry.
+			if tex := r.acquireGLTFTexture(key); tex != nil {
+				textures[i] = tex
+				acquired = append(acquired, tex)
+				continue
+			}
+		}
+
 		d, ok := decoded[i]
 		if !ok {
 			continue
@@ -579,10 +647,14 @@ func (r *Renderer) uploadGLTFImages(doc *gltf.Document, base fs.FS) (map[int]*Te
 			mipmap:   true,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("upload texture %d (%s): %w", i, img.Name, err)
+			return fail(fmt.Errorf("upload texture %d (%s): %w", i, img.Name, err))
 		}
 
+		if cacheable {
+			r.shareGLTFTexture(key, tex)
+		}
 		textures[i] = tex
+		acquired = append(acquired, tex)
 	}
 
 	return textures, nil
@@ -828,7 +900,7 @@ func staticMeshes(meshes []ModelMesh) []ModelMesh {
 // example builds itself. Folding the two loops together would start
 // allocating descriptor sets for skinned models that nothing binds.
 func (r *Renderer) uploadSkinnedModel(rd *gltfRead) error {
-	textures, err := r.uploadGLTFImages(rd.doc, rd.base)
+	textures, err := r.uploadGLTFImages(rd)
 	if err != nil {
 		return fmt.Errorf("load gltf images: %w", err)
 	}
