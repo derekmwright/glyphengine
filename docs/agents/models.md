@@ -69,7 +69,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: bundled
-verified: 2026-09-24 # streamed uploads measured and gated
+verified: 2026-09-25 # texture decode borrows the PNG buffer (#135)
 ---
 
 # Treat a loaded model as geometry, not only as a draw call
@@ -906,6 +906,26 @@ model.ReleaseGeometry()
 
 After that, `Bounds` reports `ok == false` and `CombineModel` returns an error
 rather than an empty mesh — failing instead of silently producing nothing.
+
+Texture decoding borrows the decoder's buffer when it can. `image/png` returns
+an `*image.RGBA` for an RGB file and an `*image.NRGBA` for an RGBA one, both
+already packed 4 bytes per pixel, and the loader used to allocate a second
+full-size image and convert through the generic per-pixel path anyway: in a
+60-prop scene with 2048x2048 sheets that was 3.26 GB of a 3.9 GB total-alloc
+load and about 2 s of CPU (issue #135). An opaque `*image.RGBA` (premultiplied
+and straight alpha are the same bytes at alpha 255) and a packed
+`*image.NRGBA` are now used as-is; a sub-image, a paletted PNG, a JPEG's
+YCbCr or an RGBA image with real alpha still takes the conversion.
+`BenchmarkDecodeImageRGB2048`, one 2048x2048 RGB PNG, five iterations each:
+
+| | ns/op | B/op | allocs/op |
+|---|---:|---:|---:|
+| generic conversion | 66,528,480 | 33,617,769 | 21 |
+| borrowed buffer | 38,615,220 | 16,840,435 | 18 |
+
+`TestStraightRGBABorrowsPackedBuffers` asserts the returned slice shares the
+decoder's backing array; deleting the fast paths fails it with "copied" while
+the bytes still match, which is why the alias is what the test checks.
 
 ## Failure mode: skinned primitives carry no vertices
 

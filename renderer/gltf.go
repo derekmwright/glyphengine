@@ -593,25 +593,49 @@ type decodedImage struct {
 	width, height int
 }
 
-// decodeImage decodes PNG/JPEG bytes into RGBA pixel data.
+// decodeImage decodes PNG/JPEG bytes into straight-alpha RGBA pixel data.
 func decodeImage(data []byte) (*decodedImage, error) {
 	img, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
 		return nil, err
 	}
+	bounds := img.Bounds()
+	return &decodedImage{
+		pixels: straightRGBA(img),
+		width:  bounds.Dx(),
+		height: bounds.Dy(),
+	}, nil
+}
 
+// straightRGBA returns an image's pixels as tightly packed straight-alpha
+// RGBA, borrowing the decoder's own buffer when it already is that.
+//
+// image/png hands back *image.RGBA for an RGB file and *image.NRGBA for an
+// RGBA one, both already 4 bytes per pixel and row-major; a second full-size
+// NRGBA plus a draw.Draw through the generic RGBA64At/SetRGBA64 path was
+// 3.26 GB of a 3.9 GB total-alloc scene load and about 2 s of CPU across 60
+// props with 2048x2048 sheets (issue #135). Premultiplied and straight alpha
+// are the same bytes when every alpha is 255, which is what Opaque checks, so
+// an RGB PNG's buffer is used as-is; anything else, a sub-image, a JPEG's
+// YCbCr, a paletted PNG, an RGBA image with real alpha, takes the conversion
+// it always took.
+func straightRGBA(img image.Image) []byte {
 	bounds := img.Bounds()
 	w, h := bounds.Dx(), bounds.Dy()
-
-	// Convert to NRGBA
+	packed := bounds.Min == image.Point{} && w > 0 && h > 0
+	switch m := img.(type) {
+	case *image.NRGBA:
+		if packed && m.Stride == 4*w && len(m.Pix) >= 4*w*h {
+			return m.Pix[:4*w*h]
+		}
+	case *image.RGBA:
+		if packed && m.Stride == 4*w && len(m.Pix) >= 4*w*h && m.Opaque() {
+			return m.Pix[:4*w*h]
+		}
+	}
 	nrgba := image.NewNRGBA(bounds)
 	draw.Draw(nrgba, bounds, img, bounds.Min, draw.Src)
-
-	return &decodedImage{
-		pixels: nrgba.Pix,
-		width:  w,
-		height: h,
-	}, nil
+	return nrgba.Pix
 }
 
 // resolveMaterial extracts PBR properties from a glTF material.
