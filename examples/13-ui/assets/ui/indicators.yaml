@@ -1,0 +1,334 @@
+# The indicator grid `task indicator` measures, for
+# `go run ./13-ui -yamlui indicators`.
+#
+# Three rows -- roll, sweep, tint -- by four columns: a value a quarter, half
+# and all of the way up, and a fourth slot with no indicator at all. The
+# fourth column is the legibility baseline: the ink recovered from the label
+# over a covered icon has to match the ink from the label over that one.
+#
+# The geometry is fixed on purpose. Every box in the Taskfile's invocation is
+# derived from the numbers below at scale 1, so a change to a width, a padding
+# or a gap here moves boxes that are written down over there:
+#
+#	root at (420, 190), 428 x 328, padding 20, gap 12
+#	rows  88 tall, gap 12   -> icons at y 222, 322, 422
+#	cells 88 wide, gap 12, padding 12 -> icons at x 452, 552, 652, 752
+#	icons 64 x 64
+#
+# This file and indicators_plain.yaml must stay identical apart from the
+# `indicator:` blocks: the gate binds every value to zero and requires the two
+# to render byte for byte the same, so any other difference fails it.
+widget: panel
+id: indicator_grid
+width: 428
+height: 328
+padding: 20
+gap: 12
+bg_color: [0.05, 0.06, 0.08]
+children:
+  - widget: panel
+    height: 88
+    layout: horizontal
+    gap: 12
+    children:
+      - widget: panel
+        width: 88
+        padding: 12
+        bg_color: [0.08, 0.09, 0.12]
+        children:
+          - widget: icon
+            id: roll_25
+            sprite: rune
+            width: 64
+            height: 64
+            color: [1, 1, 1]
+            indicator:
+              type: roll
+              direction: down
+              value: "{v_25}"
+              max: "{v_max}"
+              color: "#000000"
+              opacity: { start: 0.8, end: 0.0 }
+          - widget: label
+            overlay: roll_25
+            width: 64
+            height: 64
+            align: center
+            font_size: 15
+            color: [1, 1, 1]
+            text: "{cell_label}"
+      - widget: panel
+        width: 88
+        padding: 12
+        bg_color: [0.08, 0.09, 0.12]
+        children:
+          - widget: icon
+            id: roll_50
+            sprite: rune
+            width: 64
+            height: 64
+            color: [1, 1, 1]
+            indicator:
+              type: roll
+              direction: down
+              value: "{v_50}"
+              max: "{v_max}"
+              color: "#000000"
+              opacity: { start: 0.8, end: 0.0 }
+          - widget: label
+            overlay: roll_50
+            width: 64
+            height: 64
+            align: center
+            font_size: 15
+            color: [1, 1, 1]
+            text: "{cell_label}"
+      - widget: panel
+        width: 88
+        padding: 12
+        bg_color: [0.08, 0.09, 0.12]
+        children:
+          - widget: icon
+            id: roll_100
+            sprite: rune
+            width: 64
+            height: 64
+            color: [1, 1, 1]
+            indicator:
+              type: roll
+              direction: down
+              value: "{v_100}"
+              max: "{v_max}"
+              color: "#000000"
+              opacity: { start: 0.8, end: 0.0 }
+          - widget: label
+            overlay: roll_100
+            width: 64
+            height: 64
+            align: center
+            font_size: 15
+            color: [1, 1, 1]
+            text: "{cell_label}"
+      - widget: panel
+        width: 88
+        padding: 12
+        bg_color: [0.08, 0.09, 0.12]
+        children:
+          - widget: icon
+            id: roll_none
+            sprite: rune
+            width: 64
+            height: 64
+            color: [1, 1, 1]
+          - widget: label
+            overlay: roll_none
+            width: 64
+            height: 64
+            align: center
+            font_size: 15
+            color: [1, 1, 1]
+            text: "{cell_label}"
+  - widget: panel
+    height: 88
+    layout: horizontal
+    gap: 12
+    children:
+      - widget: panel
+        width: 88
+        padding: 12
+        bg_color: [0.08, 0.09, 0.12]
+        children:
+          - widget: icon
+            id: sweep_25
+            sprite: rune
+            width: 64
+            height: 64
+            color: [1, 1, 1]
+            indicator:
+              type: sweep
+              direction: clockwise
+              start: -90
+              value: "{v_25}"
+              max: "{v_max}"
+              color: "#000000"
+              opacity: { start: 0.8, end: 0.0 }
+          - widget: label
+            overlay: sweep_25
+            width: 64
+            height: 64
+            align: center
+            font_size: 15
+            color: [1, 1, 1]
+            text: "{cell_label}"
+      - widget: panel
+        width: 88
+        padding: 12
+        bg_color: [0.08, 0.09, 0.12]
+        children:
+          - widget: icon
+            id: sweep_50
+            sprite: rune
+            width: 64
+            height: 64
+            color: [1, 1, 1]
+            indicator:
+              type: sweep
+              direction: clockwise
+              start: -90
+              value: "{v_50}"
+              max: "{v_max}"
+              color: "#000000"
+              opacity: { start: 0.8, end: 0.0 }
+          - widget: label
+            overlay: sweep_50
+            width: 64
+            height: 64
+            align: center
+            font_size: 15
+            color: [1, 1, 1]
+            text: "{cell_label}"
+      - widget: panel
+        width: 88
+        padding: 12
+        bg_color: [0.08, 0.09, 0.12]
+        children:
+          - widget: icon
+            id: sweep_100
+            sprite: rune
+            width: 64
+            height: 64
+            color: [1, 1, 1]
+            indicator:
+              type: sweep
+              direction: clockwise
+              start: -90
+              value: "{v_100}"
+              max: "{v_max}"
+              color: "#000000"
+              opacity: { start: 0.8, end: 0.0 }
+          - widget: label
+            overlay: sweep_100
+            width: 64
+            height: 64
+            align: center
+            font_size: 15
+            color: [1, 1, 1]
+            text: "{cell_label}"
+      - widget: panel
+        width: 88
+        padding: 12
+        bg_color: [0.08, 0.09, 0.12]
+        children:
+          - widget: icon
+            id: sweep_none
+            sprite: rune
+            width: 64
+            height: 64
+            color: [1, 1, 1]
+          - widget: label
+            overlay: sweep_none
+            width: 64
+            height: 64
+            align: center
+            font_size: 15
+            color: [1, 1, 1]
+            text: "{cell_label}"
+  - widget: panel
+    height: 88
+    layout: horizontal
+    gap: 12
+    children:
+      - widget: panel
+        width: 88
+        padding: 12
+        bg_color: [0.08, 0.09, 0.12]
+        children:
+          - widget: icon
+            id: tint_25
+            sprite: rune
+            width: 64
+            height: 64
+            color: [1, 1, 1]
+            indicator:
+              type: tint
+              value: "{v_25}"
+              max: "{v_max}"
+              color: "#000000"
+              opacity: { start: 0.8, end: 0.0 }
+          - widget: label
+            overlay: tint_25
+            width: 64
+            height: 64
+            align: center
+            font_size: 15
+            color: [1, 1, 1]
+            text: "{cell_label}"
+      - widget: panel
+        width: 88
+        padding: 12
+        bg_color: [0.08, 0.09, 0.12]
+        children:
+          - widget: icon
+            id: tint_50
+            sprite: rune
+            width: 64
+            height: 64
+            color: [1, 1, 1]
+            indicator:
+              type: tint
+              value: "{v_50}"
+              max: "{v_max}"
+              color: "#000000"
+              opacity: { start: 0.8, end: 0.0 }
+          - widget: label
+            overlay: tint_50
+            width: 64
+            height: 64
+            align: center
+            font_size: 15
+            color: [1, 1, 1]
+            text: "{cell_label}"
+      - widget: panel
+        width: 88
+        padding: 12
+        bg_color: [0.08, 0.09, 0.12]
+        children:
+          - widget: icon
+            id: tint_100
+            sprite: rune
+            width: 64
+            height: 64
+            color: [1, 1, 1]
+            indicator:
+              type: tint
+              value: "{v_100}"
+              max: "{v_max}"
+              color: "#000000"
+              opacity: { start: 0.8, end: 0.0 }
+          - widget: label
+            overlay: tint_100
+            width: 64
+            height: 64
+            align: center
+            font_size: 15
+            color: [1, 1, 1]
+            text: "{cell_label}"
+      - widget: panel
+        width: 88
+        padding: 12
+        bg_color: [0.08, 0.09, 0.12]
+        children:
+          - widget: icon
+            id: tint_none
+            sprite: rune
+            width: 64
+            height: 64
+            color: [1, 1, 1]
+          - widget: label
+            overlay: tint_none
+            width: 64
+            height: 64
+            align: center
+            font_size: 15
+            color: [1, 1, 1]
+            text: "{cell_label}"

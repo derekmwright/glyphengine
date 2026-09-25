@@ -41,6 +41,19 @@ type PanelBuilder func(r *renderer.Renderer, slice *renderer.NineSlice, color [3
 // This callback is provided by the caller to avoid importing engine/ui.
 type IconBuilder func(textureName string, color [3]float32, opacity float32, x, y, w, h, sw, sh float32) []renderer.UIRenderObject
 
+// ShapeBuilder uploads a flat-coloured triangle list and returns the render
+// objects that draw it at the given opacity. Like PanelBuilder and IconBuilder
+// it is a callback so this package never owns a GPU mesh.
+//
+// An indicator cannot go through the vertex stream BuildAt returns alongside
+// the panels: renderer.Vertex carries position, colour, normal and UV and no
+// alpha at all, so a per-object Opacity is the only place an indicator's
+// interpolated alpha can live. Emitting render objects also puts the indicator
+// in the same slice as the sprite it covers, which is what makes the draw order
+// -- widget, sprite, indicator -- a property of this package rather than of
+// whichever stream the caller happens to submit first.
+type ShapeBuilder func(verts []renderer.Vertex, idxs []uint16, opacity float32) []renderer.UIRenderObject
+
 // WidgetTree is the runtime widget tree built from a parsed YAML definition.
 type WidgetTree struct {
 	Root     *Node
@@ -52,6 +65,10 @@ type WidgetTree struct {
 	PanelFn PanelBuilder
 	// IconFn renders icon textures (injected to avoid import cycle).
 	IconFn IconBuilder
+	// ShapeFn renders indicator geometry (injected to avoid import cycle).
+	// Without it an `indicator:` block draws nothing, the same way a `sprite:`
+	// draws nothing without IconFn.
+	ShapeFn ShapeBuilder
 
 	// Interactive state
 	input       InputState
@@ -230,8 +247,10 @@ func (t *WidgetTree) renderPanel(r *renderer.Renderer, assets *AssetProvider, no
 	if def.NineSlice == "" || assets == nil || t.PanelFn == nil {
 		// Flat bg_color fallback for panels without a nine-slice (e.g. dividers).
 		if def.BgColor != [3]float32{} {
-			*verts, *idxs = appendQuad(*verts, *idxs, node.Rect.X, node.Rect.Y, node.Rect.W, node.Rect.H, def.BgColor)
+			*verts, *idxs = appendQuad(*verts, *idxs, node.Rect.X, node.Rect.Y, node.Rect.W, node.Rect.H,
+				t.indicatorTint(def, def.BgColor))
 		}
+		t.renderIndicator(node, panels)
 		return
 	}
 	nsName := resolve(def.NineSlice, t.bindings)
@@ -239,13 +258,14 @@ func (t *WidgetTree) renderPanel(r *renderer.Renderer, assets *AssetProvider, no
 	if !ok {
 		return
 	}
-	color := t.resolveColor(def)
+	color := t.indicatorTint(def, t.resolveColor(def))
 	opacity := def.Opacity
 	if opacity == 0 {
 		opacity = 1.0
 	}
 	objs := t.PanelFn(r, slice, color, opacity, node.Rect.X, node.Rect.Y, node.Rect.W, node.Rect.H, scale, sw, sh)
 	*panels = append(*panels, objs...)
+	t.renderIndicator(node, panels)
 }
 
 func (t *WidgetTree) renderLabel(r *renderer.Renderer, assets *AssetProvider, node *Node, scale, sw, sh float32, panels *[]renderer.UIRenderObject, text *[]renderer.TextLine) {
@@ -397,6 +417,7 @@ func (t *WidgetTree) renderButton(r *renderer.Renderer, assets *AssetProvider, n
 	case hover:
 		color = modulateColor(color, 1.3)
 	}
+	color = t.indicatorTint(def, modulateColor(color, t.stateFactor(def)))
 
 	// Render nine-slice background.
 	if def.NineSlice != "" && assets != nil && t.PanelFn != nil {
@@ -410,6 +431,10 @@ func (t *WidgetTree) renderButton(r *renderer.Renderer, assets *AssetProvider, n
 			*panels = append(*panels, objs...)
 		}
 	}
+
+	// The indicator sits between the widget and its label: it covers the
+	// artwork and never the text that says what the widget is.
+	t.renderIndicator(node, panels)
 
 	// Render centered label.
 	if def.Text != "" {
@@ -557,9 +582,66 @@ func (t *WidgetTree) renderIcon(node *Node, sw, sh float32, panels *[]renderer.U
 	if opacity == 0 {
 		opacity = 1.0
 	}
-	color := t.resolveColor(def)
+	color := t.indicatorTint(def, modulateColor(t.resolveColor(def), t.stateFactor(def)))
 	objs := t.IconFn(resolved, color, opacity, node.Rect.X, node.Rect.Y, node.Rect.W, node.Rect.H, sw, sh)
 	*panels = append(*panels, objs...)
+	t.renderIndicator(node, panels)
+}
+
+// stateFactor is the tint multiplier a widget's `state` binding asks for.
+//
+// An absent state is 1: a widget that says nothing about a toggle is not off.
+func (t *WidgetTree) stateFactor(def *WidgetDef) float32 {
+	if def.State == "" || resolveBool(def.State, t.bindings) {
+		return 1
+	}
+	return stateDim
+}
+
+// indicatorTint applies a `type: tint` indicator to a widget's colour. Every
+// other type adds geometry instead and leaves the colour alone.
+func (t *WidgetTree) indicatorTint(def *WidgetDef, color [3]float32) [3]float32 {
+	d := def.Indicator
+	if d == nil || d.Type != IndicatorTint {
+		return color
+	}
+	frac, ok := d.frac(t.bindings)
+	if !ok || d.cover(frac) <= 0 {
+		return color
+	}
+	return d.tint(color, d.alpha(frac))
+}
+
+// renderIndicator appends the indicator's geometry over the widget's rect.
+//
+// It runs after the widget has drawn itself and before any text, so a cooldown
+// covers the artwork and leaves the label that names it readable. A tint adds
+// no geometry at all -- it has already been folded into the widget's colour by
+// indicatorTint -- and neither does a zero fraction, which is what makes
+// "the cooldown finished" byte-identical to "this widget has no indicator".
+func (t *WidgetTree) renderIndicator(node *Node, panels *[]renderer.UIRenderObject) {
+	d := node.Def.Indicator
+	if d == nil || d.Type == IndicatorTint || t.ShapeFn == nil {
+		return
+	}
+	frac, ok := d.frac(t.bindings)
+	if !ok {
+		return
+	}
+	cover := d.cover(frac)
+	if cover <= 0 {
+		return
+	}
+	alpha := d.alpha(frac)
+	if alpha <= 0 {
+		return
+	}
+	pts := d.indicatorGeometry(node.Rect, cover)
+	if len(pts) < 3 {
+		return
+	}
+	verts, idxs := appendIndicatorFan(nil, nil, pts, d.rgb())
+	*panels = append(*panels, t.ShapeFn(verts, idxs, alpha)...)
 }
 
 func (t *WidgetTree) renderTextInput(r *renderer.Renderer, assets *AssetProvider, node *Node, scale, sw, sh float32, panels *[]renderer.UIRenderObject, text *[]renderer.TextLine) {

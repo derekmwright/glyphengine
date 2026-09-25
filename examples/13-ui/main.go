@@ -15,9 +15,10 @@
 // The UI pipeline is ortho-projected with depth testing off, so screen
 // position is the only thing that decides what covers what.
 //
-//	go run ./13-ui              # windowed
-//	go run ./13-ui -frames 120  # render 120 frames, then exit
-//	go run ./13-ui -glow on     # a second panel whose elements emit light
+//	go run ./13-ui                    # windowed
+//	go run ./13-ui -frames 120        # render 120 frames, then exit
+//	go run ./13-ui -glow on           # a second panel whose elements emit light
+//	go run ./13-ui -yamlui cooldown   # a second HUD, built from YAML
 //
 // -glow selects one of four modes, and the reason there are four is that each
 // pair of them isolates exactly one thing:
@@ -42,6 +43,17 @@
 // asserted: the glow has to be the same at midnight as at noon, and the same
 // under ACES as under identity, because it does not go through either.
 //
+// -yamlui names a file under assets/ui and draws a second HUD from it through
+// ui/yamlui, which is the only place in this repository that package is driven
+// by a clock. `cooldown` is the one to watch: a sweep unwinding on one icon, a
+// downward wipe on the next, and a tint on a toggle that flips on its own. A
+// still frame cannot tell a sweep that unwinds the wrong way from one that does
+// not, so this exists to be looked at. `indicators` is the fixed grid
+// `task indicator` reads pixels out of.
+//
+// It is off by default and allocates nothing when off, so every capture this
+// example already produces is unchanged.
+//
 // The bars animate on their own. Escape quits.
 package main
 
@@ -59,6 +71,7 @@ import (
 	"github.com/derekmwright/glyphengine/input"
 	"github.com/derekmwright/glyphengine/renderer"
 	"github.com/derekmwright/glyphengine/ui"
+	"github.com/derekmwright/glyphengine/ui/yamlui"
 )
 
 //go:embed assets
@@ -102,6 +115,21 @@ type game struct {
 	mode     glowMode
 	btnMesh  *renderer.Mesh
 	warnMesh *renderer.Mesh
+
+	// The YAML-driven HUD (-yamlui). Everything here stays nil when the flag
+	// is not given; see yamlhud.go.
+	yamlName   string
+	yamlZero   bool
+	yamlLabels bool
+	yamlTree   *yamlui.WidgetTree
+	yamlAssets *yamlui.AssetProvider
+	// The icon texture is not destroyed here: the renderer sweeps its own
+	// texture registry at Destroy, which is how 16-materials and
+	// 21-streetlights leave theirs too. The meshes are not in that sweep.
+	yamlIcon  *renderer.Texture
+	yamlQuads *renderer.Mesh
+	yamlPool  *meshPool
+	yamlProj  [16]float32
 
 	// The scene's look, so the UI's independence from it can be MEASURED
 	// rather than argued. The whole reason the UI has a layer of its own is
@@ -235,6 +263,12 @@ func (g *game) Init(e *glyph.Engine) error {
 		r.SetTonemap(g.exposure, g.curve, 6)
 	}
 
+	if g.yamlName != "" {
+		if err := g.initYamlHUD(e); err != nil {
+			return err
+		}
+	}
+
 	g.camera = glyph.NewCamera(9)
 	g.camera.Target = mgl32.Vec3{0, 1.2, 0}
 	g.camera.Pitch = 0.20
@@ -352,6 +386,14 @@ func (g *game) buildHUD(e *glyph.Engine, sw, sh float32) {
 			},
 		)
 	}
+
+	// The YAML HUD's draws go after the immediate-mode ones. Within them the
+	// order is the one buildYamlHUD returns: the flat-quad mesh first, because
+	// everything in it is a background, then the sprites and the indicators
+	// over them in the order the widget tree emitted them.
+	yamlObjs, yamlText := g.buildYamlHUD(e, sw, sh)
+	overlays = append(overlays, yamlObjs...)
+
 	e.SetUIOverlays(overlays)
 
 	// Labels last, so nothing covers them.
@@ -388,6 +430,11 @@ func (g *game) buildHUD(e *glyph.Engine, sw, sh float32) {
 			},
 		)
 	}
+	// The YAML HUD's labels join the same MSDF draw, which is composited after
+	// every UI panel -- so a label over an indicator is over it in the frame as
+	// well as in the widget tree.
+	lines = append(lines, yamlText...)
+
 	g.text.SetText(e.Renderer(), lines, sw, sh)
 	e.SetMSDFOverlays([]renderer.RenderObject{g.text.RenderObject(sw, sh, 48)})
 }
@@ -405,6 +452,12 @@ func (g *game) Shutdown(e *glyph.Engine) {
 	if g.warnMesh != nil {
 		e.Renderer().DestroyMesh(g.warnMesh)
 	}
+	if g.yamlQuads != nil {
+		e.Renderer().DestroyMesh(g.yamlQuads)
+	}
+	if g.yamlPool != nil {
+		g.yamlPool.destroy()
+	}
 }
 
 func main() {
@@ -421,6 +474,9 @@ func main() {
 	glowThres := flag.Float64("glowthreshold", 1.2, "UI glow threshold, in linear light; keep it at or above 1 + the knee")
 	exposure := flag.Float64("exposure", 0, "scene tonemap exposure (0 = unchanged)")
 	curve := flag.Float64("curve", 0, "scene tonemap curve: 0 identity, 1 Reinhard, 2 ACES")
+	yamlName := flag.String("yamlui", "", "draw a second HUD from assets/ui/<name>.yaml (empty = off)")
+	yamlZero := flag.Bool("yamluizero", false, "bind every indicator value to zero: what a finished cooldown leaves behind")
+	yamlLabels := flag.Bool("yamluilabels", true, "draw the YAML HUD's labels")
 	flag.Parse()
 
 	mode, err := parseGlowMode(*glow)
@@ -456,6 +512,9 @@ func main() {
 		glowThres:    float32(*glowThres),
 		exposure:     float32(*exposure),
 		curve:        float32(*curve),
+		yamlName:     *yamlName,
+		yamlZero:     *yamlZero,
+		yamlLabels:   *yamlLabels,
 	}, opts...)
 	if err != nil {
 		log.Fatalf("create engine: %v", err)

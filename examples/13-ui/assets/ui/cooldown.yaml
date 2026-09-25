@@ -1,0 +1,109 @@
+# A YAML-driven action bar, for `go run ./13-ui -yamlui cooldown`.
+#
+# This is the indicator block in motion, which is the only way some of it can
+# be judged: a sweep that unwinds the wrong way, a wipe anchored to the wrong
+# edge and a state that dims the wrong thing all render perfectly plausible
+# still frames. `task indicator` measures the geometry; this is for watching.
+#
+# Slot 1 sweeps, slot 2 wipes downward, slot 3 tints and toggles its state.
+widget: panel
+id: action_bar
+width: 320
+height: 108
+padding: 12
+gap: 6
+bg_color: [0.05, 0.06, 0.08]
+children:
+  - widget: label
+    text: "ACTION BAR -- yamlui indicator"
+    font_size: 13
+    color: [0.78, 0.65, 0.31]
+    height: 16
+
+  - widget: panel
+    height: 64
+    layout: horizontal
+    gap: 12
+    children:
+      # A cooldown sweep: clockwise from twelve, hugging the square icon so
+      # the corners darken too.
+      - widget: panel
+        width: 64
+        children:
+          - widget: icon
+            id: slot_sweep
+            sprite: rune
+            width: 64
+            height: 64
+            color: [1, 1, 1]
+            indicator:
+              type: sweep
+              direction: clockwise
+              start: -90
+              value: "{cd_sweep}"
+              max: "{cd_max}"
+              color: "#000000"
+              opacity: { start: 0.75, end: 0.0 }
+          - widget: label
+            overlay: slot_sweep
+            width: 64
+            height: 64
+            align: center
+            font_size: 15
+            color: [1, 1, 1]
+            text: "{cd_sweep_text}"
+
+      # A downward wipe: the covered region hangs from the top edge and its
+      # lower boundary rises as the value falls.
+      - widget: panel
+        width: 64
+        children:
+          - widget: icon
+            id: slot_roll
+            sprite: rune
+            width: 64
+            height: 64
+            color: [1, 1, 1]
+            indicator:
+              type: roll
+              direction: down
+              value: "{cd_roll}"
+              max: "{cd_max}"
+              color: "#000000"
+              opacity: { start: 0.75, end: 0.0 }
+          - widget: label
+            overlay: slot_roll
+            width: 64
+            height: 64
+            align: center
+            font_size: 15
+            color: [1, 1, 1]
+            text: "{cd_roll_text}"
+
+      # A tint, on a toggle. state and the indicator are separate statements
+      # about the same widget: the icon dims while the toggle is off, and the
+      # red tint runs on its own clock regardless.
+      - widget: panel
+        width: 64
+        children:
+          - widget: icon
+            id: slot_tint
+            sprite: rune
+            width: 64
+            height: 64
+            color: [1, 1, 1]
+            state: "{ability_active}"
+            indicator:
+              type: tint
+              value: "{cd_tint}"
+              max: "{cd_max}"
+              color: "#FF3020"
+              opacity: { start: 0.9, end: 0.0 }
+          - widget: label
+            overlay: slot_tint
+            width: 64
+            height: 64
+            align: center
+            font_size: 13
+            color: [1, 1, 1]
+            text: "{ability_state_text}"
