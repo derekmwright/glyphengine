@@ -197,6 +197,17 @@ type Scene struct {
 	// linear-scan fallback used when StaticGrid is nil.
 	staticColliderXZ [][2]float32
 
+	// staticGridCell records which cell RebuildStatics put each static
+	// collider in, and staticGridFor is the StaticGrid it recorded them for.
+	// Together they answer "is a StaticGrid walk going to produce this
+	// entity?" exactly and in O(1), which is how the broad phase drops the
+	// duplicate a Static entity in both grids used to produce without risking
+	// dropping the entity itself — see Scene.staticWalkProduces and
+	// Scene.eachBroadPhaseCandidate (#141). Written only by RebuildStatics, so
+	// queries running on the parallel movement phase's goroutines only read it.
+	staticGridCell map[ecs.Entity]cellKey
+	staticGridFor  *SpatialGrid
+
 	// Frozen world-space AABBs for the parallel movement phase. When active,
 	// OverlapAABB and Raycast read collider geometry from this snapshot instead
 	// of live Transforms, so movement goroutines never read a neighbor's
@@ -569,12 +580,45 @@ func (s *Scene) RebuildStatics() {
 	}
 	s.StaticGrid.Clear()
 
+	// Reused rather than replaced, the way the collision snapshot's map is: a
+	// level reload calls this for every static it has.
+	if s.staticGridCell == nil {
+		s.staticGridCell = make(map[ecs.Entity]cellKey, 256)
+	} else {
+		clear(s.staticGridCell)
+	}
+	s.staticGridFor = s.StaticGrid
+
 	ecs.Query3(s.C.Transform, s.C.Collider, s.C.Static,
 		func(entity ecs.Entity, t *Transform, _ *Collider, _ *Static) {
 			p := t.Position
 			s.staticColliderXZ = append(s.staticColliderXZ, [2]float32{p.X(), p.Z()})
 			s.StaticGrid.Insert(entity, p.X(), p.Z())
+			s.staticGridCell[entity] = s.StaticGrid.cellFor(p.X(), p.Z())
 		})
+}
+
+// staticWalkProduces reports whether a StaticGrid walk over (x, z, radius)
+// hands back entity — the question Scene.eachBroadPhaseCandidate asks before
+// dropping that entity from the moving grid's walk.
+//
+// Every condition is checked against what the static grid actually holds
+// rather than inferred from the Static tag, because the answer decides whether
+// a collider is offered to a query at all. A Static entity spawned since the
+// last RebuildStatics is not in staticGridCell; a StaticGrid the game swapped
+// out after RebuildStatics is not staticGridFor; a static whose cell this
+// query does not reach fails walkReaches. Each of those returns false, which
+// leaves the entity to the moving grid's walk — at worst the duplicate every
+// query paid before #141 — where a wrong true is a missing collider.
+func (s *Scene) staticWalkProduces(entity ecs.Entity, x, z, radius float32) bool {
+	if s.StaticGrid == nil || s.StaticGrid != s.staticGridFor {
+		return false
+	}
+	key, ok := s.staticGridCell[entity]
+	if !ok {
+		return false
+	}
+	return s.StaticGrid.walkReaches(key, x, z, radius)
 }
 
 // hasNearbyStaticCollider reports whether any static collider is within

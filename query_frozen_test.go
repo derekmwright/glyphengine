@@ -102,9 +102,20 @@ func frozenParityQueries(lower ecs.Entity) ([]frozenRay, []frozenBox) {
 //	    query_frozen_test.go:140: FrozenQueries().OverlapAABB is not ascending
 //	    by entity id: result 2 is entity 767 after 768
 //
-// Results hold each Static entity twice, since the built-in broad phase visits
-// the moving and the static grid and a Static entity is in both; the contract
-// is non-decreasing ids, so the check is for a strict decrease.
+// The ids are checked as strictly increasing. They used to hold each Static
+// entity twice — the built-in broad phase visited the moving grid and the
+// static grid, and a Static entity is in both — which left only a strict
+// decrease to test for; the broad phase now offers each entity once (#141), so
+// a repeat is a failure like any other disorder.
+//
+// Break experiment (2026-09-25): removing the staticWalkProduces skip from
+// eachBroadPhaseCandidate brings those duplicates back, and the strict check
+// is what notices — the parity subtest stays green through it, since both
+// backends are that one broad phase:
+//
+//	--- FAIL: TestFrozenQueriesMatchBuiltinQueries/order/over_the_cluster
+//	    query_frozen_test.go:156: FrozenQueries().OverlapAABB is not strictly
+//	    ascending by entity id: result 1 is entity 767 after 767
 func TestFrozenQueriesMatchBuiltinQueries(t *testing.T) {
 	s, lower, higher := frozenParityScene(t)
 	rays, boxes := frozenParityQueries(lower)
@@ -141,8 +152,8 @@ func TestFrozenQueriesMatchBuiltinQueries(t *testing.T) {
 			t.Run(b.name, func(t *testing.T) {
 				results := frozen.OverlapAABB(b.box, b.exclude)
 				for i := 1; i < len(results); i++ {
-					if results[i].Entity < results[i-1].Entity {
-						t.Errorf("FrozenQueries().OverlapAABB is not ascending by entity id: result %d is entity %d after %d",
+					if results[i].Entity <= results[i-1].Entity {
+						t.Errorf("FrozenQueries().OverlapAABB is not strictly ascending by entity id: result %d is entity %d after %d",
 							i, results[i].Entity, results[i-1].Entity)
 					}
 				}
@@ -188,9 +199,10 @@ func TestFrozenQueriesMatchBuiltinQueries(t *testing.T) {
 // fail here rather than agree with it.
 func TestFrozenQueriesIgnoreLaterWrites(t *testing.T) {
 	s := NewScene()
-	// Plain colliders, not Static ones: a Static entity sits in both grids and
-	// the built-in broad phase visits both, so it would be reported twice and
-	// the counts below would be about that rather than about the freeze.
+	// Plain colliders, not Static ones: this test deliberately never rebuilds a
+	// grid (see below), so the moving grid is the only broad phase it has and
+	// the counts below stay about the freeze rather than about which grid
+	// produced which candidate.
 	spawnCollider := func(pos mgl32.Vec3) ecs.Entity {
 		e := s.Spawn()
 		s.C.Transform.Set(e, &Transform{Position: pos, Scale: mgl32.Vec3{1, 1, 1}})
