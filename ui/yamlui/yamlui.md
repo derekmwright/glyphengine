@@ -43,7 +43,7 @@ Container widget. Arranges children in a layout. Optionally renders a nine-slice
 | `layout` | string | `"vertical"` | `"vertical"` or `"horizontal"` |
 | `gap` | float | 0 | Spacing between children |
 | `nine_slice` | string | — | Nine-slice texture name (from AssetProvider). Supports `{binding}` templates |
-| `color` | [3]float | [0,0,0] | RGB tint applied to nine-slice (linear space) |
+| `color` | [3]float | [0,0,0] | RGB tint applied to nine-slice (sRGB, 0..1) |
 | `color_key` | string | — | Dynamic color binding key (overrides `color` if bound) |
 | `opacity` | float | 1.0 | Alpha for nine-slice rendering (0.0 = fully transparent) |
 | `bg_color` | [3]float | — | Flat solid-color quad fallback when no `nine_slice` is set |
@@ -64,7 +64,7 @@ Text display widget. Vertically centered within its rect.
 | `text` | string | — | Display text. Supports `{binding}` templates |
 | `font` | string | — | Font family hint (`"display"` or `"body"`). Parsed but currently unused — single MSDF atlas |
 | `font_size` | float | — | Text size in ref px. **Required** for the label to render |
-| `color` | [3]float | [0,0,0] | Text color (linear space) |
+| `color` | [3]float | [0,0,0] | Text color (sRGB, 0..1) |
 | `color_key` | string | — | Dynamic color binding key (overrides `color`) |
 | `align` | string | `"left"` | `"left"`, `"center"`, or `"right"` |
 | `nine_slice` | string | — | Optional background nine-slice behind the text |
@@ -91,6 +91,40 @@ Horizontal fill bar with background and foreground layers.
 | `visible` | string | — | Visibility template |
 
 Fill width = `(value / max) * bar_width`, clamped to [0, 1].
+
+### Flat quads reach the colour you asked for
+
+`bg_color` on a `panel`, and `bg_color`/`fg_color` on a `progress_bar` with no
+nine-slice, do not go through `PanelFn`. They are appended to the vertex stream
+`BuildAt` returns, which the game uploads as one mesh — the fourth and fifth
+return values, not the first. The `scroll_view` thumb is on the same path.
+
+Those colours are **sRGB**, like every other UI colour in the engine: what you
+write is what reaches the display. `bg_color: [0.05, 0.06, 0.08]` renders as
+(13, 15, 20) of 255, which is `0.05 × 255` and so on, within rounding.
+`shaders/ui.frag` decodes them with `srgbToLinear` and the swapchain re-encodes
+on the way out, so the round trip is the identity. This page used to
+call them linear in four places; measured, they are not, and the palette table
+below has always given each float next to the sRGB hex it equals.
+
+Each quad is emitted **half a pixel larger than its rect on every side**, with
+UVs running from just below 0 to just above 1 so that UV 0 and 1 still land on
+the rect that was asked for. `ui.frag` turns the distance to UV 0 or 1 into
+coverage; that is where a flat panel's antialiased edge comes from, since the
+swapchain is single-sampled and the UI is composited after the tonemap. A
+zero-width or zero-height quad is dropped rather than grown, so an empty
+progress bar is empty rather than a one-pixel sliver.
+
+The emitter had none of that until issue #144. It wrote no UV at all, so all
+four vertices carried (0, 0), `edgeCoverage` saw a distance of 0 with `fwidth`
+clamped to `1e-8`, and coverage came out at its `+ 0.5` clamp for every
+fragment: **every flat quad composited at half alpha, edge to edge**, whatever
+`opacity` asked for. A nearly black panel on a nearly white one measured
+(147, 158, 172) where the YAML asked for (13, 15, 20). It is (13, 15, 20) now.
+Nine-slice panels and text were never affected — their UVs already spanned
+0..1 — which is why the only symptom was a flat panel that looked washed out,
+and why nothing in `task smoke`, `task validate`, `task determinism` or
+`task indicator` could see it. `task flatquad` is the gate that now does.
 
 ### button
 
@@ -420,7 +454,9 @@ These are the standard nine-slice assets in the stone theme:
 
 ## Color Palette (Stone Theme)
 
-Colors are linear-space RGB floats. The GPU applies sRGB gamma on output.
+Colors are sRGB floats in 0..1 — the hex column is the same number times 255.
+`ui.frag` decodes them and the swapchain re-encodes, so what you write is what
+reaches the display.
 
 | Name | Value | Hex (sRGB) | Usage |
 |------|-------|------------|-------|
@@ -759,4 +795,4 @@ When converting from JSX/React mockups to YamlUI:
 
 15. **No border-radius**. Rounded corners come from the nine-slice texture, not a CSS property.
 
-16. **Colors are linear-space RGB**. CSS hex colors must be converted. To convert: `linear = (sRGB / 255) ^ 2.2`. For quick approximation: divide hex by 255, then square the result.
+16. **Colors are sRGB floats**. A CSS hex color converts by dividing each byte by 255 and nothing else: `#C8A64E` is `[0.784, 0.651, 0.306]`. Do not apply a gamma — the shader decodes and the swapchain re-encodes, and squaring the value here darkens every colour in the file.

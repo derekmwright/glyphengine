@@ -816,14 +816,53 @@ func (t *WidgetTree) SetChildren(parentID string, defs []WidgetDef) {
 	}
 }
 
+// edgeSkirt is how far a flat quad is grown past its own edge, in pixels, to
+// give ui.frag's coverage ramp an outside half.
+//
+// It is ui.edgeSkirt's value, duplicated the way renderer.edgeSkirt is: this
+// package takes its GPU work as callbacks precisely so it never depends on the
+// widget toolkit, and importing ui for one float would undo that. Change one
+// and change all three.
+const edgeSkirt = 0.5
+
 // appendQuad appends 4 vertices and 6 indices for a solid-color rectangle.
+//
+// This is ui.AppendQuad, and it has to stay that: the quad is emitted half a
+// pixel larger than asked for on every side, with UVs running from just below 0
+// to just above 1 so that UV 0 and 1 land on the requested edge. ui.frag turns
+// that into coverage; see edgeCoverage there.
+//
+// Writing no UV at all is not a softer edge, it is a wrong colour everywhere.
+// Four vertices at (0, 0) make fwidth(uv) zero, so edgeCoverage's distance and
+// its pixel scale both vanish and the ramp lands on its clamp of 0.5 across the
+// whole quad -- every flat bg_color panel and every non-nine-slice progress bar
+// composited at half alpha, edge to edge, whatever opacity asked for (#144).
+// The shader's "a quad that was not expanded still gets the inner half" only
+// holds for an emitter that writes corner UVs.
+//
+// A zero-width or zero-height quad is dropped rather than grown. An empty
+// progress bar asks for exactly that, and a skirt around nothing is a visible
+// one-pixel sliver where the bar is supposed to be empty.
 func appendQuad(verts []renderer.Vertex, idxs []uint16, x, y, w, h float32, col [3]float32) ([]renderer.Vertex, []uint16) {
+	if w <= 0 || h <= 0 {
+		return verts, idxs
+	}
+
+	// UV extent of the skirt, in this quad's own UV units.
+	eu := edgeSkirt / w
+	ev := edgeSkirt / h
+
+	x0, x1 := x-edgeSkirt, x+w+edgeSkirt
+	y0, y1 := y-edgeSkirt, y+h+edgeSkirt
+	u0, u1 := -eu, 1+eu
+	v0, v1 := -ev, 1+ev
+
 	base := uint16(len(verts))
 	verts = append(verts,
-		renderer.Vertex{Pos: [3]float32{x, y, 0}, Color: col},
-		renderer.Vertex{Pos: [3]float32{x + w, y, 0}, Color: col},
-		renderer.Vertex{Pos: [3]float32{x + w, y + h, 0}, Color: col},
-		renderer.Vertex{Pos: [3]float32{x, y + h, 0}, Color: col},
+		renderer.Vertex{Pos: [3]float32{x0, y0, 0}, Color: col, UV: [2]float32{u0, v0}},
+		renderer.Vertex{Pos: [3]float32{x1, y0, 0}, Color: col, UV: [2]float32{u1, v0}},
+		renderer.Vertex{Pos: [3]float32{x1, y1, 0}, Color: col, UV: [2]float32{u1, v1}},
+		renderer.Vertex{Pos: [3]float32{x0, y1, 0}, Color: col, UV: [2]float32{u0, v1}},
 	)
 	idxs = append(idxs, base, base+1, base+2, base+2, base+3, base)
 	return verts, idxs

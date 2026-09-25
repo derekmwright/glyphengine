@@ -1884,6 +1884,72 @@ tasks:
         fi
         exit $status
 
+  flatquad:
+    desc: "Check that a flat yamlui bg_color panel and progress-bar fill reach the colour they ask for"
+    cmds:
+      # Needs a GPU, so it sits with smoke, validate and indicator rather than
+      # in `task ci`.
+      #
+      # Issue #144: ui/yamlui's quad emitter wrote no UV, so every vertex
+      # carried (0, 0), ui.frag's edgeCoverage saw d = 0 with fwidth clamped to
+      # 1e-8, and coverage landed on its 0.5 clamp for every fragment. Flat
+      # panels and non-nine-slice progress bars composited at half alpha edge to
+      # edge. Nine-slice panels and text were unaffected, which is why nothing
+      # else here noticed: `task smoke` rendered the frame, `task validate` was
+      # silent, `task determinism` agreed with itself, and `task indicator`
+      # differences two captures that were both half alpha in the same way.
+      #
+      # assets/ui/flatquad.yaml is a nearly white root with a nearly black panel
+      # and a two-colour progress bar on it, so half alpha lands about 110 of
+      # 255 from either endpoint rather than on a shade someone might have
+      # chosen. The boxes below are its geometry at scale 1, pinned at
+      # yamlHUDOrigin (420, 190), inset 10px from every quad edge so the
+      # coverage ramp is not inside them:
+      #
+      #	root  420,190 400x200, padding 20, gap 20
+      #	panel 440,210 360x60  [0.05 0.06 0.08] over the root
+      #	bar   440,290 360x60  [0.20 0.06 0.06], fill 440..620 [0.95 0.85 0.20]
+      #
+      # PROVED by restoring the zero-UV emitter and running this task on a
+      # staged tree; the numbers are in cmd/flatquadcheck's own comment. The
+      # short version is that all three boxes came back on the half-alpha
+      # midpoint and 61 to 150 of 255 away from the colour the YAML asked for.
+      - |
+        status=0
+        d=.task/flatquad
+        rm -rf $d && mkdir -p $d
+        (cd examples && GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./13-ui \
+          -frames 60 -yamlui flatquad -screenshot ../$d/flat.png) >/dev/null 2>&1
+        if [ ! -s $d/flat.png ]; then
+          echo "MISSING CAPTURE -- this gate proves nothing"
+          exit 1
+        fi
+        # Prove the comparator before trusting a word it says. Handed the
+        # BACKGROUND colour as the colour the panel asked for, it has to reject
+        # the capture rather than report a column of small numbers and pass.
+        if go run ./cmd/flatquadcheck -shot $d/flat.png \
+             -patch 450,220,300,40,0.85,0.86,0.88 -over 0.05,0.06,0.08 >/dev/null 2>&1; then
+          echo "SELF-CHECK: a patch handed the wrong colour passed -- this gate proves nothing"
+          exit 1
+        fi
+        # And a patch drawn over its own colour, which no coverage at all can
+        # tell apart: the separation floor has to reject it.
+        if go run ./cmd/flatquadcheck -shot $d/flat.png \
+             -patch 450,220,300,40,0.05,0.06,0.08 -over 0.05,0.06,0.08 >/dev/null 2>&1; then
+          echo "SELF-CHECK: a patch over its own colour passed -- this gate proves nothing"
+          exit 1
+        fi
+        go run ./cmd/flatquadcheck -shot $d/flat.png \
+          -patch 450,220,300,40,0.05,0.06,0.08 -over 0.85,0.86,0.88 \
+          -patch 450,300,160,40,0.95,0.85,0.20 -over 0.20,0.06,0.06 \
+          -patch 640,300,150,40,0.20,0.06,0.06 -over 0.85,0.86,0.88 || status=1
+        if [ $status -ne 0 ]; then
+          echo "capture kept in $d"
+        else
+          rm -rf $d
+        fi
+        exit $status
+
   nightlight:
     desc: "Check that lamplight still reads as lamplight after the night shift"
     dir: examples
