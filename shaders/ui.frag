@@ -45,11 +45,16 @@ layout(location = 0) out vec4 outColor;
 // UV-per-pixel ratio -- corner quads clamp to half the panel for a panel
 // narrower than two corners, so that ratio is not constant across a panel.
 //
-// A quad whose geometry was not expanded past its edge still gets the inner
-// half of the ramp: the rasterizer only generates fragments whose centre is
-// inside, so the distance never goes negative. That is a softer edge biased
-// half a pixel inward rather than a hard step, which is why this degrades
-// gracefully on any quad emitter that has not been updated.
+// A quad that writes corner UVs but was not expanded past its edge still gets
+// the inner half of the ramp: the rasterizer only generates fragments whose
+// centre is inside, so the distance never goes negative. That is a softer edge
+// biased half a pixel inward rather than a hard step.
+//
+// An emitter that writes NO UV does not degrade that way, and this comment used
+// to imply it did. Four vertices at (0, 0) make d zero and fwidth zero, so w is
+// the 1e-8 clamp, px is 0, and this returns 0.5 for every fragment of the quad
+// -- half alpha across the interior, not a soft edge. That was issue #144 in
+// ui/yamlui's flat quads; `task flatquad` is what now says so in pixels.
 float edgeCoverage(vec2 uv) {
     vec2 d = min(uv, 1.0 - uv);
     vec2 w = max(fwidth(uv), vec2(1e-8));

@@ -1,0 +1,40 @@
+# The flat-quad panel `task flatquad` measures, for
+# `go run ./13-ui -yamlui flatquad`.
+#
+# Every widget here goes through yamlui's flat quad stream -- a `bg_color`
+# panel and a progress bar with no nine-slice -- which is the path issue #144
+# was about: the emitter wrote no UV, ui.frag's edge coverage saturated at 0.5,
+# and every one of these composited at half alpha edge to edge.
+#
+# The colours are picked so that failure is arithmetic rather than taste. The
+# root is nearly white and the panel on it nearly black, so half alpha lands
+# roughly midway between them and misses either endpoint by about 110 of 255.
+# A gate that only asked "is this dark" would pass the bug.
+#
+# The geometry is fixed on purpose. cmd/flatquadcheck is handed boxes written
+# down in the Taskfile, derived from the numbers below at scale 1, pinned at
+# yamlHUDOrigin (420, 190):
+#
+#	root at (420, 190), 400 x 200, padding 20, gap 20
+#	content starts at (440, 210) and is 360 wide
+#	panel   y 210..270
+#	bar     y 290..350, fill 180 wide at v_50 of v_max
+widget: panel
+id: flat_root
+width: 400
+height: 200
+padding: 20
+gap: 20
+bg_color: [0.85, 0.86, 0.88]
+children:
+  - widget: panel
+    id: flat_panel
+    height: 60
+    bg_color: [0.05, 0.06, 0.08]
+  - widget: progress_bar
+    id: flat_bar
+    height: 60
+    value: "{v_50}"
+    max: "{v_max}"
+    bg_color: [0.20, 0.06, 0.06]
+    fg_color: [0.95, 0.85, 0.20]

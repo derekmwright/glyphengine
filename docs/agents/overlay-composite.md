@@ -264,12 +264,34 @@ Two details carry the whole thing:
   1 stay on the requested edge. The rasterizer only generates fragments whose
   centre is inside the geometry, so without that skirt the distance never goes
   negative and only the inner half of the ramp exists — a softer edge biased
-  half a pixel inward rather than a hard step. Emitters that have not been
-  updated still get that half, which is why this degrades gracefully.
+  half a pixel inward rather than a hard step. An emitter that writes corner
+  UVs but no skirt still gets that half, which is the sense in which this
+  degrades gracefully.
+
+An emitter that writes **no UV** does not degrade gracefully, and that is worth
+stating plainly because the shader's own comment used to imply it did. All four
+vertices then carry (0, 0): the distance is 0, `fwidth` is clamped to `1e-8`,
+`px` is 0, and coverage is the `+ 0.5` for every fragment of the quad. Not a
+soft edge — **half alpha across the whole quad**, interior included. That was
+issue #144, and it went unseen in `ui/yamlui`'s flat `bg_color` panels and
+non-nine-slice progress bars for as long as they existed: a nearly black panel
+on a nearly white one measured (147, 158, 172) of 255 where the YAML asked for
+(13, 15, 20). `task flatquad` is the gate, and it fails at 152 of 255 rather
+than at a tolerance.
+
+Three emitters therefore have to agree, and none of them can share the constant
+because of the import direction: `ui.AppendQuad`, `renderer.NineSlice.AppendQuads`
+and `yamlui`'s own `appendQuad`. Each names the other two.
 
 A zero-width or zero-height quad is dropped rather than grown. An empty progress
 bar asks for exactly that, and a skirt around nothing is a one-pixel sliver
 where the bar is supposed to be empty.
+
+The one shape that deliberately opts out is an `indicator:`'s triangle fan,
+which gives every vertex a constant UV of (0.5, 0.5). A fan has no outer skirt,
+and corner UVs would ramp its alpha down to a half along every interior seam and
+draw spokes across the overlay; a constant UV has zero `fwidth`, so the ramp
+saturates and the shape is fully covered. See `appendIndicatorFan`.
 
 ### What it measures
 

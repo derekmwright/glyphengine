@@ -184,6 +184,7 @@ are that pipeline's own real-Blender fixture, in the same spirit as
 | `task sky` | Celestial bodies are occluded by terrain, not drawn over it (needs a GPU) |
 | `task hud` | Screen-space overlays survive water, bloom and the tonemap (needs a GPU) |
 | `task indicator` | A yamlui `indicator:` covers the widget region it names, nothing else, stays under its label and vanishes at zero (needs a GPU) |
+| `task flatquad` | A flat yamlui `bg_color` panel and progress-bar fill reach the colour they ask for instead of half alpha (needs a GPU) |
 | `task custompasses` | Application light/compute/fog passes are visible, confined, repeatable and validation-clean (needs a GPU) |
 | `task waterblend` | A blended effect in front of the water is not painted over by it (needs a GPU) |
 | `task bench` | Per-pass GPU and per-phase CPU cost over a fixed scene set (needs a GPU) |
