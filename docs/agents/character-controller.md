@@ -24,7 +24,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-09-19
+verified: 2026-09-25
 ---
 
 # Move a character with MoveIntent
@@ -93,14 +93,12 @@ identically on a client and an authoritative server.
 
 | Field | Meaning |
 |---|---|
-| `Forward`, `Right` | XZ movement, relative to `Yaw`. Only the **sign** is used — magnitude does not scale speed. |
+| `Forward`, `Right` | XZ movement, relative to `Yaw`. The **magnitude** scales speed, so a half-deflected stick walks at half speed; a diagonal is clamped to unit length, not normalized up to it. |
 | `Yaw` | Reference heading in radians, normally the camera yaw. |
 | `Turn` | Rotate in place at `TurnRate`. Non-zero `Turn` makes `Forward`/`Right` relative to the character's *new* facing, so keyboard turning and camera-relative movement compose. |
 | `Sprint` | Use `RunSpeed` instead of `WalkSpeed`. |
 | `Jump` | Apply `JumpSpeed` if grounded. Feed this an edge-triggered `KeyPressed`, not `KeyDown`. |
 | `SpeedScale` | Multiplies final horizontal speed — haste, snares, roots. Zero means 1. |
-
-Call it with the **frame** delta from `Game.Update`, not a fixed tick delta.
 
 ## Facing
 
@@ -181,6 +179,13 @@ collision here too — for free, since neither this file's code nor
 honour the collision snapshot for the invariants above to hold; see
 `QueryBackend`'s doc comment for what that means for a backend that is not
 just reading Scene's live components.
+
+A game that keeps its own movement integrator instead of calling
+`MoveCharacter` still gets the engine's freeze: `scene.FrozenQueries()` returns
+a backend answering from a snapshot of every collider's world AABB, with the
+same ordering and tie-breaks the phase above uses, safe to query from every
+goroutine in that phase. See `physics-queries` for what the snapshot does and
+does not cover.
 
 ## Failure modes
 

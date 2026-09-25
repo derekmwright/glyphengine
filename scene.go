@@ -201,7 +201,9 @@ type Scene struct {
 	// OverlapAABB and Raycast read collider geometry from this snapshot instead
 	// of live Transforms, so movement goroutines never read a neighbor's
 	// position while another goroutine writes it. Built and cleared by
-	// MoveCharactersParallel.
+	// MoveCharactersParallel, through the same freeze FrozenQueries gives a
+	// game; the map is handed back in each tick so that freeze does not
+	// reallocate it.
 	collisionAABBs       map[ecs.Entity]AABB
 	useCollisionSnapshot bool
 

@@ -25,6 +25,7 @@ api:
   - glyphengine.QueryBackend
   - glyphengine.Scene.Queries
   - glyphengine.Scene.BuiltinQueries
+  - glyphengine.Scene.FrozenQueries
   - glyphengine.Engine.PickEntity
   - glyphengine.Engine.ScreenRay
   - glyphengine.ComputeConvexHull
@@ -36,7 +37,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-09-21
+verified: 2026-09-25
 ---
 
 # Colliders, raycasts, overlap queries, and body integration
@@ -223,6 +224,72 @@ buffer and is documented NOT safe for this.
 `controller_race_test.go`-style coverage with a custom backend installed is in
 `query_backend_test.go` (`TestMoveCharactersParallelRaceWithCustomQueryBackend`).
 
+## Freezing the world for a parallel phase
+
+`Scene.FrozenQueries()` returns a `QueryBackend` that answers from a snapshot
+of every collider's world AABB, taken at the call. It is safe to read from many
+goroutines while `Transform`s are being written, which is what
+`MoveCharactersParallel` does with it — and what a game that moves characters
+with its own integrator, in a parallel phase of its own, needs:
+
+```go
+frozen := scene.FrozenQueries() // freeze once, on this goroutine
+scene.World().EnableLocking()   // concurrent component access, as the engine's phase does
+
+var wg sync.WaitGroup
+for _, shard := range shards { // partition by entity, so one entity is one goroutine's
+	wg.Add(1)
+	go func(shard []glyphengine.Entity) {
+		defer wg.Done()
+		for _, e := range shard {
+			myMovement(scene, e, frozen, dt) // frozen.Raycast, frozen.OverlapAABB
+		}
+	}(shard)
+}
+wg.Wait()
+
+scene.World().DisableLocking()
+```
+
+The answers are `BuiltinQueries()`'s answers, ordering and tie-breaks included:
+it is that same implementation reading AABBs from the snapshot instead of from
+live components. `MoveCharactersParallel` freezes through the same code, so the
+engine's parallel phase and a game's own cannot drift apart — there is one
+implementation of the #57 rules, not a copy of them in every game that needs a
+parallel phase.
+
+**What the snapshot holds:** the world AABB — `WorldAABB`, so position plus or
+minus half-extents times the absolute scale, rotation ignored — of every entity
+that had both a `Transform` and a `Collider` at the moment it was taken.
+Moving entities and `Static` ones alike, characters included, which is what
+lets a character see its neighbours where they stood before the phase began.
+
+**What it does not hold.** These are still read live on every query, and each
+is safe for a reason rather than by accident:
+
+| Still read live | Why that is safe |
+|---|---|
+| The terrain heightmap (the downward-ray fast path) | terrain is replaced between phases, not during one |
+| Convex hulls, and the `Transform`s the hull narrow phase reads | hull entities must be `Static`, so they do not move |
+| `SpatialGrid` and `StaticGrid`, which supply broad-phase candidates | rebuilt between phases, never during one |
+
+So while a snapshot is in use, do not call `UpdateSpatialGrid`,
+`RebuildStatics` or `SetTerrain`, and do not move a hull entity. The grid is
+the broad phase, not the snapshot: an entity the grid still lists but the
+snapshot never saw is skipped as having no geometry, and an entity the snapshot
+holds but the grid no longer lists is never offered as a candidate in the first
+place.
+
+**A snapshot goes stale** the moment anything writes a `Transform` or a
+`Collider`, or spawns or despawns a collider entity. Those writes are invisible
+to it — that is the entire point during a phase, and a bug between phases. Take
+a new snapshot each tick; one held across ticks answers with last tick's world.
+
+Two neighbours of this seam stay unexported on purpose, because the exported
+API already reaches them: the engine's internal "is there static geometry
+near this point" check is `scene.StaticGrid.HasAnyInRadius(x, z, 10)`, and the
+default spatial-grid cell size is whatever `NewSpatialGrid(0)` selects.
+
 ## Screen picking
 
 ```go
@@ -355,3 +422,11 @@ walk produced.
 - **`MoveCharactersParallel` behaves differently tick to tick with a custom
   `Queries` backend.** The backend is not honouring the collision snapshot —
   see "Swapping the query backend" above.
+- **A `FrozenQueries()` backend answers with last tick's world.** It is being
+  held across ticks. The snapshot is taken at the call and never updates; take
+  a new one per tick.
+- **A `FrozenQueries()` backend stopped seeing an entity that is clearly
+  there.** Either the entity gained its `Collider` after the freeze — the
+  snapshot has no geometry for it — or a spatial grid was rebuilt while the
+  snapshot was in use, which moved the entity out of the cells the query
+  visits. Freeze after the grids are rebuilt, not before.

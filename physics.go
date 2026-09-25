@@ -119,15 +119,12 @@ func (a AABB) Raycast(origin, dir mgl32.Vec3, maxDist float32) (t float32, norma
 // buildCollisionSnapshot freezes every collider entity's world-space AABB for
 // the duration of the parallel movement phase. Called sequentially before the
 // goroutines spawn; the map is reused across ticks to avoid reallocation.
+//
+// It freezes through the same code FrozenQueries hands a game, so the engine's
+// parallel phase and a game's own see the same set of colliders and the same
+// ordering rules rather than two copies of them.
 func (s *Scene) buildCollisionSnapshot() {
-	if s.collisionAABBs == nil {
-		s.collisionAABBs = make(map[ecs.Entity]AABB, 512)
-	} else {
-		clear(s.collisionAABBs)
-	}
-	ecs.Query2(s.C.Transform, s.C.Collider, func(e ecs.Entity, t *Transform, c *Collider) {
-		s.collisionAABBs[e] = WorldAABB(t, c)
-	})
+	s.collisionAABBs = s.freezeQueries(s.collisionAABBs).aabb
 	s.useCollisionSnapshot = true
 }
 
@@ -137,12 +134,30 @@ func (s *Scene) clearCollisionSnapshot() {
 	s.useCollisionSnapshot = false
 }
 
+// phaseAABBs returns the frozen AABBs the built-in queries must answer from
+// while the parallel movement phase is running, and nil — meaning "read the
+// live components" — at every other time.
+func (s *Scene) phaseAABBs() map[ecs.Entity]AABB {
+	if s.useCollisionSnapshot {
+		return s.collisionAABBs
+	}
+	return nil
+}
+
 // colliderAABB returns the entity's world AABB, reading from the frozen
 // snapshot during the parallel movement phase and from live components
 // otherwise. ok is false if the entity has no collider geometry.
 func (s *Scene) colliderAABB(entity ecs.Entity) (wb AABB, ok bool) {
-	if s.useCollisionSnapshot {
-		wb, ok = s.collisionAABBs[entity]
+	return s.colliderAABBFrom(s.phaseAABBs(), entity)
+}
+
+// colliderAABBFrom returns the entity's world AABB out of snapshot, or from
+// live components when snapshot is nil. ok is false if the entity has no
+// collider geometry — which, against a snapshot, also covers an entity that
+// gained its collider after the freeze.
+func (s *Scene) colliderAABBFrom(snapshot map[ecs.Entity]AABB, entity ecs.Entity) (wb AABB, ok bool) {
+	if snapshot != nil {
+		wb, ok = snapshot[entity]
 		return wb, ok
 	}
 	t, tok := s.C.Transform.Get(entity)
@@ -199,7 +214,10 @@ func (s *Scene) colliderAABB(entity ecs.Entity) (wb AABB, ok bool) {
 // once per tick, which is the normal shape of a broadphase — satisfies the
 // same requirement for free, because nothing in its index changes mid-phase
 // in the first place. A replacement that instead queries Scene's live
-// Transform/Velocity itself needs the same freeze the built-in one has.
+// Transform/Velocity itself needs the same freeze the built-in one has, and
+// Scene.FrozenQueries is that freeze, exported: it hands back this same
+// implementation bound to a snapshot taken on the spot, for a game whose own
+// movement integrator runs a parallel phase of its own (#133).
 //
 // Concurrency: Raycast and OverlapAABB are called from multiple goroutines
 // during the parallel phase, so neither may keep scratch state shared across
@@ -240,6 +258,75 @@ func (b builtinQueries) OverlapAABB(box AABB, exclude ecs.Entity) []OverlapResul
 	return b.s.overlapAABBBuiltin(box, exclude)
 }
 
+// FrozenQueries returns a QueryBackend that answers Raycast and OverlapAABB
+// from a snapshot of every collider's current world AABB, taken now. Safe to
+// call from many goroutines while Transforms are being written, which is how
+// MoveCharactersParallel uses it: a game running its own movement integrator
+// in a parallel phase freezes once on the calling goroutine, then queries the
+// returned backend from all of them.
+//
+//	frozen := scene.FrozenQueries()
+//	// ... goroutines calling frozen.Raycast and frozen.OverlapAABB while
+//	// other goroutines write Transforms, under scene.World().EnableLocking()
+//	// the way MoveCharactersParallel does ...
+//
+// The answers are BuiltinQueries' answers, ordering and tie-breaks included —
+// it is that same implementation reading AABBs from the snapshot instead of
+// from live components, which is exactly what MoveCharactersParallel does.
+//
+// The snapshot holds the world AABB of every entity that had both a Transform
+// and a Collider when it was taken, moving and Static alike, so a character
+// sees its neighbours where they stood before the phase began. It copies
+// nothing else: the terrain heightmap, convex hulls and the Transforms the
+// hull narrow phase reads, and the two spatial grids that supply broad-phase
+// candidates are all still read live. That is sound for the same reason
+// MoveCharactersParallel is — hull entities are Static, and terrain and the
+// grids are rebuilt between phases rather than during one.
+//
+// A snapshot goes stale the moment anything writes a Transform or a Collider,
+// or spawns or despawns a collider entity: those writes are invisible to it by
+// design. Take a new one each tick — holding one across ticks answers with
+// last tick's world.
+func (s *Scene) FrozenQueries() QueryBackend {
+	return s.freezeQueries(nil)
+}
+
+// freezeQueries captures every collider entity's world AABB and returns the
+// backend that answers from it. reuse, when non-nil, is emptied and refilled
+// rather than replaced: the parallel movement phase hands its own map back
+// every tick so the freeze does not reallocate, while FrozenQueries passes nil
+// so that a caller's snapshot is a map nothing else can write.
+func (s *Scene) freezeQueries(reuse map[ecs.Entity]AABB) frozenQueries {
+	snapshot := reuse
+	if snapshot == nil {
+		snapshot = make(map[ecs.Entity]AABB, 512)
+	} else {
+		clear(snapshot)
+	}
+	ecs.Query2(s.C.Transform, s.C.Collider, func(e ecs.Entity, t *Transform, c *Collider) {
+		snapshot[e] = WorldAABB(t, c)
+	})
+	return frozenQueries{s: s, aabb: snapshot}
+}
+
+// frozenQueries is the built-in implementation bound to one snapshot instead
+// of to whatever the scene is doing now. buildCollisionSnapshot needs the
+// concrete type: it installs that map as the phase's, so Scene.Raycast,
+// Scene.OverlapAABB and any backend delegating to BuiltinQueries all read the
+// same frozen copy for the phase's duration.
+type frozenQueries struct {
+	s    *Scene
+	aabb map[ecs.Entity]AABB
+}
+
+func (f frozenQueries) Raycast(origin, dir mgl32.Vec3, maxDist float32, exclude ecs.Entity) (RayHit, bool) {
+	return f.s.raycastFrom(f.aabb, origin, dir, maxDist, exclude)
+}
+
+func (f frozenQueries) OverlapAABB(box AABB, exclude ecs.Entity) []OverlapResult {
+	return f.s.overlapAABBFrom(f.aabb, box, exclude)
+}
+
 // OverlapAABB queries the world for all collider entities whose AABB overlaps
 // the given box. The exclude entity (if non-zero) is skipped.
 //
@@ -259,17 +346,25 @@ func (s *Scene) OverlapAABB(box AABB, exclude ecs.Entity) []OverlapResult {
 	return s.overlapAABBBuiltin(box, exclude)
 }
 
-// overlapAABBBuiltin is the default OverlapAABB implementation: spatial-grid
-// broad phase over colliderAABB, which is what makes it safe under the
-// collision snapshot (see colliderAABB and QueryBackend).
+// overlapAABBBuiltin is the default OverlapAABB implementation. It reads the
+// parallel movement phase's frozen AABBs while that phase is running and live
+// components otherwise, which is what keeps it — and every backend that
+// delegates to BuiltinQueries — safe there (see phaseAABBs and QueryBackend).
 func (s *Scene) overlapAABBBuiltin(box AABB, exclude ecs.Entity) []OverlapResult {
+	return s.overlapAABBFrom(s.phaseAABBs(), box, exclude)
+}
+
+// overlapAABBFrom is the one implementation of the overlap query and of its
+// #57 ordering contract, over whichever AABBs it is given: a frozen snapshot,
+// or the live components when snapshot is nil.
+func (s *Scene) overlapAABBFrom(snapshot map[ecs.Entity]AABB, box AABB, exclude ecs.Entity) []OverlapResult {
 	var results []OverlapResult
 
 	testEntity := func(entity ecs.Entity) {
 		if entity == exclude {
 			return
 		}
-		wb, ok := s.colliderAABB(entity)
+		wb, ok := s.colliderAABBFrom(snapshot, entity)
 		if !ok {
 			return
 		}
@@ -392,10 +487,20 @@ func (s *Scene) Raycast(origin, dir mgl32.Vec3, maxDist float32, exclude ecs.Ent
 }
 
 // raycastBuiltin is the default Raycast implementation: terrain fast path,
-// then spatial-grid broad phase over colliderAABB, then convex-hull narrow
-// phase — see colliderAABB and QueryBackend for the collision-snapshot
-// contract this depends on.
+// then spatial-grid broad phase, then convex-hull narrow phase. Like
+// overlapAABBBuiltin it answers from the parallel movement phase's frozen
+// AABBs while that phase is running — see phaseAABBs and QueryBackend for the
+// collision-snapshot contract this depends on.
 func (s *Scene) raycastBuiltin(origin, dir mgl32.Vec3, maxDist float32, exclude ecs.Entity) (RayHit, bool) {
+	return s.raycastFrom(s.phaseAABBs(), origin, dir, maxDist, exclude)
+}
+
+// raycastFrom is the one implementation of the nearest-hit raycast and of its
+// #57 tie-break, over whichever AABBs it is given: a frozen snapshot, or the
+// live components when snapshot is nil. The terrain fast path and the hull
+// narrow phase below read live state either way — neither changes during a
+// parallel phase, since hull entities are Static (see QueryBackend).
+func (s *Scene) raycastFrom(snapshot map[ecs.Entity]AABB, origin, dir mgl32.Vec3, maxDist float32, exclude ecs.Entity) (RayHit, bool) {
 	var best RayHit
 	found := false
 
@@ -417,7 +522,7 @@ func (s *Scene) raycastBuiltin(origin, dir mgl32.Vec3, maxDist float32, exclude 
 		if entity == exclude {
 			return
 		}
-		wb, ok := s.colliderAABB(entity)
+		wb, ok := s.colliderAABBFrom(snapshot, entity)
 		if !ok {
 			return
 		}
