@@ -29,6 +29,12 @@ type Button struct {
 	pressed   bool
 	Hidden    bool
 	bounds    Rect
+
+	// line is storage for the label's TextLine. Build runs every frame and
+	// there is never more than one line, so holding it here is what keeps the
+	// label from being the last allocation in a Build whose panel no longer
+	// rebuilds.
+	line [1]renderer.TextLine
 }
 
 // NewButton creates a button with a single 9-slice layer.
@@ -46,6 +52,12 @@ func NewButton(r *renderer.Renderer, slice *renderer.NineSlice, color [3]float32
 }
 
 // Build renders the button panel and label text.
+//
+// Both slices are the button's own and are overwritten by its next Build, so a
+// caller that keeps them past the frame has to copy -- which is what
+// append(dst, ...) at every call site already does. That is what lets a button
+// that has not moved, resized, recoloured or changed state cost no allocations
+// and no mesh upload at all; see renderer.Panel.Rebuild.
 func (b *Button) Build(r *renderer.Renderer, scale, sw, sh float32, font *renderer.Font) ([]renderer.UIRenderObject, []renderer.TextLine) {
 	if b.Hidden {
 		return nil, nil
@@ -89,10 +101,11 @@ func (b *Button) Build(r *renderer.Renderer, scale, sw, sh float32, font *render
 		tw := font.MeasureText(b.Label, fontSize)
 		tx := b.bounds.X + (b.bounds.W-tw)/2
 		ty := b.bounds.Y + (b.bounds.H-fontSize)/2
-		text = append(text, renderer.TextLine{
+		b.line[0] = renderer.TextLine{
 			Text: b.Label, X: tx, Y: ty, Scale: fontSize, Color: b.LabelColor,
 			Glow: glow,
-		})
+		}
+		text = b.line[:1]
 	}
 
 	return panels, text

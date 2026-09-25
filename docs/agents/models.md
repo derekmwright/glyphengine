@@ -65,13 +65,15 @@ api:
   - renderer.ResourceCounts.MeshRanges
   - renderer.ResourceCounts.CachedTextures
   - renderer.ResourceCounts.TextureShares
+  - renderer.Renderer.CreateDynamicIndexedMesh
+  - renderer.Renderer.UpdateMeshData
 example: examples/08-grass
 run: task example:08-grass
 requires:
   - cgo
   - vulkan-runtime
 assets: bundled
-verified: 2026-09-25 # texture decode borrows the PNG buffer (#135); external images shared between documents (#136)
+verified: 2026-09-25 # decode borrows the PNG buffer (#135); images shared between documents (#136); dynamic mesh slot rule (#137)
 ---
 
 # Treat a loaded model as geometry, not only as a draw call
@@ -216,6 +218,47 @@ fail with zero visible pixels, despite reporting nonzero draw/triangle counts.
 
 See [shared mesh storage](../adr/0010-shared-mesh-storage-and-range-submission.md)
 for ownership and [instancing](instancing.md) for repeated geometry.
+
+## Updating a mesh every frame, or only when it changes
+
+`CreateDynamicIndexedMesh(maxVertices, maxIndices)` allocates one host-visible,
+persistently mapped vertex and index buffer **per frame in flight** and returns
+a mesh that draws nothing until the first update lands.
+`UpdateMeshData(m, vertices, indices)` stages a copy CPU-side, clamped to the
+capacity the mesh was created with; `DrawFrame` copies it into a buffer after
+that frame's fence has signaled. An empty vertex slice hides the mesh. Ranges
+from a `MeshArena` are rejected -- the two are separate APIs.
+
+### The slot an update is written into
+
+The per-frame buffers are **not** a per-frame rotation. An update is copied
+into exactly one of them, and the mesh is repointed at it; a mesh that is not
+updated keeps whichever one it already had, and every frame that records while
+it sits there records its draws against that same buffer.
+
+That is what makes "write this frame's buffer" wrong. The frame being flushed
+has had its fence signaled, which says nothing about the *other* frames in
+flight -- and those may all be reading the slot the mesh has been parked on. At
+two frames in flight it is every update whose previous write was exactly two
+frames earlier: for a UI panel that only rebuilds when it changes, about half
+of them. The CPU memcpy would land in host-visible memory the GPU has already
+been told to fetch, and nothing in Vulkan would report it. It is a genuine
+read-while-write race whose symptom is a single torn frame.
+
+So `flushDynamicMeshes` tracks, per mesh, which slot it is bound to and which
+slot each frame last recorded against, and writes a slot no in-flight frame is
+reading -- preferring the flushing frame's own, which is free in the steady
+state. There is always one available: the other `maxFramesInFlight - 1` frames
+can hold at most that many slots between them.
+
+**If you add a dynamic buffer of your own with per-frame slots, it needs the
+same rule** -- unless it is genuinely written every frame, in which case each
+frame only ever touches its own slot. `renderer/dynamicmeshslot_test.go` is the
+gate; the hazard was found while making UI panels skip their rebuild, which
+turned it from rare into routine.
+
+One consequence worth having: an update now costs a single memcpy instead of
+one per frame in flight, because the slots are no longer kept in step.
 
 ## Streaming geometry in while frames render
 

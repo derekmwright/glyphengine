@@ -22,6 +22,30 @@ type PanelLayer struct {
 	Glow float32
 
 	mesh *Mesh
+
+	// built is what this layer's mesh currently holds, and hasBuilt says
+	// whether it holds anything yet. Rebuild compares the two against the
+	// values it is about to draw from; see quadInputs.
+	built    quadInputs
+	hasBuilt bool
+}
+
+// quadInputs is every value that reaches a layer's vertices, and it is the
+// whole of Rebuild's skip rule: a value AppendQuads reads and this does not
+// record is a panel that goes on drawing its old shape after the game moved,
+// resized or recoloured it, with nothing in a log and nothing in a validation
+// report to say so.
+//
+// The nine-slice is held by pointer as well as by the three numbers read out
+// of it, so swapping a layer's artwork for a different slice with the same
+// metrics still rebuilds. Texture and Fill are deliberately absent: neither
+// reaches a vertex, and UIRenderObjects reads both live every frame.
+type quadInputs struct {
+	slice                *NineSlice
+	x, y, w, h           float32
+	scale                float32
+	color                [3]float32
+	texSize, texH, inset int
 }
 
 // Panel is a multi-layer 9-slice UI element.
@@ -30,6 +54,14 @@ type Panel struct {
 	Scale               float32 // texture-pixel to screen-pixel ratio
 	Layers              []*PanelLayer
 	Visible             bool
+
+	// Scratch geometry and render objects, reused across rebuilds. A HUD
+	// rebuilds its panels every frame and the quads are the same 36 vertices
+	// and 54 indices every time, so growing a fresh pair of slices per layer
+	// per frame was the engine's largest steady-state allocator.
+	scratchV []Vertex
+	scratchI []uint16
+	objs     []UIRenderObject
 }
 
 // NewPanel creates an empty panel with default scale and visibility.
@@ -52,13 +84,34 @@ func (p *Panel) AddLayer(r *Renderer, ns *NineSlice, color [3]float32, opacity f
 	return nil
 }
 
-// Rebuild regenerates the mesh data for all layers based on current panel geometry.
+// Rebuild regenerates the mesh data for any layer whose geometry inputs have
+// changed since its last build, and leaves the rest alone.
+//
+// Skipping is safe because an unupdated dynamic mesh keeps pointing at the
+// buffer it was last flushed into, and nothing writes that buffer again until
+// the next UpdateMeshData -- so the panel keeps drawing the same vertices
+// without the CPU touching them. What it does mean is that several frames in
+// flight end up reading that one buffer, which is why flushDynamicMeshes
+// chooses the slot an update is copied into rather than writing the frame's
+// own; read that comment before changing either side.
 func (p *Panel) Rebuild(r *Renderer) {
 	for _, layer := range p.Layers {
-		verts, inds := layer.NineSlice.GenerateQuads(
+		ns := layer.NineSlice
+		in := quadInputs{
+			slice: ns,
+			x:     p.X, y: p.Y, w: p.Width, h: p.Height,
+			scale: p.Scale, color: layer.Color,
+			texSize: ns.TexSize, texH: ns.TexH, inset: ns.Inset,
+		}
+		if layer.hasBuilt && layer.built == in {
+			continue
+		}
+		p.scratchV, p.scratchI = ns.AppendQuads(
+			p.scratchV[:0], p.scratchI[:0],
 			p.X, p.Y, p.Width, p.Height, p.Scale, layer.Color,
 		)
-		r.UpdateMeshData(layer.mesh, verts, inds)
+		r.UpdateMeshData(layer.mesh, p.scratchV, p.scratchI)
+		layer.built, layer.hasBuilt = in, true
 	}
 }
 
@@ -94,13 +147,25 @@ type UIRenderObject struct {
 }
 
 // UIRenderObjects returns UIRenderObjects with per-layer opacity for the UI pipeline.
+//
+// The slice is the panel's own and is overwritten by the next call on this
+// panel, which is what keeps a per-frame Build from allocating. Copy out of it
+// -- which is what append(dst, objs...) at every call site already does -- if
+// it has to outlive the frame.
 func (p *Panel) UIRenderObjects(screenW, screenH float32) []UIRenderObject {
 	if !p.Visible {
 		return nil
 	}
 	proj := mgl32.Ortho(0, screenW, 0, screenH, -1, 1)
-	var objs []UIRenderObject
+	objs := p.objs[:0]
 	for _, layer := range p.Layers {
+		// A layer with no mesh draws nothing. Layers and PanelLayer are both
+		// exported, so a layer assembled by hand rather than through AddLayer
+		// reaches here, and dereferencing it was a nil-pointer panic inside
+		// the renderer rather than an empty panel the caller could see.
+		if layer.mesh == nil {
+			continue
+		}
 		if layer.mesh.IndexCount == 0 && layer.mesh.VertexCount == 0 {
 			continue
 		}
@@ -117,6 +182,7 @@ func (p *Panel) UIRenderObjects(screenW, screenH float32) []UIRenderObject {
 			Fill:        layer.NineSlice.Fill,
 		})
 	}
+	p.objs = objs
 	return objs
 }
 

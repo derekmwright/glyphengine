@@ -345,7 +345,68 @@ type dynamicMesh struct {
 
 	stagingV []Vertex
 	stagingI []uint16
-	dirty    [maxFramesInFlight]bool
+
+	// dirty says the staging copy has not reached a buffer yet. It is one flag
+	// rather than one per frame because an update is copied into exactly one
+	// slot; see flushDynamicMeshes for why it cannot simply be this frame's.
+	dirty bool
+
+	// bound is the slot the Mesh currently points at, and boundAt[f] is the
+	// slot frame f last recorded its draws against -- unboundSlot until f has
+	// been through a flush. A mesh that is not updated keeps its slot, so
+	// several frames in flight can be reading the same one, and that is what
+	// the writer has to avoid.
+	bound   int
+	boundAt [maxFramesInFlight]int
+}
+
+// unboundSlot marks a frame that has not recorded this mesh yet, so no buffer
+// is being read on its behalf. Zero would name a real slot and would keep the
+// first update off it for no reason.
+const unboundSlot = -1
+
+// newDynamicMesh returns a dynamicMesh with its frame bookkeeping cleared. The
+// zero value cannot be used: boundAt would read as "every frame is holding
+// slot 0".
+func newDynamicMesh() *dynamicMesh {
+	dm := &dynamicMesh{}
+	for i := range dm.boundAt {
+		dm.boundAt[i] = unboundSlot
+	}
+	return dm
+}
+
+// heldInFlight reports whether a frame other than this one recorded its draws
+// against slot, and so may still be reading it.
+//
+// The frame being flushed is excluded because its fence has already signaled:
+// whatever it recorded last time round is finished, and it is about to record
+// again from whatever the flush leaves bound.
+func (dm *dynamicMesh) heldInFlight(frame, slot int) bool {
+	for f := range dm.boundAt {
+		if f != frame && dm.boundAt[f] == slot {
+			return true
+		}
+	}
+	return false
+}
+
+// writeSlot picks the slot this frame's update may be copied into. It prefers
+// the frame's own slot, which keeps the steady state on one buffer per frame,
+// and otherwise takes any slot no in-flight frame is reading.
+//
+// There is always one: the other maxFramesInFlight-1 frames can hold at most
+// that many slots between them, out of maxFramesInFlight.
+func (dm *dynamicMesh) writeSlot(frame int) int {
+	if !dm.heldInFlight(frame, frame) {
+		return frame
+	}
+	for slot := range maxFramesInFlight {
+		if !dm.heldInFlight(frame, slot) {
+			return slot
+		}
+	}
+	return frame
 }
 
 // destroy unmaps and releases all per-frame buffer sets.
@@ -376,7 +437,7 @@ func (r *Renderer) CreateDynamicIndexedMesh(maxVertices, maxIndices int) (*Mesh,
 	vbufSize := maxVertices * sizeOf[Vertex]()
 	ibufSize := maxIndices * 2 // uint16
 
-	dm := &dynamicMesh{}
+	dm := newDynamicMesh()
 	for i := 0; i < maxFramesInFlight; i++ {
 		vbuf, vmem, err := r.createBuffer(vbufSize,
 			core1_0.BufferUsageVertexBuffer,
@@ -413,6 +474,9 @@ func (r *Renderer) CreateDynamicIndexedMesh(maxVertices, maxIndices int) (*Mesh,
 		dm.imapped[i] = unsafe.Slice((*byte)(iptr), ibufSize)
 	}
 
+	// Slot 0, matching dm.bound's zero value: the mesh draws nothing until the
+	// first flush, but the two have to agree before then or the first update
+	// would be told the mesh is bound somewhere it is not.
 	m := &Mesh{
 		vertexBuffer: dm.vbufs[0],
 		vertexMemory: dm.vmems[0],
@@ -444,40 +508,63 @@ func (r *Renderer) UpdateMeshData(m *Mesh, vertices []Vertex, indices []uint16) 
 	}
 	dm.stagingV = append(dm.stagingV[:0], vertices...)
 	dm.stagingI = append(dm.stagingI[:0], indices...)
-	for i := range dm.dirty {
-		dm.dirty[i] = true
-	}
+	dm.dirty = true
 	return nil
 }
 
-// flushDynamicMeshes copies staged mesh data into the given frame's buffers
-// and repoints each mesh at them. Called from DrawFrame after the frame's
-// fence wait, so the GPU is guaranteed to be done reading these buffers.
-// Meshes that weren't updated keep pointing at their last-written buffers.
+// flushDynamicMeshes copies staged mesh data into one buffer set per mesh and
+// repoints the mesh at it. Called from DrawFrame after the frame's fence wait,
+// so this frame's own last submission is finished. Meshes that weren't updated
+// keep pointing at their last-written buffers.
+//
+// The slot written is NOT simply this frame's. A mesh that is not updated
+// every frame keeps whichever slot it was last written into, and every frame
+// that records while it sits there records its draws against that one buffer.
+// Writing slot `frame` would then be a copy into host-visible memory that
+// another frame, still in flight, is reading: the CPU overwrites vertices the
+// GPU has been told to fetch. With two frames in flight that is every other
+// update -- half the time for a button that changes on hover -- and it shows
+// as a one-frame tear rather than as anything a fence would catch.
+//
+// So the update goes to a slot no in-flight frame is bound to, which the
+// bookkeeping below tracks, and every frame records the slot it is about to
+// draw from whether or not anything was flushed into it.
+//
+// One copy per update rather than one per frame in flight also means an
+// update costs a single memcpy; the old per-slot dirty array copied the same
+// bytes maxFramesInFlight times for every change.
 func (r *Renderer) flushDynamicMeshes(frame int) {
 	for m, dm := range r.dynamicMeshes {
-		if !dm.dirty[frame] {
-			continue
-		}
-		dm.dirty[frame] = false
+		if dm.dirty {
+			dm.dirty = false
 
-		m.VertexCount = len(dm.stagingV)
-		m.IndexCount = len(dm.stagingI)
-		if len(dm.stagingV) == 0 {
-			continue
+			m.VertexCount = len(dm.stagingV)
+			m.IndexCount = len(dm.stagingI)
+
+			// An empty update hides the mesh; nothing is recorded from it, so
+			// it keeps the slot it had rather than claiming another.
+			if len(dm.stagingV) > 0 {
+				slot := dm.writeSlot(frame)
+
+				vbytes := len(dm.stagingV) * sizeOf[Vertex]()
+				copy(dm.vmapped[slot][:vbytes], unsafe.Slice((*byte)(unsafe.Pointer(&dm.stagingV[0])), vbytes))
+				if len(dm.stagingI) > 0 {
+					ibytes := len(dm.stagingI) * 2
+					copy(dm.imapped[slot][:ibytes], unsafe.Slice((*byte)(unsafe.Pointer(&dm.stagingI[0])), ibytes))
+				}
+
+				m.vertexBuffer = dm.vbufs[slot]
+				m.vertexMemory = dm.vmems[slot]
+				m.indexBuffer = dm.ibufs[slot]
+				m.indexMemory = dm.imems[slot]
+				dm.bound = slot
+			}
 		}
 
-		vbytes := len(dm.stagingV) * sizeOf[Vertex]()
-		copy(dm.vmapped[frame][:vbytes], unsafe.Slice((*byte)(unsafe.Pointer(&dm.stagingV[0])), vbytes))
-		if len(dm.stagingI) > 0 {
-			ibytes := len(dm.stagingI) * 2
-			copy(dm.imapped[frame][:ibytes], unsafe.Slice((*byte)(unsafe.Pointer(&dm.stagingI[0])), ibytes))
-		}
-
-		m.vertexBuffer = dm.vbufs[frame]
-		m.vertexMemory = dm.vmems[frame]
-		m.indexBuffer = dm.ibufs[frame]
-		m.indexMemory = dm.imems[frame]
+		// This frame is about to record against whatever is bound now, flushed
+		// or not. Recording it here rather than only on an update is the whole
+		// point: the slot a frame reads is the one it was left with.
+		dm.boundAt[frame] = dm.bound
 	}
 }
 
