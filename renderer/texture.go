@@ -937,6 +937,13 @@ func (r *Renderer) createFallbackTexture() (*Texture, error) {
 
 // DestroyTexture releases GPU resources for a texture, including the
 // descriptor set it took from the pool at upload.
+//
+// A texture shared between glTF documents is normally released a share at a
+// time through DestroyModel, and reaches here only when the last share goes.
+// Calling this on one directly destroys it regardless of who else is holding
+// it, which is the caller's error either way -- but it still drops the cache
+// entry, so the next LoadGLTF uploads a fresh texture rather than being handed
+// this destroyed one.
 func (r *Renderer) DestroyTexture(t *Texture) {
 	if t != nil && t.scene != nil {
 		return // Borrowed scene images are released with their renderer targets.
@@ -949,6 +956,7 @@ func (r *Renderer) DestroyTexture(t *Texture) {
 		return
 	}
 	t.destroyed = true
+	r.forgetGLTFTexture(t)
 
 	// Deregister for the same reason as DestroyMesh: the renderer's own
 	// cleanup would otherwise free these handles a second time.

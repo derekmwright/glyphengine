@@ -338,7 +338,7 @@ func TestReadGLTFDoesNotDecodeImages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openGLTF: %v", err)
 	}
-	if _, err := decodeGLTFImages(doc, base); err == nil {
+	if _, err := decodeGLTFImages(doc, base, nil); err == nil {
 		t.Fatal("decodeGLTFImages accepted garbage image bytes -- this test proves nothing about the read skipping them")
 	} else {
 		t.Logf("upload-side decode fails as expected: %v", err)
@@ -369,7 +369,7 @@ func TestReadGLTFExternalImageIsNotEvenRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openGLTF: %v", err)
 	}
-	if _, err := decodeGLTFImages(doc, base); err == nil {
+	if _, err := decodeGLTFImages(doc, base, nil); err == nil {
 		t.Fatal("decodeGLTFImages succeeded with the image file absent -- this test proves nothing")
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("decodeGLTFImages error = %v, want one wrapping fs.ErrNotExist", err)

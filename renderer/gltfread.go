@@ -86,8 +86,16 @@ type gltfRead struct {
 	doc  *gltf.Document
 	base fs.FS
 
+	// fsys is the filesystem the CALLER named, kept alongside base because the
+	// shared-image cache keys on it (issue #136) and base will not do: fs.Sub
+	// hands back a fresh *subFS on every call, so two documents in one
+	// directory have equal fsys and unequal base. Reading images still goes
+	// through base -- this is identity, not a second way to open a file.
+	fsys fs.FS
+
 	// name is the document's name as the caller gave it, for log lines and
-	// error messages that quote it.
+	// error messages that quote it, and for the directory the cache key's
+	// image path is resolved against.
 	name string
 
 	// prims is one entry per model.Meshes entry, in the same order, holding
@@ -236,7 +244,7 @@ func openRead(fsys fs.FS, name string) (*gltfRead, error) {
 	if err != nil {
 		return nil, err
 	}
-	rd := &gltfRead{model: new(Model), doc: doc, base: base, name: name}
+	rd := &gltfRead{model: new(Model), doc: doc, base: base, fsys: fsys, name: name}
 	rd.model.Nodes = extractNodes(doc)
 	rd.model.Lights = extractLights(doc, rd.model.Nodes)
 	return rd, nil

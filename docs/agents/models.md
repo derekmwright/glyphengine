@@ -63,13 +63,15 @@ api:
   - renderer.ResourceCounts.PendingUploads
   - renderer.ResourceCounts.MeshArenas
   - renderer.ResourceCounts.MeshRanges
+  - renderer.ResourceCounts.CachedTextures
+  - renderer.ResourceCounts.TextureShares
 example: examples/08-grass
 run: task example:08-grass
 requires:
   - cgo
   - vulkan-runtime
 assets: bundled
-verified: 2026-09-25 # texture decode borrows the PNG buffer (#135)
+verified: 2026-09-25 # texture decode borrows the PNG buffer (#135); external images shared between documents (#136)
 ---
 
 # Treat a loaded model as geometry, not only as a draw call
@@ -672,14 +674,101 @@ and a skinned primitive decodes to `SkinnedVertex` — see the failure mode
 below). Skipping that would mean a second decode path behind a flag, which is
 the drift this split exists to prevent.
 
+## One trim sheet, many documents
+
+An asset pack does not give each prop its own texture. Sixty `.gltf` files
+reference `T_Trim_Metal_01.png` and its friends, and before this the loader
+decoded, converted and uploaded each 2048-square sheet sixty times — most of a
+3.5 GB allocation burst at scene load, plus sixty identical copies in VRAM
+(issue #136).
+
+`LoadGLTF` now uploads an external image once and hands the same `*Texture` to
+every document that names the same file. Nothing to opt into and nothing to
+call: the second document simply never opens the file.
+
+```go
+a, _ := r.LoadGLTF(assets, "props/crate.gltf")   // decodes and uploads T_Trim.png
+b, _ := r.LoadGLTF(assets, "props/barrel.gltf")  // same T_Trim.png: no read, no upload
+// a and b's ModelMesh.Texture are the same pointer.
+```
+
+### What counts as the same image
+
+The key is four things, and each of them is part of the identity of the
+*uploaded texture* rather than of the document that asked for it:
+
+| Part | Why it is in the key |
+|---|---|
+| the `fs.FS` you passed to `LoadGLTF` | two filesystems can both hold `props/sheet.png` and they are not the same file |
+| `path.Join(path.Dir(name), uri)` | the URI is relative to the document, so `one/a.gltf` and `two/b.gltf` both naming `sheet.png` mean two different files |
+| the sampler wrap mode | glTF carries `wrapS`/`wrapT` per texture and they are baked into the `VkSampler` at upload |
+| sRGB versus data | an image bound as a normal map is uploaded `_UNORM` and as albedo `_SRGB` |
+
+The last two are the ones worth understanding, because getting them wrong is
+invisible. Sharing across the sRGB flag would bend every normal through a gamma
+curve — the surface still lights, just wrongly, and nothing in the frame says
+so. Sharing across the wrap mode would tile a texture that was authored to
+clamp.
+
+**Embedded images are never shared.** A `.glb`'s buffer-view image and a
+`data:` URI live inside the one document, so two documents carrying identical
+pixels are still two different images by construction, and comparing the bytes
+to find out would cost what the cache saves. Two loads of the same `.glb`
+therefore get two textures — that is correct, not a miss.
+
+### The `fs.FS` has to be usable as a map key
+
+An interface value is only comparable when its dynamic type is, and a map write
+with a non-comparable key **panics** rather than returning an error.
+`os.DirFS` (a string), `embed.FS` (a struct of one pointer) and `fs.Sub`'s
+result are all fine, which covers every filesystem the engine's own examples
+use. `fstest.MapFS` is a map and is not.
+
+Passing one that is not does not fail the load. The document is decoded and
+uploaded per-document exactly as it was before this cache existed, one line is
+logged naming the type, and `CachedTextures` stays at zero. The honest answer
+to "I cannot tell whether these two filesystems are the same" is "assume they
+are not", which is the old behaviour — so a game with a custom filesystem
+keeps working and simply does not get the saving. Wrap it in a pointer type to
+get the saving back.
+
+`reflect.TypeOf(fsys).Comparable()` on its own is **not** the check, and that
+is the part that would have shipped a crash. A struct with an `fs.FS` field is
+a comparable *type*, and comparing two of them panics anyway once that field
+holds a map. So the loader performs the map write on a throwaway map under
+`recover` as well. Both halves have a test: removing the probe turns the
+wrapped case from a pass into `panic: hash of unhashable type: fstest.MapFS`.
+
+### Measured
+
+`TestSharedSheetLoadCost` in `renderer/gltftexturecache_test.go` generates one
+2048x2048 PNG in a temp directory and loads four one-image documents naming it,
+with and without the cache, against the fake driver:
+
+| | decodes | `CreateImage` | `TotalAlloc` |
+|---|---|---|---|
+| uncached | 4 | 4 | 193 MiB |
+| shared | 1 | 1 | 48 MiB |
+
+About 48 MiB per uncached document — a 16 MiB decode, the 16 MiB NRGBA copy
+`decodeImage` converts it into, and a 16 MiB staging buffer — against a flat
+48 MiB however many documents name the sheet. It is a gate as well as a
+number: one decode and one image whatever N is.
+
+Sharing the GPU texture alone would not have been the fix. Removing the decode
+skip and leaving only the upload shared reports `193 MiB -> 145 MiB`: three
+quarters of the cost is the read and the conversion, which is why the cache is
+consulted *before* `decodeGLTFImages` rather than after it.
+
 ## Releasing one
 
 ```go
 r.DestroyModel(model)          // or r.DestroySkinnedModel(skinned)
 ```
 
-Every GPU resource `LoadGLTF` created for the model, released exactly once,
-after the frames currently in flight have finished with it. Afterwards every
+Every GPU resource `LoadGLTF` created for the model — or, for a shared
+external image, this model's *share* of it — released exactly once, after the
+frames currently in flight have finished with it. Afterwards every
 `ModelMesh`'s `Mesh`, `Texture` and `Material` is `nil`, so a draw that still
 points at the model fails on a nil pointer in Go rather than inside the driver.
 `Nodes`, `Lights`, `Verts` and `Idx` are untouched — they are CPU data the
@@ -696,6 +785,14 @@ primitives: a level with one atlas and twenty primitives has twenty
 image the document carries that no material references is uploaded all the
 same, appears on no `ModelMesh`, and a walk leaks it. `DestroyModel` releases
 what the upload recorded creating, not what the slice happens to name.
+
+A shared sheet is reference counted, so there is a second half to that rule
+and it sits between models: `DestroyModel` gives back one share, and the
+texture is destroyed — through the same deferral as everything else — when
+the last share goes. Release order does not matter, and neither does reload
+order: a model loaded while another still holds the sheet takes its own share,
+so a level swapped for a freshly loaded copy never round-trips a texture both
+copies use.
 
 The double-free half of that is worth knowing precisely, because it is quieter
 than it sounds: `DestroyTexture`, `DestroyMesh` and `DestroyMaterial` each
@@ -791,6 +888,17 @@ reported zero leaks because teardown never ran.
 
 `Deferred` is not a detail: a count taken immediately after `DestroyModel`
 still includes the model, because those resources are genuinely still alive.
+
+`CachedTextures` and `TextureShares` are the shared-image cache: how many
+distinct external images are being shared, and how many holds are outstanding
+across all of them. Every cached texture is also in `Textures`, so the pair
+says how much of that list is shared rather than adding to it. They are there
+because neither of the cache's two failure modes shows up in `Textures` alone.
+Shares that never come back — a model released without its images being
+released — read as `TextureShares` climbing across reloads while
+`CachedTextures` does not. Sharing that is not happening at all — an
+uncomparable filesystem, or documents that disagree about wrap or sRGB — reads
+as `CachedTextures` far below the number of distinct sheets the level has.
 
 `LODSets` and `ImpostorAtlases` count the resources described in
 [LOD instancing](lod-instancing.md), including deferred releases. An atlas also
@@ -1178,6 +1286,16 @@ against glTF documents built in memory rather than against `08-grass` or
 another bundled asset — this needs no device either, since it is all
 arithmetic over `*gltf.Document` and `Model.Nodes`. See
 `renderer/gltfnodes_test.go` and `renderer/gltflights_test.go`.
+
+`examples/08-grass/assets/flora` is the committed fixture for the shared-image
+cache, because it already has the bug's shape: four `.gltf` documents in one
+directory, every one of them naming `Grass.png`. Four decodes and four textures
+before, one of each now. `renderer/gltftexturecache_test.go` drives that whole
+path — `createTexture` included — against the fake driver, and eleven
+deliberate breaks are recorded against it, including the one that looks
+harmless: keying on the document's own sub-filesystem rather than the one the
+caller named, which shares nothing at all because `fs.Sub` returns a fresh
+value on every call.
 
 `renderer/gltfread_test.go` pins the decode itself: a SHA-256 of every
 primitive's upload bytes (`Verts` then `Idx`) for both committed level

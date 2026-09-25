@@ -276,6 +276,22 @@ type Renderer struct {
 	fallbackTexture *Texture
 	textures        []*Texture
 
+	// gltfTextureCache shares one GPU texture between every glTF document
+	// that names the same external image file, and gltfTextureShares is the
+	// same entries keyed by texture so DestroyModel's release can find them
+	// (issue #136). An asset pack's props reference a handful of trim sheets
+	// from dozens of .gltf files; without this each 2048-square sheet is
+	// decoded, converted and uploaded once per document.
+	//
+	// Renderer thread only, like LoadGLTF itself -- plain maps with no lock,
+	// and nothing that touches them is reached off the frame thread.
+	//
+	// Both are nil until the first shareable image, and both are dropped in
+	// Destroy: the sweep over r.textures frees the textures themselves, and a
+	// cache outliving them would hand a destroyed one to a load after it.
+	gltfTextureCache  map[gltfTextureKey]*cachedTexture
+	gltfTextureShares map[*Texture]*cachedTexture
+
 	// Material maps: set 0 = albedo/normal/metallic-roughness/occlusion
 	// samplers plus a per-material uniform buffer. fallbackNormal is the flat
 	// tangent-space normal bound to slots a material leaves unsupplied.
@@ -2275,6 +2291,11 @@ func (r *Renderer) Destroy() {
 	textures, meshes, joints := r.textures, r.meshes, r.jointBuffers
 	materials := r.materials
 	r.textures, r.meshes, r.jointBuffers, r.materials = nil, nil, nil, nil
+	// The shared-image cache goes with them. The sweep below frees every
+	// texture it names regardless of how many shares were outstanding, so
+	// leaving the maps up would let a LoadGLTF after Destroy hand out a
+	// destroyed texture rather than uploading a new one.
+	r.gltfTextureCache, r.gltfTextureShares = nil, nil
 	// Materials before textures: a material holds views and samplers the
 	// textures own, and its descriptor set has to stop referencing them first.
 	for _, m := range materials {

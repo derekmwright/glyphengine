@@ -76,6 +76,23 @@ type ResourceCounts struct {
 	MeshArenas int
 	MeshRanges int
 
+	// CachedTextures is how many distinct external glTF images the renderer is
+	// sharing between documents, and TextureShares how many holds are
+	// outstanding across all of them (issue #136). Every cached texture is
+	// also counted in Textures; these say how much of that list is shared and
+	// how much sharing is going on.
+	//
+	// The pair is what makes the cache's two failure modes readable as
+	// numbers. Shares that never come back are a model released without its
+	// images being released -- TextureShares climbs across reloads while
+	// CachedTextures does not. Sharing that is not happening at all -- a
+	// filesystem that cannot be a map key, or documents whose images differ in
+	// wrap mode or sRGB encoding -- reads as CachedTextures far below the
+	// number of distinct sheets the level actually has. Neither shows up in
+	// Textures alone, which is why they are not derived from it.
+	CachedTextures int
+	TextureShares  int
+
 	// DescriptorSets is how many sets those resources hold from the
 	// renderer's one descriptor pool: one per Texture, one per Material, one
 	// per TerrainMaterial, maxFramesInFlight per JointBuffer, plus one for the
@@ -133,11 +150,17 @@ func (r *Renderer) ResourceCounts() ResourceCounts {
 	for _, a := range r.meshArenas {
 		ranges += len(a.live)
 	}
+	shares := 0
+	for _, c := range r.gltfTextureCache {
+		shares += c.shares
+	}
 	return ResourceCounts{
 		Meshes:          len(r.meshes),
 		MeshArenas:      len(r.meshArenas),
 		MeshRanges:      ranges,
 		Textures:        len(r.textures),
+		CachedTextures:  len(r.gltfTextureCache),
+		TextureShares:   shares,
 		Materials:       len(r.materials),
 		DescriptorSets:  r.liveDescriptorSets,
 		InstanceSets:    len(r.instanceSets),
@@ -148,19 +171,27 @@ func (r *Renderer) ResourceCounts() ResourceCounts {
 	}
 }
 
-// DestroyModel releases every GPU resource a LoadGLTF call created for m,
+// DestroyModel releases every GPU resource a LoadGLTF call created for m --
+// or, for an external image shared with another document, m's share of it --
 // exactly once each, after the frames currently in flight have finished with
 // them.
 //
-// Three things it has to get right, each of which is a real failure it would
+// Four things it has to get right, each of which is a real failure it would
 // otherwise have:
 //
-//   - **Sharing.** A Model's ModelMesh entries point at SHARED textures and
-//     cached materials, so freeing what each entry names frees the shared ones
-//     once per entry. The upload records what it created instead (see
-//     modelResources), which also catches an image the document carries that
-//     no material references -- uploaded, on no ModelMesh, and invisible to
-//     any walk of the slice.
+//   - **Sharing within the model.** A Model's ModelMesh entries point at
+//     SHARED textures and cached materials, so freeing what each entry names
+//     frees the shared ones once per entry. The upload records what it created
+//     instead (see modelResources), which also catches an image the document
+//     carries that no material references -- uploaded, on no ModelMesh, and
+//     invisible to any walk of the slice.
+//
+//   - **Sharing between models.** An external image is uploaded once and
+//     handed to every document that names the same file (issue #136), so
+//     destroying what this model's upload recorded would take a texture some
+//     other live model is still drawing with. releaseGLTFTexture gives back
+//     one share and destroys only when the last one goes; a texture that was
+//     never cached is destroyed outright, exactly as before.
 //
 //   - **Frames in flight.** DestroyMesh and DestroyTexture free a static
 //     resource IMMEDIATELY; only a dynamic mesh goes through DeferDestroy.
@@ -213,7 +244,7 @@ func (r *Renderer) DestroyModel(m *Model) {
 			r.DestroyMaterial(mat)
 		}
 		for _, t := range res.textures {
-			r.DestroyTexture(t)
+			r.releaseGLTFTexture(t)
 		}
 		for _, mesh := range res.meshes {
 			r.DestroyMesh(mesh)
