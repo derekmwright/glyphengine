@@ -11,6 +11,12 @@ since: v0.5.0
 api:
   - renderer.PanelFill
   - renderer.NineSlice
+  - renderer.NineSlice.GenerateQuads
+  - renderer.NineSlice.AppendQuads
+  - renderer.Panel.Rebuild
+  - renderer.Panel.UIRenderObjects
+  - ui.Button.Build
+  - ui.PanelWidget.Build
   - glyphengine.Engine.SetUIOverlays
   - glyphengine.Engine.SetMSDFOverlays
   - glyphengine.Engine.SetOverlays
@@ -33,7 +39,7 @@ api:
   - shaders.UIResolveFragSpv
 example: examples/13-ui
 run: task hud
-verified: 2026-09-23
+verified: 2026-09-25
 ---
 
 # Where screen-space overlays are drawn
@@ -272,6 +278,82 @@ negative opacity. `packUIFill` is the one place that encodes it, and
 `TestPanelFillUnsetSignalsDerive` fails if the sentinel goes missing — the
 symptom otherwise is a panel whose background vanished, which points at the
 wrong file.
+
+## Rebuilding a panel every frame
+
+`ui.Button.Build` and `ui.PanelWidget.Build` call `Panel.Rebuild` once per
+frame, and a HUD's panels are the same nine quads frame after frame. Two things
+keep that from costing anything.
+
+**The buffers are reused.** `NineSlice.GenerateQuads` grows a fresh
+`[]Vertex`/`[]uint16` pair per call; `NineSlice.AppendQuads` takes the pair from
+the caller and returns it grown, so a panel resets its own with `[:0]` and
+regenerates into the same memory. Indices are positions in the whole
+destination rather than in the nine quads, so several panels can be appended
+into one buffer and drawn as one mesh:
+
+```go
+verts, idx = ns.AppendQuads(verts[:0], idx[:0], x, y, w, h, scale, color)
+```
+
+`GenerateQuads` is now that call with a nil pair and is unchanged for callers
+who want a fresh slice.
+
+**An unchanged layer is not rebuilt at all.** `Panel.Rebuild` records what each
+layer's mesh was built from and skips both the regenerate and the
+`UpdateMeshData` upload while that record still matches. The record is every
+value that reaches a vertex, and nothing else:
+
+| Input | From |
+| --- | --- |
+| `X`, `Y`, `Width`, `Height` | the panel; `Button.Build` writes them from the resolved anchor |
+| `Scale` | the panel; `Button.Build` writes `borderScale(scale)` |
+| `Color` | the layer; `Button.Build` writes the disabled/pressed/hovered tint |
+| `Inset`, `TexSize`, `TexH` | the layer's `NineSlice` |
+| the `NineSlice` pointer itself | the layer, so swapping artwork of the same metrics still rebuilds |
+
+`Texture`, `Fill`, `Opacity`, `Glow` and `TextureMode` are deliberately not in
+it: none reaches a vertex, and `UIRenderObjects` reads all five live every
+frame. A game that changes only those sees the change immediately and pays no
+upload for it.
+
+Skipping the upload is safe because a dynamic mesh that is not updated keeps
+pointing at the buffer it was last flushed into, and nothing writes that buffer
+again until the next `UpdateMeshData` (`flushDynamicMeshes` in
+`renderer/mesh.go`).
+
+That is also what made the skip's arrival worth a change underneath it. A panel
+parked on one buffer means every frame in flight is reading that buffer, so the
+next update must not be copied into it -- see
+[the slot an update is written into](models.md#the-slot-an-update-is-written-into).
+A panel that rebuilt every frame hit that case rarely; one that rebuilds on
+hover hits it about half the time.
+
+**If you add a field that a vertex reads, add it to that record.** A missed
+input is a panel that goes on drawing where it used to be, with nothing in a
+log and nothing in a validation report to say so.
+`TestPanelRebuildUploadsWhenAnInputChanges` walks the list one input at a time.
+
+The slices `UIRenderObjects` and `Button.Build` return are the panel's and the
+button's own, overwritten by their next call. Copying out of them is what
+`append(dst, objs...)` at every call site already does; keeping one past the
+frame is not supported.
+
+### What it saves
+
+`BenchmarkPanelSteadyState` in `renderer`, one layer that is not changing, on a
+Ryzen 9 5900X at `-benchtime 200000x -count 5`:
+
+| | bytes/frame | allocs/frame | ns/frame |
+| --- | --- | --- | --- |
+| `GenerateQuads` and a fresh object slice | 3120 | 7 | 1060-1180 |
+| scratch buffers and the skip rule | 0 | 0 | 25-149 |
+
+`BenchmarkButtonBuildSteadyState` in `ui` measures the same button end to end:
+5984 B and 9 allocs per frame before, 0 and 0 after (45-68 ns). A panel that really is
+moving every frame still regenerates and re-uploads, and costs nothing either
+-- the scratch buffers are what that case is for, and
+`TestPanelMovingEveryFrameAllocatesNothing` is its gate.
 
 ## What it costs
 

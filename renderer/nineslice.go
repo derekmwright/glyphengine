@@ -46,7 +46,22 @@ func NewNineSlice(tex *Texture, texSize, inset int) *NineSlice {
 // GenerateQuads builds 9 textured quads for a panel at (x,y) with size (w,h).
 // scale is screen pixels per texture pixel (e.g. 2.0 means 16px inset = 32 screen px).
 // color tints the vertex color (white texture * color = colored panel).
+//
+// It allocates a fresh pair of slices on every call. A caller that rebuilds
+// every frame should keep its own buffers and use AppendQuads.
 func (ns *NineSlice) GenerateQuads(x, y, w, h, scale float32, color [3]float32) ([]Vertex, []uint16) {
+	return ns.AppendQuads(nil, nil, x, y, w, h, scale, color)
+}
+
+// AppendQuads appends the nine quads GenerateQuads describes to caller-owned
+// slices and returns them grown, so a panel rebuilt every frame can reuse one
+// pair of buffers reset with [:0] and allocate nothing in the steady state.
+//
+// Indices are positions within the whole of verts rather than within the nine
+// quads, so several panels can be appended into one buffer and drawn as one
+// mesh. Appending into an empty pair therefore produces exactly what
+// GenerateQuads returns.
+func (ns *NineSlice) AppendQuads(verts []Vertex, idx []uint16, x, y, w, h, scale float32, color [3]float32) ([]Vertex, []uint16) {
 	// Corner size in screen pixels
 	cornerX := float32(ns.Inset) * scale
 	texH := ns.TexH
@@ -102,9 +117,6 @@ func (ns *NineSlice) GenerateQuads(x, y, w, h, scale float32, color [3]float32) 
 		v[3] += dv
 	}
 
-	var vertices []Vertex
-	var indices []uint16
-
 	for row := 0; row < 3; row++ {
 		for col := 0; col < 3; col++ {
 			x0, x1 := sx[col], sx[col+1]
@@ -117,16 +129,16 @@ func (ns *NineSlice) GenerateQuads(x, y, w, h, scale float32, color [3]float32) 
 				continue
 			}
 
-			base := uint16(len(vertices))
-			vertices = append(vertices,
+			base := uint16(len(verts))
+			verts = append(verts,
 				Vertex{Pos: [3]float32{x0, y0, 0}, Color: color, UV: [2]float32{u0, v0}},
 				Vertex{Pos: [3]float32{x1, y0, 0}, Color: color, UV: [2]float32{u1, v0}},
 				Vertex{Pos: [3]float32{x1, y1, 0}, Color: color, UV: [2]float32{u1, v1}},
 				Vertex{Pos: [3]float32{x0, y1, 0}, Color: color, UV: [2]float32{u0, v1}},
 			)
-			indices = append(indices, base, base+1, base+2, base+2, base+3, base)
+			idx = append(idx, base, base+1, base+2, base+2, base+3, base)
 		}
 	}
 
-	return vertices, indices
+	return verts, idx
 }
