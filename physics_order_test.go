@@ -212,6 +212,23 @@ func TestUnstickTiesBreakOnLowestEntityID(t *testing.T) {
 // 1 arriving last instead of first). It did not touch the Unstick tests
 // above — Unstick's own fix scans every overlap itself and no longer reads
 // results in whatever order OverlapAABB hands them back.
+// The ids are strictly increasing, not merely non-decreasing: five colliders
+// are five results. They are Static and both grids are rebuilt on every run,
+// so each of them is in the moving grid and in the static grid — the shape
+// that used to return every one of them twice (#141).
+//
+// Break experiment (2026-09-25): removing the staticWalkProduces skip from
+// eachBroadPhaseCandidate, so both grids walk into the same callback again,
+// fails on the first run:
+//
+//	--- FAIL: TestOverlapAABBOrderIsAscendingEntityID
+//	    physics_order_test.go:250: run 0: got 10 overlaps, want 5:
+//	    [{267 ...} {267 ...} {268 ...} {268 ...} {269 ...} {269 ...}
+//	     {270 ...} {270 ...} {271 ...} {271 ...}]
+//
+// The sort.SliceIsSorted check above stayed green through that, because
+// adjacent duplicates are still sorted — which is why the count and the
+// repeat check are separate assertions.
 func TestOverlapAABBOrderIsAscendingEntityID(t *testing.T) {
 	base := mgl32.Vec3{200, 0, 200}
 	s := NewScene()
@@ -222,13 +239,205 @@ func TestOverlapAABBOrderIsAscendingEntityID(t *testing.T) {
 
 	for i := 0; i < 500; i++ {
 		s.UpdateSpatialGrid()
+		// Rebuilt per run for the same reason the moving grid is: both cell
+		// lists are filled by a Go map walk, and the static grid is the one
+		// that hands these entities over now, so leaving it built once would
+		// pin the candidate order to a single shuffle and stop testing the
+		// sort at all.
+		s.RebuildStatics()
 		ov := s.OverlapAABB(query, 0)
 		if len(ov) != 5 {
-			t.Fatalf("run %d: got %d overlaps, want 5", i, len(ov))
+			t.Fatalf("run %d: got %d overlaps, want 5: %v", i, len(ov), ov)
 		}
 		if !sort.SliceIsSorted(ov, func(a, b int) bool { return ov[a].Entity < ov[b].Entity }) {
 			t.Fatalf("run %d: OverlapAABB result not sorted by entity id: %v", i, ov)
 		}
+		for j := 1; j < len(ov); j++ {
+			if ov[j].Entity == ov[j-1].Entity {
+				t.Fatalf("run %d: entity %d reported twice: %v", i, ov[j].Entity, ov)
+			}
+		}
+	}
+}
+
+// gridHolds reports whether a walk of g reaches entity at (x, z). The
+// once-per-entity tests below are worth nothing unless the collider really is
+// in both grids — #141 is a duplicate between two grids, and a fixture with
+// one of them empty passes every assertion while proving nothing — so they
+// check that first.
+func gridHolds(g *SpatialGrid, entity ecs.Entity, x, z float32) bool {
+	if g == nil {
+		return false
+	}
+	found := false
+	g.eachInRadius(x, z, 0.5, func(e ecs.Entity) {
+		if e == entity {
+			found = true
+		}
+	})
+	return found
+}
+
+// TestOverlapAABBReportsAStaticColliderOnce is #141 itself. SpatialGrid holds
+// every entity with a Transform and StaticGrid holds the Static ones, so a
+// Static collider sits in both, and the broad phase used to offer it to the
+// narrow phase once per grid: two adjacent, identical results for one
+// collider. The ordering contract hid it, because adjacent duplicates are
+// still non-decreasing.
+//
+// Break experiment (2026-09-25): removing the staticWalkProduces skip from
+// eachBroadPhaseCandidate — both grids walked into the same callback, which
+// is the code this fixes — fails here on the static collider and leaves the
+// moving one alone:
+//
+//	--- FAIL: TestOverlapAABBReportsAStaticColliderOnce
+//	    physics_order_test.go:323: static collider 272 is in OverlapAABB's
+//	    results 2 times, want 1: [{272 {[499.5 -0.5 499.5] [500.5 0.5 500.5]}}
+//	    {272 {[499.5 -0.5 499.5] [500.5 0.5 500.5]}} {273 ...}]
+//	    physics_order_test.go:329: OverlapAABB returned 3 results for 2
+//	    colliders
+func TestOverlapAABBReportsAStaticColliderOnce(t *testing.T) {
+	base := mgl32.Vec3{500, 0, 500}
+	s := NewScene()
+	wall := spawnStaticCollider(s, base, mgl32.Vec3{0.5, 0.5, 0.5})
+	mover := s.Spawn()
+	s.C.Transform.Set(mover, &Transform{Position: base.Add(mgl32.Vec3{0.6, 0, 0}), Scale: mgl32.Vec3{1, 1, 1}})
+	s.C.Collider.Set(mover, &Collider{HalfExtents: mgl32.Vec3{0.5, 0.5, 0.5}})
+
+	s.UpdateSpatialGrid()
+	s.RebuildStatics()
+
+	if !gridHolds(s.SpatialGrid, wall, base.X(), base.Z()) || !gridHolds(s.StaticGrid, wall, base.X(), base.Z()) {
+		t.Fatalf("fixture: the static collider is not in both grids (moving %v, static %v), so a single result would prove nothing",
+			gridHolds(s.SpatialGrid, wall, base.X(), base.Z()), gridHolds(s.StaticGrid, wall, base.X(), base.Z()))
+	}
+
+	query := AABB{Min: base.Sub(mgl32.Vec3{2, 2, 2}), Max: base.Add(mgl32.Vec3{2, 2, 2})}
+	ov := s.OverlapAABB(query, 0)
+
+	counts := map[ecs.Entity]int{}
+	for _, r := range ov {
+		counts[r.Entity]++
+	}
+	if counts[wall] != 1 {
+		t.Errorf("static collider %d is in OverlapAABB's results %d times, want 1: %v", wall, counts[wall], ov)
+	}
+	if counts[mover] != 1 {
+		t.Errorf("moving collider %d is in OverlapAABB's results %d times, want 1: %v", mover, counts[mover], ov)
+	}
+	if len(ov) != 2 {
+		t.Errorf("OverlapAABB returned %d results for 2 colliders", len(ov))
+	}
+}
+
+// TestOverlapAABBKeepsAStaticSpawnedSinceRebuildStatics is the other half of
+// the dedupe: the direction it drops duplicates in. The moving grid's walk
+// skips an entity only when the static grid it is about to walk has that
+// entity recorded, rather than whenever the entity carries the Static tag,
+// and this is the difference between the two. The wall below is tagged Static
+// and is in the moving grid, but RebuildStatics has not seen it, so the
+// static walk cannot produce it and the moving walk must.
+//
+// Break experiment (2026-09-25): replacing the staticWalkProduces call in
+// eachBroadPhaseCandidate with the tag test it could plausibly have been —
+// `if s.C.Static.Has(entity) { return }` — leaves every other test in the
+// package green and fails here, with the collider gone from the world:
+//
+//	--- FAIL: TestOverlapAABBKeepsAStaticSpawnedSinceRebuildStatics
+//	    physics_order_test.go:365: OverlapAABB returned 0 results ([]), want
+//	    the Static collider 274 that RebuildStatics has not indexed yet
+func TestOverlapAABBKeepsAStaticSpawnedSinceRebuildStatics(t *testing.T) {
+	base := mgl32.Vec3{700, 0, 700}
+	s := NewScene()
+	s.RebuildStatics() // an empty static grid, the way a level with no geometry loads
+
+	wall := spawnStaticCollider(s, base, mgl32.Vec3{0.5, 0.5, 0.5})
+	s.UpdateSpatialGrid() // ... and the per-tick rebuild that does see it
+
+	if !gridHolds(s.SpatialGrid, wall, base.X(), base.Z()) || gridHolds(s.StaticGrid, wall, base.X(), base.Z()) {
+		t.Fatalf("fixture: want the wall in the moving grid only (moving %v, static %v)",
+			gridHolds(s.SpatialGrid, wall, base.X(), base.Z()), gridHolds(s.StaticGrid, wall, base.X(), base.Z()))
+	}
+
+	query := AABB{Min: base.Sub(mgl32.Vec3{2, 2, 2}), Max: base.Add(mgl32.Vec3{2, 2, 2})}
+	ov := s.OverlapAABB(query, 0)
+	if len(ov) != 1 || ov[0].Entity != wall {
+		t.Fatalf("OverlapAABB returned %d results (%v), want the Static collider %d that RebuildStatics has not indexed yet",
+			len(ov), ov, wall)
+	}
+}
+
+// unitHull returns a box hull of the given half-extent, centred on the origin
+// in local space.
+func unitHull(half float32) *ConvexHullCollider {
+	var corners [][3]float32
+	for _, x := range []float32{-half, half} {
+		for _, y := range []float32{-half, half} {
+			for _, z := range []float32{-half, half} {
+				corners = append(corners, [3]float32{x, y, z})
+			}
+		}
+	}
+	return ComputeConvexHull(corners)
+}
+
+// TestRaycastRunsTheHullNarrowPhaseOncePerCandidate is the raycast half of
+// #141. The duplicate never changed Raycast's answer — the two hits are the
+// same entity at the same distance, and the tie-break keeps the lower id,
+// which is itself — but it bought that answer twice, including a second run
+// of the convex-hull narrow phase, the most expensive thing a candidate can
+// cost.
+//
+// The hull test runs inside the callback raycastFrom hands to the broad-phase
+// walk, once for each candidate the walk offers, so counting the offers for
+// this ray counts the hull tests it pays for. The raycast below then has to
+// still report the hull hit: a dedupe that answered "once" by losing the
+// collider would pass the count and fail here. hit.T distinguishes them —
+// 4.75 is the hull's top face, 4.5 would be the broad-phase box's, which is
+// deliberately looser than the hull it encloses.
+//
+// Break experiment (2026-09-25): removing the staticWalkProduces skip from
+// eachBroadPhaseCandidate fails the count and nothing else, which is the
+// point — the duplicate is wasted work, not a wrong answer:
+//
+//	--- FAIL: TestRaycastRunsTheHullNarrowPhaseOncePerCandidate
+//	    physics_order_test.go:395: the broad phase offered the static hull
+//	    collider 2 times for one ray, so its narrow phase ran 2 times, want 1
+//
+// The hit assertions below stayed green under that break, as expected.
+func TestRaycastRunsTheHullNarrowPhaseOncePerCandidate(t *testing.T) {
+	base := mgl32.Vec3{600, 0, 600}
+	s := NewScene()
+	rock := spawnStaticCollider(s, base, mgl32.Vec3{0.5, 0.5, 0.5})
+	s.C.ConvexHullCollider.Set(rock, unitHull(0.25))
+
+	s.UpdateSpatialGrid()
+	s.RebuildStatics()
+
+	if !gridHolds(s.SpatialGrid, rock, base.X(), base.Z()) || !gridHolds(s.StaticGrid, rock, base.X(), base.Z()) {
+		t.Fatalf("fixture: the hull collider is not in both grids (moving %v, static %v), so one visit would prove nothing",
+			gridHolds(s.SpatialGrid, rock, base.X(), base.Z()), gridHolds(s.StaticGrid, rock, base.X(), base.Z()))
+	}
+
+	origin := mgl32.Vec3{base.X(), 5, base.Z()}
+	const maxDist = 20
+
+	visits := 0
+	s.eachBroadPhaseCandidate(origin.X(), origin.Z(), maxDist, func(e ecs.Entity) {
+		if e == rock {
+			visits++
+		}
+	})
+	if visits != 1 {
+		t.Errorf("the broad phase offered the static hull collider %d times for one ray, so its narrow phase ran %d times, want 1", visits, visits)
+	}
+
+	hit, ok := s.Raycast(origin, mgl32.Vec3{0, -1, 0}, maxDist, 0)
+	if !ok || hit.Entity != rock {
+		t.Fatalf("ray hit (%v, %v), want the hull collider %d — the dedupe dropped it", hit, ok, rock)
+	}
+	if abs32(hit.T-4.75) > 1e-3 {
+		t.Errorf("hit distance %v, want 4.75 (the hull's top face; 4.5 would be the broad-phase box, i.e. no narrow phase)", hit.T)
 	}
 }
 

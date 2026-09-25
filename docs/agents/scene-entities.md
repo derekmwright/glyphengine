@@ -30,7 +30,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-09-19
+verified: 2026-09-25
 ---
 
 # Build a scene from entities and components
@@ -179,8 +179,11 @@ interpolate between ticks. Games never set it, but they do call
 ## The `Static` tag is load-bearing
 
 `Static` marks geometry that never moves. It puts the entity in
-`Scene.StaticGrid`, rebuilt only when you call `RebuildStatics`, instead of the
-per-tick `SpatialGrid`.
+`Scene.StaticGrid`, rebuilt only when you call `RebuildStatics`. That is as
+well as the per-tick `SpatialGrid`, which indexes everything with a
+`Transform` — a static collider is in both grids, and the broad phase behind
+`Raycast` and `OverlapAABB` offers it to one query once (see
+`physics-queries`).
 
 It is not only an optimization. The parallel movement phase runs convex-hull
 narrow-phase tests against *live* transforms while AABB queries read a frozen

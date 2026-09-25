@@ -138,6 +138,13 @@ at the overlap counts a single query actually sees (a handful of nearby
 colliders) and adds no allocations beyond the result slice's own growth;
 `BenchmarkOverlapAABB` in `physics_order_test.go` has the measured numbers.
 
+**Strictly ascending: an entity is in the results at most once.** A `Static`
+collider is in both spatial grids, and the built-in broad phase used to walk
+both, so it came back twice — adjacent, so the ascending order held and the
+duplicate was easy to miss. It no longer does (#141); the grid walks hand each
+entity to the narrow phase once. `OverlapAABB` counts are counts again, and a
+`Raycast` along a static hull pays for one hull test instead of two.
+
 ## Swapping the query backend
 
 `Scene.Queries` replaces Raycast and OverlapAABB together, for a game backing
@@ -312,6 +319,16 @@ Two grids, with different rebuild costs:
 | `SpatialGrid` | everything with a `Transform` | `UpdateSpatialGrid()`, once per tick |
 | `StaticGrid` | entities tagged `Static` | `RebuildStatics()`, only when world geometry changes |
 
+The two overlap: a `Static` collider is in both. Both queries walk both grids
+and offer each entity to the narrow phase **once**, dropping the copy on the
+moving grid's side — but only where `RebuildStatics` has actually recorded the
+entity in the cell the query reads, so a `Static` entity spawned since the last
+`RebuildStatics` is still found through `SpatialGrid` rather than lost. On the
+all-static fixture `BenchmarkRaycastGrid` and `BenchmarkOverlapGridMiss` use,
+dropping that duplicate took a query from ~7.3 to ~4.5 µs and ~7.0 to ~4.3 µs
+respectively, with no change to the allocation count; the measurement is
+recorded on `eachBroadPhaseCandidate` in `physics.go`.
+
 With no grid, queries fall back to a linear scan of every collider. That is
 correct but O(n) per query, and it is the usual reason a scene that ran fine
 with 50 entities crawls at 5,000.
@@ -404,6 +421,12 @@ walk produced.
   walkable-slope test (`normal.Y > 0.5`). A plain AABB has axis-aligned faces
   and is treated as walkable when hit from above.
 - **Everything is slow.** Missing `UpdateSpatialGrid()` in the tick.
+- **A `Static` collider comes back from `OverlapAABB` twice.** Something other
+  than `RebuildStatics` put it in `StaticGrid` — a direct `StaticGrid.Insert`,
+  or a `StaticGrid` assigned after the rebuild. Only entities `RebuildStatics`
+  recorded are dropped from the moving grid's walk, so everything else falls
+  back to the old duplicate rather than to a missing collider. Fill the static
+  grid through `RebuildStatics()`.
 - **`Unstick` moved an entity somewhere unexpected with several overlapping
   colliders.** Check which collider actually needed the smallest push — it
   resolves the shallowest overlap first, not necessarily the one that looks

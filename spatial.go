@@ -92,10 +92,24 @@ func (g *SpatialGrid) eachInRadius(x, z, radius float32, visit func(ecs.Entity))
 }
 
 func (g *SpatialGrid) eachCell(x, z, radius float32, visit func([]ecs.Entity)) {
-	minCX := int((x - radius) / g.cellSize)
-	maxCX := int((x + radius) / g.cellSize)
-	minCZ := int((z - radius) / g.cellSize)
-	maxCZ := int((z + radius) / g.cellSize)
+	minCX, maxCX, minCZ, maxCZ := g.cellRange(x, z, radius)
+	for cx := minCX; cx <= maxCX; cx++ {
+		for cz := minCZ; cz <= maxCZ; cz++ {
+			visit(g.cells[cellKey{cx, cz}])
+		}
+	}
+}
+
+// cellRange returns the inclusive cell bounds a query at (x, z) with the given
+// radius covers. It is a function rather than repeated arithmetic because
+// walkReaches has to answer for exactly the cells eachCell reads: a rounding
+// difference between the two would let the broad-phase dedupe drop an entity
+// the other grid's walk never reaches (see Scene.staticWalkProduces).
+func (g *SpatialGrid) cellRange(x, z, radius float32) (minCX, maxCX, minCZ, maxCZ int) {
+	minCX = int((x - radius) / g.cellSize)
+	maxCX = int((x + radius) / g.cellSize)
+	minCZ = int((z - radius) / g.cellSize)
+	maxCZ = int((z + radius) / g.cellSize)
 
 	if x-radius < 0 {
 		minCX--
@@ -103,12 +117,16 @@ func (g *SpatialGrid) eachCell(x, z, radius float32, visit func([]ecs.Entity)) {
 	if z-radius < 0 {
 		minCZ--
 	}
+	return minCX, maxCX, minCZ, maxCZ
+}
 
-	for cx := minCX; cx <= maxCX; cx++ {
-		for cz := minCZ; cz <= maxCZ; cz++ {
-			visit(g.cells[cellKey{cx, cz}])
-		}
-	}
+// walkReaches reports whether eachInRadius over (x, z, radius) reads the given
+// cell. Cells, not distance: what decides whether a walk hands an entity over
+// is the cell the entity sits in, and two grids with different cell sizes
+// cover different ground for the same query.
+func (g *SpatialGrid) walkReaches(key cellKey, x, z, radius float32) bool {
+	minCX, maxCX, minCZ, maxCZ := g.cellRange(x, z, radius)
+	return key[0] >= minCX && key[0] <= maxCX && key[1] >= minCZ && key[1] <= maxCZ
 }
 
 // Clear resets the grid without reallocating the map.
@@ -128,16 +146,7 @@ func (g *SpatialGrid) Insert(entity ecs.Entity, x, z float32) {
 // This is a coarse check (cell-level, not per-entity distance) suitable for
 // cheap proximity heuristics.
 func (g *SpatialGrid) HasAnyInRadius(x, z, radius float32) bool {
-	minCX := int((x - radius) / g.cellSize)
-	maxCX := int((x + radius) / g.cellSize)
-	minCZ := int((z - radius) / g.cellSize)
-	maxCZ := int((z + radius) / g.cellSize)
-	if x-radius < 0 {
-		minCX--
-	}
-	if z-radius < 0 {
-		minCZ--
-	}
+	minCX, maxCX, minCZ, maxCZ := g.cellRange(x, z, radius)
 	for cx := minCX; cx <= maxCX; cx++ {
 		for cz := minCZ; cz <= maxCZ; cz++ {
 			if len(g.cells[cellKey{cx, cz}]) > 0 {

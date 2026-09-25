@@ -168,6 +168,80 @@ func (s *Scene) colliderAABBFrom(snapshot map[ecs.Entity]AABB, entity ecs.Entity
 	return WorldAABB(t, c), true
 }
 
+// eachBroadPhaseCandidate offers every entity the broad phase has for a query
+// centred on (x, z) — each entity exactly once — and falls back to a linear
+// scan of every collider when there is no SpatialGrid. Both built-in queries
+// walk the world through it. It reads the grid cells directly, so it needs
+// neither a candidate copy nor shared query scratch and is safe to call from
+// the parallel movement phase's goroutines.
+//
+// Once is the whole reason this is a function. SpatialGrid holds every entity
+// with a Transform and StaticGrid holds the Static ones, so a Static collider
+// is in both grids, and both walks used to hand it over: OverlapAABB returned
+// it twice, adjacent, and Raycast paid for a second AABB test and a second
+// convex-hull narrow phase to reach the answer its tie-break already had
+// (#141).
+//
+// The duplicate is dropped on the moving grid's side. That is the cheaper
+// direction and the safe one:
+//
+//   - Cheaper, because "will the static walk produce this?" is a map lookup
+//     against what RebuildStatics recorded (staticWalkProduces), paid once per
+//     candidate, and it replaces a whole second candidate test — an AABB
+//     rebuild and an overlap or slab test, plus a hull raycast for a static
+//     that has one. The other direction has no equally exact test to make:
+//     SpatialGrid is filled wholesale by Update, not entity by entity, so
+//     "did the moving walk already produce this?" would have to be a set of
+//     entity ids built per query, which allocates on every query — and for
+//     Raycast, which keeps no result list to check against, it would be a set
+//     and nothing else.
+//   - Safe, because staticWalkProduces answers from what RebuildStatics
+//     actually recorded rather than from the Static tag. A Static entity the
+//     static grid does not have — one spawned since the last RebuildStatics —
+//     is not skipped, so the moving walk still offers it and it stays in the
+//     answer (TestOverlapAABBKeepsAStaticSpawnedSinceRebuildStatics); at worst
+//     something that fills StaticGrid behind RebuildStatics' back produces the
+//     old duplicate again, which is what every query used to pay anyway.
+//     Dropping the static walk's copy instead would have to assume the moving
+//     grid had the entity, and a SpatialGrid not updated since that entity
+//     spawned would turn the assumption into a collider that silently is not
+//     there.
+//
+// Measured on an AMD Ryzen 9 5900X (24 GOMAXPROCS) against the fixture both
+// query benchmarks use — 64 static colliders, in both grids — by deleting the
+// skip and running A/B/A, three runs each:
+//
+//	go test -run '^$' -bench 'RaycastGrid|OverlapGridMiss' -benchmem -count 3 .
+//
+//	                          duplicated     deduped
+//	BenchmarkRaycastGrid       ~7.3 µs/op    ~4.5 µs/op
+//	BenchmarkOverlapGridMiss   ~7.0 µs/op    ~4.3 µs/op
+//
+// Zero allocations per query either way, which is the part that had to hold:
+// the skip is a map lookup and a cell-bounds comparison, not a per-query set
+// (TestGridQueriesDoNotAllocateCandidates). Every collider in that fixture is
+// static, so every candidate it has is a duplicate — the ~38% is the shape of
+// the best case, not of a scene that is mostly moving entities.
+func (s *Scene) eachBroadPhaseCandidate(x, z, radius float32, visit func(ecs.Entity)) {
+	if s.SpatialGrid == nil {
+		ecs.Query2(s.C.Transform, s.C.Collider, func(entity ecs.Entity, _ *Transform, _ *Collider) {
+			visit(entity)
+		})
+		return
+	}
+	if s.StaticGrid == nil {
+		s.SpatialGrid.eachInRadius(x, z, radius, visit)
+		return
+	}
+	s.SpatialGrid.eachInRadius(x, z, radius, func(entity ecs.Entity) {
+		if s.staticWalkProduces(entity, x, z, radius) {
+			return // the static walk below hands this one over.
+		}
+		visit(entity)
+	})
+	s.StaticGrid.eachInRadius(x, z, radius, visit)
+}
+
 // QueryBackend answers the two collision queries every internal engine system
 // runs against the world: a nearest-hit raycast and a box-overlap query.
 // Scene.Queries is nil by default, which keeps this file's spatial-grid
@@ -182,7 +256,8 @@ func (s *Scene) colliderAABBFrom(snapshot map[ecs.Entity]AABB, entity ecs.Entity
 // A replacement must honour the order contracts #57 gave the built-in
 // implementation, because engine code is written against them:
 //
-//   - OverlapAABB's results are ordered by ascending entity id.
+//   - OverlapAABB's results are ordered by ascending entity id, and hold each
+//     entity at most once (#141).
 //   - Raycast breaks an exact-distance tie on the lower entity id; a terrain
 //     hit (Entity == 0, since no real entity ever has id 0) always wins a tie
 //     against any real entity.
@@ -336,6 +411,10 @@ func (f frozenQueries) OverlapAABB(box AABB, exclude ecs.Entity) []OverlapResult
 // explicit sort a caller reading results[0] would get a different entity on
 // every call. Unstick used to do exactly that (#57).
 //
+// Strictly ascending: an entity is in the results at most once, even though a
+// Static collider is in both spatial grids and the broad phase walks both
+// (#141, eachBroadPhaseCandidate).
+//
 // When Scene.Queries is set, this and Raycast delegate to it instead of the
 // spatial-grid implementation below — see QueryBackend for the contract a
 // replacement has to honour.
@@ -385,20 +464,11 @@ func (s *Scene) overlapAABBFrom(snapshot map[ecs.Entity]AABB, box AABB, exclude 
 		results[i] = OverlapResult{Entity: entity, Box: wb}
 	}
 
-	// Use spatial grids for nearby entities + scene objects.
-	// Direct visitation needs neither a candidate copy nor shared query scratch.
+	// Use the spatial grids for nearby entities + scene objects, each candidate
+	// once — see eachBroadPhaseCandidate.
 	center := box.Min.Add(box.Max).Mul(0.5)
 	radius := box.Max.Sub(box.Min).Len()*0.5 + 5 // box half-diagonal + padding
-	if s.SpatialGrid != nil {
-		s.SpatialGrid.eachInRadius(center.X(), center.Z(), radius, testEntity)
-		if s.StaticGrid != nil {
-			s.StaticGrid.eachInRadius(center.X(), center.Z(), radius, testEntity)
-		}
-	} else {
-		ecs.Query2(s.C.Transform, s.C.Collider, func(entity ecs.Entity, _ *Transform, _ *Collider) {
-			testEntity(entity)
-		})
-	}
+	s.eachBroadPhaseCandidate(center.X(), center.Z(), radius, testEntity)
 
 	return results
 }
@@ -568,18 +638,11 @@ func (s *Scene) raycastFrom(snapshot map[ecs.Entity]AABB, origin, dir mgl32.Vec3
 		}
 	}
 
-	// Test entity colliders — use spatial grids for O(nearby) instead of O(all).
-	// Read the frozen cells without allocating candidate lists.
-	if s.SpatialGrid != nil {
-		s.SpatialGrid.eachInRadius(origin.X(), origin.Z(), maxDist, testEntity)
-		if s.StaticGrid != nil {
-			s.StaticGrid.eachInRadius(origin.X(), origin.Z(), maxDist, testEntity)
-		}
-	} else {
-		ecs.Query2(s.C.Transform, s.C.Collider, func(entity ecs.Entity, _ *Transform, _ *Collider) {
-			testEntity(entity)
-		})
-	}
+	// Test entity colliders — use the spatial grids for O(nearby) instead of
+	// O(all), each candidate once so the hull narrow phase above runs once per
+	// candidate rather than twice for a static one (see
+	// eachBroadPhaseCandidate).
+	s.eachBroadPhaseCandidate(origin.X(), origin.Z(), maxDist, testEntity)
 
 	return best, found
 }
