@@ -73,6 +73,11 @@ type WidgetDef struct {
 	// a cooldown sweep, a wipe or a tint. See indicator.go.
 	Indicator *IndicatorDef `yaml:"indicator"`
 
+	// Transition is an optional fade, scale and slide played as Visible flips.
+	// Allowed on every widget type, because every widget type can be hidden.
+	// See transition.go.
+	Transition *TransitionDef `yaml:"transition"`
+
 	Children []WidgetDef `yaml:"children"`
 }
 
@@ -118,6 +123,11 @@ func validateDef(def *WidgetDef) error {
 		default:
 			return fmt.Errorf("widget %s: state is only supported on button and icon, not %s",
 				widgetLabel(def), def.Widget)
+		}
+	}
+	if def.Transition != nil {
+		if err := def.Transition.validate(widgetLabel(def)); err != nil {
+			return err
 		}
 	}
 	for i := range def.Children {

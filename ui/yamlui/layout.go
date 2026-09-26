@@ -75,12 +75,24 @@ func layoutChildren(node *Node, parentRect Rect, scale float32, bindings ...map[
 	}
 }
 
-// isHidden returns true if the node's Visible field resolves to false.
-func isHidden(def *WidgetDef, bindings map[string]string) bool {
+// isHidden returns true if the node's Visible field resolves to false AND it
+// has no out-transition still running.
+//
+// A widget playing its out is invisible by binding but still on screen, so it
+// has to keep its layout box for the frames it takes to leave -- without one
+// its rect is the zero rect and it fades out at the top-left corner, one pixel
+// wide. Siblings therefore close up when the out finishes rather than on the
+// frame `visible` flipped. That is the only way a transition touches layout,
+// and a widget with no transition block is unaffected.
+func isHidden(node *Node, bindings map[string]string) bool {
+	def := node.Def
 	if def.Visible == "" || bindings == nil {
 		return false
 	}
-	return !resolveBool(def.Visible, bindings)
+	if resolveBool(def.Visible, bindings) {
+		return false
+	}
+	return def.Transition == nil || node.trans.gone()
 }
 
 // layoutVerticalInner positions children in a vertical stack within parentRect.
@@ -98,7 +110,7 @@ func layoutVerticalInner(node *Node, parentRect Rect, scale float32, bindings ma
 	var totalFlex float32
 	var nonOverlayCount int
 	for _, child := range node.Children {
-		if child.Def.Overlay != "" || isHidden(child.Def, bindings) {
+		if child.Def.Overlay != "" || isHidden(child, bindings) {
 			continue
 		}
 		nonOverlayCount++
@@ -123,7 +135,7 @@ func layoutVerticalInner(node *Node, parentRect Rect, scale float32, bindings ma
 
 	for _, child := range node.Children {
 		// Skip hidden children entirely — don't consume layout space.
-		if isHidden(child.Def, bindings) {
+		if isHidden(child, bindings) {
 			child.Rect = Rect{}
 			continue
 		}
@@ -182,7 +194,7 @@ func layoutHorizontal(node *Node, parentRect Rect, scale float32, bindings map[s
 	var totalFlex float32
 	var visibleCount int
 	for _, child := range node.Children {
-		if isHidden(child.Def, bindings) {
+		if isHidden(child, bindings) {
 			continue
 		}
 		visibleCount++
@@ -201,7 +213,7 @@ func layoutHorizontal(node *Node, parentRect Rect, scale float32, bindings map[s
 
 	cursorX := innerX
 	for _, child := range node.Children {
-		if isHidden(child.Def, bindings) {
+		if isHidden(child, bindings) {
 			child.Rect = Rect{}
 			continue
 		}

@@ -37,13 +37,16 @@ api:
   - yamlui.ShapeBuilder
   - yamlui.WidgetTree.ShapeFn
   - yamlui.IndicatorDef
+  - yamlui.TransitionDef
+  - yamlui.WidgetTree.SetTime
+  - ease.ByName
   - renderer.ShaderSet.UIResolveFrag
   - renderer.PassUILayer
   - renderer.PassUIGlow
   - shaders.UIResolveFragSpv
 example: examples/13-ui
 run: task hud
-verified: 2026-09-25
+verified: 2026-09-26 # the transition block's draw path
 ---
 
 # Where screen-space overlays are drawn
@@ -105,6 +108,37 @@ after the sprite it covers, and before every label, which is where the widget's
 own draw order puts it. The schema, the geometry and the failure modes are in
 [`ui/yamlui/yamlui.md`](../../ui/yamlui/yamlui.md#indicator); `task indicator`
 is the gate, and `go run ./13-ui -yamlui cooldown` is it in motion.
+
+### A transition moves a widget between those streams
+
+A `transition:` block fades, scales and slides a widget as its `visible` binding
+flips, and the fade is the part that touches this page. A widget's opacity rides
+on `UIRenderObject.Opacity` and on `TextLine.Alpha`, both of which a nine-slice,
+a sprite and a label already have — but a flat `bg_color` panel has neither,
+because it is four `renderer.Vertex` in the shared stream and `Vertex` carries
+no alpha. So **a fading flat quad is handed to `ShapeFn` instead**, exactly as
+an indicator's fan is, and goes back into the vertex stream the moment the
+transition settles.
+
+Two consequences worth knowing before a HUD is measured:
+
+- A widget mid-transition is in the **panel** stream, not the background one, so
+  it composites over its siblings' flat quads rather than under them. For a
+  dialog arriving over a HUD that is where it belongs; for anything else, it is
+  a change of order that lasts as long as the fade.
+- At rest the widget is back on the original path, render object for render
+  object. That is what keeps a settled HUD's capture unchanged by adding the
+  block, and `task transition` checks it pixel for pixel against the same YAML
+  with the block deleted.
+
+Without `ShapeFn` a flat quad still scales and slides but does not fade — it
+falls back to the shared stream rather than being dropped, because a dialog that
+is briefly opaque is a smaller surprise than one that is missing.
+
+The clock is `Engine.UnscaledElapsed` via `WidgetTree.SetTime`, not `Elapsed`;
+see [`game-loop`](game-loop.md#the-two-clocks) for why, and
+[`ui/yamlui/yamlui.md`](../../ui/yamlui/yamlui.md#transition) for the schema.
+`go run ./13-ui -yamlui dialog` opens one on the space bar over a paused scene.
 
 ## What the world-space channel gets
 

@@ -204,3 +204,55 @@ func TestShaderClockAdvancesWithTheTicks(t *testing.T) {
 		t.Fatalf("two seconds at half speed ran %d ticks, want about 60", got)
 	}
 }
+
+// TestUnscaledClockIgnoresTheTimeScale is the clock a paused menu runs on.
+//
+// Elapsed stops at scale 0 by design -- the grass has to stop moving -- which
+// is exactly why a modal fade cannot be driven off it: a game pauses by setting
+// the scale to 0 and then the dialog it just opened never arrives. The two
+// clocks have to be checked against each other rather than separately, because
+// a single clock that happened to be unscaled would pass either alone.
+//
+// BROKEN ONCE to prove it: `e.unscaledElapsed +=` in advanceSimulation
+// multiplied by e.timeScale, which is the copy-paste the line above it invites.
+// go test . printed
+//
+//	--- FAIL: TestUnscaledClockIgnoresTheTimeScale
+//	    paused, the unscaled clock reads 0.9999993 after a second more of
+//	    frames, want about 2
+//	    at half speed the unscaled clock advanced by 0.49999952 over a second,
+//	    want about 1
+func TestUnscaledClockIgnoresTheTimeScale(t *testing.T) {
+	e, _ := testEngine()
+	frame := time.Second / 60
+
+	run(e, 60, frame)
+	if got := e.UnscaledElapsed(); got < 0.99 || got > 1.01 {
+		t.Fatalf("after one second of frames the unscaled clock reads %v, want about 1", got)
+	}
+	if got := e.Elapsed(); got < 0.99 || got > 1.01 {
+		t.Fatalf("at scale 1 the two clocks must agree; Elapsed reads %v", got)
+	}
+
+	// Paused: the simulation clock stops, this one does not.
+	e.SetTimeScale(0)
+	scaled := e.Elapsed()
+	run(e, 60, frame)
+	if e.Elapsed() != scaled {
+		t.Errorf("paused, Elapsed moved from %v to %v", scaled, e.Elapsed())
+	}
+	if got := e.UnscaledElapsed(); got < 1.99 || got > 2.01 {
+		t.Errorf("paused, the unscaled clock reads %v after a second more of frames, want about 2", got)
+	}
+
+	// Half speed: the simulation clock runs at half rate, this one at full.
+	e.SetTimeScale(0.5)
+	scaled, unscaled := e.Elapsed(), e.UnscaledElapsed()
+	run(e, 60, frame)
+	if got := e.Elapsed() - scaled; got < 0.49 || got > 0.51 {
+		t.Errorf("at half speed Elapsed advanced by %v over a second, want about 0.5", got)
+	}
+	if got := e.UnscaledElapsed() - unscaled; got < 0.99 || got > 1.01 {
+		t.Errorf("at half speed the unscaled clock advanced by %v over a second, want about 1", got)
+	}
+}

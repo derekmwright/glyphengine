@@ -14,6 +14,13 @@ type Node struct {
 	ID       string
 	Children []*Node
 	Rect     Rect // resolved screen rect after layout
+
+	// trans is this widget's place in its `transition:` block, and is the only
+	// state in this package that survives a frame. It lives here rather than in
+	// a map on the tree so that Load and SetChildren throw it away with the
+	// nodes they replace: a dialog rebuilt from YAML while open starts at rest,
+	// not half faded. See transition.go.
+	trans transitionState
 }
 
 // AssetProvider maps named assets to GPU resources for rendering.
@@ -69,6 +76,27 @@ type WidgetTree struct {
 	// Without it an `indicator:` block draws nothing, the same way a `sprite:`
 	// draws nothing without IconFn.
 	ShapeFn ShapeBuilder
+
+	// now is the unscaled clock SetTime last fed in, prevNow what it read on
+	// the previous build, and timeSet whether the host has fed one at all.
+	// Transitions advance on the difference; see SetTime.
+	now, prevNow float32
+	timeSet      bool
+
+	// opacityMul is the transition opacity of the subtree currently being
+	// rendered, multiplied down through nested transitions. 1 everywhere
+	// outside one, which is what keeps a tree at rest on exactly the draw path
+	// a tree with no transition block takes.
+	opacityMul float32
+
+	// noInput is how many enclosing widgets are playing their out transition.
+	// Above zero, nothing under them takes a click -- see renderNode.
+	noInput int
+
+	// rectSave holds the untransformed rects of a subtree while its transition
+	// is drawn, so they can be put back exactly rather than divided back out.
+	// Kept between frames so a steady HUD allocates nothing for it.
+	rectSave []Rect
 
 	// Interactive state
 	input       InputState
@@ -158,6 +186,26 @@ func (t *WidgetTree) SetInput(inp InputState) {
 	t.input = inp
 }
 
+// SetTime updates the clock `transition:` blocks run on. Call before BuildAt(),
+// beside SetInput.
+//
+// Feed it glyphengine.Engine.UnscaledElapsed, not Elapsed: a modal mostly opens
+// while the game is paused, and Elapsed is scaled by SetTimeScale, so a fade
+// driven off it stops dead at scale 0 and the dialog never arrives. The value
+// is a running total rather than a delta, so a host that skips a frame loses no
+// time and one that hands the same reading twice advances nothing.
+//
+// A tree that is never given a clock plays no transitions at all: every widget
+// cuts to hidden or to rest the moment `visible` flips, exactly as if the block
+// were absent. That is deliberate. The alternative -- a delta that is always
+// zero -- leaves a widget that just became visible stuck at the start of its
+// fade forever, and a dialog that never opens is a much harder failure to read
+// than one that does not fade.
+func (t *WidgetTree) SetTime(seconds float32) {
+	t.now = seconds
+	t.timeSet = true
+}
+
 // DrainEvents returns and clears pending UI events.
 func (t *WidgetTree) DrainEvents() []UIEvent {
 	out := t.events
@@ -193,6 +241,17 @@ func (t *WidgetTree) BuildAt(r *renderer.Renderer, assets *AssetProvider, x, y, 
 
 	t.cursorTick++
 
+	// Transitions advance BEFORE layout, not during the render walk, because
+	// layout has to know which widgets are still on their way out: one of them
+	// keeps its box until its out finishes. Doing it in renderNode would read
+	// last frame's progress during layout and this frame's during the draw,
+	// which is a widget one frame ahead of the hole it sits in.
+	t.advanceTransitions(t.Root, t.frameDelta())
+
+	t.opacityMul = 1
+	t.noInput = 0
+	t.rectSave = t.rectSave[:0]
+
 	rootW := t.Root.Def.Width * scale
 	rootH := t.Root.Def.Height * scale
 	t.Root.Rect = Rect{X: x, Y: y, W: rootW, H: rootH}
@@ -213,12 +272,128 @@ func (t *WidgetTree) BuildAt(r *renderer.Renderer, assets *AssetProvider, x, y, 
 	return panels, verts, idxs, text
 }
 
+// frameDelta is how far the transition clock moved since the previous build.
+//
+// A clock that went backwards contributes nothing rather than winding every
+// transition back: the only ways it can is a host resetting its own timer or
+// feeding two trees from different sources, and neither is a request to rewind
+// a fade.
+func (t *WidgetTree) frameDelta() float32 {
+	if !t.timeSet {
+		return 0
+	}
+	dt := t.now - t.prevNow
+	t.prevNow = t.now
+	if dt < 0 {
+		return 0
+	}
+	return dt
+}
+
+// advanceTransitions walks the whole tree, not only the visible part: a widget
+// playing its out is by definition one whose `visible` is false, so a walk that
+// stopped at the visibility check could never advance the thing it is there to
+// advance.
+func (t *WidgetTree) advanceTransitions(node *Node, dt float32) {
+	if d := node.Def.Transition; d != nil {
+		node.trans.advance(d, t.visible(node.Def), t.timeSet, dt)
+	}
+	for _, child := range node.Children {
+		t.advanceTransitions(child, dt)
+	}
+}
+
+// visible resolves a widget's `visible` binding. An absent one is visible.
+func (t *WidgetTree) visible(def *WidgetDef) bool {
+	return def.Visible == "" || resolveBool(def.Visible, t.bindings)
+}
+
+// renderNode applies a widget's transition, if it has one, and draws it.
+//
+// The three things a transition changes all happen here rather than in the
+// widget bodies below: the rect (scaled about the anchor and offset, for the
+// whole subtree), the opacity (multiplied into t.opacityMul, which every
+// builder call reads), and whether anything under this widget takes a click.
+// Keeping it in one place is what makes "none of it touches layout" checkable
+// -- layout has already run by the time any of this is applied.
 func (t *WidgetTree) renderNode(r *renderer.Renderer, assets *AssetProvider, node *Node, scale, sw, sh float32, panels *[]renderer.UIRenderObject, verts *[]renderer.Vertex, idxs *[]uint16, text *[]renderer.TextLine) {
-	// Visibility check: if Visible is set and resolves to false, skip entirely.
-	if node.Def.Visible != "" && !resolveBool(node.Def.Visible, t.bindings) {
+	vis := t.visible(node.Def)
+	d := node.Def.Transition
+	if d == nil {
+		// Visibility check: if Visible is set and resolves to false, skip entirely.
+		if !vis {
+			return
+		}
+		t.renderWidget(r, assets, node, scale, sw, sh, panels, verts, idxs, text)
 		return
 	}
 
+	// Skipped only after the out has finished. Until then the widget is still
+	// on screen and still being drawn.
+	if node.trans.gone() {
+		return
+	}
+
+	// Input is refused from the first frame `visible` is false, not when the
+	// fade ends. A dismiss that fell through a dialog on its way out would hit
+	// whatever the dialog was covering, which is the one click a player is
+	// certain not to have meant.
+	if !vis {
+		t.noInput++
+	}
+
+	if node.trans.atRest() {
+		// The settled case skips the machinery rather than running it with an
+		// identity transform. It draws the same either way -- see atRest -- so
+		// this is a frame's worth of walks saved per block on screen and not a
+		// correctness branch.
+		t.renderWidget(r, assets, node, scale, sw, sh, panels, verts, idxs, text)
+	} else {
+		eased := d.eased(node.trans)
+		opacity, factor, dx, dy := d.transform(eased, scale)
+
+		mark := len(t.rectSave)
+		t.saveRects(node)
+		transformRects(node, factor, dx, dy, node.Rect.X+node.Rect.W/2, node.Rect.Y+node.Rect.H/2)
+
+		prevOpacity := t.opacityMul
+		t.opacityMul *= opacity
+		t.renderWidget(r, assets, node, scale, sw, sh, panels, verts, idxs, text)
+		t.opacityMul = prevOpacity
+
+		t.restoreRects(node, mark)
+		t.rectSave = t.rectSave[:mark]
+	}
+
+	if !vis {
+		t.noInput--
+	}
+}
+
+// saveRects and restoreRects stack a subtree's rects in pre-order.
+//
+// Restoring from a copy rather than applying the inverse transform: the inverse
+// of a scale is exact only in arithmetic, and a rect that comes back a
+// ten-thousandth off is a hit box that no longer matches the one layout
+// computed. Nested transitions nest here too -- the inner pair pushes after the
+// outer's block and truncates back to its own mark.
+func (t *WidgetTree) saveRects(n *Node) {
+	t.rectSave = append(t.rectSave, n.Rect)
+	for _, child := range n.Children {
+		t.saveRects(child)
+	}
+}
+
+func (t *WidgetTree) restoreRects(n *Node, at int) int {
+	n.Rect = t.rectSave[at]
+	at++
+	for _, child := range n.Children {
+		at = t.restoreRects(child, at)
+	}
+	return at
+}
+
+func (t *WidgetTree) renderWidget(r *renderer.Renderer, assets *AssetProvider, node *Node, scale, sw, sh float32, panels *[]renderer.UIRenderObject, verts *[]renderer.Vertex, idxs *[]uint16, text *[]renderer.TextLine) {
 	switch node.Def.Widget {
 	case "panel":
 		t.renderPanel(r, assets, node, scale, sw, sh, panels, verts, idxs)
@@ -247,7 +422,7 @@ func (t *WidgetTree) renderPanel(r *renderer.Renderer, assets *AssetProvider, no
 	if def.NineSlice == "" || assets == nil || t.PanelFn == nil {
 		// Flat bg_color fallback for panels without a nine-slice (e.g. dividers).
 		if def.BgColor != [3]float32{} {
-			*verts, *idxs = appendQuad(*verts, *idxs, node.Rect.X, node.Rect.Y, node.Rect.W, node.Rect.H,
+			t.appendFlatQuad(verts, idxs, panels, node.Rect.X, node.Rect.Y, node.Rect.W, node.Rect.H,
 				t.indicatorTint(def, def.BgColor))
 		}
 		t.renderIndicator(node, panels)
@@ -259,11 +434,7 @@ func (t *WidgetTree) renderPanel(r *renderer.Renderer, assets *AssetProvider, no
 		return
 	}
 	color := t.indicatorTint(def, t.resolveColor(def))
-	opacity := def.Opacity
-	if opacity == 0 {
-		opacity = 1.0
-	}
-	objs := t.PanelFn(r, slice, color, opacity, node.Rect.X, node.Rect.Y, node.Rect.W, node.Rect.H, scale, sw, sh)
+	objs := t.PanelFn(r, slice, color, t.panelOpacity(def.Opacity), node.Rect.X, node.Rect.Y, node.Rect.W, node.Rect.H, scale, sw, sh)
 	*panels = append(*panels, objs...)
 	t.renderIndicator(node, panels)
 }
@@ -275,12 +446,8 @@ func (t *WidgetTree) renderLabel(r *renderer.Renderer, assets *AssetProvider, no
 	if def.NineSlice != "" && assets != nil && t.PanelFn != nil {
 		nsName := resolve(def.NineSlice, t.bindings)
 		if slice, ok := assets.NineSlices[nsName]; ok {
-			opacity := def.Opacity
-			if opacity == 0 {
-				opacity = 1.0
-			}
 			color := t.resolveColor(def)
-			objs := t.PanelFn(r, slice, color, opacity, node.Rect.X, node.Rect.Y, node.Rect.W, node.Rect.H, scale, sw, sh)
+			objs := t.PanelFn(r, slice, color, t.panelOpacity(def.Opacity), node.Rect.X, node.Rect.Y, node.Rect.W, node.Rect.H, scale, sw, sh)
 			*panels = append(*panels, objs...)
 		}
 	}
@@ -326,6 +493,7 @@ func (t *WidgetTree) renderLabel(r *renderer.Renderer, assets *AssetProvider, no
 		Y:     ty,
 		Scale: fontSize,
 		Color: color,
+		Alpha: t.textAlpha(),
 	}
 	if resolvedFont != nil && resolvedFont != assets.Font {
 		tl.Font = resolvedFont
@@ -343,11 +511,11 @@ func (t *WidgetTree) renderProgressBar(r *renderer.Renderer, assets *AssetProvid
 	// Background: nine-slice or quad.
 	if def.NineSlice != "" && assets != nil && t.PanelFn != nil {
 		if slice, ok := assets.NineSlices[def.NineSlice]; ok {
-			objs := t.PanelFn(r, slice, white, 1.0, node.Rect.X, node.Rect.Y, node.Rect.W, node.Rect.H, scale, sw, sh)
+			objs := t.PanelFn(r, slice, white, t.panelOpacity(1), node.Rect.X, node.Rect.Y, node.Rect.W, node.Rect.H, scale, sw, sh)
 			*panels = append(*panels, objs...)
 		}
 	} else {
-		*verts, *idxs = appendQuad(*verts, *idxs, node.Rect.X, node.Rect.Y, node.Rect.W, node.Rect.H, def.BgColor)
+		t.appendFlatQuad(verts, idxs, panels, node.Rect.X, node.Rect.Y, node.Rect.W, node.Rect.H, def.BgColor)
 	}
 
 	// Foreground fill: nine-slice or quad.
@@ -363,7 +531,7 @@ func (t *WidgetTree) renderProgressBar(r *renderer.Renderer, assets *AssetProvid
 		if def.FgNineSlice != "" && assets != nil && t.PanelFn != nil {
 			if slice, ok := assets.NineSlices[def.FgNineSlice]; ok {
 				if fillW > 0 {
-					objs := t.PanelFn(r, slice, white, 1.0, node.Rect.X, node.Rect.Y, fillW, node.Rect.H, scale, sw, sh)
+					objs := t.PanelFn(r, slice, white, t.panelOpacity(1), node.Rect.X, node.Rect.Y, fillW, node.Rect.H, scale, sw, sh)
 					*panels = append(*panels, objs...)
 				}
 			}
@@ -374,7 +542,7 @@ func (t *WidgetTree) renderProgressBar(r *renderer.Renderer, assets *AssetProvid
 					fgColor = c
 				}
 			}
-			*verts, *idxs = appendQuad(*verts, *idxs, node.Rect.X, node.Rect.Y, fillW, node.Rect.H, fgColor)
+			t.appendFlatQuad(verts, idxs, panels, node.Rect.X, node.Rect.Y, fillW, node.Rect.H, fgColor)
 		}
 	}
 }
@@ -385,11 +553,16 @@ func (t *WidgetTree) renderButton(r *renderer.Renderer, assets *AssetProvider, n
 
 	disabled := def.Disabled != "" && resolveBool(def.Disabled, t.bindings)
 
-	// Hit testing.
-	hover := !disabled && node.Rect.Contains(t.input.MouseX, t.input.MouseY)
+	// Hit testing, against the TRANSFORMED rect: a button that is sliding in is
+	// clickable where it is drawn, not where layout put it. t.noInput is the
+	// out transition of this widget or of something containing it -- see
+	// renderNode -- and it refuses the click and the hover with it, so a dialog
+	// on its way out neither lights up under the cursor nor fires.
+	takesInput := !disabled && t.noInput == 0
+	hover := takesInput && node.Rect.Contains(t.input.MouseX, t.input.MouseY)
 	t.hovered[id] = hover
 
-	if !disabled {
+	if takesInput {
 		if t.input.MousePressed && hover {
 			t.pressed[id] = true
 		}
@@ -423,11 +596,7 @@ func (t *WidgetTree) renderButton(r *renderer.Renderer, assets *AssetProvider, n
 	if def.NineSlice != "" && assets != nil && t.PanelFn != nil {
 		nsName := resolve(def.NineSlice, t.bindings)
 		if slice, ok := assets.NineSlices[nsName]; ok {
-			opacity := def.Opacity
-			if opacity == 0 {
-				opacity = 1.0
-			}
-			objs := t.PanelFn(r, slice, color, opacity, node.Rect.X, node.Rect.Y, node.Rect.W, node.Rect.H, scale, sw, sh)
+			objs := t.PanelFn(r, slice, color, t.panelOpacity(def.Opacity), node.Rect.X, node.Rect.Y, node.Rect.W, node.Rect.H, scale, sw, sh)
 			*panels = append(*panels, objs...)
 		}
 	}
@@ -465,6 +634,7 @@ func (t *WidgetTree) renderButton(r *renderer.Renderer, assets *AssetProvider, n
 			Y:     ty,
 			Scale: fontSize,
 			Color: textColor,
+			Alpha: t.textAlpha(),
 		}
 		if btnFont != nil && assets != nil && btnFont != assets.Font {
 			tl.Font = btnFont
@@ -480,11 +650,7 @@ func (t *WidgetTree) renderScrollView(r *renderer.Renderer, assets *AssetProvide
 	// Render optional nine-slice background.
 	if def.NineSlice != "" && assets != nil && t.PanelFn != nil {
 		if slice, ok := assets.NineSlices[def.NineSlice]; ok {
-			opacity := def.Opacity
-			if opacity == 0 {
-				opacity = 1.0
-			}
-			objs := t.PanelFn(r, slice, def.Color, opacity, node.Rect.X, node.Rect.Y, node.Rect.W, node.Rect.H, scale, sw, sh)
+			objs := t.PanelFn(r, slice, def.Color, t.panelOpacity(def.Opacity), node.Rect.X, node.Rect.Y, node.Rect.W, node.Rect.H, scale, sw, sh)
 			*panels = append(*panels, objs...)
 		}
 	}
@@ -512,7 +678,7 @@ func (t *WidgetTree) renderScrollView(r *renderer.Renderer, assets *AssetProvide
 	}
 
 	// Handle scroll wheel.
-	if node.Rect.Contains(t.input.MouseX, t.input.MouseY) && t.input.ScrollY != 0 {
+	if t.noInput == 0 && node.Rect.Contains(t.input.MouseX, t.input.MouseY) && t.input.ScrollY != 0 {
 		scroll := t.scrollY[id] - t.input.ScrollY*30*scale
 		maxScroll := contentH - viewRect.H
 		if maxScroll < 0 {
@@ -565,7 +731,7 @@ func (t *WidgetTree) renderScrollView(r *renderer.Renderer, assets *AssetProvide
 		thumbX := viewRect.X + viewRect.W - scrollbarW
 
 		thumbColor := [3]float32{1, 1, 1}
-		*verts, *idxs = appendQuad(*verts, *idxs, thumbX, thumbY, scrollbarW, thumbH, thumbColor)
+		t.appendFlatQuad(verts, idxs, panels, thumbX, thumbY, scrollbarW, thumbH, thumbColor)
 	}
 }
 
@@ -578,12 +744,8 @@ func (t *WidgetTree) renderIcon(node *Node, sw, sh float32, panels *[]renderer.U
 	if resolved == "" {
 		return
 	}
-	opacity := def.Opacity
-	if opacity == 0 {
-		opacity = 1.0
-	}
 	color := t.indicatorTint(def, modulateColor(t.resolveColor(def), t.stateFactor(def)))
-	objs := t.IconFn(resolved, color, opacity, node.Rect.X, node.Rect.Y, node.Rect.W, node.Rect.H, sw, sh)
+	objs := t.IconFn(resolved, color, t.panelOpacity(def.Opacity), node.Rect.X, node.Rect.Y, node.Rect.W, node.Rect.H, sw, sh)
 	*panels = append(*panels, objs...)
 	t.renderIndicator(node, panels)
 }
@@ -632,7 +794,7 @@ func (t *WidgetTree) renderIndicator(node *Node, panels *[]renderer.UIRenderObje
 	if cover <= 0 {
 		return
 	}
-	alpha := d.alpha(frac)
+	alpha := d.alpha(frac) * t.opacityMul
 	if alpha <= 0 {
 		return
 	}
@@ -651,17 +813,14 @@ func (t *WidgetTree) renderTextInput(r *renderer.Renderer, assets *AssetProvider
 	// Render optional nine-slice background.
 	if def.NineSlice != "" && assets != nil && t.PanelFn != nil {
 		if slice, ok := assets.NineSlices[def.NineSlice]; ok {
-			opacity := def.Opacity
-			if opacity == 0 {
-				opacity = 1.0
-			}
-			objs := t.PanelFn(r, slice, def.Color, opacity, node.Rect.X, node.Rect.Y, node.Rect.W, node.Rect.H, scale, sw, sh)
+			objs := t.PanelFn(r, slice, def.Color, t.panelOpacity(def.Opacity), node.Rect.X, node.Rect.Y, node.Rect.W, node.Rect.H, scale, sw, sh)
 			*panels = append(*panels, objs...)
 		}
 	}
 
-	// Click to focus.
-	if t.input.MousePressed && node.Rect.Contains(t.input.MouseX, t.input.MouseY) {
+	// Click to focus. Refused while this field is on its way out, the same as a
+	// button's click is.
+	if t.noInput == 0 && t.input.MousePressed && node.Rect.Contains(t.input.MouseX, t.input.MouseY) {
 		t.focusedID = id
 	}
 
@@ -730,6 +889,7 @@ func (t *WidgetTree) renderTextInput(r *renderer.Renderer, assets *AssetProvider
 			Y:     ty,
 			Scale: fontSize,
 			Color: def.FgColor,
+			Alpha: t.textAlpha(),
 			Font:  nonDefaultFont,
 		})
 	} else if def.Placeholder != "" {
@@ -744,6 +904,7 @@ func (t *WidgetTree) renderTextInput(r *renderer.Renderer, assets *AssetProvider
 			Y:     ty,
 			Scale: fontSize,
 			Color: phColor,
+			Alpha: t.textAlpha(),
 			Font:  nonDefaultFont,
 		})
 	}
@@ -756,6 +917,65 @@ func repeatRune(r rune, n int) []rune {
 		out[i] = r
 	}
 	return out
+}
+
+// panelOpacity is what a builder callback is handed for a widget's `opacity:`.
+//
+// The schema's 0 has always meant "not stated", so it reads as 1; a transition
+// then multiplies that. Every PanelFn, IconFn and ShapeFn call in this file
+// goes through here, because an opacity that reaches only some of them is a
+// dialog that fades except for its progress bar.
+func (t *WidgetTree) panelOpacity(base float32) float32 {
+	if base == 0 {
+		base = 1
+	}
+	return base * t.opacityMul
+}
+
+// textAlpha is what a TextLine's Alpha carries at the current opacity.
+//
+// renderer.TextLine reads Alpha 0 as fully opaque, so a tree at rest writes 0
+// and its lines are byte-identical to a tree with no transition block -- and a
+// fully faded line cannot write 0, which would make it opaque at the one moment
+// it must not be. minTextAlpha is the smallest thing that is not zero and is
+// far below what an 8-bit swapchain can show.
+func (t *WidgetTree) textAlpha() float32 {
+	if t.opacityMul >= 1 {
+		return 0
+	}
+	if t.opacityMul <= minTextAlpha {
+		return minTextAlpha
+	}
+	return t.opacityMul
+}
+
+const minTextAlpha = 1e-4
+
+// appendFlatQuad emits a flat-coloured rectangle at the current opacity.
+//
+// At full opacity it goes into the shared vertex stream, which is where every
+// flat quad has always gone and what the host submits as one mesh.
+// renderer.Vertex has no alpha channel, though, so a fading one cannot live
+// there: it is handed to ShapeFn instead, the same callback an indicator's
+// geometry rides on, where the alpha can sit on the render object. That moves
+// it out of the background stream and in among the panels, which for a dialog
+// on its way in or out is where it belongs anyway.
+//
+// Without ShapeFn a fading flat quad falls back to the vertex stream and does
+// not fade -- it still scales and slides. That is the same bargain `indicator:`
+// makes with `ShapeFn`, except that here the widget is drawn rather than
+// dropped, because a dialog that is opaque for two tenths of a second is a
+// smaller surprise than one that is missing.
+func (t *WidgetTree) appendFlatQuad(verts *[]renderer.Vertex, idxs *[]uint16, panels *[]renderer.UIRenderObject, x, y, w, h float32, col [3]float32) {
+	if t.opacityMul >= 1 || t.ShapeFn == nil {
+		*verts, *idxs = appendQuad(*verts, *idxs, x, y, w, h, col)
+		return
+	}
+	qv, qi := appendQuad(nil, nil, x, y, w, h, col)
+	if len(qv) == 0 {
+		return
+	}
+	*panels = append(*panels, t.ShapeFn(qv, qi, t.opacityMul)...)
 }
 
 // modulateColor multiplies each channel by factor, clamped to [0, 1].

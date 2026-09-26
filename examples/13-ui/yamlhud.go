@@ -161,6 +161,13 @@ func (g *game) buildYamlHUD(e *glyph.Engine, sw, sh float32) ([]renderer.UIRende
 	g.yamlPool.reset()
 	g.bindYamlHUD()
 
+	// UnscaledElapsed, not Elapsed. The dialog demo runs at TimeScale 0, where
+	// Elapsed does not move at all -- a transition driven off it would never
+	// start, which is exactly the bug the unscaled clock exists to prevent.
+	// Under GLYPHENGINE_FIXED_FRAME_TIME this advances by the fixed delta, so
+	// frame N is always the same point in the fade.
+	g.yamlTree.SetTime(e.UnscaledElapsed())
+
 	panels, verts, idxs, text := g.yamlTree.BuildAt(
 		e.Renderer(), g.yamlAssets, yamlHUDOriginX, yamlHUDOriginY, 1, sw, sh)
 
@@ -212,6 +219,10 @@ func (g *game) bindYamlHUD() {
 	t.BindFloat("cd_tint", tint)
 	t.Bind("cd_sweep_text", fmt.Sprintf("%.0f", math.Ceil(float64(sweep)/10)))
 	t.Bind("cd_roll_text", fmt.Sprintf("%.0f", math.Ceil(float64(roll)/10)))
+
+	// The dialog demo: one bool, which is the whole interface a transition
+	// has. Everything else about the fade is in the YAML.
+	t.Bind("dialog_open", fmt.Sprintf("%t", g.dialogOn))
 
 	active := int(g.t/1.5)%2 == 0
 	t.Bind("ability_active", fmt.Sprintf("%t", active))

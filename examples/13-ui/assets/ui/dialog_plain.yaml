@@ -1,0 +1,45 @@
+# dialog.yaml with both `transition:` blocks deleted and nothing else changed.
+#
+# This is what `task transition` compares a frame past the end of the in
+# against, pixel for pixel: once a transition has finished it must be on the
+# same draw path a widget with no block is on -- the same render objects, the
+# same vertex stream, the same text -- or "adding a transition changed the
+# settled HUD" is true and nobody would notice until a screenshot moved.
+#
+# Keep it identical to dialog.yaml apart from the two blocks. The geometry is
+# documented there.
+widget: panel
+id: dialog_root
+width: 400
+height: 270
+padding: 20
+gap: 20
+bg_color: [0.85, 0.86, 0.88]
+children:
+  - widget: panel
+    id: dialog_spacer
+    height: 40
+  - widget: panel
+    id: dialog
+    height: 170
+    padding: 16
+    gap: 10
+    bg_color: [0.05, 0.06, 0.08]
+    visible: "{dialog_open}"
+    children:
+      - widget: label
+        id: dialog_title
+        height: 28
+        text: "Discard changes?"
+        font_size: 18
+        align: center
+        color: [0.92, 0.93, 0.95]
+      - widget: panel
+        id: dialog_accept
+        height: 50
+        bg_color: [0.16, 0.42, 0.30]
+      - widget: panel
+        id: dialog_cancel
+        height: 30
+        bg_color: [0.42, 0.18, 0.18]
+        visible: "{dialog_open}"
