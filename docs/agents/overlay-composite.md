@@ -39,6 +39,16 @@ api:
   - yamlui.IndicatorDef
   - yamlui.TransitionDef
   - yamlui.WidgetTree.SetTime
+  - yamlui.WidgetTree.SetScroll
+  - yamlui.WidgetTree.ScrollOffset
+  - yamlui.WidgetTree.SetContentClipping
+  - yamlui.WidgetTree.SetFocus
+  - renderer.ClipRect
+  - renderer.ClipRect.Intersect
+  - renderer.ClipRect.Empty
+  - renderer.ClipRect.TrimQuad
+  - renderer.UIRenderObject.Clip
+  - renderer.TextLine.Clip
   - ease.ByName
   - renderer.ShaderSet.UIResolveFrag
   - renderer.PassUILayer
@@ -46,7 +56,7 @@ api:
   - shaders.UIResolveFragSpv
 example: examples/13-ui
 run: task hud
-verified: 2026-09-26 # the transition block's draw path
+verified: 2026-09-26 # the per-draw clip rect and scroll_view's use of it
 ---
 
 # Where screen-space overlays are drawn
@@ -94,6 +104,9 @@ becomes of each:
 | `[]Vertex` + `[]uint16` | one mesh of the caller's, then `SetUIOverlays` | flat `bg_color` panels and progress-bar fills |
 | `[]TextLine` | `MSDFText`, then `SetMSDFOverlays` | every label |
 
+Each of those three can be confined to a rectangle; see
+[Clipping a draw to a rectangle](#clipping-a-draw-to-a-rectangle).
+
 The package owns no GPU resources and imports nothing from `ui`. It calls back
 into `PanelFn`, `IconFn` and `ShapeFn` to turn geometry into render objects, so
 everything above about a UI colour, the antialiased edge and the glow layer
@@ -139,6 +152,92 @@ The clock is `Engine.UnscaledElapsed` via `WidgetTree.SetTime`, not `Elapsed`;
 see [`game-loop`](game-loop.md#the-two-clocks) for why, and
 [`ui/yamlui/yamlui.md`](../../ui/yamlui/yamlui.md#transition) for the schema.
 `go run ./13-ui -yamlui dialog` opens one on the space bar over a paused scene.
+
+### Clipping a draw to a rectangle
+
+A `UIRenderObject` and a `TextLine` each carry a `Clip *ClipRect`: a screen-space
+rectangle, Y-down, in the same coordinates the object is already built in. `nil`
+means no clipping, which is what every object that has never heard of it carries
+and what every object in a frame with no scrollable container carries.
+
+`ui/yamlui`'s `scroll_view` is the only thing in the engine that sets one today.
+A game assembling `UIRenderObject`s by hand can set it directly; there is no
+other way to confine a screen-space draw, because the composite pass owns the
+scissor.
+
+**The two channels honour it by different means, because they are not the same
+shape of draw.**
+
+| Channel | How | Why |
+| --- | --- | --- |
+| `[]UIRenderObject` | a per-draw `vkCmdSetScissor` in `recordUIComposite` | one object is one draw, so a scissor fits it exactly |
+| `[]TextLine` | the glyph quads are trimmed in `appendMSDFGeometry` | one overlay is one mesh and one draw over every line it holds |
+| `[]Vertex` + `[]uint16` | `yamlui` trims the quad as it emits it | the caller uploads the whole stream as one mesh |
+
+The text row is the one that is not a choice. `MSDFText.SetText` builds a single
+mesh from every line it is given and `SetMSDFOverlays` submits it as one draw,
+so a scissor there could only clip all the lines or none — a list row half out
+of its container would take its neighbours with it. `ClipRect.TrimQuad` cuts the
+quad and **carries its UVs to the new corners**, so the part of the glyph that
+survives still samples the part of the atlas belonging over those pixels;
+cutting the quad and leaving the UVs put squeezes the whole glyph into what is
+left of its box, which reads as a smear. A glyph entirely outside the clip emits
+no vertices at all, so a long list is cheaper to draw scrolled than unscrolled.
+The flat-quad stream is trimmed the same way, and there the UVs are `ui.frag`'s
+coverage ramp rather than an atlas: the edges that survived keep their ramp and
+the cut edge lands on an interior UV, where coverage is already full, so it
+stops hard.
+
+#### What the composite pass does
+
+`recordUIComposite` sets the full-extent scissor once, as it always did, then
+tracks it:
+
+- an object with `Clip == nil` runs under the full extent;
+- an object with a clip runs under `clip.scissor(extent)`, set only when it
+  differs from what is already in the command buffer, so a run of rows sharing
+  one list's clip pays for it once;
+- an object whose clip is empty after clamping is skipped before it binds
+  anything;
+- the full extent is restored before the text draws and again at the end, so
+  nothing added to this pass later inherits whichever row was clipped last.
+
+The scissor is rounded **outward** — floor on the near edge, ceil on the far one
+— so a clip whose edge falls between pixel centres keeps the pixel it partly
+covers, and clamped to the extent, because a row scrolled half off the top of
+the screen has a perfectly sensible negative clip Y that `vkCmdSetScissor` would
+reject.
+
+A frame with no clipped object therefore records byte for byte the stream it
+always did. `TestRecordCommandBufferStreamIsUnchanged` holds that: its fixture's
+UI overlays carry no clip and the pinned hash did not move for this change.
+
+#### What it costs
+
+Measured with `BenchmarkUICompositeClip` (64 UI panels and one text overlay
+through the fake driver, `-benchtime 20000x`, three interleaved rounds rather
+than three rounds of each — a warm-up run in a block reads as a regression):
+
+| Clips | ns/op |
+| --- | --- |
+| none | 1801, 1723, 1692 |
+| one shared by every draw | 2139, 2315, 2098 |
+| a different one per draw | 2743, 2649, 2558 |
+
+About **7 ns per clipped draw** when a run of rows shares a clip and **14 ns**
+when every draw has its own, zero allocations on all three paths. For a HUD of
+64 panels that is under a microsecond a frame, and the clipped numbers include
+the benchmark's own scissor log, so they are an overstatement.
+
+The alternative considered was a clip rect pushed to `ui.frag` and `msdf.frag`
+as four more floats in the 256-byte push-constant block, with a discard in the
+fragment shader. It was not taken: it costs a branch for every fragment of every
+panel in the frame, clipped or not, on top of push-constant space that the
+lighting and glow blocks are already using — to save something already too small
+to measure in a frame. The scissor also gets the text channel wrong, since one
+draw covers every line, so the shader route would still have needed the
+geometric trim for text and would have been a second mechanism rather than a
+replacement.
 
 ## What the world-space channel gets
 
@@ -229,6 +328,20 @@ against the pre-move build to watch them fail.
 `task smoke` and `task validate` both stayed green through the original bug and
 would stay green through its return. Neither looks at whether text is readable,
 and the failure needs water and text in the same frame, which no example had.
+
+The clip rect has a gate of its own:
+
+```
+task scroll
+```
+
+It renders `13-ui -yamlui list` three times under the fixed clock — the list on
+a row boundary, the same list 20px down so a row crosses each edge, and that
+second frame again with `-scrollclip=false` — and reads boxes out of all three.
+`cmd/scrollcheck` has the boxes and the output from breaking the clip. The
+control arm is the part worth copying: without a frame that was deliberately
+*not* clipped, a gate on a list whose rows happen to sit clear of every edge
+passes while measuring nothing.
 
 ## What a UI colour means
 

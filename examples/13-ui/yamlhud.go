@@ -7,6 +7,7 @@ import (
 	"github.com/go-gl/mathgl/mgl32"
 
 	glyph "github.com/derekmwright/glyphengine"
+	"github.com/derekmwright/glyphengine/input"
 	"github.com/derekmwright/glyphengine/renderer"
 	"github.com/derekmwright/glyphengine/ui"
 	"github.com/derekmwright/glyphengine/ui/yamlui"
@@ -145,9 +146,46 @@ func (g *game) initYamlHUD(e *glyph.Engine) error {
 		}}
 	}
 
+	tree.SetContentClipping(g.scrollClip)
+
 	g.yamlTree = tree
 	g.yamlAssets = &yamlui.AssetProvider{Font: g.font}
 	return nil
+}
+
+// feedScrollInput hands the widget tree the pointer, and is the only place in
+// this example that does.
+//
+// Only in the list demo. Every other -yamlui file here is a still measurement
+// -- `task indicator`, `task flatquad`, `task transition` all compare captures
+// byte for byte -- and a widget tree that starts hit-testing against a cursor
+// at (0, 0) is a capture that might move for a reason none of those gates is
+// about.
+func (g *game) feedScrollInput(e *glyph.Engine) {
+	if !g.listMode {
+		return
+	}
+
+	// A pinned offset is `task scroll` driving the demo instead of a hand:
+	// written every frame, so the capture is the same whatever frame it stops
+	// on. Both axes, because the list scrolls down and the strip sideways.
+	if g.scrollOffset >= 0 {
+		g.yamlTree.SetScroll("list", 0, g.scrollOffset)
+		g.yamlTree.SetScroll("hband", g.scrollOffset, 0)
+		return
+	}
+
+	in := e.Input()
+	mx, my := in.MousePos()
+	_, wheel := in.Scroll()
+	g.yamlTree.SetInput(yamlui.InputState{
+		MouseX:        float32(mx),
+		MouseY:        float32(my),
+		MousePressed:  in.MousePressed(input.MouseButtonLeft),
+		MouseDown:     in.MouseDown(input.MouseButtonLeft),
+		MouseReleased: in.MouseReleased(input.MouseButtonLeft),
+		ScrollY:       float32(wheel),
+	})
 }
 
 // buildYamlHUD updates the bindings, lays the tree out and returns the draws.
@@ -167,6 +205,7 @@ func (g *game) buildYamlHUD(e *glyph.Engine, sw, sh float32) ([]renderer.UIRende
 	// Under GLYPHENGINE_FIXED_FRAME_TIME this advances by the fixed delta, so
 	// frame N is always the same point in the fade.
 	g.yamlTree.SetTime(e.UnscaledElapsed())
+	g.feedScrollInput(e)
 
 	panels, verts, idxs, text := g.yamlTree.BuildAt(
 		e.Renderer(), g.yamlAssets, yamlHUDOriginX, yamlHUDOriginY, 1, sw, sh)

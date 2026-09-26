@@ -126,6 +126,13 @@ func recordUIComposite(
 	scratch.setViewport(deviceDriver, cmdBuf, viewport)
 	scratch.setScissor(deviceDriver, cmdBuf, scissor)
 
+	// cur is the scissor already in the command buffer, so a clip rect costs a
+	// vkCmdSetScissor only where it differs from what is set. A frame with no
+	// clipped object never leaves the full-extent scissor above and records
+	// byte for byte the stream it always did -- which is what
+	// TestRecordCommandBufferStreamIsUnchanged holds.
+	cur := scissor
+
 	// Draw UI panels (alpha blended, textured, 9-slice)
 	if len(uiOverlays) > 0 {
 		deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, uiPipeline)
@@ -134,6 +141,22 @@ func recordUIComposite(
 			d := &uiOverlays[i]
 			if d.Mesh.IndexCount == 0 && d.Mesh.VertexCount == 0 {
 				continue
+			}
+
+			// A clip rect is a scissor around this one draw, set before the
+			// descriptor and vertex binds rather than after so an object
+			// clipped away to nothing skips all of them. A list scrolled past
+			// its end is mostly rows in exactly that state.
+			want := scissor
+			if d.Clip != nil {
+				want = d.Clip.scissor(extent)
+				if want.Extent.Width == 0 || want.Extent.Height == 0 {
+					continue
+				}
+			}
+			if want != cur {
+				scratch.setScissor(deviceDriver, cmdBuf, want)
+				cur = want
 			}
 
 			tex := d.Texture
@@ -181,6 +204,16 @@ func recordUIComposite(
 
 	// Draw MSDF text overlays (alpha blended, textured)
 	if len(msdfOverlays) > 0 {
+		// The text channel is never scissored: one overlay is one mesh holding
+		// every line it was given, so a scissor here could only clip all of
+		// them or none. A clipped TextLine is trimmed as its glyph quads are
+		// built instead -- see appendMSDFGeometry. What this restores is the
+		// full-extent scissor a clipped PANEL may have left behind, so the
+		// text is not silently confined to the last row's clip.
+		if cur != scissor {
+			scratch.setScissor(deviceDriver, cmdBuf, scissor)
+			cur = scissor
+		}
 		deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, msdfPipeline)
 
 		for i := range msdfOverlays {
@@ -223,5 +256,13 @@ func recordUIComposite(
 				deviceDriver.CmdDraw(cmdBuf, d.Mesh.VertexCount, 1, 0, 0)
 			}
 		}
+	}
+
+	// Leave the scissor as this function found it. Nothing else records into
+	// this pass today, but dynamic state carries across a pipeline bind and
+	// the next thing added here would inherit whichever row happened to be
+	// clipped last -- a bug that would look like the new draw being broken.
+	if cur != scissor {
+		scratch.setScissor(deviceDriver, cmdBuf, scissor)
 	}
 }

@@ -100,6 +100,12 @@ nine-slice, do not go through `PanelFn`. They are appended to the vertex stream
 `BuildAt` returns, which the game uploads as one mesh — the fourth and fifth
 return values, not the first. The `scroll_view` thumb is on the same path.
 
+Because that stream is one mesh and one draw, a quad inside a `scroll_view` is
+**trimmed to the clip as it is emitted** rather than scissored: the corners move
+and the UVs move with them, so the coverage ramp still lands on the edges that
+survived and the cut edge is hard. A quad outside every `scroll_view` is emitted
+exactly as it always was.
+
 Those colours are **sRGB**, like every other UI colour in the engine: what you
 write is what reaches the display. `bg_color: [0.05, 0.06, 0.08]` renders as
 (13, 15, 20) of 255, which is `0.05 × 255` and so on, within rounding.
@@ -171,7 +177,8 @@ Renders a sprite texture via the IconBuilder callback.
 
 ### scroll_view
 
-Scrollable vertical container. Handles mouse wheel input and renders a scrollbar thumb.
+A container that clips what it holds to its own rect and lets the player move
+the content inside it with the wheel, a drag, or the thumb.
 
 | Property | Type | Default | Description |
 |----------|------|---------|-------------|
@@ -180,13 +187,112 @@ Scrollable vertical container. Handles mouse wheel input and renders a scrollbar
 | `nine_slice` | string | — | Optional background |
 | `color` | [3]float | [0,0,0] | Background tint |
 | `opacity` | float | 1.0 | Background alpha |
-| `padding` | float | 0 | Inner padding |
+| `padding` | float | 0 | Inner padding; the view rect is the widget's rect less this |
+| `layout` | string | `"vertical"` | How the children are laid out, as on any container |
 | `gap` | float | 0 | Spacing between children |
-| `scroll_direction` | string | `"vertical"` | Only `"vertical"` is supported |
+| `scroll_direction` | string | `"vertical"` | `"vertical"`, `"horizontal"` or `"both"` |
+| `scrollbar` | string | `"auto"` | `"auto"`, `"always"` or `"never"` |
+| `drag` | bool | `true` | Whether the content follows the pointer |
+| `scroll_ease` | string | `"out_cubic"` | Curve focus arrives on, or `"none"` to snap |
 | `children` | list | — | Scrollable child widgets |
 | `visible` | string | — | Visibility template |
 
-Children outside the visible area are culled. Scroll thumb appears automatically when content exceeds view height.
+Any value these fields cannot resolve is a **load error** rather than a silent
+default: `scroll_direction: horizonal` would otherwise be a list that refuses to
+move sideways, which looks exactly like a layout mistake. The four scroll fields
+are also rejected on a widget that is not a `scroll_view`.
+
+`scroll_direction: horizontal` almost always wants `layout: horizontal` with it.
+The two are separate because they answer different questions — one is how the
+children are placed, the other is which way the player may move them.
+
+#### Content size comes from the laid-out rects
+
+How far the content reaches is measured from the children's **resolved rects
+after layout**, not from their declared heights. A child sized by `flex:` has no
+declared height at all, and a child with its own vertical layout has one that
+says nothing about what is inside it; summing declared heights got both wrong,
+so a list stopped short of its last row or scrolled past its end into blank
+space.
+
+The measurement descends into containers and **stops at a nested
+`scroll_view`**: that one's overflow is its own business, and counting it would
+make the outer list scroll by the inner list's length.
+
+#### Clipping
+
+Every descendant is clipped to the view rect — panels, nine-slices, icons,
+indicator fans, transition shapes, flat `bg_color` quads and text lines alike. A
+row crossing an edge stops at the edge; before this it drew in full, over
+whatever the container was sitting on.
+
+Nested views **intersect**: the inner clip is the overlap of the two rects, not
+the inner rect. `task scroll` reads pixels out of exactly that case.
+
+Text is clipped by trimming the glyph quads and carrying their atlas UVs with
+them, which is why a row sliding under the top edge loses the tops of its
+letters rather than the whole line at once. That is not a style choice — a text
+overlay is one mesh and one draw covering every line it was given, so a scissor
+there could only clip all of them or none. `docs/agents/overlay-composite.md`
+has the mechanism and its measured cost.
+
+A widget outside every `scroll_view` carries no clip at all and draws exactly
+the way it always did.
+
+#### Input
+
+- **Wheel** while the pointer is over the widget. It drives the vertical axis,
+  except on a view that only scrolls sideways, where it drives that one.
+- **Content drag** with the left button, when `drag` is true. The content
+  follows the pointer: dragging down reveals what is above, the way every touch
+  surface works.
+- **Thumb drag**, when `scrollbar` is `auto` or `always` and there is somewhere
+  to scroll. One pixel of thumb is `maxScroll / (track - thumb)` pixels of
+  content, so the thumb stays under the finger.
+
+A drag only becomes a drag once the pointer has moved **4 reference pixels**
+from where the button went down. Under that, the press is still a click: a list
+of rows that are buttons has to be both clickable and draggable with the same
+button, and a hand on a mouse moves a pixel or two during any click. Once a drag
+crosses that dead zone it **cancels every press in flight**, so the row you
+started on does not fire when you let go.
+
+A view inside a widget playing its out transition takes no input at all, the
+same rule a button follows.
+
+#### Scroll into view
+
+`SetFocus(id)` on a widget inside a `scroll_view` scrolls the **minimum
+distance** that brings it into sight, and nothing at all if it is already there.
+Nested views are handled innermost first, so an outer view aims at where the
+inner one leaves the row rather than at where it used to be.
+
+The move is eased with `out_cubic` over 0.15 s on the tree's unscaled clock —
+the one `SetTime` is fed — so a list on a pause menu still scrolls at
+`SetTimeScale(0)`. `scroll_ease: none` snaps instead, and a tree that was never
+given a clock snaps too, for the same reason a transition without one cuts: an
+eased scroll driven by a delta that is always zero would stop at its start, and
+the row focus just moved to would never appear.
+
+It runs only on the frame focus **changes**. A view that re-aimed every build
+could never be scrolled away from with the wheel.
+
+`examples/20-screens -scroll` is the whole keyboard path: the arrow keys pick a
+row and the game says nothing but `SetFocus("row7")`.
+
+#### Scroll state
+
+Kept on the tree, keyed by widget id, so it survives `SetChildren` — a filtered
+or refilled list stays where the player left it. It is **clamped on every
+build** against the content that is actually there, so a list that got shorter
+comes back rather than staying scrolled past its own end.
+
+`SetScroll(id, x, y)` and `ScrollOffset(id)` save and restore a position across
+a screen change. `SetContentClipping(false)` turns clipping off; it is a
+diagnostic and the control arm of `task scroll`, not something a game wants on.
+
+Two `scroll_view`s with no `id` share one offset, which is why the id is
+required.
 
 ### text_input
 
@@ -938,7 +1044,7 @@ tree.SetChildren("category_tabs", defs)
 - **Call SetChildren every frame** (or when data changes) before `BuildAt()`. The tree does not diff — it rebuilds the subtree each time.
 - **Give dynamic children unique IDs** if they need to emit events or be referenced. Use indexed IDs like `"recipe_0"`, `"recipe_1"`.
 - **Keep row definitions simple.** Each row is a `WidgetDef` struct built in Go. Deeply nested rows are valid but harder to maintain.
-- **Scroll state is preserved.** `scroll_view` tracks scroll position by its own ID, so replacing children doesn't reset the scroll offset.
+- **Scroll state is preserved.** `scroll_view` tracks scroll position by its own ID, so replacing children doesn't reset the scroll offset. It is clamped against the new content, so a list that got shorter does not stay scrolled past its end.
 - **Performance.** SetChildren rebuilds the node subtree and re-indexes. For lists under ~100 items this is negligible. For very large lists, only populate the visible portion.
 
 ## JSX-to-YamlUI Conversion Guide
@@ -965,7 +1071,7 @@ When converting from JSX/React mockups to YamlUI:
 
 10. **CSS `background-color` → `bg_color` or `nine_slice`**. Use `bg_color` for flat colors. Use `nine_slice` for textured/rounded backgrounds.
 
-11. **CSS `overflow: scroll` → `scroll_view`**. Wrap scrollable content in a scroll_view widget.
+11. **CSS `overflow: scroll` → `scroll_view`**. Wrap scrollable content in a scroll_view widget. `overflow: hidden` is the same widget with `scrollbar: never` and `drag: false`: the clip is unconditional, so a view nothing can scroll still clips.
 
 12. **Dynamic values → `{binding}` templates**. Replace `{props.value}` or `${variable}` with `{binding_key}`.
 

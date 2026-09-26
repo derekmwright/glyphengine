@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"io/fs"
 	"strconv"
+	"strings"
 
+	"github.com/derekmwright/glyphengine/ui/ease"
 	"gopkg.in/yaml.v3"
 )
 
@@ -56,7 +58,18 @@ type WidgetDef struct {
 	State string `yaml:"state"`
 
 	// Scroll view
-	ScrollDirection string `yaml:"scroll_direction"` // "vertical" (default)
+	ScrollDirection string `yaml:"scroll_direction"` // vertical (default), horizontal, both
+	Scrollbar       string `yaml:"scrollbar"`        // auto (default), always, never
+
+	// Drag is whether the content follows the pointer. A nil pointer is true:
+	// a list that cannot be dragged is unreachable without a wheel, so the
+	// default has to be on, and a plain bool could not tell "the YAML said
+	// nothing" from "the YAML said false".
+	Drag *bool `yaml:"drag"`
+
+	// ScrollEase is the curve focus rides in on when it lands on a row outside
+	// the view: an ui/ease name, or "none" to snap. Absent is out_cubic.
+	ScrollEase string `yaml:"scroll_ease"`
 
 	// Icon
 	Sprite string `yaml:"sprite"` // icon sprite name for IconBuilder callback
@@ -130,9 +143,59 @@ func validateDef(def *WidgetDef) error {
 			return err
 		}
 	}
+	if err := validateScroll(def); err != nil {
+		return err
+	}
 	for i := range def.Children {
 		if err := validateDef(&def.Children[i]); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// validateScroll rejects the scroll fields on a widget that does not scroll,
+// and a value none of them can resolve.
+//
+// Both halves are failures nothing downstream can report. A `scroll_direction`
+// on a panel is silently ignored, and so is `horizonal` on a scroll_view -- it
+// falls back to vertical, which is a list that refuses to move sideways and
+// looks exactly like a layout mistake. See validateDef on why this is the only
+// place in the package that says no.
+func validateScroll(def *WidgetDef) error {
+	if def.Widget != "scroll_view" {
+		var field string
+		switch {
+		case def.ScrollDirection != "":
+			field = "scroll_direction"
+		case def.Scrollbar != "":
+			field = "scrollbar"
+		case def.Drag != nil:
+			field = "drag"
+		case def.ScrollEase != "":
+			field = "scroll_ease"
+		default:
+			return nil
+		}
+		return fmt.Errorf("widget %s: %s is only supported on scroll_view, not %s",
+			widgetLabel(def), field, def.Widget)
+	}
+	switch def.ScrollDirection {
+	case "", "vertical", "horizontal", "both":
+	default:
+		return fmt.Errorf("widget %s: unknown scroll_direction %q (want vertical, horizontal, both)",
+			widgetLabel(def), def.ScrollDirection)
+	}
+	switch def.Scrollbar {
+	case "", "auto", "always", "never":
+	default:
+		return fmt.Errorf("widget %s: unknown scrollbar %q (want auto, always, never)",
+			widgetLabel(def), def.Scrollbar)
+	}
+	if def.ScrollEase != "" && def.ScrollEase != "none" {
+		if _, ok := ease.ByName(def.ScrollEase); !ok {
+			return fmt.Errorf("widget %s: unknown scroll_ease %q (want none, %s)",
+				widgetLabel(def), def.ScrollEase, strings.Join(ease.Names(), ", "))
 		}
 	}
 	return nil

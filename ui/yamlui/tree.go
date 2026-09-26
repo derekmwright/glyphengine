@@ -98,15 +98,35 @@ type WidgetTree struct {
 	// Kept between frames so a steady HUD allocates nothing for it.
 	rectSave []Rect
 
+	// dt is how far the unscaled clock moved since the previous build,
+	// computed once per BuildAt. Transitions and scroll-into-view both run on
+	// it, and calling frameDelta twice would hand the second caller zero.
+	dt float32
+
+	// clip is the rectangle the subtree currently being rendered is confined
+	// to, and nil outside every scroll_view -- which is every widget in a tree
+	// that has none, and therefore exactly the draw path this package took
+	// before it could clip at all. Nested views intersect; see pushClip.
+	clip *renderer.ClipRect
+
+	// noClip is SetContentClipping turned off: a diagnostic, and the control
+	// arm of the pixel gate.
+	noClip bool
+
 	// Interactive state
-	input       InputState
-	events      []UIEvent
-	hovered     map[string]bool
-	pressed     map[string]bool
-	scrollY     map[string]float32
-	focusedID   string
-	textBuffers map[string]string
-	cursorTick  int
+	input     InputState
+	events    []UIEvent
+	hovered   map[string]bool
+	pressed   map[string]bool
+	scroll    map[string]*scrollState
+	drag      dragState
+	focusedID string
+	// prevFocusedID is what focusedID was on the previous build, so a view
+	// pulls a row into sight when focus ARRIVES on it rather than on every
+	// frame it stays there. See scrollFocusIntoView.
+	prevFocusedID string
+	textBuffers   map[string]string
+	cursorTick    int
 }
 
 // Load parses a YAML widget definition from fsys and builds a widget tree.
@@ -121,7 +141,7 @@ func Load(fsys fs.FS, name string) (*WidgetTree, error) {
 		colorBindings: make(map[string][3]float32),
 		hovered:       make(map[string]bool),
 		pressed:       make(map[string]bool),
-		scrollY:       make(map[string]float32),
+		scroll:        make(map[string]*scrollState),
 		textBuffers:   make(map[string]string),
 	}
 	t.Root = t.buildNode(def)
@@ -246,10 +266,12 @@ func (t *WidgetTree) BuildAt(r *renderer.Renderer, assets *AssetProvider, x, y, 
 	// keeps its box until its out finishes. Doing it in renderNode would read
 	// last frame's progress during layout and this frame's during the draw,
 	// which is a widget one frame ahead of the hole it sits in.
-	t.advanceTransitions(t.Root, t.frameDelta())
+	t.dt = t.frameDelta()
+	t.advanceTransitions(t.Root, t.dt)
 
 	t.opacityMul = 1
 	t.noInput = 0
+	t.clip = nil
 	t.rectSave = t.rectSave[:0]
 
 	rootW := t.Root.Def.Width * scale
@@ -261,6 +283,16 @@ func (t *WidgetTree) BuildAt(r *renderer.Renderer, assets *AssetProvider, x, y, 
 	// Handle click-to-focus: if mouse pressed and no text_input claims it, clear focus.
 	if t.input.MousePressed {
 		t.focusedID = ""
+	}
+
+	// Focus has to be chased AFTER layout, because the rect it aims a view at
+	// is the one layout just resolved, and BEFORE the render walk, because the
+	// walk is what draws the children at the new offset. Only on the frame
+	// focus moved: a view that re-aimed every build could never be scrolled
+	// away from with the wheel.
+	if t.focusedID != t.prevFocusedID {
+		t.prevFocusedID = t.focusedID
+		t.scrollFocusIntoView(scale)
 	}
 
 	var panels []renderer.UIRenderObject
@@ -435,7 +467,7 @@ func (t *WidgetTree) renderPanel(r *renderer.Renderer, assets *AssetProvider, no
 	}
 	color := t.indicatorTint(def, t.resolveColor(def))
 	objs := t.PanelFn(r, slice, color, t.panelOpacity(def.Opacity), node.Rect.X, node.Rect.Y, node.Rect.W, node.Rect.H, scale, sw, sh)
-	*panels = append(*panels, objs...)
+	t.appendObjs(panels, objs)
 	t.renderIndicator(node, panels)
 }
 
@@ -448,7 +480,7 @@ func (t *WidgetTree) renderLabel(r *renderer.Renderer, assets *AssetProvider, no
 		if slice, ok := assets.NineSlices[nsName]; ok {
 			color := t.resolveColor(def)
 			objs := t.PanelFn(r, slice, color, t.panelOpacity(def.Opacity), node.Rect.X, node.Rect.Y, node.Rect.W, node.Rect.H, scale, sw, sh)
-			*panels = append(*panels, objs...)
+			t.appendObjs(panels, objs)
 		}
 	}
 
@@ -498,7 +530,7 @@ func (t *WidgetTree) renderLabel(r *renderer.Renderer, assets *AssetProvider, no
 	if resolvedFont != nil && resolvedFont != assets.Font {
 		tl.Font = resolvedFont
 	}
-	*text = append(*text, tl)
+	t.appendText(text, tl)
 }
 
 func (t *WidgetTree) renderProgressBar(r *renderer.Renderer, assets *AssetProvider, node *Node, scale, sw, sh float32, panels *[]renderer.UIRenderObject, verts *[]renderer.Vertex, idxs *[]uint16) {
@@ -512,7 +544,7 @@ func (t *WidgetTree) renderProgressBar(r *renderer.Renderer, assets *AssetProvid
 	if def.NineSlice != "" && assets != nil && t.PanelFn != nil {
 		if slice, ok := assets.NineSlices[def.NineSlice]; ok {
 			objs := t.PanelFn(r, slice, white, t.panelOpacity(1), node.Rect.X, node.Rect.Y, node.Rect.W, node.Rect.H, scale, sw, sh)
-			*panels = append(*panels, objs...)
+			t.appendObjs(panels, objs)
 		}
 	} else {
 		t.appendFlatQuad(verts, idxs, panels, node.Rect.X, node.Rect.Y, node.Rect.W, node.Rect.H, def.BgColor)
@@ -532,7 +564,7 @@ func (t *WidgetTree) renderProgressBar(r *renderer.Renderer, assets *AssetProvid
 			if slice, ok := assets.NineSlices[def.FgNineSlice]; ok {
 				if fillW > 0 {
 					objs := t.PanelFn(r, slice, white, t.panelOpacity(1), node.Rect.X, node.Rect.Y, fillW, node.Rect.H, scale, sw, sh)
-					*panels = append(*panels, objs...)
+					t.appendObjs(panels, objs)
 				}
 			}
 		} else {
@@ -597,7 +629,7 @@ func (t *WidgetTree) renderButton(r *renderer.Renderer, assets *AssetProvider, n
 		nsName := resolve(def.NineSlice, t.bindings)
 		if slice, ok := assets.NineSlices[nsName]; ok {
 			objs := t.PanelFn(r, slice, color, t.panelOpacity(def.Opacity), node.Rect.X, node.Rect.Y, node.Rect.W, node.Rect.H, scale, sw, sh)
-			*panels = append(*panels, objs...)
+			t.appendObjs(panels, objs)
 		}
 	}
 
@@ -639,7 +671,7 @@ func (t *WidgetTree) renderButton(r *renderer.Renderer, assets *AssetProvider, n
 		if btnFont != nil && assets != nil && btnFont != assets.Font {
 			tl.Font = btnFont
 		}
-		*text = append(*text, tl)
+		t.appendText(text, tl)
 	}
 }
 
@@ -651,87 +683,93 @@ func (t *WidgetTree) renderScrollView(r *renderer.Renderer, assets *AssetProvide
 	if def.NineSlice != "" && assets != nil && t.PanelFn != nil {
 		if slice, ok := assets.NineSlices[def.NineSlice]; ok {
 			objs := t.PanelFn(r, slice, def.Color, t.panelOpacity(def.Opacity), node.Rect.X, node.Rect.Y, node.Rect.W, node.Rect.H, scale, sw, sh)
-			*panels = append(*panels, objs...)
+			t.appendObjs(panels, objs)
 		}
 	}
 
-	pad := def.Padding * scale
-	viewRect := Rect{
-		X: node.Rect.X + pad,
-		Y: node.Rect.Y + pad,
-		W: node.Rect.W - 2*pad,
-		H: node.Rect.H - 2*pad,
+	viewRect := scrollViewRect(node, scale)
+
+	st := t.scrollStateFor(id)
+	contentW, contentH := scrollContentSize(node, viewRect)
+	dir := def.scrollDirection()
+
+	var maxX, maxY float32
+	if dir.horizontal() {
+		maxX = maxScroll(contentW, viewRect.W)
+	}
+	if dir.vertical() {
+		maxY = maxScroll(contentH, viewRect.H)
 	}
 
-	// Compute content height from child layout.
-	var contentH float32
-	gap := def.Gap * scale
-	for i, child := range node.Children {
-		childH := child.Def.Height * scale
-		if childH <= 0 {
-			childH = child.Def.FontSize * scale
-		}
-		contentH += childH
-		if i < len(node.Children)-1 {
-			contentH += gap
-		}
-	}
+	// Clamped before anything reads it, not after it is written. The offset
+	// survives SetChildren on purpose -- a refiltered list keeps its place --
+	// which means a list that got SHORTER arrives here scrolled past its own
+	// end, and a blank one arrives scrolled off the top of nothing.
+	st.X, st.Y = clampf(st.X, 0, maxX), clampf(st.Y, 0, maxY)
 
-	// Handle scroll wheel.
-	if t.noInput == 0 && node.Rect.Contains(t.input.MouseX, t.input.MouseY) && t.input.ScrollY != 0 {
-		scroll := t.scrollY[id] - t.input.ScrollY*30*scale
-		maxScroll := contentH - viewRect.H
-		if maxScroll < 0 {
-			maxScroll = 0
-		}
-		if scroll < 0 {
-			scroll = 0
-		}
-		if scroll > maxScroll {
-			scroll = maxScroll
-		}
-		t.scrollY[id] = scroll
-	}
+	t.scrollInput(node, st, viewRect, contentW, contentH, maxX, maxY, scale)
+	t.advanceScroll(def, st, maxX, maxY)
 
-	scrollOff := t.scrollY[id]
-
-	// Render children with scroll offset, clipping those outside the view.
+	// Children draw under the view rect, intersected with whatever clip this
+	// view is itself inside: that intersection is the whole of the nesting
+	// rule, and it is one line because a clip is a rect and rects intersect.
+	prevClip := t.pushClip(viewRect)
 	for _, child := range node.Children {
-		// Apply scroll offset to child rect.
 		shifted := child.Rect
-		shifted.Y -= scrollOff
+		shifted.X -= st.X
+		shifted.Y -= st.Y
 
-		// Skip children entirely outside the view rect.
-		if shifted.Y+shifted.H < viewRect.Y || shifted.Y > viewRect.Y+viewRect.H {
+		// Children entirely outside the view are dropped before they cost
+		// anything. The clip would have removed them anyway; this is what
+		// keeps a thousand-row list the price of the dozen rows on screen.
+		if shifted.Y+shifted.H < viewRect.Y || shifted.Y > viewRect.Y+viewRect.H ||
+			shifted.X+shifted.W < viewRect.X || shifted.X > viewRect.X+viewRect.W {
 			continue
 		}
 
-		// Temporarily shift the child's rect for rendering.
-		origRect := child.Rect
-		child.Rect = shifted
+		// The subtree is shifted for the draw and put back from a COPY
+		// afterwards, not by shifting it back: adding and subtracting the same
+		// offset is exact only in arithmetic, and a row whose rect comes back
+		// a ten-thousandth off is a hit box that no longer matches the one
+		// layout computed. Same trick, and the same reason, as the transition
+		// path's saveRects.
+		//
+		// Put back at all because a scroll offset is not a layout result: next
+		// frame's content size is measured from where layout put the rows, not
+		// from where this frame scrolled them.
+		mark := len(t.rectSave)
+		t.saveRects(child)
+		shiftRects(child, -st.X, -st.Y)
 		t.renderNode(r, assets, child, scale, sw, sh, panels, verts, idxs, text)
-		child.Rect = origRect
+		t.restoreRects(child, mark)
+		t.rectSave = t.rectSave[:mark]
 	}
+	t.clip = prevClip
 
-	// Render scrollbar thumb if content exceeds view.
-	if contentH > viewRect.H && contentH > 0 {
-		scrollbarW := 4 * scale
-		visibleRatio := viewRect.H / contentH
-		thumbH := viewRect.H * visibleRatio
-		if thumbH < 10*scale {
-			thumbH = 10 * scale
-		}
-		maxScroll := contentH - viewRect.H
-		var thumbY float32
-		if maxScroll > 0 {
-			thumbY = viewRect.Y + (scrollOff/maxScroll)*(viewRect.H-thumbH)
-		} else {
-			thumbY = viewRect.Y
-		}
-		thumbX := viewRect.X + viewRect.W - scrollbarW
+	// The bar is drawn outside the content's clip, under whatever clip encloses
+	// the view itself: it belongs to the container, not to what is in it.
+	thumbColor := [3]float32{1, 1, 1}
+	if dir.vertical() && def.scrollbarVisible(maxY > 0) {
+		b := t.thumbRectY(viewRect, st.Y, maxY, contentH, scale)
+		t.appendFlatQuad(verts, idxs, panels, b.X, b.Y, b.W, b.H, thumbColor)
+	}
+	if dir.horizontal() && def.scrollbarVisible(maxX > 0) {
+		b := t.thumbRectX(viewRect, st.X, maxX, contentW, scale)
+		t.appendFlatQuad(verts, idxs, panels, b.X, b.Y, b.W, b.H, thumbColor)
+	}
+}
 
-		thumbColor := [3]float32{1, 1, 1}
-		t.appendFlatQuad(verts, idxs, panels, thumbX, thumbY, scrollbarW, thumbH, thumbColor)
+// shiftRects translates a subtree by (dx, dy).
+//
+// The whole subtree, not just the child: a row's own label and icon are laid
+// out at absolute coordinates inside it, so moving only the row would scroll
+// its box out from under its contents. Same shape as transformRects, and for
+// the same reason.
+func shiftRects(n *Node, dx, dy float32) {
+	n.Rect.X += dx
+	n.Rect.Y += dy
+	for _, c := range n.Children {
+		shiftRects(c, dx, dy)
 	}
 }
 
@@ -746,7 +784,7 @@ func (t *WidgetTree) renderIcon(node *Node, sw, sh float32, panels *[]renderer.U
 	}
 	color := t.indicatorTint(def, modulateColor(t.resolveColor(def), t.stateFactor(def)))
 	objs := t.IconFn(resolved, color, t.panelOpacity(def.Opacity), node.Rect.X, node.Rect.Y, node.Rect.W, node.Rect.H, sw, sh)
-	*panels = append(*panels, objs...)
+	t.appendObjs(panels, objs)
 	t.renderIndicator(node, panels)
 }
 
@@ -803,7 +841,7 @@ func (t *WidgetTree) renderIndicator(node *Node, panels *[]renderer.UIRenderObje
 		return
 	}
 	verts, idxs := appendIndicatorFan(nil, nil, pts, d.rgb())
-	*panels = append(*panels, t.ShapeFn(verts, idxs, alpha)...)
+	t.appendObjs(panels, t.ShapeFn(verts, idxs, alpha))
 }
 
 func (t *WidgetTree) renderTextInput(r *renderer.Renderer, assets *AssetProvider, node *Node, scale, sw, sh float32, panels *[]renderer.UIRenderObject, text *[]renderer.TextLine) {
@@ -814,7 +852,7 @@ func (t *WidgetTree) renderTextInput(r *renderer.Renderer, assets *AssetProvider
 	if def.NineSlice != "" && assets != nil && t.PanelFn != nil {
 		if slice, ok := assets.NineSlices[def.NineSlice]; ok {
 			objs := t.PanelFn(r, slice, def.Color, t.panelOpacity(def.Opacity), node.Rect.X, node.Rect.Y, node.Rect.W, node.Rect.H, scale, sw, sh)
-			*panels = append(*panels, objs...)
+			t.appendObjs(panels, objs)
 		}
 	}
 
@@ -883,7 +921,7 @@ func (t *WidgetTree) renderTextInput(r *renderer.Renderer, assets *AssetProvider
 		if focused && (t.cursorTick/30)%2 == 0 {
 			display += "_"
 		}
-		*text = append(*text, renderer.TextLine{
+		t.appendText(text, renderer.TextLine{
 			Text:  display,
 			X:     tx,
 			Y:     ty,
@@ -898,7 +936,7 @@ func (t *WidgetTree) renderTextInput(r *renderer.Renderer, assets *AssetProvider
 		if def.PlaceholderColor != ([3]float32{}) {
 			phColor = def.PlaceholderColor
 		}
-		*text = append(*text, renderer.TextLine{
+		t.appendText(text, renderer.TextLine{
 			Text:  resolved,
 			X:     tx,
 			Y:     ty,
@@ -968,14 +1006,53 @@ const minTextAlpha = 1e-4
 // smaller surprise than one that is missing.
 func (t *WidgetTree) appendFlatQuad(verts *[]renderer.Vertex, idxs *[]uint16, panels *[]renderer.UIRenderObject, x, y, w, h float32, col [3]float32) {
 	if t.opacityMul >= 1 || t.ShapeFn == nil {
-		*verts, *idxs = appendQuad(*verts, *idxs, x, y, w, h, col)
+		// The shared stream is ONE mesh and ONE draw in every host that
+		// consumes BuildAt, so a per-object clip rect cannot reach an
+		// individual quad in it. A clipped quad is therefore trimmed here,
+		// which is exactly what the scissor would have done to it and costs
+		// nothing on the far side. The fading path below needs none of that:
+		// it has a render object of its own to carry the clip.
+		*verts, *idxs = appendQuadClipped(*verts, *idxs, x, y, w, h, col, t.clip)
 		return
 	}
 	qv, qi := appendQuad(nil, nil, x, y, w, h, col)
 	if len(qv) == 0 {
 		return
 	}
-	*panels = append(*panels, t.ShapeFn(qv, qi, t.opacityMul)...)
+	t.appendObjs(panels, t.ShapeFn(qv, qi, t.opacityMul))
+}
+
+// appendObjs stamps the current clip onto what a builder callback returned and
+// appends it.
+//
+// Every PanelFn, IconFn and ShapeFn result in this file goes through here, for
+// the same reason every opacity goes through panelOpacity: a clip that reaches
+// only some of them is a list whose rows clip and whose icons do not.
+//
+// A callback that set a Clip of its own keeps it, intersected rather than
+// replaced -- a game clipping its own icon to a mask is not asking to have that
+// mask dropped because the icon happens to sit in a list.
+func (t *WidgetTree) appendObjs(panels *[]renderer.UIRenderObject, objs []renderer.UIRenderObject) {
+	if t.clip == nil {
+		*panels = append(*panels, objs...)
+		return
+	}
+	for _, o := range objs {
+		if o.Clip != nil {
+			c := o.Clip.Intersect(*t.clip)
+			o.Clip = &c
+		} else {
+			o.Clip = t.clip
+		}
+		*panels = append(*panels, o)
+	}
+}
+
+// appendText stamps the current clip onto a line and appends it. A clipped line
+// is trimmed glyph by glyph in the renderer; see renderer.TextLine.Clip.
+func (t *WidgetTree) appendText(text *[]renderer.TextLine, tl renderer.TextLine) {
+	tl.Clip = t.clip
+	*text = append(*text, tl)
 }
 
 // modulateColor multiplies each channel by factor, clamped to [0, 1].
@@ -1064,6 +1141,22 @@ const edgeSkirt = 0.5
 // progress bar asks for exactly that, and a skirt around nothing is a visible
 // one-pixel sliver where the bar is supposed to be empty.
 func appendQuad(verts []renderer.Vertex, idxs []uint16, x, y, w, h float32, col [3]float32) ([]renderer.Vertex, []uint16) {
+	return appendQuadClipped(verts, idxs, x, y, w, h, col, nil)
+}
+
+// appendQuadClipped is appendQuad confined to a rectangle; a nil clip is
+// appendQuad exactly.
+//
+// The trim moves the UVs with the corners, which is what keeps the coverage
+// ramp meaning what it means: the un-cut edges still carry 0 and 1 on the
+// requested edge and still get their half-pixel of ramp, and the cut edge lands
+// on an interior UV, where edgeCoverage is already fully covered -- so the quad
+// simply stops there, hard, which is what a scissor would have done to it.
+//
+// Trimming the skirted rect rather than the requested one is deliberate: the
+// skirt is half a pixel of ramp OUTSIDE the quad, and cutting the requested
+// rect first would leave that half pixel hanging past the clip.
+func appendQuadClipped(verts []renderer.Vertex, idxs []uint16, x, y, w, h float32, col [3]float32, clip *renderer.ClipRect) ([]renderer.Vertex, []uint16) {
 	if w <= 0 || h <= 0 {
 		return verts, idxs
 	}
@@ -1076,6 +1169,14 @@ func appendQuad(verts []renderer.Vertex, idxs []uint16, x, y, w, h float32, col 
 	y0, y1 := y-edgeSkirt, y+h+edgeSkirt
 	u0, u1 := -eu, 1+eu
 	v0, v1 := -ev, 1+ev
+
+	if clip != nil {
+		var ok bool
+		x0, y0, x1, y1, u0, v0, u1, v1, ok = clip.TrimQuad(x0, y0, x1, y1, u0, v0, u1, v1)
+		if !ok {
+			return verts, idxs
+		}
+	}
 
 	base := uint16(len(verts))
 	verts = append(verts,
