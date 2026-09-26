@@ -20,6 +20,7 @@
 //	go run ./13-ui -glow on           # a second panel whose elements emit light
 //	go run ./13-ui -yamlui cooldown   # a second HUD, built from YAML
 //	go run ./13-ui -yamlui dialog     # space opens and closes a dialog
+//	go run ./13-ui -yamlui list       # a list to wheel, drag and thumb-drag
 //
 // -glow selects one of four modes, and the reason there are four is that each
 // pair of them isolates exactly one thing:
@@ -63,6 +64,16 @@
 //
 // It is off by default and allocates nothing when off, so every capture this
 // example already produces is unchanged.
+//
+// `list` is the scroll_view, and it is the other mode here that only means
+// something in motion: wheel over the list, drag it with the left button, or
+// grab its 4px thumb, and watch a row cross an edge. This is the ONLY mode
+// that feeds the widget tree the pointer -- see feedScrollInput -- so nothing
+// the other files capture can move because a cursor happened to be somewhere.
+// Under it sit a nested pair of views, whose inner clip is the intersection of
+// the two, and a sideways strip that the wheel drives because it has no other
+// axis. -scrolloffset pins every view where `task scroll` needs it and
+// -scrollclip=false is that gate's control arm.
 //
 // The bars animate on their own. Escape quits.
 package main
@@ -142,8 +153,15 @@ type game struct {
 	dialogClose int // frame it closes on; 0 = it stays open
 	dialogOn    bool
 	frame       int
-	yamlTree    *yamlui.WidgetTree
-	yamlAssets  *yamlui.AssetProvider
+
+	// The list demo (-yamlui list): the only mode that feeds the widget tree
+	// the pointer. scrollOffset pins every view where `task scroll` needs it
+	// instead, and scrollClip is that gate's control arm.
+	listMode     bool
+	scrollOffset float32
+	scrollClip   bool
+	yamlTree     *yamlui.WidgetTree
+	yamlAssets   *yamlui.AssetProvider
 	// The icon texture is not destroyed here: the renderer sweeps its own
 	// texture registry at Destroy, which is how 16-materials and
 	// 21-streetlights leave theirs too. The meshes are not in that sweep.
@@ -528,6 +546,8 @@ func main() {
 	dialogLive := flag.Bool("dialoglive", false, "in the dialog demo, leave the scene running instead of pausing it")
 	dialogOpen := flag.Int("dialogopen", 0, "in the dialog demo, open the dialog on this frame instead of on the space bar")
 	dialogClose := flag.Int("dialogclose", 0, "in the dialog demo, close it again on this frame (0 = leave it open)")
+	scrollOffset := flag.Float64("scrolloffset", -1, "in the list demo, pin every view to this offset instead of taking the pointer (-1 = interactive)")
+	scrollClip := flag.Bool("scrollclip", true, "in the list demo, clip scroll_view content to its view rect; off is `task scroll`'s control arm")
 	flag.Parse()
 
 	mode, err := parseGlowMode(*glow)
@@ -573,6 +593,11 @@ func main() {
 		dialogLive:  *dialogLive,
 		dialogOpen:  *dialogOpen,
 		dialogClose: *dialogClose,
+		// The list demo is the only mode that reads the pointer, so every
+		// other capture this example produces is byte for byte what it was.
+		listMode:     *yamlName == "list",
+		scrollOffset: float32(*scrollOffset),
+		scrollClip:   *scrollClip,
 	}, opts...)
 	if err != nil {
 		log.Fatalf("create engine: %v", err)

@@ -21,14 +21,23 @@
 //     keeping its own, so moving the mouse and then pressing Enter picks what
 //     is under the mouse.
 //
+//   - **A container scrolls to what has focus.** -scroll puts a twelve-entry
+//     inventory beside the menu, six of which fit. The arrow keys move focus
+//     through it and the game says nothing more than SetFocus("row7"); where
+//     the view has to go to show that row is the container's business. Watch
+//     the row at the top edge as it moves: the clip trims the glyph quads, so
+//     letters lose their tops rather than the line disappearing whole.
+//
 //     go run ./20-screens              # windowed
 //     go run ./20-screens -frames 60   # render 60 frames, then exit
+//     go run ./20-screens -scroll      # the inventory, on the arrow keys
 //
 // Escape opens and closes the pause menu.
 package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"runtime"
 
@@ -38,6 +47,7 @@ import (
 	"github.com/derekmwright/glyphengine/input"
 	"github.com/derekmwright/glyphengine/renderer"
 	"github.com/derekmwright/glyphengine/ui"
+	"github.com/derekmwright/glyphengine/ui/yamlui"
 )
 
 func init() {
@@ -72,7 +82,27 @@ type game struct {
 	slice   *renderer.NineSlice
 	font    *renderer.Font
 	text    *renderer.MSDFText
+
+	// The -scroll demo: a twelve-entry list beside the menu that the arrow
+	// keys move focus through, so a row that is not on screen has to be
+	// brought there. Everything here stays nil when the flag is absent, the
+	// same bargain 13-ui's -yamlui HUD makes -- `task screenshots` renders
+	// this example with stock flags and compares the image byte for byte.
+	scroll     bool
+	listTree   *yamlui.WidgetTree
+	listAssets *yamlui.AssetProvider
+	listMesh   *renderer.Mesh
+	listProj   [16]float32
+	listFocus  int
 }
+
+// listRows is how many entries menulist.yaml holds. Six fit in the view, which
+// is what makes the other six worth scrolling to.
+const listRows = 12
+
+// listMaxQuads bounds the one mesh every flat quad in the list goes into: a
+// background and a fill per row, the root panel, and the bar.
+const listMaxQuads = 2*listRows + 4
 
 func (g *game) Init(e *glyph.Engine) error {
 	r := e.Renderer()
@@ -136,6 +166,12 @@ func (g *game) Init(e *glyph.Engine) error {
 	g.camera = glyph.NewCamera(8)
 	g.camera.Target = mgl32.Vec3{0, 1, 0}
 
+	if g.scroll {
+		if err := g.initList(e); err != nil {
+			return err
+		}
+	}
+
 	g.uiMgr = ui.NewUIManager()
 	if err := g.showMenu(e); err != nil {
 		return err
@@ -164,7 +200,13 @@ func (g *game) button(e *glyph.Engine, label string, y float32, onClick func()) 
 	b.Anchor, b.OffsetX, b.OffsetY = ui.AnchorCenter, 0, y
 	b.OnClickFn = onClick
 
-	g.uiMgr.RegisterNavigable(b)
+	// In the -scroll demo the arrow keys belong to the list, so the menu
+	// entries are left off the keyboard traversal order rather than fighting
+	// it for the same keys. They are still clickable, which is how you get
+	// into the world from there.
+	if !g.scroll {
+		g.uiMgr.RegisterNavigable(b)
+	}
 	g.uiMgr.RegisterClickable(b)
 	g.buttons = append(g.buttons, b)
 	return nil
@@ -248,10 +290,97 @@ func (g *game) Update(e *glyph.Engine, _ float32) {
 	g.uiMgr.UpdateScale(g.screenSize(e))
 	g.uiMgr.HandleInput(in)
 
+	g.moveListFocus(in)
+
 	g.camera.Update(in)
 	e.SetCamera(g.camera.ViewVectors())
 
 	g.buildUI(e)
+}
+
+// Shutdown frees the one GPU resource the -scroll demo creates. It is a no-op
+// without the flag, because without it there is nothing to free.
+func (g *game) Shutdown(e *glyph.Engine) {
+	if g.listMesh != nil {
+		e.Renderer().DestroyMesh(g.listMesh)
+		g.listMesh = nil
+	}
+}
+
+// initList loads the list and the one mesh every flat quad in it goes into.
+func (g *game) initList(e *glyph.Engine) error {
+	tree, err := yamlui.Load(assetsFS, "assets/ui/menulist.yaml")
+	if err != nil {
+		return err
+	}
+	if g.listMesh, err = e.Renderer().CreateDynamicIndexedMesh(listMaxQuads*4, listMaxQuads*6); err != nil {
+		return err
+	}
+	g.listTree = tree
+	g.listAssets = &yamlui.AssetProvider{Font: g.font}
+	g.listTree.SetFocus("row0")
+	return nil
+}
+
+// moveListFocus is the whole keyboard path: the arrow keys pick a row, and
+// SetFocus is the only thing this example tells the widget tree.
+//
+// Where the view has to go to show that row is the tree's business, not the
+// game's -- which is the point. A row six places down is off screen, and the
+// game neither knows that nor has to: it names a widget and the container that
+// holds it scrolls the shortest distance that brings it into sight.
+func (g *game) moveListFocus(in *input.Input) {
+	if g.listTree == nil {
+		return
+	}
+	switch {
+	case in.KeyPressed(input.KeyDown), in.KeyPressed(input.KeyS):
+		g.listFocus++
+	case in.KeyPressed(input.KeyUp), in.KeyPressed(input.KeyW):
+		g.listFocus--
+	default:
+		return
+	}
+	if g.listFocus < 0 {
+		g.listFocus = 0
+	}
+	if g.listFocus >= listRows {
+		g.listFocus = listRows - 1
+	}
+	g.listTree.SetFocus(fmt.Sprintf("row%d", g.listFocus))
+}
+
+// buildList lays the list out and returns its draws: one mesh of flat quads
+// and the rows' labels.
+func (g *game) buildList(e *glyph.Engine, sw, sh float32) ([]renderer.UIRenderObject, []renderer.TextLine) {
+	if g.listTree == nil {
+		return nil, nil
+	}
+	for i := 0; i < listRows; i++ {
+		// The focused row's bar is full and every other row's is empty, which
+		// is the highlight. Bound every frame because focus moves.
+		v := float32(0)
+		if i == g.listFocus {
+			v = 100
+		}
+		g.listTree.BindFloat(fmt.Sprintf("v%d", i), v)
+	}
+
+	// UnscaledElapsed, not Elapsed: the pause menu is where a list like this
+	// is read, and Elapsed does not advance at TimeScale 0 -- an eased scroll
+	// driven off it would stop dead exactly where it is most wanted.
+	g.listTree.SetTime(e.UnscaledElapsed())
+
+	g.listProj = mgl32.Ortho(0, sw, 0, sh, -1, 1)
+	_, verts, idxs, text := g.listTree.BuildAt(e.Renderer(), g.listAssets, 60, 120, 1, sw, sh)
+	if len(verts) == 0 {
+		return nil, text
+	}
+	e.Renderer().UpdateMeshData(g.listMesh, verts, idxs)
+	return []renderer.UIRenderObject{{
+		RenderObject: renderer.RenderObject{Mesh: g.listMesh, MVP: g.listProj},
+		Opacity:      1,
+	}}, text
 }
 
 func (g *game) screenSize(e *glyph.Engine) (float32, float32) {
@@ -291,6 +420,10 @@ func (g *game) buildUI(e *glyph.Engine) {
 		Color: [3]float32{0.75, 0.78, 0.82},
 	})
 
+	listPanels, listText := g.buildList(e, sw, sh)
+	panels = append(panels, listPanels...)
+	lines = append(lines, listText...)
+
 	g.text.SetText(e.Renderer(), lines, sw, sh)
 	e.SetUIOverlays(panels)
 	e.SetMSDFOverlays([]renderer.RenderObject{g.text.RenderObject(sw, sh, 48)})
@@ -302,6 +435,7 @@ func main() {
 	fullscreen := flag.Bool("fullscreen", false, "run fullscreen on the primary monitor")
 	frames := flag.Int("frames", 0, "render N frames then exit (0 = run until closed)")
 	shot := flag.String("screenshot", "", "write a PNG of the last frame to this path")
+	scroll := flag.Bool("scroll", false, "show a scrollable inventory the arrow keys move focus through")
 	flag.Parse()
 
 	opts := []glyph.Option{
@@ -319,7 +453,7 @@ func main() {
 		opts = append(opts, glyph.WithScreenshot(*shot))
 	}
 
-	e, err := glyph.New(&game{}, opts...)
+	e, err := glyph.New(&game{scroll: *scroll}, opts...)
 	if err != nil {
 		log.Fatalf("create engine: %v", err)
 	}

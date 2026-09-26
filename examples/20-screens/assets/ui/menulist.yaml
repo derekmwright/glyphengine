@@ -1,0 +1,177 @@
+# A twelve-entry list in a view that shows six of them, for -scroll.
+#
+# The rows are progress bars rather than panels because a progress bar's fill
+# is the cheapest visible "this one is focused" this schema has: the game binds
+# the focused row's value to its max and every other row's to zero, so the
+# highlight is a filled row and everything else is the row's own background.
+# Both halves are flat quads, so the whole list is one mesh and one draw.
+#
+# The label inside each row is an ordinary child, which is the part worth
+# watching: text lines are clipped by trimming their glyph quads, so a row
+# sliding under the top edge loses the top of its letters rather than the whole
+# line at once.
+widget: panel
+id: root
+width: 260
+height: 240
+padding: 10
+gap: 8
+bg_color: [0.07, 0.08, 0.10]
+children:
+  - widget: label
+    id: title
+    height: 20
+    text: "INVENTORY — up/down"
+    font_size: 14
+    color: [0.78, 0.65, 0.31]
+
+  - widget: scroll_view
+    id: menu
+    height: 192
+    gap: 4
+    scrollbar: always
+    children:
+      - widget: progress_bar
+        id: row0
+        height: 30
+        value: "{v0}"
+        max: "100"
+        bg_color: [0.12, 0.13, 0.16]
+        fg_color: [0.20, 0.42, 0.30]
+        children:
+          - widget: label
+            text: "  01  iron ingot"
+            font_size: 15
+            color: [0.88, 0.89, 0.92]
+      - widget: progress_bar
+        id: row1
+        height: 30
+        value: "{v1}"
+        max: "100"
+        bg_color: [0.12, 0.13, 0.16]
+        fg_color: [0.20, 0.42, 0.30]
+        children:
+          - widget: label
+            text: "  02  oak plank"
+            font_size: 15
+            color: [0.88, 0.89, 0.92]
+      - widget: progress_bar
+        id: row2
+        height: 30
+        value: "{v2}"
+        max: "100"
+        bg_color: [0.12, 0.13, 0.16]
+        fg_color: [0.20, 0.42, 0.30]
+        children:
+          - widget: label
+            text: "  03  coil of rope"
+            font_size: 15
+            color: [0.88, 0.89, 0.92]
+      - widget: progress_bar
+        id: row3
+        height: 30
+        value: "{v3}"
+        max: "100"
+        bg_color: [0.12, 0.13, 0.16]
+        fg_color: [0.20, 0.42, 0.30]
+        children:
+          - widget: label
+            text: "  04  waxed thread"
+            font_size: 15
+            color: [0.88, 0.89, 0.92]
+      - widget: progress_bar
+        id: row4
+        height: 30
+        value: "{v4}"
+        max: "100"
+        bg_color: [0.12, 0.13, 0.16]
+        fg_color: [0.20, 0.42, 0.30]
+        children:
+          - widget: label
+            text: "  05  tin whistle"
+            font_size: 15
+            color: [0.88, 0.89, 0.92]
+      - widget: progress_bar
+        id: row5
+        height: 30
+        value: "{v5}"
+        max: "100"
+        bg_color: [0.12, 0.13, 0.16]
+        fg_color: [0.20, 0.42, 0.30]
+        children:
+          - widget: label
+            text: "  06  brass key"
+            font_size: 15
+            color: [0.88, 0.89, 0.92]
+      - widget: progress_bar
+        id: row6
+        height: 30
+        value: "{v6}"
+        max: "100"
+        bg_color: [0.12, 0.13, 0.16]
+        fg_color: [0.20, 0.42, 0.30]
+        children:
+          - widget: label
+            text: "  07  dried sage"
+            font_size: 15
+            color: [0.88, 0.89, 0.92]
+      - widget: progress_bar
+        id: row7
+        height: 30
+        value: "{v7}"
+        max: "100"
+        bg_color: [0.12, 0.13, 0.16]
+        fg_color: [0.20, 0.42, 0.30]
+        children:
+          - widget: label
+            text: "  08  lantern oil"
+            font_size: 15
+            color: [0.88, 0.89, 0.92]
+      - widget: progress_bar
+        id: row8
+        height: 30
+        value: "{v8}"
+        max: "100"
+        bg_color: [0.12, 0.13, 0.16]
+        fg_color: [0.20, 0.42, 0.30]
+        children:
+          - widget: label
+            text: "  09  whetstone"
+            font_size: 15
+            color: [0.88, 0.89, 0.92]
+      - widget: progress_bar
+        id: row9
+        height: 30
+        value: "{v9}"
+        max: "100"
+        bg_color: [0.12, 0.13, 0.16]
+        fg_color: [0.20, 0.42, 0.30]
+        children:
+          - widget: label
+            text: "  10  salt pork"
+            font_size: 15
+            color: [0.88, 0.89, 0.92]
+      - widget: progress_bar
+        id: row10
+        height: 30
+        value: "{v10}"
+        max: "100"
+        bg_color: [0.12, 0.13, 0.16]
+        fg_color: [0.20, 0.42, 0.30]
+        children:
+          - widget: label
+            text: "  11  copper wire"
+            font_size: 15
+            color: [0.88, 0.89, 0.92]
+      - widget: progress_bar
+        id: row11
+        height: 30
+        value: "{v11}"
+        max: "100"
+        bg_color: [0.12, 0.13, 0.16]
+        fg_color: [0.20, 0.42, 0.30]
+        children:
+          - widget: label
+            text: "  12  spare flint"
+            font_size: 15
+            color: [0.88, 0.89, 0.92]

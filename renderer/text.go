@@ -134,6 +134,16 @@ type TextLine struct {
 	// make one line glow and leave the next alone. It reaches the shader in the
 	// vertex position's unused Z; see msdf.vert.
 	Glow float32
+
+	// Clip confines this line to a screen-space rectangle; nil draws the whole
+	// line, which is what every line that has never heard of clipping does.
+	//
+	// Honoured by trimming the glyph quads rather than by a scissor, and for
+	// the same reason Glow is per line: an overlay is ONE mesh and ONE draw
+	// covering every line it was given, so a scissor could only clip all of
+	// them or none. Trimming costs two comparisons per glyph and four lerps
+	// per glyph that actually straddles an edge.
+	Clip *ClipRect
 }
 
 // TextOverlay renders bitmap text as colored quads.
@@ -182,13 +192,26 @@ func (t *TextOverlay) SetText(r *Renderer, lines []TextLine, screenW, screenH fl
 					}
 					px := charX + float32(col)*s
 					py := y0 + float32(row)*s
+					qx0, qy0, qx1, qy1 := px, py, px+s, py+s
+
+					// A clipped line trims each lit pixel to the clip rect.
+					// These quads carry no UV -- the bitmap font is drawn as
+					// flat colour -- so trimming is the rect intersection and
+					// nothing else.
+					if line.Clip != nil {
+						var ok bool
+						qx0, qy0, qx1, qy1, _, _, _, _, ok = line.Clip.TrimQuad(qx0, qy0, qx1, qy1, 0, 0, 1, 1)
+						if !ok {
+							continue
+						}
+					}
 
 					base := uint16(len(vertices))
 					vertices = append(vertices,
-						Vertex{Pos: [3]float32{px, py, 0}, Color: line.Color, Normal: [3]float32{0, 0, 0}},
-						Vertex{Pos: [3]float32{px + s, py, 0}, Color: line.Color, Normal: [3]float32{0, 0, 0}},
-						Vertex{Pos: [3]float32{px + s, py + s, 0}, Color: line.Color, Normal: [3]float32{0, 0, 0}},
-						Vertex{Pos: [3]float32{px, py + s, 0}, Color: line.Color, Normal: [3]float32{0, 0, 0}},
+						Vertex{Pos: [3]float32{qx0, qy0, 0}, Color: line.Color, Normal: [3]float32{0, 0, 0}},
+						Vertex{Pos: [3]float32{qx1, qy0, 0}, Color: line.Color, Normal: [3]float32{0, 0, 0}},
+						Vertex{Pos: [3]float32{qx1, qy1, 0}, Color: line.Color, Normal: [3]float32{0, 0, 0}},
+						Vertex{Pos: [3]float32{qx0, qy1, 0}, Color: line.Color, Normal: [3]float32{0, 0, 0}},
 					)
 					indices = append(indices,
 						base, base+1, base+2,

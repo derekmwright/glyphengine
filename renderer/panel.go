@@ -144,6 +144,13 @@ type UIRenderObject struct {
 	// built through NineSlice carry theirs from there, and a game assembling
 	// UIRenderObjects itself sets this directly.
 	Fill *PanelFill
+
+	// Clip confines this draw to a screen-space rectangle; nil draws the whole
+	// object, which is what everything that has never heard of clipping does.
+	// The composite pass turns it into a scissor around this draw alone, so
+	// two objects in the same frame can be clipped to different rectangles.
+	// See ClipRect.
+	Clip *ClipRect
 }
 
 // UIRenderObjects returns UIRenderObjects with per-layer opacity for the UI pipeline.

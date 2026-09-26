@@ -110,6 +110,27 @@ func appendMSDFGeometry(vertices []Vertex, indices []uint16, font *Font, lines [
 				uRight := g.AtlasBounds[2]
 				vTop := 1.0 - g.AtlasBounds[3]
 
+				// A clipped line trims each glyph quad and carries its UVs
+				// with it, so the part of the glyph that survives still
+				// samples the part of the atlas that belongs over those
+				// pixels. Cutting the quad and leaving the UVs where they were
+				// would squeeze the whole glyph into what is left of its box,
+				// which reads as a smear rather than as a row sliding under an
+				// edge.
+				//
+				// A glyph entirely outside the clip emits nothing at all,
+				// which is what makes a long list cheaper to draw scrolled
+				// than unscrolled rather than dearer.
+				if line.Clip != nil {
+					var inside bool
+					x0, y0, x1, y1, uLeft, vTop, uRight, vBottom, inside =
+						line.Clip.TrimQuad(x0, y0, x1, y1, uLeft, vTop, uRight, vBottom)
+					if !inside {
+						cursorX += g.Advance * fontSize
+						continue
+					}
+				}
+
 				// Alpha: 0 means fully opaque (default zero-value), otherwise use as-is.
 				alpha := line.Alpha
 				if alpha == 0 {
