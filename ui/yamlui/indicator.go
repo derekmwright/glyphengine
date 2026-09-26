@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/derekmwright/glyphengine/renderer"
+	"github.com/derekmwright/glyphengine/ui/ease"
 	"gopkg.in/yaml.v3"
 )
 
@@ -42,6 +43,16 @@ const sweepStepDeg = 6.0
 type IndicatorOpacity struct {
 	Start float32 `yaml:"start"`
 	End   float32 `yaml:"end"`
+
+	// Ease shapes the interpolation between them, by ui/ease name. Empty is
+	// linear, which is what the ramp always was.
+	//
+	// It eases on frac rather than on time, because that is what the ramp
+	// interpolates on and there is no other clock here: a cooldown that runs
+	// down at a constant rate and fades with out_cubic loses most of its alpha
+	// early and then lingers, which is how a sweep stops shouting at the player
+	// for the last half second of a long cooldown.
+	Ease string `yaml:"ease"`
 }
 
 // IndicatorDef is a driven overlay effect attached to a widget: a cooldown
@@ -210,6 +221,13 @@ func (d *IndicatorDef) validate(widget string) error {
 		}
 	}
 
+	if d.Opacity.Ease != "" {
+		if _, ok := ease.ByName(d.Opacity.Ease); !ok {
+			return fmt.Errorf("widget %s: indicator: opacity: unknown ease %q (want %s)",
+				widget, d.Opacity.Ease, strings.Join(ease.Names(), ", "))
+		}
+	}
+
 	if _, err := parseHexColor(d.Color); err != nil {
 		return fmt.Errorf("widget %s: indicator: %w", widget, err)
 	}
@@ -243,7 +261,10 @@ func (d *IndicatorDef) rgb() [3]float32 {
 // paths agree.
 func (d *IndicatorDef) ramp() IndicatorOpacity {
 	if d.Opacity.Start == 0 && d.Opacity.End == 0 {
-		return IndicatorOpacity{Start: 1, End: 1}
+		// Ease is carried across: a Go-built ramp that says out_cubic and
+		// nothing else is asking for the default endpoints on that curve, and
+		// dropping the curve here would ease the YAML path and not the other.
+		return IndicatorOpacity{Start: 1, End: 1, Ease: d.Opacity.Ease}
 	}
 	return d.Opacity
 }
@@ -338,8 +359,15 @@ func (d *IndicatorDef) cover(frac float32) float32 {
 
 // alpha interpolates the opacity ramp. Start is the alpha at frac 1 and End at
 // frac 0, which is the direction a cooldown runs.
+//
+// An unknown `ease` name cannot reach here from YAML -- validate rejects it at
+// load -- and from a Go-built block it reads as linear, which is the ramp with
+// no curve at all rather than a ramp that is missing.
 func (d *IndicatorDef) alpha(frac float32) float32 {
 	r := d.ramp()
+	if f, ok := ease.ByName(r.Ease); ok {
+		frac = f(frac)
+	}
 	return r.End + frac*(r.Start-r.End)
 }
 

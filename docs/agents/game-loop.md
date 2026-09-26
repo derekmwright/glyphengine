@@ -42,6 +42,8 @@ api:
   - glyphengine.Engine.SetTimeScale
   - glyphengine.Engine.TimeScale
   - glyphengine.Engine.Paused
+  - glyphengine.Engine.Elapsed
+  - glyphengine.Engine.UnscaledElapsed
   - glyphengine.WithShaders
   - renderer.Renderer.SetShaderParameters
   - renderer.ShaderParameterBytes
@@ -52,7 +54,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-09-24 # streamed uploads from a worker
+verified: 2026-09-26 # UnscaledElapsed, and Elapsed's contract corrected
 ---
 
 # Run a game loop with Engine and Game
@@ -523,6 +525,32 @@ What keeps running: `Update`, `LateUpdate`, and rendering — everything a pause
 game needs to still be a program. They get the **real** frame delta, not the
 scaled one, so a menu animates and a camera moves at full speed over a stopped
 world. A game that wants its camera slowed too multiplies by `TimeScale` itself.
+
+### The two clocks
+
+```go
+e.Elapsed()          // simulation time: SCALED, stops at scale 0
+e.UnscaledElapsed()  // wall time since Run started, whatever the scale
+```
+
+`Elapsed` is the clock the shaders animate on, and it is scaled — pausing the
+game has to stop the grass moving. It was documented as wall-clock time until
+2026-09-26 and was never that; a fade written against that description works in
+every test and never in a paused menu, which is where fades mostly live.
+
+`UnscaledElapsed` is for anything that must keep moving while the world is
+stopped: a modal fading in, a spinner on a loading screen, a menu sliding.
+
+```go
+tree.SetTime(e.UnscaledElapsed())   // ui/yamlui transitions
+```
+
+Both advance in `advanceSimulation`, with the ticks, so neither can drift past
+the other when a frame is skipped, and under `WithFixedFrameTime` both advance
+by the fixed delta — so a transition lands on the same frame in every run and a
+capture of it is comparable. `task transition` is the gate: it renders a yamlui
+dialog fading in at `SetTimeScale(0)`, and driving it off `Elapsed` instead
+leaves the dialog missing from every frame.
 
 **Scaling goes into the accumulator, never into the tick delta.** A fixed
 timestep is only fixed if `tickDt` never moves; slow motion that shortened the

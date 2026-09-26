@@ -458,6 +458,16 @@ type Engine struct {
 	sunMesh  *renderer.Mesh
 	elapsed  float32 // running time counter for shader animation
 
+	// unscaledElapsed is the same counter with SetTimeScale left out of it.
+	//
+	// Kept beside elapsed rather than derived from it because the two separate
+	// the moment the scale is anything but 1 and there is no way back: elapsed
+	// is a sum of already-scaled deltas, so dividing it by the current scale
+	// recovers nothing, and at scale 0 it is a division by zero. A UI
+	// transition running while the world is paused is the case that needs
+	// this; see UnscaledElapsed.
+	unscaledElapsed float32
+
 	// nightGrade is Scene.NightGrade in the renderer's own shape, kept here
 	// so the per-frame SceneLighting can point at it without allocating.
 	nightGrade renderer.NightGrade
@@ -1146,6 +1156,13 @@ func (e *Engine) advanceSimulation(frameDelta time.Duration) {
 	// what matters is that nothing can skip it without skipping the ticks too.
 	e.elapsed += float32(frameDelta.Seconds()) * e.timeScale
 
+	// The unscaled clock advances here too, and for the same reason: it has to
+	// be somewhere the loop cannot skip without skipping the ticks. frameDelta
+	// has already been replaced by the fixed one when WithFixedFrameTime or
+	// GLYPHENGINE_FIXED_FRAME_TIME is in force, so a menu fade is as capturable
+	// as the rest of the frame. See UnscaledElapsed.
+	e.unscaledElapsed += float32(frameDelta.Seconds())
+
 	// The simulation clock is the real one scaled. Scaling what goes into the
 	// accumulator rather than the tick delta is the whole design: a fixed
 	// timestep is only fixed if tickDt never moves, and slow motion that
@@ -1222,8 +1239,33 @@ func (e *Engine) TimeScale() float32 { return e.timeScale }
 // Paused reports whether the simulation clock is stopped.
 func (e *Engine) Paused() bool { return e.timeScale == 0 }
 
-// Elapsed returns the running wall-clock time in seconds since Run started.
+// Elapsed returns the running SIMULATION time in seconds since Run started.
+//
+// It is scaled by SetTimeScale: at scale 0 it stops, at 0.5 it advances at half
+// the rate of the wall clock, and it can never be read as a wall-clock reading.
+// That is deliberate -- it is the clock the shaders animate on, so pausing the
+// game has to stop the grass moving -- but it used to be documented as
+// wall-clock time, which is how a paused menu animation gets written against
+// the wrong clock and then never runs.
+//
+// For time that keeps going while the world is stopped, use UnscaledElapsed.
 func (e *Engine) Elapsed() float32 { return e.elapsed }
+
+// UnscaledElapsed returns the running wall-clock time in seconds since Run
+// started, unaffected by SetTimeScale.
+//
+// This is the clock anything that must keep moving while the game is paused
+// runs on: a modal fading in, a menu sliding, a spinner on a loading screen.
+// Elapsed cannot serve them, because a game pauses by setting the scale to 0
+// and a transition driven off Elapsed then never finishes -- a dialog that
+// opens only when the game is running is a dialog that never opens.
+//
+//	tree.SetTime(e.UnscaledElapsed())   // ui/yamlui transitions
+//
+// Under WithFixedFrameTime (or GLYPHENGINE_FIXED_FRAME_TIME) it advances by the
+// fixed delta, exactly as Elapsed does before scaling, so a transition lands on
+// the same frame in every run and a capture of it is comparable.
+func (e *Engine) UnscaledElapsed() float32 { return e.unscaledElapsed }
 
 // SetFogDensity sets the environment's fog density (0 disables fog).
 //

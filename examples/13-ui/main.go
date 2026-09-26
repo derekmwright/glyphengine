@@ -19,6 +19,7 @@
 //	go run ./13-ui -frames 120        # render 120 frames, then exit
 //	go run ./13-ui -glow on           # a second panel whose elements emit light
 //	go run ./13-ui -yamlui cooldown   # a second HUD, built from YAML
+//	go run ./13-ui -yamlui dialog     # space opens and closes a dialog
 //
 // -glow selects one of four modes, and the reason there are four is that each
 // pair of them isolates exactly one thing:
@@ -51,6 +52,15 @@
 // not, so this exists to be looked at. `indicators` is the fixed grid
 // `task indicator` reads pixels out of.
 //
+// `dialog` is the `transition:` block, and it pauses the scene with
+// SetTimeScale(0) while it runs -- which is the point of it. A modal mostly
+// opens while the game is stopped, so a fade driven off the scaled clock would
+// never move; this one runs on Engine.UnscaledElapsed and does. Space opens and
+// closes it. A still frame cannot tell out_back's overshoot on the cancel bar
+// from a slow arrival either, so this is the other thing here that exists to be
+// looked at. -dialogopen and -dialogclose replace the key with a fixed frame
+// number, which is how `task transition` captures the same instant every run.
+//
 // It is off by default and allocates nothing when off, so every capture this
 // example already produces is unchanged.
 //
@@ -64,6 +74,7 @@ import (
 	"log"
 	"math"
 	"runtime"
+	"strings"
 
 	"github.com/go-gl/mathgl/mgl32"
 
@@ -121,8 +132,18 @@ type game struct {
 	yamlName   string
 	yamlZero   bool
 	yamlLabels bool
-	yamlTree   *yamlui.WidgetTree
-	yamlAssets *yamlui.AssetProvider
+
+	// The dialog demo (-yamlui dialog). dialogMode also pauses the scene, so
+	// that a capture of the fade has a still background to sit on and the
+	// unscaled clock is the only thing still moving.
+	dialogMode  bool
+	dialogLive  bool
+	dialogOpen  int // frame the dialog opens on; 0 = the space bar drives it
+	dialogClose int // frame it closes on; 0 = it stays open
+	dialogOn    bool
+	frame       int
+	yamlTree    *yamlui.WidgetTree
+	yamlAssets  *yamlui.AssetProvider
 	// The icon texture is not destroyed here: the renderer sweeps its own
 	// texture registry at Destroy, which is how 16-materials and
 	// 21-streetlights leave theirs too. The meshes are not in that sweep.
@@ -269,6 +290,17 @@ func (g *game) Init(e *glyph.Engine) error {
 		}
 	}
 
+	// The dialog demo stops the world. Everything this example animates in
+	// Update is multiplied by TimeScale below, which is the engine's own
+	// advice for a game that wants its presentation paused too -- SetTimeScale
+	// stops the simulation and deliberately leaves Update running at full
+	// speed. The transition is then the only thing on screen that moves, which
+	// is what makes "the paused scene did not change between captures" a
+	// statement a gate can check.
+	if g.dialogMode && !g.dialogLive {
+		e.SetTimeScale(0)
+	}
+
 	g.camera = glyph.NewCamera(9)
 	g.camera.Target = mgl32.Vec3{0, 1.2, 0}
 	g.camera.Pitch = 0.20
@@ -278,12 +310,28 @@ func (g *game) Init(e *glyph.Engine) error {
 }
 
 func (g *game) Update(e *glyph.Engine, dt float32) {
-	g.t += dt
+	// Scaled by TimeScale so that pausing stops the presentation too. It is 1
+	// in every mode but the dialog demo, and multiplying by exactly 1 leaves
+	// every other capture this example produces bit for bit what it was.
+	sdt := dt * e.TimeScale()
+	g.t += sdt
+
+	if g.dialogMode {
+		g.frame++
+		switch {
+		case g.dialogOpen > 0:
+			// Scripted: the same frames open and close it every run, which is
+			// what lets a capture be compared against another run's.
+			g.dialogOn = g.frame >= g.dialogOpen && (g.dialogClose <= 0 || g.frame < g.dialogClose)
+		case e.Input().KeyPressed(input.KeySpace):
+			g.dialogOn = !g.dialogOn
+		}
+	}
 
 	if t, ok := e.C.Transform.Get(g.cube); ok {
-		t.Rotation[1] += 0.4 * dt
+		t.Rotation[1] += 0.4 * sdt
 	}
-	g.camera.Yaw += autoOrbitRate * dt
+	g.camera.Yaw += autoOrbitRate * sdt
 	e.SetCamera(g.camera.ViewVectors())
 
 	// Drift the values so the bars visibly track something.
@@ -477,6 +525,9 @@ func main() {
 	yamlName := flag.String("yamlui", "", "draw a second HUD from assets/ui/<name>.yaml (empty = off)")
 	yamlZero := flag.Bool("yamluizero", false, "bind every indicator value to zero: what a finished cooldown leaves behind")
 	yamlLabels := flag.Bool("yamluilabels", true, "draw the YAML HUD's labels")
+	dialogLive := flag.Bool("dialoglive", false, "in the dialog demo, leave the scene running instead of pausing it")
+	dialogOpen := flag.Int("dialogopen", 0, "in the dialog demo, open the dialog on this frame instead of on the space bar")
+	dialogClose := flag.Int("dialogclose", 0, "in the dialog demo, close it again on this frame (0 = leave it open)")
 	flag.Parse()
 
 	mode, err := parseGlowMode(*glow)
@@ -515,6 +566,13 @@ func main() {
 		yamlName:     *yamlName,
 		yamlZero:     *yamlZero,
 		yamlLabels:   *yamlLabels,
+		// Both dialog files select the demo: `task transition` renders the one
+		// without the blocks through the same paused, scripted run, or the two
+		// captures would differ by more than the transition.
+		dialogMode:  strings.HasPrefix(*yamlName, "dialog"),
+		dialogLive:  *dialogLive,
+		dialogOpen:  *dialogOpen,
+		dialogClose: *dialogClose,
 	}, opts...)
 	if err != nil {
 		log.Fatalf("create engine: %v", err)

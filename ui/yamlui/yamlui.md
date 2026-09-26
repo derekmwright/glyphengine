@@ -50,6 +50,7 @@ Container widget. Arranges children in a layout. Optionally renders a nine-slice
 | `visible` | string | — | Template. `"false"` or `"0"` hides widget and all children |
 | `overlay` | string | — | ID of sibling — positions this widget at the same Y as that sibling (vertical layout only) |
 | `indicator` | block | — | Driven overlay effect. See [Indicator](#indicator) |
+| `transition` | block | — | Fade, scale and slide as `visible` flips. Allowed on every widget type. See [Transition](#transition) |
 | `children` | list | — | Child widget definitions |
 
 **Rendering priority:** If `nine_slice` is set, renders a nine-slice panel. If only `bg_color` is set, renders a flat colored rectangle. If neither, the panel is invisible (layout-only container).
@@ -242,7 +243,7 @@ the game updates every frame.
 | `value` | string | — | Current value. Template: `"{cooldown}"` |
 | `max` | string | — | Maximum value. Template: `"{cooldown_max}"` |
 | `color` | string | `#000000` | Overlay colour, `#rrggbb`. The same space a `color:` triple is in — each channel is the hex digit pair over 255 |
-| `opacity` | block | opaque | `{ start, end }`. `start` is the alpha at `frac` 1, `end` the alpha at `frac` 0 |
+| `opacity` | block | opaque | `{ start, end, ease }`. `start` is the alpha at `frac` 1, `end` the alpha at `frac` 0, and `ease` shapes the ramp between them by [`ui/ease`](../ease) name |
 
 ### Semantics
 
@@ -270,7 +271,12 @@ the game updates every frame.
   alpha and adds **no geometry**: at alpha 0 the widget is untouched, at 1 it is
   fully multiplied, and in between it crossfades.
 - **`opacity`** interpolates on `frac`, not on coverage, so a cooldown fades out
-  as it expires. Omit the block for a fully opaque overlay.
+  as it expires. Omit the block for a fully opaque overlay. An `ease` shapes
+  that interpolation — `ease: out_cubic` on a `{start: 0.6, end: 0}` ramp loses
+  most of the alpha early and then lingers, which is how a sweep stops shouting
+  at the player for the last half second of a long cooldown. The endpoints are
+  untouched by any curve, so "frac 0 draws nothing" still holds. The same eight
+  names the [`transition:`](#the-curves) block uses.
 
 ### Draw order
 
@@ -347,6 +353,180 @@ of the validation. Two consequences for an action bar assembled in Go:
 Everything else — the direction words, the colour, the fill — is resolved from
 the strings on every draw, so a block built in Go behaves exactly like the same
 block written in YAML.
+
+## Transition
+
+An optional block on **any** widget that fades, scales and slides it as its
+`visible` binding flips. There is no `play()`, no trigger and no timeline: a
+game already has a bool for "is the dialog open", and the whole point is that it
+does not need a second one.
+
+```yaml
+- widget: panel
+  id: confirm_dialog
+  visible: "{confirm_open}"
+  transition:
+    duration: 0.2       # seconds, on the UNSCALED clock. Required
+    ease: out_cubic     # any curve below; default linear
+    opacity: true       # fade from 0; default true
+    scale: 0.9          # grow from this factor to 1 about the anchor; default 1
+    offset_y: -12       # slide from this many pixels to 0; offset_x likewise
+    out: in_quad        # a different curve on the way out; default the in curve played back
+```
+
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `duration` | float | **required** | Seconds. Must be positive |
+| `ease` | string | `linear` | The curve the in-transition plays. See the set below |
+| `opacity` | bool | `true` | Fade from fully transparent. `false` for a slide or a scale with no fade |
+| `scale` | float | `1` | The factor the widget grows from, about its anchor. Must be positive |
+| `offset_x` | float | `0` | Reference pixels the widget slides from, multiplied by the tree's scale like every other length here |
+| `offset_y` | float | `0` | |
+| `out` | string | — | A separate curve for the out. Without it the out is the in curve read at a descending progress: the same shape, played back |
+
+### The curves
+
+`linear`, `in_quad`, `out_quad`, `in_out_quad`, `in_cubic`, `out_cubic`,
+`in_out_cubic`, `out_back` — the standard Penner names, exported from
+[`ui/ease`](../ease) so a HUD built in Go can use the same shapes.
+
+| Curve | How it reads |
+|---|---|
+| `linear` | No easing. Mechanical on anything that moves, and exactly right for a crossfade, where a constant rate of change *is* the even blend |
+| `in_quad` | Starts slow, accelerates. Something leaving under its own power |
+| `out_quad` | Starts fast, decelerates into rest. The gentlest arrival here |
+| `in_out_quad` | Symmetric. The safe default for something that both appears and disappears |
+| `in_cubic` | `in_quad` sharper: slower at the start, faster at the end |
+| `out_cubic` | Decelerates harder than `out_quad`. The usual choice for a panel arriving — quick without ever snapping to a stop |
+| `in_out_cubic` | `in_out_quad` with more contrast between the middle and the ends. Deliberate rather than merely smooth |
+| `out_back` | Overshoots about 10% past its target around t 0.6 and settles back. A dialog that pops rather than arrives |
+
+`out_back` is the only one that leaves 0..1. The overshoot reaches the scale and
+the offset, which is the point of it; the opacity is clamped, because there is
+nothing above fully opaque.
+
+### Semantics
+
+- **Driven by `visible`.** True starts the in, false starts the out. The widget
+  is skipped only once the out **finishes**, not when `visible` flips.
+- **Flipping mid-transition reverses from the current progress**, not from the
+  start. A dialog dismissed halfway through its arrival takes half as long to
+  leave, and re-opening it from there picks up where it was.
+- **A widget already visible at the first build starts at rest.** A HUD does not
+  fade in on every level load.
+- **Nothing here touches layout.** The resolved rect and the resolved opacity
+  are transformed at draw time, after layout has run, so siblings do not reflow
+  while a dialog slides in. The one exception is documented below.
+- **Input is refused from the first frame `visible` is false**, not when the
+  fade ends — so the click that dismissed a dialog cannot also hit what was
+  underneath it. During the in the widget takes clicks normally, and hit testing
+  uses the **transformed** rect: a button sliding in is clickable where it is
+  drawn. The refusal covers the whole subtree, and the hover highlight with it.
+- **`scale` is about the widget's anchor**, which is its rect centre. This
+  schema has no anchor field, and a modal growing from its middle is what
+  `scale` means everywhere it is offered. The whole subtree scales as one, so a
+  dialog's buttons arrive with the dialog rather than sliding around inside it.
+- **Transitions nest.** A child with its own block multiplies its opacity by its
+  parent's and transforms inside the parent's transform.
+- **Per-widget state lives on the node.** `Load` and `SetChildren` build new
+  nodes, so a tree rebuilt from YAML starts at rest rather than resuming a fade
+  that belonged to the list it replaced.
+
+#### The one place a transition meets layout
+
+A widget playing its **out** is invisible by binding but still on screen, so it
+keeps its layout box until the out finishes — without one its rect is the zero
+rect and it fades out at the top-left corner, a pixel wide. Siblings therefore
+close up when the out ends rather than on the frame `visible` flipped. A widget
+with no `transition:` block is unaffected: hiding it still reflows immediately.
+
+### The clock
+
+Transitions run on a clock the host feeds in, beside the input:
+
+```go
+tree.SetInput(state)
+tree.SetTime(e.UnscaledElapsed())   // NOT e.Elapsed()
+panels, verts, idxs, text := tree.BuildAt(r, assets, x, y, scale, sw, sh)
+```
+
+`Engine.UnscaledElapsed` and not `Engine.Elapsed`, and this is the part that is
+easy to get wrong because it works in every test: `Elapsed` is scaled by
+`SetTimeScale`, a game pauses by setting the scale to 0, and a modal is very
+nearly always opened while the game is paused. A fade wired to `Elapsed` never
+starts in the one situation it exists for. `task transition` is the gate for
+exactly that, and it captures every frame at `SetTimeScale(0)`.
+
+The value is a running total rather than a delta, so a host that skips a frame
+loses no time and one that hands the same reading twice advances nothing. Under
+`GLYPHENGINE_FIXED_FRAME_TIME` it advances by the fixed delta, which is what
+makes a capture of a fade land on the same point every run.
+
+**A tree that is never given a clock plays no transitions at all**: every widget
+cuts to hidden or to rest the moment `visible` flips, exactly as if the block
+were absent. That is deliberate. A delta that was always zero would leave a
+widget that just became visible stuck at the start of its fade forever, and "my
+dialog never opens" is a far harder failure to read than "my dialog does not
+fade".
+
+### What the host has to supply
+
+A fading **flat `bg_color` panel** needs `ShapeFn`, for the same reason an
+`indicator:` does: `renderer.Vertex` has no alpha channel, so a quad that is
+half faded cannot ride the shared vertex stream. While it is fading it is handed
+to `ShapeFn` as its own render object, and it goes back into the vertex stream
+the moment the transition settles. Two consequences:
+
+- Mid-transition the widget composites **over** its siblings' flat quads rather
+  than under them, because it is in the panel stream. For a dialog arriving over
+  a HUD that is where it belongs.
+- Without `ShapeFn` it still scales and slides but does not fade. It falls back
+  to the vertex stream rather than being dropped — unlike an `indicator:`, which
+  draws nothing — because a dialog that is briefly opaque is a smaller surprise
+  than one that is missing.
+
+Nine-slice panels, sprites and labels need nothing extra: their opacity already
+has somewhere to live, on `UIRenderObject.Opacity` and `TextLine.Alpha`.
+
+### Past the end, nothing is different
+
+Once the in has finished, a transitioning widget is on exactly the draw path a
+widget with no block is on — the same render objects, the same vertex stream,
+the same text, with `TextLine.Alpha` back to the 0 that means opaque. Adding a
+`transition:` to a HUD does not change a screenshot of it at rest.
+`task transition` checks that pixel for pixel against the same YAML with the
+block deleted, and `TestFramePastTheEndMatchesNoTransition` checks it render
+object for render object.
+
+### Errors
+
+Validated at **load**, naming the widget, the same way the indicator block is:
+
+```
+yamlui: load hud.yaml: widget "confirm_dialog": transition: unknown key "offset"
+yamlui: load hud.yaml: widget "confirm_dialog": transition: duration is required and must be positive, got 0
+yamlui: load hud.yaml: widget "confirm_dialog": transition: unknown ease "out_bounce" (want linear, in_quad, out_quad, in_out_quad, in_cubic, out_cubic, in_out_cubic, out_back)
+yamlui: load hud.yaml: widget "confirm_dialog": transition: unknown out "elastic" (want linear, in_quad, ...)
+yamlui: load hud.yaml: widget "confirm_dialog": transition: scale must be positive, got 0
+```
+
+### Building one in Go
+
+`SetChildren` takes `WidgetDef` structs rather than YAML, so it does not run the
+unmarshaller and therefore applies none of the defaults above and performs none
+of the validation:
+
+- Set `Opacity: true` explicitly. The zero value is `false`, which is a
+  transition that moves without fading.
+- An all-zero `Scale` is read as 1 (no scale), because a widget scaled from
+  nothing and held there is never what anyone means. Written in YAML, `scale: 0`
+  is rejected at load instead, so the two paths cannot disagree about a number
+  someone actually typed.
+
+`examples/13-ui` drives the whole block behind `-yamlui dialog`:
+`go run ./13-ui -yamlui dialog` pauses the scene and opens a confirm dialog on
+the space bar, with an `out_back` pop on the bar inside it. A still frame cannot
+tell an overshoot from a slow arrival, so that one exists to be looked at.
 
 ## Layout Algorithm
 
