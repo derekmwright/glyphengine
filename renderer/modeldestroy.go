@@ -193,21 +193,24 @@ func (r *Renderer) ResourceCounts() ResourceCounts {
 //     one share and destroys only when the last one goes; a texture that was
 //     never cached is destroyed outright, exactly as before.
 //
-//   - **Frames in flight.** DestroyMesh and DestroyTexture free a static
-//     resource IMMEDIATELY; only a dynamic mesh goes through DeferDestroy.
-//     That is fine at shutdown, where Renderer.Destroy has already waited for
-//     the device to go idle, and it is a use-after-free for a model a frame
-//     still in flight is drawing -- which is the whole point of being able to
-//     release one at runtime. So the entire release goes through DeferDestroy
-//     rather than DestroyMesh's and DestroyTexture's immediacy being changed
-//     under every other caller of them.
+//   - **Frames in flight.** A frame submitted just before this call is still
+//     drawing the model, so nothing it owns may be freed here. The whole
+//     release goes through DeferDestroy, and the callback then uses the
+//     immediate destroyMaterialNow/releaseGLTFTextureNow/destroyMeshNow rather
+//     than the public DestroyMesh/DestroyTexture/DestroyMaterial, which defer
+//     in their own right. Deferring inside a deferral would make a released
+//     level's resources wait two countdowns instead of one -- twice the
+//     geometry held by a game that reloads on a tick, for no safety at all,
+//     since this callback does not run until every frame that could have been
+//     in flight at the call has retired. That is the one countdown
+//     TestDestroyModelRetiresItsMeshesInOneCountdown pins.
 //
 //   - **The renderer's own bookkeeping.** r.meshes, r.textures and r.materials
-//     exist so Destroy can clean up after an application that did not, and the
-//     Destroy* methods deregister from them as they go (read DestroyMesh's own
+//     exist so Destroy can clean up after an application that did not, and
+//     every retirement deregisters from them as it goes (read retireMesh's own
 //     comment: without that, an explicit destroy is followed by a second free
 //     at shutdown and the layer reports invalid handles). Routing through
-//     those same methods is what keeps that right, rather than freeing the
+//     those same functions is what keeps that right, rather than freeing the
 //     Vulkan objects here and leaving three dangling pointers behind.
 //
 // After it returns, every ModelMesh's Mesh, Texture and Material is nil, so a
@@ -241,13 +244,13 @@ func (r *Renderer) DestroyModel(m *Model) {
 	// first.
 	r.DeferDestroy(func() {
 		for _, mat := range res.materials {
-			r.DestroyMaterial(mat)
+			r.destroyMaterialNow(mat)
 		}
 		for _, t := range res.textures {
-			r.releaseGLTFTexture(t)
+			r.releaseGLTFTextureNow(t)
 		}
 		for _, mesh := range res.meshes {
-			r.DestroyMesh(mesh)
+			r.destroyMeshNow(mesh)
 		}
 	})
 }

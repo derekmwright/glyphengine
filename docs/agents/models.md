@@ -34,6 +34,7 @@ api:
   - renderer.Renderer.LoadGLTFSkinned
   - renderer.ReadGLTF
   - renderer.ReadGLTFSkinned
+  - renderer.Renderer.DestroyMesh
   - renderer.Renderer.DestroyModel
   - renderer.Renderer.DestroySkinnedModel
   - renderer.Renderer.DestroyTexture
@@ -73,7 +74,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: bundled
-verified: 2026-09-25 # decode borrows the PNG buffer (#135); images shared between documents (#136); dynamic mesh slot rule (#137)
+verified: 2026-10-02 # one runtime-safe release contract for meshes and textures (#153)
 ---
 
 # Treat a loaded model as geometry, not only as a draw call
@@ -120,8 +121,9 @@ measured cost of one 1089-vertex, 6144-index patch is recorded with the
 benchmark below.
 
 Remove all draws borrowing a range before `arena.Free(mesh)` (or
-`r.DestroyMesh(mesh)`). Reuse waits out all frames in flight, and `Stats` includes
-retiring ranges until then. `r.DestroyMeshArena(arena)` panics with the arena's
+`r.DestroyMesh(mesh)`, which is the same operation -- see
+[one contract](#releasing-anything-at-runtime-one-contract)). Reuse waits out
+all frames in flight, and `Stats` includes retiring ranges until then. `r.DestroyMeshArena(arena)` panics with the arena's
 name if any range has not been freed; after all frees are queued, destruction
 may be queued immediately behind them. Both release operations are idempotent.
 `ResourceCounts.MeshArenas` and `.MeshRanges` include deferred resources;
@@ -395,11 +397,21 @@ enqueued, recorded, or waiting out the fence of the submission that carried
 them. It returns to zero a few frames after the last publish, and a streaming
 game's steady value is roughly the publish rate times the frames in flight.
 
-`DestroyMesh` and `MeshArena.Free` accept a mesh whose upload has not landed. A
-copy that is still only queued is dropped and its staging returned at once; one
-already recorded into a command buffer that will run keeps its destination
-alive behind the same deferred countdown every other retirement uses, so the
-copy always has somewhere to land.
+`DestroyMesh` and `MeshArena.Free` accept a mesh in any upload state, and the
+three are indistinguishable from outside:
+
+| State | Staging | Destination buffers |
+|---|---|---|
+| queued (copy not recorded) | dropped and returned at the call | retire after the frames in flight |
+| recorded (copy in a submitted command buffer) | retires on that batch's own fence | retire after the frames in flight |
+| settled (ticket ready) | already gone | retire after the frames in flight |
+
+The destination never goes before the copy that writes it, and that is not two
+countdowns happening to agree: the batch's retirement is queued at the end of
+the frame that recorded it, and a release can only reach the "recorded" state
+from a *later* frame's update, so its countdown lands in the same flush or a
+later one. Both sit in the one deferred queue, batch first.
+`TestDestroyMeshRetiresInEveryUploadState` asserts it per flush.
 
 ### Barriers
 
@@ -803,6 +815,110 @@ skip and leaving only the upload shared reports `193 MiB -> 145 MiB`: three
 quarters of the cost is the read and the conversion, which is why the cache is
 consulted *before* `decodeGLTFImages` rather than after it.
 
+## Releasing anything at runtime: one contract
+
+Every public release on the renderer means the same two things, whatever the
+resource and whatever state it is in:
+
+1. **It stops being live immediately.** The mesh, texture, material, instance
+   set or range reads as destroyed from the moment the call returns, the cache
+   stops naming a shared texture, and a dynamic mesh stops receiving updates.
+2. **Its Vulkan objects are destroyed later**, once the frames that were in
+   flight at the call have retired -- `maxFramesInFlight` deferred-queue
+   flushes, each of which follows one frame slot's fence wait.
+
+```go
+r.DestroyMesh(mesh)      // standalone, dynamic, arena range, streamed: same call
+r.DestroyTexture(tex)
+r.DestroyMaterial(mat)
+r.DestroyInstanceSet(set)
+r.DestroyModel(model)
+arena.Free(mesh)
+```
+
+There is **no device-wide idle** on any of these, and no variant to pick
+between. `DestroyMesh` used to free a settled static mesh's buffers inline and
+defer only the other three kinds, and `DestroyTexture` freed everything inline,
+which meant a correct call became a use-after-free as soon as its upload
+landed -- the same call, the same mesh, one frame later. An application cannot
+see which state a mesh is in, so this:
+
+```go
+// No longer needed. Both branches are now the same call.
+if ticket != nil && !ticket.Ready() {
+    r.DestroyMesh(mesh)
+} else {
+    r.DeferDestroy(func() { r.DestroyMesh(mesh) })
+}
+```
+
+is now just `r.DestroyMesh(mesh)`. Wrapping a release in `DeferDestroy` is not
+wrong, but it costs an extra `maxFramesInFlight` frames of residency for
+nothing.
+
+Immediate destruction still exists and is **internal**: `destroyMeshNow`,
+`destroyTextureNow` and `destroyMaterialNow`, used by `Renderer.Destroy` (which
+has already waited the device idle) and by callers that are already inside a
+deferred callback. That second case is why they are separate functions rather
+than a flag: `DestroyModel` defers its whole release, and calling the public
+methods from inside that deferral would queue a second countdown inside the
+first, so a released level's buffers would live twice as long as they need to.
+`renderer/release_test.go` pins the frame each kind actually dies on.
+
+**What a release does not do is take the resource out of your draw list.** The
+`destroyed` flag is what the engine's own paths read -- mesh-range batching, LOD
+level selection, impostor baking, custom shader texture slots -- but an entity's
+`MeshRef` holds its own `*Mesh`, and the engine draws from that. Despawn or
+un-reference first; see [stop drawing it first](#stop-drawing-it-first) for what
+the layer says when you do not.
+
+### What a release costs
+
+One closure per release, queued on the existing deferred queue. Measured at the
+rate this came from -- 200 patches released a frame -- that is **200
+allocations of 32 B, 6.4 KB a frame**, with the queue's backing array reused
+between frames. `TestReleasingAMeshCostsOneAllocationPerRelease` holds it at one
+per release and `BenchmarkReleaseStaticMesh` reports the number. A typed
+retirement list would save the 6.4 KB and cost a second countdown beside
+`DeferDestroy`, with the ordering between the two to get right -- a staging
+buffer's retirement and its destination's sit in one queue today, in that order,
+which is what keeps a recorded copy's destination alive. Not worth it at 6.4 KB
+a frame; re-measure before deciding otherwise.
+
+### Why the validation layer is not the check
+
+It does not report this class of bug. Measured directly for this change, by
+putting the inline free back and running
+`27-streaming -count 20 -mode sync -churn 200 -frames 240` — 200 frames of a
+drawn patch released while the frames that drew it were still in flight:
+
+| | `VULKAN ERROR`/`WARNING` | `SYNC-HAZARD` |
+|---|---|---|
+| `GLYPHENGINE_VALIDATION=1` | 0 | 0 |
+| `+ GLYPHENGINE_SYNC_VALIDATION=1` | 0 | 0 |
+
+Silent in both, exit 0. The layer speaks when a resource is freed while the live
+draw list still names it, which is a different mistake.
+
+**A resource count is not automatically the check either**, and this is the trap
+worth recording. The obvious assertion — a ceiling on peak `Meshes`, to catch
+retirement stopping — also passed under the break, and passed *comfortably*:
+the broken run reported **peak Meshes 22** against the **24** a correct run
+reports. Freeing at the call deregisters at the call, so the count goes DOWN. An
+upper bound can only ever see a leak; it cannot see a premature free.
+
+So the gates are a count that moves the right way, and frames:
+
+- `renderer/release_test.go` counts the fake driver's `DestroyBuffer` calls
+  *per flush*, for every kind and every upload state. That is where a release
+  landing one flush early is visible.
+- `task validate` runs the churn case in both modes and asserts **two** numbers:
+  peak `Meshes` under a ceiling (retirement stopped) and **minimum `Deferred` at
+  least 1** (the release was never deferred). A churn frame has just queued a
+  full countdown, so there is always one outstanding; an inline free queues
+  none. Broken: `min Deferred 0`, exit 1. Fixed: 1 in `-mode sync`, 3 in
+  `-mode async`.
+
 ## Releasing one
 
 ```go
@@ -897,12 +1013,12 @@ still on screen.
 
 This is the HARDER case for `DestroyModel`, not the easier one. At the moment
 of the swap the frames still in flight reference the old buffers, which is why
-the release is deferred: `DestroyMesh` and `DestroyTexture` free a static
-resource immediately (only a dynamic mesh already went through `DeferDestroy`),
-which is correct at shutdown, where `Renderer.Destroy` has waited for the
-device to go idle, and a use-after-free here. Their behaviour is unchanged for
-every other caller; `DestroyModel` routes its own release through
-`DeferDestroy` instead.
+the release is deferred. `DestroyModel` queues **one** countdown and then
+destroys inline inside it, through the internal `Now` variants rather than the
+public `DestroyMesh`/`DestroyTexture`/`DestroyMaterial` -- those defer in their
+own right, and a deferral inside a deferral would hold a released level's
+geometry twice as long for no safety at all.
+`TestDestroyModelRetiresItsMeshesInOneCountdown` is that frame pinned.
 
 **Do not expect the validation layer to catch a missing deferral.** Measured:
 with `DestroyModel` freeing inline instead of deferring, `22-level -reload 20`
@@ -929,8 +1045,18 @@ exported because a check that teardown happened cannot otherwise be written
 from outside the package, and this repo has shipped a teardown test that
 reported zero leaks because teardown never ran.
 
-`Deferred` is not a detail: a count taken immediately after `DestroyModel`
-still includes the model, because those resources are genuinely still alive.
+**Every count means "live", and a released resource is live until it retires.**
+`Meshes`, `Textures`, `Materials`, `MeshRanges`, `InstanceSets`, `LODSets`,
+`ImpostorAtlases`, `DescriptorSets` and `PendingUploads` all hold a
+released-but-unretired object, and all drop together when its retirement runs
+`maxFramesInFlight` flushes later. Reporting a release as gone the moment it is
+requested would be a lie with a use-after-free hiding behind it: for those
+frames the objects are exactly as alive as they were.
+`TestResourceCountsHoldAReleasedObjectUntilItRetires` states that once, across
+every kind.
+
+`Deferred` is the queue itself -- one entry per retirement outstanding -- so a
+count taken immediately after a release reads one higher, not one lower.
 
 `CachedTextures` and `TextureShares` are the shared-image cache: how many
 distinct external images are being shared, and how many holds are outstanding
@@ -990,14 +1116,14 @@ reported nothing.
 
 Where the set is freed, and why there:
 
-- **`DestroyTexture` frees it immediately**, before the view and sampler it
-  names. Everything else that function owns is freed immediately too, so the
-  set's exposure to a frame in flight is exactly the sampler's, and it is the
-  caller's to arrange — `DestroyModel` runs the whole call through
-  `DeferDestroy`, and `Renderer.Destroy` has already idled the device.
+- **`DestroyTexture` frees it inside the retirement it queues**, before the
+  view and sampler that set names, so the set's exposure to a frame in flight
+  is exactly the sampler's. It used to free the set -- and everything else --
+  at the call, which is why `ResourceCounts.DescriptorSets` now drops when a
+  released texture retires rather than when it is released.
 - **`DestroyMaterial` and `DestroyJointBuffer` free it inside the deferral
-  they already queue** for the uniform buffers that set names. There is
-  nothing immediate in those for it to be safe alongside.
+  they already queue** for the uniform buffers that set names, for the same
+  reason.
 
 In both cases the set is freed *before* the objects it names, which is the
 order `Renderer.Destroy` already sweeps in.

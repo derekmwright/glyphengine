@@ -14,6 +14,7 @@ import (
 	"time"
 
 	glyph "github.com/derekmwright/glyphengine"
+	"github.com/derekmwright/glyphengine/ecs"
 	"github.com/derekmwright/glyphengine/renderer"
 	"github.com/go-gl/mathgl/mgl32"
 )
@@ -21,6 +22,12 @@ import (
 func init() { runtime.LockOSThread() }
 
 const patchSide = 33
+
+// churnHeadroom is how many released-but-unretired patches the count may hold
+// over the field itself: one per frame in flight, plus the one created before
+// its predecessor is released, plus slack so the gate is about retirement
+// stopping rather than about where in the frame the reading was taken.
+const churnHeadroom = 8
 
 // game publishes perPatch patches per rendered frame until count of them
 // exist. Generation is deliberately on the frame thread here: what is being
@@ -38,6 +45,17 @@ type game struct {
 	walls           []float64
 	pending         []*renderer.UploadTicket
 	skipped         int
+
+	// churn is how many frames of release-and-recreate to run once every patch
+	// exists, and ents/meshes are what it needs to do it: the entity drawing
+	// each patch and the mesh it is drawing. See churnOne.
+	churn       int
+	churned     int
+	ents        []ecs.Entity
+	meshes      []*renderer.Mesh
+	peakMesh    int
+	peakStage   int
+	minDeferred int
 }
 
 // Each patch is 1089 vertices and 2048 triangles, with a distinct surface.
@@ -120,6 +138,86 @@ func (g *game) publish(e *glyph.Engine, n int) error {
 	e.C.MeshRef.Set(ent, &glyph.MeshRef{Mesh: m, Roughness: 0.9})
 	e.C.NoCastShadow.Set(ent, &glyph.NoCastShadow{})
 	e.C.Static.Set(ent, &glyph.Static{})
+	g.ents = append(g.ents, ent)
+	g.meshes = append(g.meshes, m)
+	return nil
+}
+
+// churnOne replaces one drawn patch's geometry and releases what it replaced,
+// which is the shape issue #153 came from: a terrain streamer swapping a patch
+// across an LOD change, every frame, while frames that drew the old one are
+// still in flight.
+//
+// Load first, swap, release after, inside one tick -- examples/22-level's
+// reload order, for the same reason: the entity is never without geometry, so
+// nothing blinks and the picture check at the end still has a field to look at.
+//
+// The release is one plain r.DestroyMesh whatever state the mesh is in. In
+// -mode sync the mesh being released has SETTLED, which is the state that used
+// to be freed inline and is the whole point of running this under the layer; in
+// -mode async it is whatever the ticket happens to be, which over 200 frames is
+// all three. The consumer's branch on ticket.Ready() is deliberately absent --
+// if it were needed, this is where the layer would say so.
+func (g *game) churnOne(e *glyph.Engine) error {
+	r := e.Renderer()
+	i := g.churned % len(g.ents)
+	v, idx := patch(g.count + g.churned)
+
+	var m *renderer.Mesh
+	var err error
+	switch g.mode {
+	case "sync":
+		m, err = r.CreateIndexedMesh32(v, idx)
+	case "dynamic":
+		short := make([]uint16, len(idx))
+		for j, x := range idx {
+			short[j] = uint16(x)
+		}
+		m, err = r.CreateDynamicIndexedMesh(len(v), len(short))
+		if err == nil {
+			err = r.UpdateMeshData(m, v, short)
+		}
+	case "async":
+		var ticket *renderer.UploadTicket
+		m, ticket, err = r.CreateIndexedMesh32Async(v, idx)
+		if err == nil {
+			g.pending = append(g.pending, ticket)
+		}
+	}
+	if err != nil {
+		return err
+	}
+	ref, ok := e.C.MeshRef.Get(g.ents[i])
+	if !ok {
+		return fmt.Errorf("churn: patch %d has no MeshRef", i)
+	}
+	ref.Mesh = m
+	r.DestroyMesh(g.meshes[i])
+	g.meshes[i] = m
+	g.churned++
+
+	// Two counts, because they catch opposite failures and neither catches both.
+	//
+	// peakMesh catches retirement STOPPING: a released mesh is held for the
+	// frames in flight, so the steady state is the field plus a few, and a
+	// release that never retires climbs without bound. Peaks rather than a
+	// final reading, because a leak the shutdown flush tidies up looks
+	// identical at the end.
+	//
+	// minDeferred catches the release not being DEFERRED AT ALL, which is the
+	// bug this gate exists for and which peakMesh cannot see -- freeing at the
+	// call makes the counts go DOWN, not up. The release above has just queued
+	// its retirement with a full countdown, so from here there is always at
+	// least one outstanding; a release that freed inline queues none. Measured:
+	// with DestroyMesh freeing a settled static mesh inline, this reads 0 while
+	// peakMesh reads 22 against the 24 a correct run reports -- lower, not
+	// higher, and comfortably inside the ceiling.
+	counts := r.ResourceCounts()
+	g.peakMesh = max(g.peakMesh, counts.Meshes)
+	g.peakStage = max(g.peakStage, counts.PendingUploads)
+	if g.churned == 1 || counts.Deferred < g.minDeferred {
+		g.minDeferred = counts.Deferred
+	}
 	return nil
 }
 
@@ -138,6 +236,11 @@ func (g *game) Update(e *glyph.Engine, _ float32) {
 			log.Fatal(err)
 		}
 		g.made++
+	}
+	if g.made == g.count && g.churned < g.churn {
+		if err := g.churnOne(e); err != nil {
+			log.Fatal(err)
+		}
 	}
 	g.skipped += e.Renderer().Stats().UploadsSkipped
 }
@@ -160,6 +263,10 @@ func (g *game) report(e *glyph.Engine) {
 		}
 	}
 	counts := e.Renderer().ResourceCounts()
+	if g.churn > 0 {
+		log.Printf("churn: %d of %d release-and-recreate frames, peak Meshes %d (field %d), peak PendingUploads %d, min Deferred %d",
+			g.churned, g.churn, g.peakMesh, g.count, g.peakStage, g.minDeferred)
+	}
 	// Buffers retained for geometry: two device-local per static or streamed
 	// mesh, and two host-visible sets of two per dynamic mesh.
 	buffers := counts.Meshes * 2
@@ -175,13 +282,14 @@ func main() {
 	n := flag.Int("count", 400, "patches to publish")
 	per := flag.Int("per-frame", 2, "patches published per rendered frame")
 	mode := flag.String("mode", "async", "sync, dynamic, or async")
+	churn := flag.Int("churn", 0, "frames of release-and-recreate of a drawn patch, after all of them exist")
 	frames := flag.Int("frames", 300, "frames to render")
 	shot := flag.String("screenshot", "", "capture final frame")
 	flag.Parse()
 	if *n <= 0 || *per <= 0 || (*mode != "sync" && *mode != "dynamic" && *mode != "async") {
 		log.Fatal("invalid count, per-frame or mode")
 	}
-	g := &game{count: *n, perPatch: *per, mode: *mode}
+	g := &game{count: *n, perPatch: *per, mode: *mode, churn: *churn}
 	opts := []glyph.Option{glyph.WithTitle(fmt.Sprintf("GlyphEngine streaming: %s", *mode)), glyph.WithWindowSize(1280, 720), glyph.WithMSAA(4), glyph.WithProjection(50, 0.1, 2000), glyph.WithMaxFrames(*frames)}
 	if *shot != "" {
 		opts = append(opts, glyph.WithScreenshot(*shot))
@@ -195,6 +303,22 @@ func main() {
 	g.report(e)
 	if g.made != *n {
 		log.Fatalf("published %d of %d patches; raise -frames", g.made, *n)
+	}
+	if g.churned != g.churn {
+		log.Fatalf("churned %d of %d frames; raise -frames", g.churned, g.churn)
+	}
+	// A bound rather than an exact number, because how many released patches
+	// are still retiring depends on where in the frame the count was taken.
+	// What it has to catch is retirement stopping, which is unbounded growth:
+	// over 200 churn frames that would read as peak Meshes near count+200.
+	if g.churn > 0 && g.peakMesh > *n+churnHeadroom {
+		log.Fatalf("churn: peak Meshes %d for a field of %d; released patches are not retiring", g.peakMesh, *n)
+	}
+	// The other direction, and the one the validation layer is silent about:
+	// every churn frame must leave a retirement outstanding, because releasing
+	// a drawn patch has to wait out the frames still drawing it.
+	if g.churn > 0 && g.minDeferred < 1 {
+		log.Fatalf("churn: min Deferred %d; a released patch was freed at the call, while the frames that drew it were still in flight", g.minDeferred)
 	}
 	// A readback outside the timed loop, for the reason 26-mesh-ranges keeps
 	// one: draw counts alone accepted a completely back-face-culled field

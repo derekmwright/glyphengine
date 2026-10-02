@@ -2298,14 +2298,22 @@ func (r *Renderer) Destroy() {
 	r.gltfTextureCache, r.gltfTextureShares = nil, nil
 	// Materials before textures: a material holds views and samplers the
 	// textures own, and its descriptor set has to stop referencing them first.
+	// The immediate variants, not the public DestroyMaterial/DestroyTexture/
+	// DestroyMesh: those retire through the deferred queue, which is the right
+	// answer at runtime and pointless here, where the device has been waited
+	// idle two statements ago. Going through them would still work -- the
+	// flushAllDeferred below drains whatever they queue -- but it would make
+	// shutdown's teardown ORDER depend on the queue rather than on this loop,
+	// and materials-before-textures-before-meshes is the order the descriptor
+	// sets require.
 	for _, m := range materials {
-		r.DestroyMaterial(m)
+		r.destroyMaterialNow(m)
 	}
 	for _, t := range textures {
-		r.DestroyTexture(t)
+		r.destroyTextureNow(t)
 	}
 	for _, m := range meshes {
-		r.DestroyMesh(m)
+		r.destroyMeshNow(m)
 	}
 	// Joint buffers are swept for the same reason meshes are: an application
 	// that loads a skinned model and never explicitly releases it should still
@@ -2314,8 +2322,9 @@ func (r *Renderer) Destroy() {
 		r.DestroyJointBuffer(jb)
 	}
 
-	// Dynamic meshes queue their buffer destruction via DeferDestroy; the GPU
-	// is already idle, so run anything queued during the loop above.
+	// The sweep above destroys immediately, but DestroyJointBuffer and
+	// DestroyRenderTarget still defer, and so does anything an application
+	// released in its last frame. The GPU is already idle, so run all of it.
 	r.flushAllDeferred()
 
 	r.destroyPendingUploads()

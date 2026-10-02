@@ -332,8 +332,9 @@ func (g *game) releaseLevel(e *glyph.Engine, model *renderer.Model, entities []g
 // reload anyone would ship. Swapping inside one tick is also the harder case
 // for DestroyModel, not the easier one: at the moment of the swap the frames
 // still in flight reference the OLD buffers, which is exactly what its
-// deferral exists for, and what DestroyMesh's and DestroyTexture's immediacy
-// would turn into a use-after-free.
+// deferral exists for. Every public release is deferred now (issue #153), but
+// DestroyModel's own deferral is still what this loop depends on, because it is
+// one countdown for the whole model rather than one per resource.
 //
 // The counts are what make this more than a smoke test. CLAUDE.md records a
 // teardown check that reported zero leaks because teardown never ran, so

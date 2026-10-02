@@ -568,55 +568,129 @@ func (r *Renderer) flushDynamicMeshes(frame int) {
 	}
 }
 
-// DestroyMesh releases GPU resources for a mesh. Dynamic meshes are destroyed
-// after all in-flight frames finish referencing them.
+// DestroyMesh releases a mesh. It is safe at runtime, in any state: the mesh
+// reads as destroyed the moment the call returns, and its Vulkan objects are
+// retired once the frames currently in flight have finished with them.
+//
+// One contract for every kind -- standalone static, dynamic, arena range, and
+// a streamed mesh whose copy is still queued, already recorded, or settled.
+// That used to depend on which: a settled static mesh's buffers were freed
+// here and now, which is correct only once the device is idle, so releasing a
+// patch whose upload had landed was a use-after-free where the same call on
+// the same patch one frame earlier was safe. Nothing in the API shows which
+// state a mesh is in, and the validation layer does not report the difference
+// (see docs/agents/models.md), so the only version of this that an application
+// can use is the one that is safe in all of them.
+//
+// Immediate destruction did not go away, it moved: destroyMeshNow is what
+// renderer shutdown and callers already inside a deferred callback use. No
+// device-wide idle on either path.
+//
+// Idempotent and nil-safe. A range belonging to another renderer panics.
 func (r *Renderer) DestroyMesh(m *Mesh) {
-	if m == nil || m.destroyed {
+	if !r.releaseMesh(m) {
 		return
+	}
+	// Taken out of the dynamic map here rather than at retirement: a released
+	// mesh must stop being a destination for flushDynamicMeshes immediately,
+	// or two more frames of staged updates get copied into buffers nobody will
+	// draw. delete of an absent key is a no-op, so this is also how the static
+	// case reaches retireMesh with a nil dm -- one closure for every kind
+	// instead of one per branch.
+	dm := r.dynamicMeshes[m]
+	delete(r.dynamicMeshes, m)
+	r.DeferDestroy(func() { r.retireMesh(m, dm) })
+}
+
+// destroyMeshNow is DestroyMesh without the wait: the Vulkan objects are gone
+// before it returns.
+//
+// Unexported because there are exactly two places it is correct. Renderer
+// shutdown, which has already waited for the device to go idle. And inside a
+// deferred callback, which by definition does not run until every frame that
+// could have been in flight when it was queued has retired -- so the wait has
+// already happened and deferring again would only make the resource outlive
+// its release by two countdowns instead of one. DestroyModel's release of a
+// level's meshes is that case, and the doubling is what
+// TestDestroyModelRetiresItsMeshesInOneCountdown pins.
+func (r *Renderer) destroyMeshNow(m *Mesh) {
+	if !r.releaseMesh(m) {
+		return
+	}
+	dm := r.dynamicMeshes[m]
+	delete(r.dynamicMeshes, m)
+	r.retireMesh(m, dm)
+}
+
+// releaseMesh is the immediate half both entry points share: stop the mesh
+// reading as live, drop a copy that has not been recorded yet, and hand an
+// arena range to its arena. It reports whether m still owns Vulkan objects
+// that are owed a retirement.
+//
+// The destroyed flag is what stops new draws, and it is set before anything
+// else here. The engine's own paths read it -- mesh-range batching, LOD level
+// selection, impostor baking, custom shader texture slots -- but an entity's
+// MeshRef holds its own pointer, so a game still has to take the mesh out of
+// its draw list first. That failure is loud and documented; this is about the
+// one that was not.
+func (r *Renderer) releaseMesh(m *Mesh) bool {
+	if m == nil || m.destroyed {
+		return false
 	}
 	if m.owner != nil {
 		if m.owner.r != r {
 			panic("DestroyMesh: range belongs to another renderer")
 		}
+		// A range owns no Vulkan objects of its own -- the arena's two buffers
+		// are shared by every range in it. What has to wait out the frames in
+		// flight is the span, and Free already defers exactly that, so there
+		// is nothing for either entry point to retire.
 		m.owner.Free(m)
-		return
+		return false
 	}
 	m.destroyed = true
 
-	// The renderer also tracks every mesh it hands out so Destroy can clean up
-	// after an application that did not. Dropping the mesh from that list here
-	// is not bookkeeping -- without it, an explicit DestroyMesh is followed by
-	// a second free at shutdown, and the validation layer reports the buffer
-	// and its memory as invalid handles.
+	// A copy that is still only queued is dropped and its staging handed back
+	// at once. One already recorded into a command buffer that will run has to
+	// have somewhere to land, which is why the retirement below waits out a
+	// countdown that outlasts the batch's own -- see cancelUpload and
+	// finishUploadBatch for why those two countdowns cannot cross.
+	if m.upload != nil {
+		r.cancelUpload(m)
+	}
+	return true
+}
+
+// retireMesh destroys what one released mesh owns. dm is its per-frame buffer
+// sets, or nil for a mesh that was not created dynamic.
+//
+// The renderer also tracks every mesh it hands out so Destroy can clean up
+// after an application that did not, and a released mesh has to come off that
+// list or the shutdown sweep walks it again.
+//
+// The old comment here said the layer reports the buffer and its memory as
+// invalid handles when it does. MEASURED, by deleting this loop and running the
+// package: it does not, and nothing else moved either. releaseMesh returns
+// early on the destroyed flag, so the sweep's second release never reaches
+// Vulkan at all, and the created/destroyed balance stayed level while the sweep
+// was walking three meshes whose buffers were already freed. The only thing
+// that saw it was TestShutdownDrainsRetirementExactlyOnce asserting what the
+// sweep FOUND -- the same blind spot docs/agents/models.md records for a
+// double-freed shared texture.
+//
+// It happens HERE, at retirement, rather than at the call that requests one, so
+// ResourceCounts.Meshes reports a released-but-unretired mesh as live -- which
+// it genuinely is for maxFramesInFlight more frames. MeshRanges, InstanceSets
+// and PendingUploads already meant that; Textures and Materials now do too.
+func (r *Renderer) retireMesh(m *Mesh, dm *dynamicMesh) {
 	for i, other := range r.meshes {
 		if other == m {
 			r.meshes = append(r.meshes[:i], r.meshes[i+1:]...)
 			break
 		}
 	}
-
-	if dm, ok := r.dynamicMeshes[m]; ok {
-		delete(r.dynamicMeshes, m)
-		r.DeferDestroy(func() { dm.destroy(r.deviceDriver) })
-		return
-	}
-
-	// A mesh whose upload has not landed may still be named by a copy already
-	// recorded into a command buffer that will run, so its buffers cannot be
-	// freed here the way a settled mesh's are. cancelUpload drops the copy if
-	// it is still only queued; the deferred free covers the case where it is
-	// not, because DeferDestroy's countdown outlasts the batch's own.
-	if m.upload != nil {
-		r.cancelUpload(m)
-		vbuf, vmem, ibuf, imem := m.vertexBuffer, m.vertexMemory, m.indexBuffer, m.indexMemory
-		r.DeferDestroy(func() {
-			if ibuf.Handle() != 0 {
-				r.deviceDriver.DestroyBuffer(ibuf, nil)
-				r.deviceDriver.FreeMemory(imem, nil)
-			}
-			r.deviceDriver.DestroyBuffer(vbuf, nil)
-			r.deviceDriver.FreeMemory(vmem, nil)
-		})
+	if dm != nil {
+		dm.destroy(r.deviceDriver)
 		return
 	}
 	// A mesh created without indices leaves indexBuffer zeroed, whose handle
