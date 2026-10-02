@@ -286,6 +286,9 @@ func run(o options) error {
 			fmt.Printf("app timing %s: %.4f ms\n", t.Name, t.Ms)
 		}
 	}
+	if err = checkAppStats(r.Stats(), o); err != nil {
+		return err
+	}
 	if err = os.MkdirAll(".task", 0755); err != nil {
 		return err
 	}
@@ -372,6 +375,54 @@ func run(o options) error {
 	fmt.Printf("terrain region: %d pixels differ by >=4/255; max contrast %d/255\n", changed, maxDelta)
 	if changed == 0 {
 		return fmt.Errorf("application passes made no visible change in terrain region")
+	}
+	return nil
+}
+
+// checkAppStats prints the submitted-work block beside the GPU timings and
+// checks it against what this harness knows it submitted. The mesh pass draws
+// one indexed quad -- one draw, two triangles -- so a count that does not say
+// that is either not counting the pass or counting something else as it; the
+// whole point of the block is that an application pass with a timer and no
+// counts cannot be told apart from a cheap one.
+func checkAppStats(st renderer.RenderStats, o options) error {
+	fmt.Printf("application submitted: %d draws, %d instances, %d triangles, %d dispatches (scene-only %d draws, %d triangles)\n",
+		st.App.DrawCalls, st.App.Instances, st.App.Triangles, st.App.Dispatches,
+		st.DrawCalls-st.App.DrawCalls, st.Triangles-st.App.Triangles)
+	for _, p := range st.App.Passes {
+		fmt.Printf("app pass %s: %d draws, %d instances, %d triangles, %d dispatches\n",
+			p.Name, p.DrawCalls, p.Instances, p.Triangles, p.Dispatches)
+	}
+	if st.DrawCalls-st.App.DrawCalls < 1 {
+		return fmt.Errorf("scene-only parity leaves %d draws; the engine drew nothing", st.DrawCalls-st.App.DrawCalls)
+	}
+	mesh := "pattern"
+	if o.history {
+		mesh = "history pattern"
+	}
+	got, ok := st.App.Pass(mesh)
+	if !ok {
+		return fmt.Errorf("no application pass named %q in RenderStats", mesh)
+	}
+	want := renderer.AppPassStats{Name: mesh, DrawCalls: 1, Instances: 1, Triangles: 2}
+	if o.disabled {
+		want = renderer.AppPassStats{Name: mesh}
+	}
+	if got != want {
+		return fmt.Errorf("mesh pass %q counted %+v, want %+v", mesh, got, want)
+	}
+	// Two fullscreen passes ride with it, each one triangle; the compute pass
+	// adds a dispatch and no draw.
+	wantDraws, wantTriangles, wantDispatches := 3, 4, 0
+	if o.compute {
+		wantDispatches = 1
+	}
+	if o.disabled {
+		wantDraws, wantTriangles, wantDispatches = 0, 0, 0
+	}
+	if st.App.DrawCalls != wantDraws || st.App.Triangles != wantTriangles || st.App.Dispatches != wantDispatches {
+		return fmt.Errorf("application totals %d draws, %d triangles, %d dispatches; want %d, %d, %d",
+			st.App.DrawCalls, st.App.Triangles, st.App.Dispatches, wantDraws, wantTriangles, wantDispatches)
 	}
 	return nil
 }

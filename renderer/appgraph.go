@@ -22,6 +22,24 @@ func (r *Renderer) buildAppGraph() (*frameGraph, error) {
 	return f, nil
 }
 
+// appRecorder registers p in this graph's application pass list and wraps its
+// recording closure so that the slot it was given is on the graphFrame while it
+// records.
+//
+// The slot is bound here, to the graph that also supplies the labels in
+// RenderStats.reset, rather than stored on the AppPass: CreateAppPass builds a
+// throwaway graph to read pipeline formats, and a slot left on the pass by that
+// build would renumber the live graph's passes under it and charge an
+// application draw to its neighbour.
+func (f *frameGraph) appRecorder(p *AppPass, record func(*graphFrame)) func(*graphFrame) {
+	slot := len(f.apps)
+	f.apps = append(f.apps, p)
+	return func(c *graphFrame) {
+		c.appSlot = slot
+		record(c)
+	}
+}
+
 func (f *frameGraph) appNode(p *AppPass) int {
 	for i := range f.nodes {
 		if f.nodes[i].app == p {
@@ -152,7 +170,7 @@ func (r *Renderer) extendAppGraph(f *frameGraph, g *framegraph.Graph) error {
 				}
 			}
 			n.Uses = slots(n.Uses, d.Target)
-			appendNode(n, graphNode{name: d.Name, app: p, byFrame: d.Target != nil, record: p.record, enabled: func(*graphFrame) bool { return p.enabled }, begin: -1, end: -1, resolve: -1})
+			appendNode(n, graphNode{name: d.Name, app: p, byFrame: d.Target != nil, record: f.appRecorder(p, p.record), enabled: func(*graphFrame) bool { return p.enabled }, begin: -1, end: -1, resolve: -1})
 		}
 	}
 	// A persistent sampled image may have been written by the preceding

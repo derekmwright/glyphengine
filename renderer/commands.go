@@ -521,7 +521,7 @@ func recordCommandBuffer(
 
 	// Outside any render pass, which vkCmdResetQueryPool requires, and before
 	// the first timestamp is written into the slot being reset.
-	stats.reset()
+	stats.reset(graph.apps)
 	timer.reset(deviceDriver, cmdBuf, frame)
 	timer.begin(deviceDriver, cmdBuf, frame, frameQuery)
 	if graph.beforeShadows > 0 {
@@ -1828,6 +1828,13 @@ func (s LightShaftShape) resolve() LightShaftShape {
 // No stats.addDraw. RenderStats counts scene geometry so a game can see what
 // its own draw list costs, and a post-process triangle is not that; bloom and
 // the tonemap do not count themselves either.
+//
+// Application fullscreen passes ARE counted, in both the aggregate and
+// RenderStats.App, and the asymmetry is deliberate. The engine's own chain is a
+// fixed cost of having a renderer, the same every frame whatever the game does,
+// and each stage already has a named GPU timer. An application pass is one the
+// game created and can switch off, and the counters are the only place it can
+// see what the decision cost.
 //
 // The push block is filled by hand rather than through packLightingPC, the way
 // recordTonemap fills its own: godray.frag reads four floats and a vec2, and

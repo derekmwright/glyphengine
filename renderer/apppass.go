@@ -83,6 +83,9 @@ func (r *Renderer) validateAppPass(d AppPassDesc) error {
 	if d.Blend < BlendNone || d.Blend > BlendAlpha {
 		return fail("Blend", "unknown blend mode")
 	}
+	if err := r.validateAppName(d.Name, fail); err != nil {
+		return err
+	}
 	if d.Target == nil {
 		if d.Stage != StageBeforeBloom && d.Stage != StageBeforeTonemap {
 			return fail("Target", "HDR requires StageBeforeBloom or StageBeforeTonemap")
@@ -158,6 +161,23 @@ func (r *Renderer) validateAppReads(inputs []*Texture, stage PassStage, hdr bool
 	}
 	return nil
 }
+
+// validateAppName rejects a name another live application pass already holds.
+//
+// RenderStats attributes submitted work per pass by name, and GPU timings are
+// reported the same way, so two passes called the same thing give a game two
+// indistinguishable rows and no way to tell which effect is the expensive one.
+// Rejecting it at creation is the only point where the application still knows
+// which pass it meant. Destroying a pass frees its name again.
+func (r *Renderer) validateAppName(name string, fail func(string, string) error) error {
+	for _, p := range r.appPasses {
+		if p.desc.Name == name {
+			return fail("Name", "already used by a live application pass")
+		}
+	}
+	return nil
+}
+
 func (r *Renderer) validateAppTiming(timed bool, fail func(string, string) error) error {
 	if timed {
 		n := 0
@@ -312,6 +332,9 @@ func (p *AppPass) record(c *graphFrame) {
 		s.bindDescriptorSets(d, c.cmd, core1_0.PipelineBindPointGraphics, p.layout, 0, p.r.fallbackTexture.DescriptorSet, c.shadowDS, p.sets[c.frame])
 		s.pushConstants(d, c.cmd, p.layout, core1_0.StageVertex|core1_0.StageFragment)
 		d.CmdDraw(c.cmd, 3, 1, 0, 0)
+		// One draw of one triangle. A fullscreen pass is submitted work like any
+		// other, and reporting it as nothing hid whole postprocess chains.
+		c.stats.addAppDraw(c.appSlot, 1, 0, 3)
 		return
 	}
 	for i := range p.draws {
@@ -333,6 +356,7 @@ func (p *AppPass) record(c *graphFrame) {
 		} else {
 			d.CmdDraw(c.cmd, draw.Mesh.VertexCount, 1, 0, 0)
 		}
+		c.stats.addAppDraw(c.appSlot, 1, draw.Mesh.IndexCount, draw.Mesh.VertexCount)
 	}
 }
 

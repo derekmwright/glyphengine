@@ -186,7 +186,7 @@ func TestAppPassReusesTextureSets(t *testing.T) {
 		t.Fatalf("input flush allocated %.0f times", allocs)
 	}
 	probe := &appSetBindProbe{fakeDriver: &fakeDriver{}, sets: make([][3]core1_0.DescriptorSet, len(draws)+1)}
-	c := &graphFrame{driver: probe, scratch: &fx.scratch, frame: 1, shadowDS: r.shadow.descriptorSets[1], extent: fx.extent, lighting: fx.lighting}
+	c := &graphFrame{driver: probe, scratch: &fx.scratch, frame: 1, shadowDS: r.shadow.descriptorSets[1], extent: fx.extent, lighting: fx.lighting, stats: &fx.stats}
 	mesh.record(c)
 	full.record(c)
 	if probe.bad || probe.count != len(draws)+1 {
