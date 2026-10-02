@@ -242,6 +242,7 @@ are that pipeline's own real-Blender fixture, in the same spirit as
 | `task scroll` | A yamlui `scroll_view` clips its content to its view rect, exactly up to the edge and nowhere past it (needs a GPU) |
 | `task custompasses` | Application light/compute/fog passes are visible, confined, repeatable and validation-clean (needs a GPU) |
 | `task waterblend` | A blended effect in front of the water is not painted over by it (needs a GPU) |
+| `task xwater` | `x/water`'s underwater volume darkens and shifts with depth, changes nothing above the surface, and balances its passes (needs a GPU) |
 | `task bench` | Per-pass GPU and per-phase CPU cost over a fixed scene set (needs a GPU) |
 | `task ranges` | Shared mesh ranges, both index widths, indirect/instanced/LOD equivalence and deferred replacement (needs a GPU) |
 | `task stream` | A patch grid streamed in over 100 frames matches one built synchronously, standalone and in an arena (needs a GPU) |
@@ -254,6 +255,7 @@ are that pipeline's own real-Blender fixture, in the same spirit as
 | `task skypalette` | The sky palette reaches the fog, the water and the clouds, not just the dome (needs a GPU) |
 | `task ci` | Lint, build, test, race, across all three modules |
 | `task shaders:verify` | The committed `.spv` match their GLSL, compiled with `-Iinclude` (needs the SDK) |
+| `task xwater:shaders` | Recompile `x/water`'s `.spv` through the exported include set; its own test verifies them under `task ci` (needs the SDK) |
 
 ### Signing off a fix
 

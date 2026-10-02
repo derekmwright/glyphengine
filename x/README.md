@@ -150,6 +150,9 @@ two.
 | Package | What it is | Page |
 |---|---|---|
 | [`terrainfield`](terrainfield/) | An island heightmap from value-noise fBm | [`terrainfield.md`](terrainfield/terrainfield.md) |
+| [`water`](water/) | The underwater volume: absorption, the water's own colour and sun shafts | [`water.md`](water/water.md) |
 
-`x/water`, the environment carve, `x/sky` and `x/sky/lut` are steps 2 to 5 of the
-sequence in ADR 0012.
+The environment carve, `x/sky` and `x/sky/lut` are steps 3 to 5 of the sequence
+in ADR 0012. `x/water` is step 2, and its page records which parts of the
+atmosphere it deliberately left to a sibling package and why -- that boundary
+argument is the part worth reading before adding the next one.

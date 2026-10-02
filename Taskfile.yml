@@ -114,6 +114,16 @@ tasks:
       - go run -C examples ./23-shadow-coverage -caster=false -frames 60 -screenshot ../.shadowcoverage/control.png
       - go run ./cmd/shadowcheck -on .shadowcoverage/on.png -off .shadowcoverage/off.png -control .shadowcoverage/control.png
 
+  xwater:shaders:
+    desc: Recompile x/water's SPIR-V through the engine's exported include set (requires VULKAN_SDK)
+    dir: x
+    cmds:
+      # The generator and the check are one thing: water/spirv_test.go compiles
+      # through include.WriteTo + `glslc -I` either way, and -update makes it
+      # write the result instead of comparing it. Two copies of a compile
+      # command are two things that can disagree about a flag.
+      - go test ./water/ -run TestCommittedSPIRVMatchesGLSL -update -count=1 -v
+
   shaders:verify:
     desc: Assert the committed .spv match their GLSL (needs VULKAN_SDK)
     cmds:
@@ -351,6 +361,11 @@ tasks:
         # retirement stops, which is the half the layer cannot see.
         check 27-streaming -count 20 -mode sync -churn 200 -frames 240
         check 27-streaming -count 20 -mode async -churn 200 -frames 240
+        # 09-water with x/water created. The player spawns on the shore, so this
+        # is the created-but-inactive path in a real example: three application
+        # passes in the graph contributing nothing, through the one example that
+        # also has engine water, refraction and a second render pass around them.
+        check 09-water -water
         # The yamlui path: a widget tree loaded from YAML, with the indicator's
         # fans and wipes going through a caller-supplied mesh pool.
         check 13-ui -yamlui indicators
@@ -547,6 +562,24 @@ tasks:
         check 25-lod-forest -gpu -indexed
         unset GLYPHENGINE_PROVOKE_RECREATE_FRAMES
         exit $status
+      - |
+        # x/water's gate scene, which no example reaches with the camera
+        # actually under the surface for the whole run. The interesting case for
+        # the layer is -sweep: the camera descends through the waterline, so the
+        # three passes switch on and then off again mid-run while the frame
+        # graph is rebuilt around them, and GLYPHENGINE_PROVOKE_RECREATE_FRAMES
+        # rebuilds the swapchain underneath that. A relative target whose
+        # descriptor still named a retired view would surface here and nowhere
+        # else. syncvalidate reuses this block through `task validate`.
+        cd ..
+        probe=$(echo "VULKAN ERROR: self-check" | grep -cE "VULKAN (ERROR|WARNING)" || true)
+        [ "$probe" = "1" ] || { echo "cannot count validation messages"; exit 1; }
+        for args in "-water on -sweep" "-water on -depth 20" "-water on -disabled -depth 20"; do
+          out=$(GLYPHENGINE_FIXED_FRAME_TIME=16.667ms GLYPHENGINE_PROVOKE_RECREATE_FRAMES=12,40 go run ./x/water/internal/watercheck $args -frames 60 2>&1) || { echo "$out"; exit 1; }
+          msgs=$(echo "$out" | grep -cE "VULKAN (ERROR|WARNING)" || true)
+          [ "$msgs" = "0" ] || { echo "$out"; exit 1; }
+          echo "watercheck $args: clean"
+        done
       - |
         # The consumer's shape from issue #157, which no example reaches: a
         # half-resolution compute dispatch reading the directional cascades at
@@ -1491,6 +1524,51 @@ tasks:
           rm -rf $d
         fi
         exit $status
+
+  xwater:
+    desc: "x/water's underwater volume darkens and shifts with depth, and changes nothing above the surface"
+    env:
+      GLYPHENGINE_BACKGROUND: "1"
+      GLYPHENGINE_FIXED_FRAME_TIME: "16.667ms"
+    cmds:
+      # Needs a GPU, so it sits with smoke and validate rather than in
+      # `task ci`. The package's unit tests run there.
+      #
+      # The scene is this gate's own, not an example's: one flat wall at a fixed
+      # 20 units in front of a camera whose depth is a flag. Three depths, each
+      # captured with and without the package, and the numbers are the
+      # difference. 640x360, frame 120, RX 7900 XTX, measured 2026-10-02:
+      #
+      #   depth  4   change -55.394 / -19.646 / -10.135
+      #   depth 20   change -57.003 / -22.002 / -11.479
+      #   depth 60   change -59.001 / -25.732 / -14.000
+      #
+      # Red falls five times as far as blue, which is the colour shift, and
+      # every channel deepens with depth. The three no-package captures read
+      # exactly 95.000/100.000/111.000 at all three depths -- that control is
+      # what makes the comparison about the water rather than about the light.
+      #
+      # PROVED: zeroing BodyDepthFalloff -- the camera-depth falloff of the
+      # water's own radiance -- still passes the sweep above, because the shafts
+      # dim with depth too (blue spread 2.481 -> 1.110, ordering intact). So the
+      # gate also sweeps with ScatterColor zeroed, where only that falloff can
+      # move the image: 1.000 and 2.000 counts of blue per step with it intact,
+      # 0.000 and 0.000 with it dead, and the run fails. The first version of
+      # this gate was decoration and this is the measurement that says so.
+      #
+      # PROVED: the control is not decoration either. It caught a camera placed
+      # below the sloping bed at the deepest station, where the "wall" in the
+      # capture was terrain: the no-package wall read 137.918 instead of 95.000
+      # and the run failed before reporting a single water number.
+      - go run ./x/water/internal/watercheck -depths
+      # Create and destroy three times over, counting the renderer's own
+      # application-pass roster rather than the package's fields: 0 -> 3 -> 0.
+      # -disabled is its meta-check; it skips the Destroy and must fail with
+      # "after destroy: 3 passes, want the baseline 0".
+      - go run ./x/water/internal/watercheck -balance -frames 400
+      # Zero bytes and zero objects over 2000 Update calls with real passes
+      # behind them, which is the half the unit test cannot see.
+      - go run ./x/water/internal/watercheck -water on -allocs -depth 20 -frames 200
 
   waterblend:
     desc: "Check that a blended effect in front of the water is not painted over by it"
