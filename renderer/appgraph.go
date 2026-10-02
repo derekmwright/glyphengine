@@ -9,6 +9,11 @@ import (
 
 type appGraphTarget struct{ write, read, depth framegraph.ResourceID }
 
+// shadowCascadeNode names the declaration standing in for the hand-recorded sun
+// cascade passes. The recording fixture matches on it, as it does the streamed
+// upload node, so the name is shared rather than repeated.
+const shadowCascadeNode = "sun shadow cascades"
+
 func (r *Renderer) buildAppGraph() (*frameGraph, error) {
 	f, err := newFrameGraph(r.msaaSamples, r.depth.format, r.sc.imageFormat, len(r.sc.imageViews), r)
 	if err != nil {
@@ -66,6 +71,20 @@ func (r *Renderer) extendAppGraph(f *frameGraph, g *framegraph.Graph) error {
 	// is in place before anything in this frame can read it.
 	r.appendUploadGraph(f, g, appendNode)
 	r.appendGPULODGraph(f, g, appendNode)
+	// recordCommandBuffer draws the sun cascades between step beforeShadows-1 and
+	// step beforeShadows, which appendGPULODGraph has just fixed, so this is where
+	// that write belongs in the graph: the first declaration past the boundary.
+	// Declaring it gives a dispatch that reads the cascades a real edge back to
+	// the passes that filled them, and Rewrites turns a reader scheduled ahead of
+	// the boundary into a compile error rather than a silent read of last frame.
+	//
+	// It records no command and derives no barrier of its own -- the cascade
+	// targets own their explicit transitions, see depthRenderingTarget -- so a
+	// graph whose dispatches declare no shadow read records what it always did.
+	f.shadowCascades = len(f.nodes)
+	appendNode(framegraph.Node{Name: shadowCascadeNode, Kind: framegraph.Legacy,
+		Uses: []framegraph.Use{{Resource: f.sunShadow, Access: framegraph.DepthWrite, Rewrites: true}}},
+		graphNode{name: shadowCascadeNode, begin: -1, end: -1, resolve: -1})
 	read := func(uses []framegraph.Use, id framegraph.ResourceID) []framegraph.Use {
 		for _, u := range uses {
 			if u.Resource == id {
@@ -258,6 +277,14 @@ func (r *Renderer) replaceAppGraph(deferOld bool) error {
 
 func (r *Renderer) bindAppGraphImages() {
 	f := r.frameGraph
+	// A compute dispatch declaring ReadsShadows is the only thing that makes the
+	// compiler emit a barrier for these, and the executor resolves one through
+	// f.images. Bound unconditionally: the shadow images outlive every graph
+	// rebuild, so there is nothing to gain by tracking whether a reader exists.
+	if r.shadow != nil {
+		f.images[f.sunShadow] = graphImage{images: r.shadow.images[:], views: r.shadow.arrayViews[:], frameInstance: true}
+		f.images[f.pointShadow] = graphImage{images: r.shadow.cubeImages[:], views: r.shadow.cubeSamplerViews[:], frameInstance: true}
+	}
 	for id, b := range f.lodBuffers {
 		f.images[id] = b
 	}

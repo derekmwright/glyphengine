@@ -3,9 +3,16 @@
 //
 // A resource rests in ShaderReadOnlyOptimal if sampled, General if used for
 // storage, or its attachment layout otherwise; presented imports rest in
-// PresentSrc. Persistent images start there and need a one-time transition.
+// PresentSrc. A depth image read through DepthSampledRead rests in
+// DepthStencilReadOnlyOptimal instead, a layout its own attachment passes can
+// also leave it in, so no transition separates the write from the read.
+// Persistent images start there and need a one-time transition.
 // Imports start in their declared InitialLayout. Other images start Undefined
 // every frame, so their contents cannot be read before a guaranteed write.
+// A write declaring Use.Rewrites claims that it replaces the frame's contents,
+// and any read of that resource at an earlier node is rejected naming the
+// reader -- the ordering rule for contents an opaque recorder produces, whose
+// layout alone cannot say whether this frame has written them yet.
 // Buffers have no layout or priming transition. Persistent/imported buffers
 // begin with a conservative preceding-submission memory scope. Buffer hazards
 // use pipeline barriers, including graphics vertex and indirect reads before

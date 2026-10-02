@@ -11,6 +11,8 @@ func accessState(kind NodeKind, u Use) imageState {
 	switch u.Access {
 	case SampledRead:
 		s.layout, s.stage, s.access = core1_0.ImageLayoutShaderReadOnlyOptimal, shaderStage, core1_0.AccessShaderRead
+	case DepthSampledRead:
+		s.layout, s.stage, s.access = core1_0.ImageLayoutDepthStencilReadOnlyOptimal, shaderStage, core1_0.AccessShaderRead
 	case StorageRead, StorageWrite, StorageReadWrite:
 		s.layout, s.stage = core1_0.ImageLayoutGeneral, shaderStage
 		if reads(u.Access) {
@@ -59,6 +61,8 @@ func stateForLayout(layout core1_0.ImageLayout) imageState {
 		a = ColorLoadWrite
 	case core1_0.ImageLayoutDepthStencilAttachmentOptimal:
 		a = DepthLoadWrite
+	case core1_0.ImageLayoutDepthStencilReadOnlyOptimal:
+		a = DepthSampledRead
 	case core1_0.ImageLayoutTransferSrcOptimal:
 		a = TransferSrc
 	case core1_0.ImageLayoutTransferDstOptimal:
@@ -71,7 +75,7 @@ func stateForLayout(layout core1_0.ImageLayout) imageState {
 		return imageState{layout: layout, stage: core1_0.PipelineStageTopOfPipe}
 	}
 	s := accessState(Graphics, Use{Access: a})
-	if a == SampledRead || a == StorageReadWrite {
+	if a == SampledRead || a == DepthSampledRead || a == StorageReadWrite {
 		s.stage |= core1_0.PipelineStageComputeShader
 	}
 	if writes(a) {

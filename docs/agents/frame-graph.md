@@ -12,6 +12,8 @@ api:
   - framegraph.BufferDesc
   - framegraph.Graph.Build
   - framegraph.Step.AfterBarriers
+  - framegraph.DepthSampledRead
+  - framegraph.Use.Rewrites
   - renderer.recordCommandBuffer
   - renderer.Pass
   - renderer.AppComputeDesc
@@ -27,7 +29,7 @@ requires:
   - VK_KHR_dynamic_rendering
   - vulkan-sdk
 assets: procedural
-verified: 2026-09-24 # dynamic rendering, attachment barriers and the streamed upload node
+verified: 2026-10-02 # the cascade declaration and compute shadow reads; dynamic rendering, attachment barriers and the streamed upload node
 ---
 
 # Record the renderer's frame graph
@@ -46,7 +48,11 @@ Vulkan handles. It retains declaration order.
 
 Clouds, both shadow passes and the main scene pass remain one hand-recorded
 `Legacy` node. It declares the HDR colour and depth attachments it leaves and
-the sampled shadow maps. `recordCommandBuffer` records that body using dynamic rendering,
+the sampled shadow maps. Those two are imported per-frame depth arrays declared
+`DepthSampledRead`, so the graph rests them in `DepthStencilReadOnlyOptimal` --
+the layout their own attachment passes exit into and the layout bindings 1 and 2
+of the light set name, which is what lets a derived barrier order a write against
+a read without transitioning anything. `recordCommandBuffer` records that body using dynamic rendering,
 including `PassSceneResolve`, then calls `executeGraph` for the remaining steps:
 the scene-colour copy, water, nine bloom stages, the optional UI layer and its
 nine glow stages, and tonemap with the composite inside the same rendering instance. A
@@ -69,6 +75,32 @@ nodes. Both interleave in creation order at a named stage:
 | `StageAfterScene` | After the legacy scene and optional depth resolve, before water's colour copy; HDR and resolved scene depth. |
 | `StageBeforeBloom` | After water; complete HDR scene, resolved depth and prior application outputs. |
 | `StageBeforeTonemap` | After bloom and UI glow; HDR, resolved depth and prior application outputs. |
+
+A second engine-owned `Legacy` declaration, "sun shadow cascades", stands for
+the hand-recorded sun cascade passes. It sits at the shadow boundary that GPU LOD
+selection fixes -- the first declaration past the point `recordCommandBuffer`
+draws the cascades -- and declares the depth write with `Use.Rewrites`. It
+records no command and derives no barrier of its own, because the cascade targets
+own their explicit transitions, so a graph whose dispatches declare no shadow
+read records the command buffer it always did.
+
+`Rewrites` is what makes the ordering checkable. An imported image's layout
+cannot say whether this frame has written it yet, so without the declaration a
+reader scheduled ahead of the cascade passes would compile and sample the
+previous frame's layers. With it, Build rejects any read of that resource at an
+earlier node, naming the reader. Every `PassStage` is past the boundary today,
+which is why the rule guards a future stage rather than a reachable mistake.
+
+`AppComputeDesc.ReadsShadows` adds `DepthSampledRead` on the cascade map as the
+dispatch's first use, so its derived barrier heads the entry group: the cascade
+depth writes (`EarlyFragmentTests|LateFragmentTests`,
+`DepthStencilAttachmentWrite`) made available to `ComputeShader`/`ShaderRead`,
+with `DepthStencilReadOnlyOptimal` on both sides. There is no return edge -- the
+map is not an application target and nothing in the graph touches it again before
+the next frame's cascade passes. One declared read is one extra driver call per
+frame. The executor resolves it through the per-frame cascade binding, over every
+cascade layer, so the declared `Layers` and the frame-instanced image list are
+load-bearing rather than documentation.
 
 Compute nodes bind a compute pipeline, fallback/light/input descriptor sets,
 push VP plus identity model and application data, then dispatch on the graphics
@@ -158,7 +190,8 @@ its existing shadow boundary. See [ADR 0008](../adr/0008-buffer-resources-and-gp
 
 ## Layouts and optional work
 
-A sampled resource rests in `ShaderReadOnlyOptimal`; storage rests in
+A sampled resource rests in `ShaderReadOnlyOptimal`; a depth image read through
+`DepthSampledRead` rests in `DepthStencilReadOnlyOptimal`; storage rests in
 `General`, other attachments in their attachment layouts, and the swapchain
 in `PresentSrc`. `Step.Barriers` transitions each attachment into its color or
 depth attachment layout before CmdBeginRendering. `Step.AfterBarriers` exposes
@@ -238,6 +271,10 @@ other GPU objects still retire through their existing lifetime mechanisms.
   unavailable. SceneResolve/WaterResolve contain only CmdEndRendering.
 - A missing entry/exit barrier can leave an attachment in its sampled layout
   or hide writes from a later reader. Run both core and synchronization validation.
+- A barrier naming a layout the image is not in is a core validation error, not a
+  hazard: declaring the cascade map's read as `SampledRead` rather than
+  `DepthSampledRead` produces exactly that, since the cascade passes leave it in
+  `DepthStencilReadOnlyOptimal`.
 - Stale attachment bindings or descriptors after resize name retired views.
   Failure-injection tests cover remaining allocation sites;
   `TestResizeCreatesNoRenderPassesOrFramebuffers` requires zero obsolete objects.

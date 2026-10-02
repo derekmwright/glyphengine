@@ -19,7 +19,15 @@ type AppComputeDesc struct {
 	Reads   []*Texture
 	Writes  []*RenderTarget
 	Buffers []*StorageBuffer
-	Timed   bool
+	// ReadsShadows declares that the shader samples the directional cascades at
+	// set 1 bindings 0 and 1. It adds the frame-graph edge from the cascade
+	// passes to this dispatch, so their depth writes are made visible to the
+	// compute reads. The descriptors are bound either way, so a shader sampling
+	// them without declaring it reads whatever a neighbouring pass's barriers
+	// happened to leave visible. A dispatch that leaves it false records exactly
+	// the stream it recorded before.
+	ReadsShadows bool
+	Timed        bool
 }
 
 // AppCompute shares ordering, timing and lifetime with application graphics work.

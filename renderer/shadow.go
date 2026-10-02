@@ -308,6 +308,46 @@ type shadowResources struct {
 	cubeTargets      [maxFramesInFlight][6]*renderingTarget
 }
 
+// shadowSetBindings is the shared shadow/light descriptor set: set 1 for the
+// static lit, terrain, water, sky and application pipelines, set 2 for the
+// skinned ones. Binding 0 = ShadowData UBO, 1 = sun cascade comparison sampler,
+// 2 = point cube sampler, 3-5 = the clustered light storage buffers
+// (LightBuffer, ClusterGrid, LightIndices -- see shaders/lights.inc), 6 = the
+// application uniform block and 7-10 the application texture slots.
+//
+// Binding 3 used to be a point-lights UBO; it is a storage buffer now because
+// the light array no longer fits the UBO's 16KB minimum guaranteed range once it
+// can hold MaxLights (1024) 64-byte entries instead of 32.
+//
+// Bindings 0 and 1 carry Compute because an application compute dispatch binds
+// this same set and may sample the cascades -- see AppComputeDesc.ReadsShadows.
+// A stage the shader accesses but the layout omits is
+// VUID-VkComputePipelineCreateInfo-layout-07988, reported by the validation
+// layer at pipeline creation and by nothing else. The other engine bindings stay
+// graphics-only: no compute path reads them, and widening a stage mask spends
+// descriptor visibility for nothing.
+//
+// A function rather than a literal inside createShadowResources so the ABI nine
+// shaders depend on can be asserted without a device.
+func shadowSetBindings() []core1_0.DescriptorSetLayoutBinding {
+	const graphics = core1_0.StageVertex | core1_0.StageFragment
+	const shared = graphics | core1_0.StageCompute
+	sampler := func(binding int, stages core1_0.ShaderStageFlags) core1_0.DescriptorSetLayoutBinding {
+		return core1_0.DescriptorSetLayoutBinding{Binding: binding, DescriptorType: core1_0.DescriptorTypeCombinedImageSampler, DescriptorCount: 1, StageFlags: stages}
+	}
+	storage := func(binding int) core1_0.DescriptorSetLayoutBinding {
+		return core1_0.DescriptorSetLayoutBinding{Binding: binding, DescriptorType: core1_0.DescriptorTypeStorageBuffer, DescriptorCount: 1, StageFlags: core1_0.StageFragment}
+	}
+	return []core1_0.DescriptorSetLayoutBinding{
+		{Binding: 0, DescriptorType: core1_0.DescriptorTypeUniformBuffer, DescriptorCount: 1, StageFlags: shared},
+		sampler(1, core1_0.StageFragment|core1_0.StageCompute),
+		sampler(2, core1_0.StageFragment),
+		storage(3), storage(4), storage(5),
+		{Binding: 6, DescriptorType: core1_0.DescriptorTypeUniformBuffer, DescriptorCount: 1, StageFlags: shared},
+		sampler(7, shared), sampler(8, shared), sampler(9, shared), sampler(10, shared),
+	}
+}
+
 // createShadowResources creates all resources for the shadow mapping pass.
 func createShadowResources(
 	instanceDriver core1_0.CoreInstanceDriver,
@@ -557,63 +597,7 @@ func createShadowResources(
 		clear(s.lightIndexMapped[i])
 	}
 
-	// Descriptor set layout: binding 0 = UBO, binding 1 = sun shadow sampler,
-	// binding 2 = point cube sampler, bindings 3-5 = the clustered light
-	// storage buffers (LightBuffer, ClusterGrid, LightIndices -- see
-	// shaders/lights.inc). Binding 3 used to be a point-lights UBO; it is a
-	// storage buffer now because the light array no longer fits the UBO's
-	// 16KB minimum guaranteed range once it can hold MaxLights (1024) 64-byte
-	// entries instead of 32.
-	s.descriptorSetLayout, _, err = deviceDriver.CreateDescriptorSetLayout(nil, core1_0.DescriptorSetLayoutCreateInfo{
-		Bindings: []core1_0.DescriptorSetLayoutBinding{
-			{
-				Binding:         0,
-				DescriptorType:  core1_0.DescriptorTypeUniformBuffer,
-				DescriptorCount: 1,
-				StageFlags:      core1_0.StageVertex | core1_0.StageFragment,
-			},
-			{
-				Binding:         1,
-				DescriptorType:  core1_0.DescriptorTypeCombinedImageSampler,
-				DescriptorCount: 1,
-				StageFlags:      core1_0.StageFragment,
-			},
-			{
-				Binding:         2,
-				DescriptorType:  core1_0.DescriptorTypeCombinedImageSampler,
-				DescriptorCount: 1,
-				StageFlags:      core1_0.StageFragment,
-			},
-			{
-				Binding:         3,
-				DescriptorType:  core1_0.DescriptorTypeStorageBuffer,
-				DescriptorCount: 1,
-				StageFlags:      core1_0.StageFragment,
-			},
-			{
-				Binding:         4,
-				DescriptorType:  core1_0.DescriptorTypeStorageBuffer,
-				DescriptorCount: 1,
-				StageFlags:      core1_0.StageFragment,
-			},
-			{
-				Binding:         5,
-				DescriptorType:  core1_0.DescriptorTypeStorageBuffer,
-				DescriptorCount: 1,
-				StageFlags:      core1_0.StageFragment,
-			},
-			{
-				Binding:         6,
-				DescriptorType:  core1_0.DescriptorTypeUniformBuffer,
-				DescriptorCount: 1,
-				StageFlags:      core1_0.StageVertex | core1_0.StageFragment | core1_0.StageCompute,
-			},
-			{Binding: 7, DescriptorType: core1_0.DescriptorTypeCombinedImageSampler, DescriptorCount: 1, StageFlags: core1_0.StageVertex | core1_0.StageFragment | core1_0.StageCompute},
-			{Binding: 8, DescriptorType: core1_0.DescriptorTypeCombinedImageSampler, DescriptorCount: 1, StageFlags: core1_0.StageVertex | core1_0.StageFragment | core1_0.StageCompute},
-			{Binding: 9, DescriptorType: core1_0.DescriptorTypeCombinedImageSampler, DescriptorCount: 1, StageFlags: core1_0.StageVertex | core1_0.StageFragment | core1_0.StageCompute},
-			{Binding: 10, DescriptorType: core1_0.DescriptorTypeCombinedImageSampler, DescriptorCount: 1, StageFlags: core1_0.StageVertex | core1_0.StageFragment | core1_0.StageCompute},
-		},
-	})
+	s.descriptorSetLayout, _, err = deviceDriver.CreateDescriptorSetLayout(nil, core1_0.DescriptorSetLayoutCreateInfo{Bindings: shadowSetBindings()})
 	if err != nil {
 		s.destroy(deviceDriver)
 		return nil, fmt.Errorf("shadow descriptor set layout: %w", err)
