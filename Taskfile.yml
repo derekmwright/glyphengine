@@ -249,6 +249,16 @@ tasks:
         check 19-instanced
         check 25-lod-forest
         check 26-mesh-ranges
+        # Both arms of the overdraw baseline, at 256 patches rather than its own
+        # 1024 so startup stays short. Worth checking even though no capture
+        # compares it: it is the only run here that builds a five-map material
+        # from generated data AND submits a thousand draws through one of them,
+        # and both of its arms assert about the scene they rendered -- a visible
+        # pixel floor and a measured depth complexity -- so a frame that came out
+        # empty or a layout that stopped overlapping fails here rather than
+        # silently approving whatever is next measured on it.
+        check 28-overdraw -count 256
+        check 28-overdraw -count 256 -overlap=false
         check 27-streaming -count 40
         check 20-screens
         # The same clipping reached through focus rather than through a flag.
@@ -295,6 +305,14 @@ tasks:
         check 26-mesh-ranges -count 100 -mode ranges
         check 26-mesh-ranges -count 100 -mode indirect
         check 26-mesh-ranges -count 100 -mode indirect -index32=false
+        # Both arms of the overdraw baseline. 256 patches is 256 meshes and 196
+        # clustered lights through one five-map material, which is a different
+        # shape of allocation from anything else in this matrix, and the two arms
+        # build different projections -- the control derives its far plane from a
+        # camera 300 metres up, which is the sort of thing that reaches the layer
+        # before it reaches a picture.
+        check 28-overdraw -count 256
+        check 28-overdraw -count 256 -overlap=false
         # The streamed uploader, against the two paths it replaces. 20
         # patches at two a frame fits inside CHECK_FRAMES with room for
         # the last one to land and its staging to retire.

@@ -54,7 +54,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-09-26 # UnscaledElapsed, and Elapsed's contract corrected
+verified: 2026-10-02 # the draw list's order, and the opaque policy measured and rejected
 ---
 
 # Run a game loop with Engine and Game
@@ -626,6 +626,131 @@ would make the world move on without the player.
 Renderer-side world state has no teardown: `InitGrass` and `InitParticles` have
 no counterpart, so swapping from a grassy world to a menu scene leaves the grass
 drawing. Clear it game-side for now.
+
+## The draw list and its order
+
+Every frame the engine walks the entities with `Transform` and `MeshRef`, culls
+them, and hands the renderer one list. The order of that list is a contract, and
+it has two halves that are decided for opposite reasons:
+
+- **Opaque draws** are grouped by `RenderObject.SortKey` — pipeline variant
+  first, then the resource bound at set 0 — so the recorder does as few pipeline
+  binds and descriptor switches as possible. Inside a group the order is
+  `SortID`, which is the entity id, which is spawn order.
+- **Blended draws** come after all of them, back to front by
+  `RenderObject.ViewDepth`. That ordering *is* the image: blending is not
+  commutative.
+
+The comparison is a total order — `SortID` is the final tiebreak on both halves —
+and that is what makes the recorded sequence a function of the scene rather than
+of the Go map walk the list arrives in. `scene-entities.md` has the detail, and
+`task determinism` gates it.
+
+### Opaque order inside a group was measured, and left alone
+
+Inside an opaque group nothing is ordered by distance, so a near draw and the
+draw hidden behind it are recorded in spawn order and the hidden one's fragments
+reach an expensive fragment shader before the depth buffer can reject them.
+Issue #152 asked whether ordering nearer first inside each group pays. It was
+built, measured against a rule written before the run, and removed.
+
+The rule, written first:
+
+> Ship the option if front-to-back cuts GPU opaque time on the overlap arm by
+> more than the within-mode scatter, while the no-overlap control moves by less
+> than that scatter and the CPU sort time rises by less than the GPU time saved.
+> Otherwise remove the option and record the numbers that said no.
+
+The scene is `examples/28-overdraw`, which stayed in the tree when the policy did
+not: a 32x32 grid of distinct heightmap patches tiled edge to edge, 2048 triangles
+and 6 m of relief each, all sharing ONE five-map PBR material so the whole field
+is a single `SortKey` group, lit by 196 clustered point lights of range 55, clouds
+off, spawned FARTHEST ROW FIRST so `SortID` order is the worst case the default
+can be handed — which makes the saving below an upper bound rather than a typical
+figure. Two arms: a grazing eye 2.4 m up looking almost along the field, where the
+measured screen-space depth complexity is 3.28, and the same field seen from
+overhead through a narrow 12-degree lens, where it is 1.02. Each arm measures its
+own depth complexity from the patch bounds and the frame's own view-projection,
+and fails if it has drifted, so neither arm can quietly stop being the arm it is
+named after. Three trials per cell, interleaved grouped / front-to-back / grouped
+/ front-to-back with every sample kept, 200 frames each under
+`GLYPHENGINE_FIXED_FRAME_TIME=16.667ms`, nothing else on the GPU. AMD Radeon
+RX 7900 XTX.
+
+`task bench -- -scene overdraw` is the two arms with one order, three trials,
+interleaved, and `-extra "-width 3840 -height 2160"` is the other resolution.
+
+`gpu_opaque`, in milliseconds:
+
+| resolution | arm | depth complexity | grouped | front to back | mean change | within-mode scatter |
+|---|---|---|---|---|---|---|
+| 1280x720 | overlap | 3.28 | 1.781 / 1.794 / 1.855 | 1.589 / 1.703 / 1.809 | **-0.110** | 0.074 / 0.220 |
+| 1280x720 | control | 1.02 | 7.241 / 7.219 / 7.251 | 8.368 / 8.359 / 8.221 | **+1.079** | 0.032 / 0.147 |
+| 3840x2160 | overlap | 3.28 | 7.114 / 6.975 / 7.102 | 6.332 / 6.296 / 6.101 | **-0.821** | 0.139 / 0.231 |
+| 3840x2160 | control | 1.02 | 9.451 / 9.193 / 9.308 | 10.255 / 10.365 / 10.349 | **+1.006** | 0.258 / 0.110 |
+
+`gpu_total` moves with it — 1.939 to 1.810 and 7.600 to 6.665 on the overlap
+arm, 7.368 to 8.431 and 9.715 to 10.706 on the control — so the opaque column is
+not hiding a cost somewhere else. `cpu_drawsort`, the phase timer around the
+sort, rose from 0.141 to 0.186 ms at 720p and from 0.133 to 0.188 ms at 4K on
+795 draws: real, and an order of magnitude below the GPU time at stake. `cpu_total`
+sat at 16.4 to 16.7 ms in all 24 samples, which is vsync, not the policy. Draw
+counts were identical within each arm (795 and 1025), so no cell was rendering
+less than another.
+
+**The rule's verdict: do not ship.** Clause one passes at 4K and squeaks past at
+720p. Clause three passes everywhere. Clause two fails at both resolutions by
+four to thirty-four times the scatter: ordering by distance costs about one
+millisecond of the opaque pass on a field where nothing is hidden at all, which
+is the opposite of free.
+
+The cause is screen-space locality, and a fourth run nailed it. Spawn the same
+overlap field NEAREST row first, so `SortKey` order is already front to back and
+row-major, and grouped beats the policy outright — 5.965 / 6.011 / 5.874 against
+6.160 / 6.363 / 6.313 at 3840x2160. The best opaque time measured anywhere in
+this scene, 5.950 ms, belongs to the DEFAULT policy over a spatially coherent
+spawn order, and front-to-back never reaches it. Distance order is not
+screen-space order: from the overhead camera, sorting by eye distance turns a
+row-major submission into concentric rings, and every ring touches most of the
+framebuffer's tiles. What early-Z gives back on the hidden fragments, the
+scramble spends on cache and ROP throughput.
+
+So the engine keeps one order and the option does not exist. What a game can do
+about overdraw today is what it could do before: spawn or stream its world in an
+order that is spatially coherent AND roughly front to back, because `SortID` is
+spawn order and that is already the knob — worth 1.1 ms of 7.1 on this scene, more
+than the rejected policy was worth.
+
+To redo this measurement, the policy itself is two lines: in `sortDraws`, give an
+opaque draw `o.depth = -d.ViewDepth(eye)` instead of leaving it at zero. The
+comparison already reads "farther first", so a negated depth reads as "nearer
+first" for opaque draws and leaves the blended tail alone, and `drawOrder` stays
+24 bytes.
+
+### A depth prepass is still worth asking about, and the baseline is kept
+
+The overlap arm says there is recoverable work: 0.82 ms of a 7.06 ms opaque pass
+at 4K, found by draw-level rejection alone, on a field with 3.28x depth
+complexity — and since that figure counts one DRAW hiding another, a per-pixel
+mechanism would see more. A prepass rejects per pixel rather than per draw, so it
+would find more of it, and — this is the part the numbers above argue for — it
+would not pay the locality penalty, because it does not reorder the main pass.
+Against that it costs a second geometry pass over 1.6 M triangles and has to get
+alpha test, displacement, reverse-Z and MSAA depth matching right.
+
+`examples/28-overdraw` and `task bench -- -scene overdraw` are kept as the
+baseline for exactly that, and for hierarchical-Z occlusion culling after it. Both
+are bets that what they remove outweighs what they cost unconditionally, and that
+is a bet only a pair of arms can settle: the overlap arm says how much there is to
+win, and the control says what every scene without hidden work is being charged
+for it. The control is not a formality — it is what rejected the sort, on numbers
+the overlap arm alone would have approved.
+
+One result from that same scene is worth carrying into either design. Spawning the
+field nearest row first, so submission order is both front to back and
+row-major, takes the opaque pass from 7.06 ms to 5.95 ms at 3840x2160 with no
+engine change at all (`-spawn fronttoback`). Any mechanism proposed here has to
+beat 5.95, not 7.06.
 
 ## Headless and CI
 

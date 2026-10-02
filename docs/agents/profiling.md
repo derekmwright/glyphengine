@@ -23,7 +23,7 @@ api:
   - renderer.RenderStats
 assets: none
 run: task bench
-verified: 2026-09-21
+verified: 2026-10-02 # cpu drawsort split out of cpu drawlist
 ---
 
 # Measuring frame cost
@@ -38,19 +38,45 @@ cpu update      0.010 ms      gpu terrain     0.000 ms
 cpu tick        0.050 ms      gpu opaque      0.030 ms
 cpu animate     0.000 ms      gpu grass       3.026 ms
 cpu lateupdate  0.018 ms      gpu sky         1.642 ms
-cpu drawlist    0.016 ms      gpu particles   0.000 ms
-cpu gpuwait     9.945 ms      gpu water       0.000 ms
-cpu submit      0.093 ms      gpu overlay     0.197 ms
-cpu record      0.209 ms      gpu FRAME       4.950 ms
+cpu drawlist    0.014 ms      gpu particles   0.000 ms
+cpu drawsort    0.002 ms      gpu water       0.000 ms
+cpu gpuwait     9.945 ms      gpu overlay     0.197 ms
+cpu submit      0.093 ms      gpu FRAME       4.950 ms
+cpu record      0.209 ms
 cpu present     6.065 ms
 cpu FRAME      16.512 ms
 ```
+
+`drawlist` is building and culling; `drawsort` is ordering, split out because
+what the sort costs is a question of its own and a column carrying the component
+walk and the frustum tests cannot answer it. The two sum to what `drawlist`
+alone used to report, so the phases still add up to the frame — any older
+`cpu_drawlist` figure, including the ones quoted in `instancing.md` and
+`models.md`, has to be read as `cpu_drawlist + cpu_drawsort`. On a field of 1024
+individual opaque draws in one state group the sort is 0.13 to 0.19 ms a frame,
+against 0.7 ms for the rest of the build; on what the examples render it is
+microseconds.
 
 `=1` prints the human-readable block; `=tsv` prints one tab-separated line for
 collecting runs. Neither needs the game to add a flag — the point, like
 `GLYPHENGINE_VALIDATION`, is getting numbers out of a binary you did not build.
 
 `task bench` runs a fixed scene set and prints the same data per scene.
+
+Three of its scenes are not single rows but paired arms, kept interleaved with
+every sample retained because what they measure is smaller than the machine's own
+drift over a run: `-scene patches` and `-scene stream` for submission and upload
+paths, and `-scene overdraw` for hidden fragment work. That last one is a grazing
+field of terrain patches under a five-map material where the measured screen-space
+depth complexity is 3.28, against a control where the same field is seen from
+overhead and it is 1.02. It exists because nothing in the engine removes hidden
+opaque fragments today and anything that would — an opt-in depth prepass,
+hierarchical-Z occlusion culling — costs something unconditionally: the overlap
+arm says how much there is to win and the control says what a scene with nothing
+hidden is charged for it. Read `gpu_opaque` first, `gpu_total` to check the cost
+has not moved to another pass, and the reported depth complexity to confirm each
+arm is still what it is named after. `docs/agents/game-loop.md` has the one
+measurement already made on it, which the control rejected.
 
 ## Read the two tables together
 

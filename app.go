@@ -1943,7 +1943,9 @@ func (e *Engine) buildDrawList(vp mgl32.Mat4, shadowEnabled bool, lightVPs ...mg
 
 	// Opaque geometry groups by pipeline variant then texture, so command
 	// recording does far fewer pipeline binds and descriptor switches. It is
-	// all depth-tested, so its draw order does not affect the image.
+	// all depth-tested, so its draw order does not affect the image. Ordering
+	// inside a group front to back for early-Z was measured and rejected; the
+	// numbers are in docs/agents/game-loop.md.
 	//
 	// Translucent geometry sorts after all of it, and within itself back to
 	// front by distance from the eye. That ordering *is* the image: blending is
@@ -1960,7 +1962,15 @@ func (e *Engine) buildDrawList(vp mgl32.Mat4, shadowEnabled bool, lightVPs ...mg
 	}
 
 	eye := [3]float32{e.cameraEye.X(), e.cameraEye.Y(), e.cameraEye.Z()}
+	// Timed apart from the rest of the draw-list build rather than folded into
+	// it: what the sort costs is its own question, and a column that also
+	// carried culling and the component walk cannot answer it. Measured on 1024
+	// opaque draws in one group at 1280x720: 0.13 to 0.19 ms a frame, against
+	// 0.7 ms for the rest of the build. begin() closes the open phase and opens
+	// this one, so the phases still sum to the frame -- see cpuTimer.
+	e.cpu.begin(CPUDrawSort)
 	sorted := e.sortDraws(draws, eye)
+	e.cpu.begin(CPUDrawList)
 
 	e.drawBuf = draws // keep the assembly buffer for next frame
 	return sorted
@@ -2012,6 +2022,15 @@ type drawOrder struct {
 // absorb anyway. GLYPHENGINE_PROVOKE_DRAW_ORDER=reverse permutes the list on
 // purpose, and a stable sort over an ordered input would still have to answer
 // for it.
+//
+// Opaque draws inside one group are left in SortID order on purpose, and that
+// was measured rather than assumed. Ordering them nearer first so early-Z can
+// reject what is hidden saved 0.82 ms of a 7.06 ms opaque pass on a field with
+// 3.3x screen-space depth complexity at 3840x2160 -- and cost 1.01 ms on the
+// same field with nothing hidden, because distance order is not screen-space
+// order and the scramble costs more than the rejection saves. The table and the
+// decision are in docs/agents/game-loop.md; the scene is examples/28-overdraw,
+// kept as the baseline for whatever is tried next.
 func (e *Engine) sortDraws(draws []renderer.RenderObject, eye [3]float32) []renderer.RenderObject {
 	order := e.drawOrderBuf[:0]
 	for i := range draws {
