@@ -41,15 +41,21 @@ tasks:
   # .spv files are COMMITTED on purpose: shaders/shaders.go embeds them with
   # go:embed, so without them the module will not build for anyone who runs
   # `go get`. glslc is therefore only needed when editing GLSL.
+  #
+  # -Iinclude resolves the shared fragments out of shaders/include, which is the
+  # directory shaders/include/include.go embeds and exports to the x module.
+  # Every shader here names them bare (#include "lighting.inc") so the search
+  # path is what resolves them: an x package compiles against a temp dir holding
+  # the same set, and nothing in the GLSL has to know which one it got.
 
   shaders:
     desc: Compile GLSL to SPIR-V (requires VULKAN_SDK; only needed when editing shaders)
     dir: shaders
     cmds:
-      - for f in *.vert *.frag *.comp; do "${VULKAN_SDK}/bin/glslc{{.EXE}}" "$f" -o "$f.spv" || exit 1; done
-      - for f in ../cmd/skyshadowcheck/*.frag; do "${VULKAN_SDK}/bin/glslc{{.EXE}}" "$f" -o "$f.spv"; done
-      - for f in ../cmd/apppasscheck/*.vert ../cmd/apppasscheck/*.frag ../cmd/apppasscheck/*.comp; do "${VULKAN_SDK}/bin/glslc{{.EXE}}" "$f" -o "$f.spv"; done
-      - for f in ../examples/*/*.vert ../examples/*/*.frag ../examples/*/*.comp; do [ -f "$f" ] || continue; "${VULKAN_SDK}/bin/glslc{{.EXE}}" "$f" -o "$f.spv" || exit 1; done
+      - for f in *.vert *.frag *.comp; do "${VULKAN_SDK}/bin/glslc{{.EXE}}" -Iinclude "$f" -o "$f.spv" || exit 1; done
+      - for f in ../cmd/skyshadowcheck/*.frag; do "${VULKAN_SDK}/bin/glslc{{.EXE}}" -Iinclude "$f" -o "$f.spv"; done
+      - for f in ../cmd/apppasscheck/*.vert ../cmd/apppasscheck/*.frag ../cmd/apppasscheck/*.comp; do "${VULKAN_SDK}/bin/glslc{{.EXE}}" -Iinclude "$f" -o "$f.spv"; done
+      - for f in ../examples/*/*.vert ../examples/*/*.frag ../examples/*/*.comp; do [ -f "$f" ] || continue; "${VULKAN_SDK}/bin/glslc{{.EXE}}" -Iinclude "$f" -o "$f.spv" || exit 1; done
     sources:
       - examples/*/*.vert
       - examples/*/*.frag
@@ -62,7 +68,7 @@ tasks:
       - shaders/*.vert
       - shaders/*.frag
       - shaders/*.comp
-      - shaders/*.inc
+      - shaders/include/*.inc
       - cmd/skyshadowcheck/*.frag
       - cmd/skyshadowcheck/*.inc
     generates:
@@ -147,20 +153,30 @@ tasks:
   # ───────────────────────── quality ─────────────────────────
 
   build:
-    desc: Build the engine and all examples
+    desc: Build the engine, the x packages and all examples
     cmds:
+      # Three modules, in dependency order (ADR 0012): the engine depends on
+      # neither of the others, x depends on the engine, the examples depend on
+      # both. Building them separately rather than relying on the examples to
+      # pull x in transitively is the point -- x has to compile against the
+      # engine on its own, the way a game that imports x and not the examples
+      # will.
       - go build ./...
+      - go build -C x ./...
       - go build -C examples ./...
 
   test:
     desc: Run all tests
     cmds:
       - go test ./... -count=1
+      - go test -C x ./... -count=1
 
   test:race:
     desc: Run tests under the race detector (the parallel movement phase needs it)
     cmds:
       - go test -race ./... -count=1
+      # -C must be the first flag on the command line.
+      - go test -C x -race ./... -count=1
 
   fmt:
     desc: Format all Go code
@@ -181,6 +197,7 @@ tasks:
         fi
       - go vet -unsafeptr=false ./...
       # -C must be the first flag on the command line.
+      - go vet -C x -unsafeptr=false ./...
       - go vet -C examples -unsafeptr=false ./...
 
   lod:

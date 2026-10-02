@@ -62,7 +62,7 @@ const skyPaletteCount = 6
 
 // Volumetrics is the scattering medium's look and its sampling: how
 // forward-scattering the air is, and how many steps the in-scattering march
-// spends crossing it. See volInscatter in shaders/volumetric.inc.
+// spends crossing it. See volInscatter in shaders/include/volumetric.inc.
 //
 // It is not the medium's density -- that is the scene's fog
 // (SceneLighting.FogDensity and the height profile beside it), because the
@@ -158,7 +158,7 @@ func DefaultVolumetrics() Volumetrics {
 const MaxVolumetricSteps = 64
 
 // NightGrade is the scotopic colour grade the lit shaders apply as daylight
-// goes -- see atmNightShift in shaders/atmosphere.inc. Strength 0 turns it off
+// goes -- see atmNightShift in shaders/include/atmosphere.inc. Strength 0 turns it off
 // entirely; Tint is what a fully shifted surface's luminance is multiplied by,
 // and is blue-biased because rods are.
 //
@@ -183,7 +183,7 @@ func DefaultNightGrade() NightGrade {
 
 // SkyPalette is the six colours the atmosphere blends between -- zenith and
 // horizon for day, twilight and night. atmSkyPalette in
-// shaders/atmosphere.inc mixes night toward day on the daylight curve and then
+// shaders/include/atmosphere.inc mixes night toward day on the daylight curve and then
 // toward twilight on the twilight curve, so these are endpoints rather than a
 // gradient anyone samples directly.
 //
@@ -261,7 +261,7 @@ type shadowResources struct {
 
 	// Per-frame storage buffers for the clustered light data (points + spots,
 	// up to MaxLights), persistently mapped. Three buffers because the GPU
-	// contract in shaders/lights.inc is three separate readonly buffers, not
+	// contract in shaders/include/lights.inc is three separate readonly buffers, not
 	// one with sub-regions -- LightBuffer (bindings 3), ClusterGrid (4) and
 	// LightIndices (5).
 	lightBuffers  [maxFramesInFlight]core1_0.Buffer
@@ -312,7 +312,7 @@ type shadowResources struct {
 // static lit, terrain, water, sky and application pipelines, set 2 for the
 // skinned ones. Binding 0 = ShadowData UBO, 1 = sun cascade comparison sampler,
 // 2 = point cube sampler, 3-5 = the clustered light storage buffers
-// (LightBuffer, ClusterGrid, LightIndices -- see shaders/lights.inc), 6 = the
+// (LightBuffer, ClusterGrid, LightIndices -- see shaders/include/lights.inc), 6 = the
 // application uniform block and 7-10 the application texture slots.
 //
 // Binding 3 used to be a point-lights UBO; it is a storage buffer now because
@@ -1046,7 +1046,7 @@ func packLitUBO(dst []byte, vps [ShadowCascades]mgl32.Mat4, grade *NightGrade, p
 }
 
 // uploadLights writes this frame's light data into the three storage buffers
-// the fragment shader reads (see shaders/lights.inc): the 64-byte header and
+// the fragment shader reads (see shaders/include/lights.inc): the 64-byte header and
 // the GpuLight array, the per-froxel cells, and the cells' light lists.
 //
 // lights must already be in clusters.Order -- the shader's lights[i] is what

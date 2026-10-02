@@ -70,7 +70,7 @@ the input to all of it.
 | `MoonIntensity()` | `smoothstep(0.14, 0.34, moonY)` | Moon's contribution as a light |
 | `StarVisibility()` | `1 - smoothstep(-0.30, -0.02, sunY)` | Star fade |
 
-`shaders/atmosphere.inc` holds the shader half, driven by `pc.sunColor.w` — the
+`shaders/include/atmosphere.inc` holds the shader half, driven by `pc.sunColor.w` — the
 sun's elevation, which rides there because `pc.sunDir` is whichever body is
 *currently* lighting the scene and is the moon all night. `sky.frag`,
 `clouds.frag` and `lighting.inc` all include it, so the sky, the clouds and the

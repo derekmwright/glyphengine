@@ -104,7 +104,7 @@ Every frame, before drawing, the engine hands the lights to
 The result goes to the GPU in three storage buffers — the engine's first — at
 bindings 3, 4 and 5 of the shadow/light descriptor set: the light array with a
 small header, one `{offset, count}` per cell, and the concatenated index lists.
-`shaders/lights.inc` declares them once for all seven lit fragment shaders. A
+`shaders/include/lights.inc` declares them once for all seven lit fragment shaders. A
 fragment finds its cell from `gl_FragCoord.xy` and its view depth
 (`1.0 / gl_FragCoord.w`, which needs neither near nor far) and loops over that
 cell's list only.
@@ -209,7 +209,7 @@ gives you yours; the CPU cost is the `cluster` phase of the engine's CPU timer
   documented there, is how a game tunes or turns off the night shift itself.
 - **A game that replaced the lit shaders through `WithShaders` must re-vendor
   them.** The `LightBlock` uniform buffer that used to sit at binding 3 is gone:
-  bindings 3, 4 and 5 are storage buffers now, declared in `shaders/lights.inc`
+  bindings 3, 4 and 5 are storage buffers now, declared in `shaders/include/lights.inc`
   behind a `LIGHT_SET` macro (set 1 for static pipelines, set 2 for skinned
   ones, where set 1 is the joint matrices). `GpuLight` is **64 bytes**, four
   vec4s — a stale 48-byte copy reads light 0 correctly and every later light

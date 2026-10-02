@@ -9,7 +9,7 @@ import (
 )
 
 // TestPackLightHeaderLayout pins the LightBuffer header's byte layout against
-// the std430 declaration in shaders/lights.inc: four consecutive 16-byte
+// the std430 declaration in shaders/include/lights.inc: four consecutive 16-byte
 // fields (grid, zParams, screen, flags), including the derived screen.zw =
 // grid.xy / framebuffer size the shader's cluster lookup depends on.
 //
@@ -120,7 +120,7 @@ func TestPackLightsRoundTrip(t *testing.T) {
 	// gpuLightSize, so a wrong stride moves the expectations with it and the
 	// loop keeps passing.
 	if gpuLightSize != 64 {
-		t.Errorf("gpuLightSize = %d, want 64 -- shaders/lights.inc's GpuLight is four vec4s", gpuLightSize)
+		t.Errorf("gpuLightSize = %d, want 64 -- shaders/include/lights.inc's GpuLight is four vec4s", gpuLightSize)
 	}
 
 	// Overrun: a buffer too small for every light must truncate rather than

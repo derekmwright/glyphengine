@@ -10,9 +10,9 @@ import (
 
 	glyph "github.com/derekmwright/glyphengine"
 	"github.com/derekmwright/glyphengine/ecs"
-	"github.com/derekmwright/glyphengine/examples/internal/terrainfield"
 	"github.com/derekmwright/glyphengine/input"
 	"github.com/derekmwright/glyphengine/renderer"
+	"github.com/derekmwright/glyphengine/x/terrainfield"
 	"github.com/go-gl/mathgl/mgl32"
 )
 

@@ -4,6 +4,7 @@ go 1.27
 
 require (
 	github.com/derekmwright/glyphengine v0.0.0
+	github.com/derekmwright/glyphengine/x v0.0.0
 	github.com/go-gl/mathgl v1.2.0
 	github.com/qmuntal/gltf v0.28.0
 )
@@ -13,6 +14,12 @@ require (
 // opposite of a replace in the ENGINE's go.mod, which would be ignored by
 // consumers and silently give them different code than we build against.
 replace github.com/derekmwright/glyphengine => ../
+
+// Same reasoning for x. The examples are the only consumer of x in this
+// repository, and they are the second half of the dependency direction ADR 0012
+// records: they may depend on both the engine and x, and nothing may depend on
+// them.
+replace github.com/derekmwright/glyphengine/x => ../x
 
 require (
 	github.com/CannibalVox/cgoparam v1.1.0 // indirect

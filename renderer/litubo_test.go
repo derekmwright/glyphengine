@@ -61,7 +61,7 @@ func TestPackLitUBOLayout(t *testing.T) {
 }
 
 // TestPackSkyPaletteLayout pins the six endpoints' order and stride against
-// the ATM_* indices in shaders/atmosphere.inc.
+// the ATM_* indices in shaders/include/atmosphere.inc.
 //
 // Order is the whole content of this test, and it is not checkable from the
 // engine's own behaviour: swap the day and night pairs and every capture still

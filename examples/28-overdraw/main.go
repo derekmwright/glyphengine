@@ -50,8 +50,8 @@ import (
 	"github.com/go-gl/mathgl/mgl32"
 
 	glyph "github.com/derekmwright/glyphengine"
-	"github.com/derekmwright/glyphengine/examples/internal/terrainfield"
 	"github.com/derekmwright/glyphengine/renderer"
+	"github.com/derekmwright/glyphengine/x/terrainfield"
 )
 
 func init() {

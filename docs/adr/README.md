@@ -19,6 +19,7 @@ Start with the index below; use [the template](template.md) for a new record.
 | [0009](0009-execute-render-passes-with-dynamic-rendering.md) | Execute render passes with dynamic rendering | Accepted | 2026-09-24 |
 | [0010](0010-shared-mesh-storage-and-range-submission.md) | Shared mesh storage and range submission | Accepted | 2026-09-24 |
 | [0011](0011-one-runtime-safe-resource-release-contract.md) | One runtime-safe resource release contract | Accepted | 2026-10-02 |
+| [0012](0012-an-x-module-for-opinionated-systems.md) | An x module for opinionated systems | Accepted | 2026-10-02 |
 
 Records 0002–0004 document existing decisions retrospectively. Their recorded
 date is when the ADR was written, not an assertion about when the original

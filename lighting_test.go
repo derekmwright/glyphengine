@@ -98,7 +98,7 @@ func TestSpotLightGpuLightZeroDir(t *testing.T) {
 }
 
 // TestSpotLightGpuLightNonUnitDir checks that Dir is normalized before it
-// reaches the GPU -- shaders/lights.inc's dot(dir, -L) assumes a unit
+// reaches the GPU -- shaders/include/lights.inc's dot(dir, -L) assumes a unit
 // vector.
 func TestSpotLightGpuLightNonUnitDir(t *testing.T) {
 	sl := SpotLight{

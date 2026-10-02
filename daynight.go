@@ -227,7 +227,7 @@ func (dn *DayNight) Daylight() float32 {
 // curve wide enough for the approach still held the horizon 37 percent warm at
 // an elevation of -0.20, with the stars already 71 percent out.
 //
-// Must match atmTwilight in shaders/atmosphere.inc. These are the same function
+// Must match atmTwilight in shaders/include/atmosphere.inc. These are the same function
 // computed in two places -- the shader for the sky, the fog and the water, this
 // for game code -- and they had already drifted once, when only the shader was
 // changed.
@@ -251,7 +251,7 @@ type keyframe struct {
 // dome anyway, so that a game which disables the dome still gets a sky rather
 // than whatever these last happened to say.
 //
-// The dome's actual colours live in shaders/atmosphere.inc, driven by sun
+// The dome's actual colours live in shaders/include/atmosphere.inc, driven by sun
 // elevation.
 var skyKeyframes = []keyframe{
 	{0.00, 0.008, 0.010, 0.035},
