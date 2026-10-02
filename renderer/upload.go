@@ -250,9 +250,12 @@ func (r *Renderer) retireUploads(f int) {
 // yet, and detaches the mesh either way.
 //
 // Only the queue is searched. Once a copy is in the batch or retiring it has
-// been recorded into a command buffer that will run, so its destination has
-// to outlive it -- which is why DestroyMesh defers a streamed mesh's buffers
-// instead of freeing them where a static mesh's are freed immediately.
+// been recorded into a command buffer that will run, so its destination has to
+// outlive it. That is covered by the retirement releaseMesh's caller queues:
+// this batch's own retirement was deferred at the end of the frame that
+// recorded it, and a release can only reach the "already recorded" case from a
+// LATER frame's update, whose countdown therefore lands in the same flush or a
+// later one -- never before the copy's fence.
 func (r *Renderer) cancelUpload(m *Mesh) {
 	for i := range r.uploadQueue {
 		if r.uploadQueue[i].mesh != m {

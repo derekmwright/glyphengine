@@ -165,10 +165,15 @@ func TestDestroyModelIsIdempotentAndNilsHandles(t *testing.T) {
 // TestDestroyModelDefersRatherThanFreeingNow is the frames-in-flight property
 // stated as a test rather than as a comment.
 //
-// DestroyMesh and DestroyTexture free a static resource IMMEDIATELY -- read
-// them -- which is correct at shutdown, where the device is already idle, and
-// a use-after-free for a model a submitted frame is still drawing. So what
-// DestroyModel must NOT do is call them straight away.
+// Freeing a model's resources at the call is a use-after-free for a model a
+// submitted frame is still drawing, so what DestroyModel must NOT do is release
+// anything before the frames in flight have retired.
+//
+// DestroyMesh and DestroyTexture are now deferred in their own right (issue
+// #153), so this no longer stands between the caller and an immediate free --
+// it pins DestroyModel's ONE countdown. The release runs inside that callback
+// through destroyMeshNow and friends, which is what keeps it one and not two;
+// TestDestroyModelRetiresItsMeshesInOneCountdown is the other half.
 //
 // BROKEN: made DestroyModel run its release closure inline instead of passing
 // it to DeferDestroy. FAILED with: "DestroyModel freed immediately: 0 deferred

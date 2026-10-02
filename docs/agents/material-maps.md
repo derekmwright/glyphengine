@@ -315,4 +315,8 @@ was never returned at all — the pool carried no
 destroyed while a game ran spent the pool's fixed budget permanently.
 `docs/agents/models.md` has the measurement that found it.) Textures are **not** released — several
 materials commonly share one albedo, and they outlive any single material. Call
-`DestroyTexture` separately. `Renderer.Destroy` sweeps both, materials first.
+`DestroyTexture` separately: it retires the image, view, sampler, memory and
+descriptor set after the frames in flight, exactly as this does, and is safe to
+call at any point in a frame. See
+[one contract](models.md#releasing-anything-at-runtime-one-contract).
+`Renderer.Destroy` sweeps both, materials first.

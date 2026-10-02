@@ -319,6 +319,20 @@ tasks:
         check 27-streaming -count 20 -mode async
         check 27-streaming -count 20 -mode sync
         check 27-streaming -count 20 -mode dynamic
+        # Issue #153's shape, which nothing else here reaches: a DRAWN patch
+        # released and recreated every frame for 200 frames, through one plain
+        # DestroyMesh with no branch on the upload ticket. -mode sync is the
+        # case that matters -- the mesh being released has settled, which is
+        # the state DestroyMesh used to free inline while the frames that drew
+        # it were still in flight -- and -mode async releases in all three
+        # upload states over the same 200 frames. The -reload runs further
+        # down release a Model, whose release always went through
+        # DeferDestroy, so they never covered this. -frames overrides
+        # CHECK_FRAMES because the churn needs the frames to happen in; the
+        # run asserts its own peak resource counts and exits non-zero if
+        # retirement stops, which is the half the layer cannot see.
+        check 27-streaming -count 20 -mode sync -churn 200 -frames 240
+        check 27-streaming -count 20 -mode async -churn 200 -frames 240
         # The yamlui path: a widget tree loaded from YAML, with the indicator's
         # fans and wipes going through a caller-supplied mesh pool.
         check 13-ui -yamlui indicators
@@ -372,9 +386,9 @@ tasks:
         check 22-level -instanced -level ../renderer/testdata/blender/level.glb
         # Renderer.DestroyModel, which no stock run reaches: 22-level swaps the
         # level for a freshly loaded copy twenty times over, releasing each old
-        # model while frames that drew it are still in flight. That is the case
-        # DestroyMesh's and DestroyTexture's immediacy would make a
-        # use-after-free, and the layer is the only thing that sees it. Both
+        # model while frames that drew it are still in flight. DestroyModel
+        # has always deferred that release; the 27-streaming churn runs above
+        # are the same hazard reached through DestroyMesh directly. Both
         # level files, because only the Blender one carries a texture, and a
         # texture is the resource a model SHARES across its primitives -- the
         # one a naive release frees twice. The run asserts its own live

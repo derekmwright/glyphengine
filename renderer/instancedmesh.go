@@ -213,8 +213,8 @@ func (s *InstanceSet) recomputeBounds(instances []MeshInstance) {
 // r.instanceSets so Renderer.Destroy does not free it a second time at
 // shutdown.
 //
-// Deferred through DeferDestroy for the same reason DestroyModel defers its
-// whole release rather than calling DestroyMesh/DestroyTexture inline: a
+// Deferred through DeferDestroy for the same reason every other release here
+// is, and the reason DestroyMesh and DestroyTexture now are too: a
 // submitted frame can still be reading this set's buffer in
 // recordInstanced/recordInstancedShadow at the moment a game decides to give
 // it back -- the harder case, not the easier one, is a level's -reload swap,
@@ -272,7 +272,7 @@ func (r *Renderer) DestroyInstanceSet(s *InstanceSet) {
 			r.deviceDriver.FreeMemory(memory, nil)
 		}
 		// Deregistered here, not at the top of this function, for the same
-		// reason DestroyModel's whole release runs inside DeferDestroy: a
+		// reason retireMesh and retireTexture deregister at retirement: a
 		// ResourceCounts taken right after this call still has to report the
 		// set as live, because it genuinely still is for
 		// maxFramesInFlight more frames. examples/22-level's -reload loop

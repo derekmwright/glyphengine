@@ -54,7 +54,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-10-02 # the draw list's order, and the opaque policy measured and rejected
+verified: 2026-10-02 # the draw list's order and the rejected opaque policy; releasing mid-frame (#153)
 ---
 
 # Run a game loop with Engine and Game
@@ -172,6 +172,15 @@ waiting for the graphics queue to drain. See
 [streaming geometry in](models.md#streaming-geometry-in-while-frames-render)
 for the constructors, the readiness ticket and the rule that an unfinished
 mesh is simply not drawn.
+
+Releasing from this thread, mid-frame, is also fine, and needs no accounting
+for the frames in flight: `DestroyMesh`, `DestroyTexture` and every other
+public release stop the resource being drawn at the call and destroy its Vulkan
+objects once the frames that were in flight have retired — which is
+`maxFramesInFlight` more of the loop above, since each iteration's fence wait
+is what lets one countdown tick. There is no device idle in it, and no variant
+to choose by allocation or upload state. See
+[one contract](models.md#releasing-anything-at-runtime-one-contract).
 
 ## Two clocks, on purpose
 

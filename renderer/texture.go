@@ -935,31 +935,89 @@ func (r *Renderer) createFallbackTexture() (*Texture, error) {
 	return r.CreateTexture(white, 1, 1)
 }
 
-// DestroyTexture releases GPU resources for a texture, including the
-// descriptor set it took from the pool at upload.
+// DestroyTexture releases a texture. It is safe at runtime: the texture reads
+// as destroyed the moment the call returns, and its image, view, sampler,
+// memory and descriptor set are retired once the frames currently in flight
+// have finished with them.
+//
+// It used to free all five here and now, and said so -- correct at shutdown,
+// where Renderer.Destroy has waited for the device to go idle, and a
+// use-after-free for a texture a submitted frame is still sampling. That left
+// every caller to work out which of the two it was, from a call that looks the
+// same either way. DestroyMesh had the same shape and the same fix; see
+// docs/agents/models.md for the one contract both now follow.
 //
 // A texture shared between glTF documents is normally released a share at a
-// time through DestroyModel, and reaches here only when the last share goes.
-// Calling this on one directly destroys it regardless of who else is holding
-// it, which is the caller's error either way -- but it still drops the cache
-// entry, so the next LoadGLTF uploads a fresh texture rather than being handed
-// this destroyed one.
+// time through DestroyModel and reaches here only when the last share goes.
+// Calling this on one directly destroys it regardless of who else holds it,
+// which is the caller's error either way -- but the cache entry is dropped
+// immediately, so the next LoadGLTF uploads a fresh texture rather than being
+// handed this one on its way out.
+//
+// Immediate destruction lives in destroyTextureNow, for renderer shutdown and
+// for callers already inside a deferred callback.
 func (r *Renderer) DestroyTexture(t *Texture) {
+	if !r.releaseTexture(t) {
+		return
+	}
+	r.DeferDestroy(func() { r.retireTexture(t) })
+}
+
+// destroyTextureNow is DestroyTexture without the wait. Unexported, and
+// correct in the same two places destroyMeshNow is: renderer shutdown, and
+// inside a deferred callback whose countdown has already covered the frames in
+// flight. DestroyModel's release of a level's images is the second.
+func (r *Renderer) destroyTextureNow(t *Texture) {
+	if !r.releaseTexture(t) {
+		return
+	}
+	r.retireTexture(t)
+}
+
+// releaseTexture is the immediate half both entry points share. It reports
+// whether t owns Vulkan objects that are owed a retirement -- a borrowed scene
+// image and a render target's own texture do not, and neither does one that
+// has already been released.
+func (r *Renderer) releaseTexture(t *Texture) bool {
 	if t != nil && t.scene != nil {
-		return // Borrowed scene images are released with their renderer targets.
+		return false // Borrowed scene images are released with their renderer targets.
 	}
 	if t != nil && t.target != nil {
 		r.DestroyRenderTarget(t.target)
-		return
+		return false
 	}
 	if t == nil || t.destroyed {
-		return
+		return false
 	}
 	t.destroyed = true
-	r.forgetGLTFTexture(t)
 
-	// Deregister for the same reason as DestroyMesh: the renderer's own
-	// cleanup would otherwise free these handles a second time.
+	// The cache stops naming the texture NOW, not at retirement: a LoadGLTF
+	// between the two would otherwise be handed a texture that is already on
+	// its way out. Exactly once, because the destroyed flag above turns a
+	// second release into a no-op before it reaches here -- which is what
+	// makes releaseGLTFTexture's last share and a direct call on a shared
+	// texture both evict once and retire once.
+	r.forgetGLTFTexture(t)
+	return true
+}
+
+// retireTexture destroys what one released texture owns and drops it from the
+// renderer's cleanup list.
+//
+// The deregistration is at retirement rather than at the call for the reason
+// retireMesh's is: ResourceCounts.Textures reports a released-but-unretired
+// texture as live because it genuinely is, and whichever of the retirement and
+// Renderer.Destroy's sweep runs first takes the texture off the list, so the
+// handles cannot be freed twice.
+//
+// The set goes back BEFORE the view and sampler it names are destroyed. That
+// is the same ordering Renderer.Destroy uses when it sweeps materials before
+// textures, for the same reason: what the layer reports is a sampler destroyed
+// while a descriptor set still names it (VUID-vkDestroySampler-sampler-01082),
+// so the set has to stop naming it first. Inside the one retirement rather
+// than split across the call and the retirement, so that the set's exposure to
+// a frame still in flight stays exactly the sampler's.
+func (r *Renderer) retireTexture(t *Texture) {
 	for i, other := range r.textures {
 		if other == t {
 			r.textures = append(r.textures[:i], r.textures[i+1:]...)
@@ -967,20 +1025,6 @@ func (r *Renderer) DestroyTexture(t *Texture) {
 		}
 	}
 
-	// The set goes back BEFORE the view and sampler it names are destroyed.
-	// That is the same ordering Renderer.Destroy uses when it sweeps
-	// materials before textures, for the same reason: what the layer reports
-	// is a sampler destroyed while a descriptor set still names it
-	// (VUID-vkDestroySampler-sampler-01082), so the set has to stop naming it
-	// first.
-	//
-	// Freed here and now, not deferred, because everything else this function
-	// owns is freed here and now -- so the set's exposure to a frame still in
-	// flight is exactly the sampler's, and it is the CALLER's to arrange, as
-	// it already was before there was a set to give back. DestroyModel runs
-	// this whole call through DeferDestroy; Renderer.Destroy has waited for
-	// the device to go idle. Deferring only the set would buy nothing and
-	// would leave it naming a destroyed sampler for two frames.
 	r.freeDescriptorSets(t.DescriptorSet)
 
 	r.deviceDriver.DestroySampler(t.sampler, nil)

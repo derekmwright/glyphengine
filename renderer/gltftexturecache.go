@@ -169,21 +169,42 @@ func (r *Renderer) shareGLTFTexture(key gltfTextureKey, tex *Texture) {
 }
 
 // releaseGLTFTexture gives back one share of t and destroys it when the last
-// one goes. A texture that was never cached -- an embedded image, or one from
-// a filesystem that cannot be a key -- is destroyed outright, which is what
-// DestroyModel did to every texture before this existed.
+// one goes, through the runtime-safe DestroyTexture. A texture that was never
+// cached -- an embedded image, or one from a filesystem that cannot be a key --
+// is released outright, which is what DestroyModel did to every texture before
+// this existed.
 //
-// The eviction is NOT here: DestroyTexture does it, so there is exactly one
+// The eviction is NOT here: releaseTexture does it, so there is exactly one
 // place the cache can stop naming a texture and it is the place the texture
-// actually dies. See DestroyTexture.
+// starts dying. See DestroyTexture.
 func (r *Renderer) releaseGLTFTexture(t *Texture) {
+	if r.unshareGLTFTexture(t) {
+		r.DestroyTexture(t)
+	}
+}
+
+// releaseGLTFTextureNow is releaseGLTFTexture for a caller already inside a
+// deferred callback. Same share accounting, same single eviction; the
+// destruction it reaches is the immediate one, because the wait has happened.
+// DestroyModel's release closure is the only caller.
+func (r *Renderer) releaseGLTFTextureNow(t *Texture) {
+	if r.unshareGLTFTexture(t) {
+		r.destroyTextureNow(t)
+	}
+}
+
+// unshareGLTFTexture gives back one share of t and reports whether t should now
+// be destroyed. Split out so the deferred and immediate releases cannot drift
+// apart on the one thing that must happen exactly once per hold -- the
+// decrement -- while differing on when the texture dies.
+func (r *Renderer) unshareGLTFTexture(t *Texture) bool {
 	if c, ok := r.gltfTextureShares[t]; ok {
 		c.shares--
 		if c.shares > 0 {
-			return
+			return false
 		}
 	}
-	r.DestroyTexture(t)
+	return true
 }
 
 // forgetGLTFTexture drops t from the cache. Called from DestroyTexture, so it

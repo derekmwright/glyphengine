@@ -308,36 +308,62 @@ func (r *Renderer) CreateMaterial(opts MaterialOptions) (*Material, error) {
 	return m, nil
 }
 
-// DestroyMaterial unregisters the material and defers releasing its uniform
-// buffer and its descriptor set until every in-flight frame has finished
-// referencing them. The textures belong to the caller.
+// DestroyMaterial releases a material's uniform buffer and its descriptor set
+// once every in-flight frame has finished referencing them. The textures belong
+// to the caller.
+//
+// Idempotent and nil-safe.
 func (r *Renderer) DestroyMaterial(m *Material) {
-	if m == nil || m.destroyed {
+	if !r.releaseMaterial(m) {
 		return
 	}
-	m.destroyed = true
+	r.DeferDestroy(func() { r.retireMaterial(m) })
+}
 
-	// Deregister for the same reason DestroyTexture does: the renderer's own
-	// shutdown sweep would otherwise free these handles a second time.
+// destroyMaterialNow is DestroyMaterial without the wait, for the same two
+// callers destroyMeshNow and destroyTextureNow serve: renderer shutdown, and a
+// deferred callback that has already waited out the frames in flight.
+//
+// DestroyModel's release closure is the second, and it is why this exists. It
+// used to call DestroyMaterial from inside its own deferral, so a released
+// level's materials took two countdowns to free where its meshes and textures
+// took one -- a difference nothing asked for and the reload loop had to budget
+// for.
+func (r *Renderer) destroyMaterialNow(m *Material) {
+	if !r.releaseMaterial(m) {
+		return
+	}
+	r.retireMaterial(m)
+}
+
+func (r *Renderer) releaseMaterial(m *Material) bool {
+	if m == nil || m.destroyed {
+		return false
+	}
+	m.destroyed = true
+	return true
+}
+
+// retireMaterial frees the set and then the buffer it names, and deregisters
+// the material.
+//
+// Deregistered at retirement rather than at the call, the convention
+// retireMesh and retireTexture follow: the renderer's own shutdown sweep would
+// otherwise free these handles a second time, and ResourceCounts.Materials
+// reports a released-but-unretired material as live because it is.
+func (r *Renderer) retireMaterial(m *Material) {
 	for i, other := range r.materials {
 		if other == m {
 			r.materials = append(r.materials[:i], r.materials[i+1:]...)
 			break
 		}
 	}
-
-	r.DeferDestroy(func() {
-		// The set first: it names this buffer at binding 5 and the textures'
-		// views and samplers at 0..4, and it has to stop naming them before
-		// any of them go. Inside the deferral rather than freed above it for
-		// the reason the buffer is already deferred -- a submitted frame can
-		// still have this set bound, and unlike DestroyTexture there is
-		// nothing else here that is freed immediately for it to be safe
-		// alongside.
-		r.freeDescriptorSets(m.DescriptorSet)
-		r.deviceDriver.FreeMemory(m.uniformMemory, nil)
-		r.deviceDriver.DestroyBuffer(m.uniform, nil)
-	})
+	// The set first: it names this buffer at binding 5 and the textures'
+	// views and samplers at 0..4, and it has to stop naming them before any of
+	// them go.
+	r.freeDescriptorSets(m.DescriptorSet)
+	r.deviceDriver.FreeMemory(m.uniformMemory, nil)
+	r.deviceDriver.DestroyBuffer(m.uniform, nil)
 }
 
 // createFallbackNormalTexture creates the 1x1 flat tangent-space normal

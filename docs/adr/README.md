@@ -18,6 +18,7 @@ Start with the index below; use [the template](template.md) for a new record.
 | [0008](0008-buffer-resources-and-gpu-draw-generation.md) | Buffer resources, storage buffers and GPU draw generation | Accepted | 2026-09-24 |
 | [0009](0009-execute-render-passes-with-dynamic-rendering.md) | Execute render passes with dynamic rendering | Accepted | 2026-09-24 |
 | [0010](0010-shared-mesh-storage-and-range-submission.md) | Shared mesh storage and range submission | Accepted | 2026-09-24 |
+| [0011](0011-one-runtime-safe-resource-release-contract.md) | One runtime-safe resource release contract | Accepted | 2026-10-02 |
 
 Records 0002–0004 document existing decisions retrospectively. Their recorded
 date is when the ADR was written, not an assertion about when the original
