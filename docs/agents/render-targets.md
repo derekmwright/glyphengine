@@ -35,13 +35,18 @@ api:
   - renderer.SceneColor
   - renderer.SceneDepth
   - renderer.GPUTimings
+  - renderer.Renderer.Stats
+  - renderer.RenderStats
+  - renderer.AppStats
+  - renderer.AppStats.Pass
+  - renderer.AppPassStats
 example: examples/24-custom-passes
 run: task example:24-custom-passes -- -timings
 requires:
   - cgo
   - vulkan-runtime
 assets: procedural
-verified: 2026-10-02 # directional shadow sampling from compute; storage buffers, sampler probes and explicit barriers; exported GLSL include set
+verified: 2026-10-02 # directional shadow sampling from compute; application submission counts per pass; storage buffers, sampler probes and explicit barriers; exported GLSL include set
 ---
 
 # Application render targets, graphics and compute passes
@@ -246,6 +251,47 @@ silent read of the previous frame's layers. See
 The cascade map is not swapchain-sized, so a resize or rebuild leaves it and its
 light-set descriptors in place; only the dispatch's own relative targets and
 their input sets are replaced.
+## Counted work
+
+Every application draw is in `Stats()`. `RenderStats.DrawCalls`, `Instances` and
+`Triangles` are submitted work wherever it came from, and `RenderStats.App` is
+the application's share of the same numbers, so scene-only figures are the
+subtraction:
+
+```go
+st := r.Stats()
+sceneDraws := st.DrawCalls - st.App.DrawCalls
+sceneTriangles := st.Triangles - st.App.Triangles
+if p, ok := st.App.Pass("caustic atlas"); ok {
+    log.Printf("%s: %d draws, %d triangles", p.Name, p.DrawCalls, p.Triangles)
+}
+```
+
+The counting rule:
+
+- A mesh draw counts as one draw call, one instance and the triangles its index
+  count asks for — its vertex count when it is not indexed.
+- A fullscreen pass counts as one draw call, one instance and one triangle. It
+  is a real submission, and a postprocess chain reading as zero is how an
+  expensive one stays invisible.
+- A dispatch counts in `App.Dispatches` and nowhere else. It is not a draw and
+  it has no triangles, so it is absent from `DrawCalls` and from `Triangles`. A
+  dispatch with a zero axis records no command and so counts as nothing.
+- A disabled pass keeps its row, reading zero, so a HUD line does not move when
+  an effect is switched off.
+
+The engine's own post-process triangles -- bloom, the tonemap, light shafts --
+are not in these counters, and that asymmetry is deliberate: that chain is a
+fixed cost of having a renderer and each stage already has a named GPU timer,
+while an application pass is one the game created and can switch off.
+
+`App.Passes` holds one row per application pass in frame-graph order — creation
+order within a stage — and `App.Pass(name)` finds one by name. `CreateAppPass`
+and `CreateAppCompute` reject a `Name` a live pass already holds, with an error
+naming `Name`, so that lookup is unambiguous; destroying a pass frees its name
+again. `App.Passes` is the renderer's own storage, refilled in place by each
+`DrawFrame` rather than reallocated, so read it before the next frame or copy
+what you keep.
 
 ## Application storage buffers
 

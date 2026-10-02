@@ -130,6 +130,13 @@ func TestAppComputeStreams(t *testing.T) {
 const goldenAppComputeStreamHash Hasher = 0x42a9ec47c9236b15
 const goldenAppComputeCalls = 3390
 
+// Three application passes -- mesh, compute and fullscreen -- is also what holds
+// RenderStats.App.Passes to a slice reused in place. Rebuilding the per-pass rows
+// as a map, or as a fresh slice, costs an allocation on every frame of every game
+// that has a single application pass, and this is where that shows up. Verified:
+// a map[string]*AppPassStats plus an append to a nil slice in RenderStats.reset
+// reports 3 allocs/frame here at all three draw counts, and 2 in
+// TestAppPassAllocs, which has no compute pass.
 func TestAppComputeAllocs(t *testing.T) {
 	for _, n := range []int{7, 97, 511} {
 		fx := withAppFrame(buildFrame(n), true, true)

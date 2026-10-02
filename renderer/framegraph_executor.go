@@ -44,6 +44,7 @@ type graphNode struct {
 type frameGraph struct {
 	beforeShadows          int
 	lodTimer, uploadTimer  *AppPass
+	apps                   []*AppPass // application passes in graph order; indexes RenderStats.App.Passes
 	lodBuffers             map[framegraph.ResourceID]graphImage
 	storage                map[*StorageBuffer]framegraph.ResourceID
 	declarations           []framegraph.Node
@@ -75,6 +76,7 @@ type graphFrame struct {
 	scratch                                                 *commandScratch
 	timer                                                   *gpuTimer
 	stats                                                   *RenderStats
+	appSlot                                                 int // set by the recording closure of the application pass being recorded
 	sceneColor                                              *sceneColorTarget
 	sceneImage                                              core1_0.Image
 	waterPipeline, godRayPipeline, uiPipeline, msdfPipeline core1_0.Pipeline

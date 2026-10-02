@@ -60,7 +60,7 @@ func (r *Renderer) appendComputeGraph(f *frameGraph, p *AppCompute, group int, a
 		rest = append(rest, framegraph.Use{Resource: id, Access: framegraph.SampledRead,
 			Stages: core1_0.PipelineStageVertexShader | core1_0.PipelineStageFragmentShader | core1_0.PipelineStageComputeShader})
 	}
-	appendNode(n, graphNode{name: p.desc.Name, app: p.pass, record: p.record, enabled: p.active, begin: -1, end: -1, resolve: -1})
+	appendNode(n, graphNode{name: p.desc.Name, app: p.pass, record: f.appRecorder(p.pass, p.record), enabled: p.active, begin: -1, end: -1, resolve: -1})
 	// Storage writes enter General. Keep their derived return to sampled layout
 	// in the same optional group so disabling a dispatch also skips both edges.
 	appendNode(framegraph.Node{Name: p.desc.Name + " sampled outputs", Kind: framegraph.Transfer, OptionalGroup: group, Uses: rest},

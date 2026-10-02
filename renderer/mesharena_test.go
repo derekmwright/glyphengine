@@ -288,7 +288,7 @@ func TestMeshRangesAcrossRecordingPaths(t *testing.T) {
 	h := &fakeHandles{next: 50000}
 	p := &AppPass{r: &Renderer{fallbackTexture: fx.fallbackTexture}, draws: fx.draws[:1], sets: []core1_0.DescriptorSet{h.descSet()}}
 	d.draws = nil
-	p.record(&graphFrame{driver: d, scratch: &fx.scratch})
+	p.record(&graphFrame{driver: d, scratch: &fx.scratch, stats: &RenderStats{}})
 	if len(d.draws) != 1 || d.draws[0][1] != 19 || d.draws[0][2] != 37 {
 		t.Fatal("application pass lost range", d.draws)
 	}

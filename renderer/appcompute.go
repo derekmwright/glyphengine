@@ -52,6 +52,9 @@ func (r *Renderer) validateAppCompute(d AppComputeDesc) error {
 	if d.Stage < StageBeforeScene || d.Stage > StageBeforeTonemap {
 		return fail("Stage", "unknown stage")
 	}
+	if err := r.validateAppName(d.Name, fail); err != nil {
+		return err
+	}
 	if len(d.Comp) < 20 || len(d.Comp)%4 != 0 || binary.LittleEndian.Uint32(d.Comp) != 0x07230203 {
 		return fail("Comp", "invalid SPIR-V header or length")
 	}
@@ -195,6 +198,9 @@ func (p *AppCompute) record(c *graphFrame) {
 	copy(s.pc[32:], pass.push[:])
 	s.pushConstants(d, c.cmd, pass.layout, core1_0.StageCompute)
 	d.CmdDispatch(c.cmd, int(p.dispatch[0]), int(p.dispatch[1]), int(p.dispatch[2]))
+	// Not a draw and not triangles: a dispatch is its own kind of submitted work,
+	// so it stays out of DrawCalls and lands in App.Dispatches only.
+	c.stats.addAppDispatch(c.appSlot)
 }
 
 func (r *Renderer) flushComputeOutputs(p *AppCompute, set core1_0.DescriptorSet, frame int) error {

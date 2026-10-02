@@ -21,9 +21,12 @@ api:
   - renderer.Renderer.ResetGPUTimings
   - renderer.Renderer.Stats
   - renderer.RenderStats
+  - renderer.AppStats
+  - renderer.AppStats.Pass
+  - renderer.AppPassStats
 assets: none
 run: task bench
-verified: 2026-10-02 # cpu drawsort split out of cpu drawlist
+verified: 2026-10-02 # cpu drawsort split out of cpu drawlist; App beside the GPU timings
 ---
 
 # Measuring frame cost
@@ -173,6 +176,25 @@ st := e.Renderer().Stats()   // DrawCalls, Instances, Triangles, GrassTiles*
 
 Times say what costs; counts say why. A pass getting slower is either doing more
 work or the same work slower, and the timer cannot tell those apart.
+
+That holds for the application's own passes too, and `st.App` is where they are:
+the same three counters for application work only, plus `Dispatches`, and one
+row per pass under the name its GPU timer reports. Read a row beside its timing
+and a slow pass says which of the two it is; `st.DrawCalls - st.App.DrawCalls`
+is the scene on its own, for watching engine-side regressions without the
+application's effects in the number.
+
+```go
+for _, p := range st.App.Passes {   // graph order, same names as GPUTimings().App
+    log.Printf("%-16s %d draws %d triangles %d dispatches", p.Name, p.DrawCalls, p.Triangles, p.Dispatches)
+}
+```
+
+Application draws were missing from these counters entirely until 2026-10. A
+pass submitting 2,359,296 triangles before the scene had a working timer and
+moved nothing in `Stats()`, so there was no way to tell it from a cheap one. See
+`docs/agents/render-targets.md` for the counting rule, including fullscreen
+draws and dispatches.
 
 This is what made the grass work tractable. Grass was 3.95 ms and a trivial
 fragment shader still cost 2.76 ms of it, so 70% was never shader maths — the
