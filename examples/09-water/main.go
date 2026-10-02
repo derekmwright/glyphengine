@@ -36,6 +36,17 @@
 // anything: the pair differs in the lights and in nothing else, so whatever
 // the water gains between the two captures is the lamps.
 //
+//	-water      x/water's underwater volume, from the x module
+//
+// The engine's water is a surface: it refracts the bed, reflects the sky and
+// absorbs colour through the still depth baked into every vertex. None of that
+// is visible from underneath, and walking in without -water gets you a flat
+// grey world. -water adds the volume -- absorption along the view ray, the
+// water's own colour filling in behind it, and sun shafts -- and switches
+// itself off the moment the camera breaks the surface, so the above-water frame
+// is byte for byte the one you get without the flag. Walk in and out with it on
+// and off; see `task xwater` and x/water/water.md.
+//
 // One more flag moves the whole atmosphere to another planet:
 //
 //	-alien      a violet-and-amber sky palette instead of Earth's
@@ -52,6 +63,7 @@
 //	go run ./09-water -plume -ghost -marker -submerged
 //	go run ./09-water -lamps 9 -spots 2 -time 0.02   # lamplight on the lake
 //	go run ./09-water -alien -time 0.35              # not Earth's sky
+//	go run ./09-water -water                         # walk under and look around
 //
 // WASD moves, mouse looks, Shift runs, Space jumps, R toggles refraction,
 // Escape releases the cursor.
@@ -74,6 +86,7 @@ import (
 	"github.com/derekmwright/glyphengine/ecs"
 	"github.com/derekmwright/glyphengine/input"
 	"github.com/derekmwright/glyphengine/renderer"
+	xwater "github.com/derekmwright/glyphengine/x/water"
 )
 
 func init() {
@@ -223,6 +236,12 @@ type game struct {
 	bloom      float32
 	bloomThres float32
 
+	// -water adds x/water's underwater volume. Off by default, so every other
+	// capture of this scene stays byte for byte what it was -- and so the flag
+	// is also the A/B: walk into the lake with it and without it.
+	volume     bool
+	underwater *xwater.Water
+
 	// Blended effects across the waterline. Off by default, so every other
 	// capture of this scene is byte for byte what it was.
 	plume     bool
@@ -294,6 +313,18 @@ func (g *game) Init(e *glyph.Engine) error {
 	e.C.MeshRef.Set(g.water, &glyph.MeshRef{Mesh: surface})
 	e.C.Water.Set(g.water, &glyph.Water{Options: opts})
 	e.C.Static.Set(g.water, &glyph.Static{})
+
+	if g.volume {
+		// The same Level the engine's surface was built with. They have to
+		// agree: the engine draws the surface from its copy and x/water decides
+		// what is submerged from its own.
+		opts := xwater.DefaultOptions(waterLevel)
+		g.underwater, err = xwater.New(e.Renderer(), opts)
+		if err != nil {
+			return err
+		}
+		g.underwater.SetEnabled(true)
+	}
 
 	// Optional hard occluders. Light shafts are built from the gaps between
 	// things silhouetted against the sun, and rolling terrain has no gaps --
@@ -893,7 +924,18 @@ func (g *game) LateUpdate(e *glyph.Engine, _ float32) {
 	if t, ok := e.InterpolatedTransform(g.player); ok {
 		g.camera.Follow(&t)
 	}
-	e.SetCamera(g.camera.ViewVectors())
+	eye, center, up := g.camera.ViewVectors()
+	e.SetCamera(eye, center, up)
+
+	// After the camera has moved, before the frame is recorded. x/water decides
+	// from the eye whether it does anything at all, so a stale eye would leave
+	// the volume on for a frame after surfacing.
+	if g.underwater != nil {
+		st := e.Scene.Environment()
+		if err := g.underwater.Update(e.ViewProjection().Inv(), eye, st.SunDir, st.SunColor); err != nil {
+			log.Fatalf("x/water update: %v", err)
+		}
+	}
 
 	// The overlay carries a finished MVP, so it has to be rebuilt after the
 	// camera moves -- which is here, not in Update.
@@ -1047,6 +1089,7 @@ func main() {
 	lampPosts := flag.Bool("lampposts", true, "draw the piles and bulb markers under the lamps (off measures the light loop against identical geometry)")
 	alien := flag.Bool("alien", false, "a violet-and-amber sky palette instead of Earth's, through Scene.SetSkyPalette")
 	lightDebug := flag.String("lightdebug", "", "light debug mode: heatmap or bruteforce (default: off)")
+	xw := flag.Bool("water", false, "x/water's underwater volume: absorption, the water's own colour and sun shafts, once the camera goes under (off by default)")
 	uiGlow := flag.Bool("uiglow", false, "route the screen-space UI through its own HDR layer; nothing here asks to glow, so `task hud` uses it as the second path the HUD has to survive")
 	flag.Parse()
 
@@ -1080,7 +1123,7 @@ func main() {
 		opts = append(opts, glyph.WithUIGlow())
 	}
 
-	e, err := glyph.New(&game{seed: *seed, refract: *refract, pitch: float32(*pitch), tod: float32(*tod), clouds: *clouds, cirrus: float32(*cirrus), stars: *stars, milkyway: *milkyway, band: *band, fogHeight: float32(*fogHeight), yaw: float32(*yaw), shafts: float32(*shafts), shaftShape: glyph.LightShaftShape{Radius: float32(*shaftRadius), Decay: float32(*shaftDecay), Threshold: [2]float32{float32(*shaftLow), float32(*shaftHigh)}}, pillars: *pillars, pauseAt: *pauseAt, hud: *hud, bloom: float32(*bloom), bloomThres: float32(*bloomThreshold), plume: *plume, ghost: *ghost, marker: *marker, submerged: *submerged, lampCount: *lamps, spotCount: *spots, lampsOff: *lampsOff, volumetric: float32(*volumetric), lampPosts: *lampPosts, alien: *alien}, opts...)
+	e, err := glyph.New(&game{seed: *seed, refract: *refract, pitch: float32(*pitch), tod: float32(*tod), clouds: *clouds, cirrus: float32(*cirrus), stars: *stars, milkyway: *milkyway, band: *band, fogHeight: float32(*fogHeight), yaw: float32(*yaw), shafts: float32(*shafts), shaftShape: glyph.LightShaftShape{Radius: float32(*shaftRadius), Decay: float32(*shaftDecay), Threshold: [2]float32{float32(*shaftLow), float32(*shaftHigh)}}, pillars: *pillars, pauseAt: *pauseAt, hud: *hud, bloom: float32(*bloom), bloomThres: float32(*bloomThreshold), plume: *plume, ghost: *ghost, marker: *marker, submerged: *submerged, lampCount: *lamps, spotCount: *spots, lampsOff: *lampsOff, volumetric: float32(*volumetric), lampPosts: *lampPosts, alien: *alien, volume: *xw}, opts...)
 	if err != nil {
 		log.Fatalf("create engine: %v", err)
 	}
