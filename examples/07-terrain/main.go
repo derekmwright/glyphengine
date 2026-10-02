@@ -36,8 +36,8 @@ import (
 
 	glyph "github.com/derekmwright/glyphengine"
 	"github.com/derekmwright/glyphengine/ecs"
-	"github.com/derekmwright/glyphengine/examples/internal/terrainfield"
 	"github.com/derekmwright/glyphengine/input"
+	"github.com/derekmwright/glyphengine/x/terrainfield"
 )
 
 func init() {

@@ -41,7 +41,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: procedural
-verified: 2026-10-02 # directional shadow sampling from compute; storage buffers, sampler probes and explicit barriers
+verified: 2026-10-02 # directional shadow sampling from compute; storage buffers, sampler probes and explicit barriers; exported GLSL include set
 ---
 
 # Application render targets, graphics and compute passes
@@ -388,6 +388,28 @@ set 0 binding 0 using its existing descriptor set; pass inputs at set 2 stay
 independent. A mesh pass with no draws still begins
 and ends dynamic rendering, including a requested clear. Fullscreen passes draw
 one triangle; supplying mesh draws to one is an error at `DrawFrame`.
+
+### Reaching the engine's shared GLSL
+
+A pass shader that wants to light, fog or grade the way the rest of the frame
+does needs the engine's shared GLSL, not a reimplementation of it. It is embedded
+and exported by `github.com/derekmwright/glyphengine/shaders/include`: write the
+set to a directory and compile with `glslc -I` against it, naming the fragments
+bare (`#include "lighting.inc"`). That package's doc comment carries the build
+step. The layouts above are what the includes expect the including file to have
+declared already, and `lighting.inc` additionally needs `LIGHT_SET` `#define`d.
+
+Do this at test or generate time, never at startup: `glslc` is an authoring-only
+dependency, and compiling in a test is what makes a changed include fail at build
+rather than at draw. `shaders/terrain.frag` is a worked preamble;
+`examples/24-custom-passes/lit.frag` is the same thing from outside the engine's
+own shader directory.
+
+Never include a shared fragment by a relative path into the engine's source tree.
+It works in a `git clone` and fails for everyone who ran `go get`. This is the
+seam [ADR 0012](../adr/0012-an-x-module-for-opinionated-systems.md) exists to
+provide, and [`x/README.md`](../../x/README.md) is the policy for packages
+outside the engine module.
 
 ## History, resize and lifetime
 

@@ -18,7 +18,7 @@ audio/miniaudio.h linguist-vendored
 # The .inc files are GLSL fragments pulled in by #include, not C++. Linguist
 # maps the .inc extension to C++ by default, which put a C++ slice on the
 # language bar for code that no C++ compiler has ever seen.
-shaders/*.inc linguist-language=GLSL
+shaders/include/*.inc linguist-language=GLSL
 
 # Line endings are declared here rather than left to each machine's
 # core.autocrlf, because that setting is per-clone and this repository cannot

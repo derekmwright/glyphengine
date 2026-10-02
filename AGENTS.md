@@ -19,25 +19,47 @@ engine in. There is no editor application and no runtime that loads your game.
 | Path | Module | Purpose |
 |---|---|---|
 | `/` | `glyphengine` | Engine root package plus subpackages |
+| `/x` | `glyphengine/x` | Opinionated systems on the engine's public seams, one package per system |
 | `/examples` | `glyphengine/examples` | Runnable examples, one concept each |
 | `/docs/adr` | — | Architecture decision records and their index |
 | `/docs/agents` | — | Machine-readable capability docs (see below) |
 | `/shaders` | — | GLSL sources and **committed** SPIR-V |
+| `/shaders/include` | `glyphengine` | The shared GLSL fragments, embedded and exported so `x` can compile against them |
 
-Two separate Go modules in one git repo, tied together by `go.work`. This is
-deliberate: `go get` of the engine never pulls example code or assets, while
-`git clone` still gets everything.
+Three separate Go modules in one git repo, tied together by `go.work`. This is
+deliberate: `go get` of the engine never pulls example code, assets, or anyone's
+opinions, while `git clone` still gets everything.
+
+The order in `go.work` is the dependency direction, and it is enforced rather
+than merely documented: **the engine depends on neither of the others, `x`
+depends on the engine, the examples depend on both.** `ximport_test.go` fails if
+an engine package reaches into `x`, including transitively. It has to exist
+because `go.work` makes every module importable from every other, so a violation
+builds, vets and tests clean on its own, and Go's cycle detection catches only
+the `x` packages that happen to import the engine's root package. See
+[ADR 0012](docs/adr/0012-an-x-module-for-opinionated-systems.md) and
+[`x/README.md`](x/README.md).
 
 ## Rules that matter
 
-1. **Never add a `replace` directive to the root `go.mod`.** A `replace` in a
-   dependency is ignored by consumers, so it would silently give them different
-   code than we build and test against. `examples/go.mod` has one, which is
-   fine — it is a main module that is never published.
+1. **Never add a `replace` directive to a published module's `go.mod`.** That is
+   the root `go.mod` and `x/go.mod`. A `replace` in a dependency is ignored by
+   consumers, so it would silently give them different code than we build and
+   test against. `examples/go.mod` has two, which is fine — it is a main module
+   that is never published. `x` resolves the engine through `go.work` in the
+   repository, and the `consumer` CI job builds it with `GOWORK=off` so the
+   requirement is proved without the workspace.
 2. **`shaders/*.spv` are committed on purpose.** `shaders/shaders.go` embeds
    them with `go:embed`, so without them the module does not build for anyone
    who runs `go get`. `glslc` is an authoring-only dependency. If you edit a
    `.vert`/`.frag`, run `task shaders` and commit the regenerated `.spv`.
+
+   The shared fragments live in `shaders/include/` and are named bare:
+   `#include "lighting.inc"`, resolved by the `-Iinclude` every `glslc`
+   invocation passes. They are there so `shaders/include/include.go` can embed
+   and export them to `x` — never include one by a relative path, in this
+   repository or outside it, because a path into the engine's source tree does
+   not survive `go get`.
 3. **No Git LFS.** The Go module proxy does not run LFS smudge, so consumers
    would receive pointer stubs where `go:embed` and the asset loaders expect
    real content.
@@ -115,6 +137,31 @@ deliberate: `go get` of the engine never pulls example code or assets, while
     wholesale for the first screen of most games. That is not unblocking, it is
     finishing.
 
+    **An opinion now has somewhere to go: `x`.** Rule 14 used to be a refusal
+    with no alternative, which is how a rule stops being followed. Apply this
+    test to any engine change, and treat a yes as a code smell:
+
+    1. Does it encode **a specific look** — palette curves, a day cycle, a
+       material response, a cloud shape, a UI style?
+    2. Does it carry **a tuned constant with no measurement behind it**?
+    3. Is it **a system a game could reasonably want to swap** for a different
+       one?
+
+    Any yes is an opinion and belongs in `x`, behind a seam. A **mechanism** — a
+    barrier, a lifetime, a layout, a sort, a format — belongs in the engine.
+    Size is not the signal: `x/terrainfield` is forty lines of value noise and
+    it is an opinion, while the clustered light binner is thousands and it is a
+    mechanism.
+
+    **When one is found in the core, the response is an ADR naming the seam it
+    moves behind and the `x` package it moves to — not a quiet deletion.** The
+    sky, clouds, water and grass all fail the test above, all predate the rule,
+    and all hold up committed captures and games already built on them. Deleting
+    one because it fails the test breaks those without replacing them. Naming
+    the seam is the work; the move is the easy part afterwards. See
+    [ADR 0012](docs/adr/0012-an-x-module-for-opinionated-systems.md) and
+    [`x/README.md`](x/README.md), which carries the same test as a page.
+
 ## Architecture decisions
 
 Read the relevant accepted records in [`docs/adr/README.md`](docs/adr/README.md)
@@ -151,6 +198,12 @@ without parsing prose. Schema and conventions: `docs/agents/README.md`.
 Query them by the `capability` and `api` frontmatter fields to find the right
 entry point for a task, then read the body for working code.
 
+An `x` package's page lives beside its code (`x/<package>/<package>.md`) with the
+same frontmatter, so one index covers both. The `api` lists are also the seam
+compatibility surface: they are what a package outside the engine module may bind
+to and expect to keep working, and a break is announced in the page's `verified`
+note and in the release notes. See [`x/README.md`](x/README.md).
+
 Blender is the reference world-building and modelling pipeline this engine
 targets (`docs/agents/blender-pipeline.md`) -- the engine still reads only
 the open glTF format, but the recipe, the export script under
@@ -172,10 +225,10 @@ are that pipeline's own real-Blender fixture, in the same spirit as
 
 | Command | Checks |
 |---|---|
-| `task build` | Engine and all examples compile |
-| `task test` | Unit tests (no GPU required) |
+| `task build` | Engine, `x` and all examples compile |
+| `task test` | Unit tests, engine and `x` (no GPU required) |
 | `task test:race` | Same under `-race`; the parallel movement phase needs it |
-| `task lint` | gofmt, then `go vet -unsafeptr=false` |
+| `task lint` | gofmt, then `go vet -unsafeptr=false` across all three modules |
 | `task smoke` | Renders real frames of every example, exits non-zero on failure |
 | `task validate` | Every example under the Vulkan validation layer; must be completely silent (needs a GPU and the SDK) |
 | `task syncvalidate` | The validation matrix plus application compute churn under synchronization validation; must be silent (needs a GPU and the SDK) |
@@ -199,7 +252,8 @@ are that pipeline's own real-Blender fixture, in the same spirit as
 | `task volumetric` | A light's beam is in the air inside its cone and nowhere else (needs a GPU) |
 | `task clouds` | Sunset gold/rose, independent cirrus, layer occlusion and repeatability (needs a GPU) |
 | `task skypalette` | The sky palette reaches the fog, the water and the clouds, not just the dome (needs a GPU) |
-| `task ci` | Lint, build, test, race |
+| `task ci` | Lint, build, test, race, across all three modules |
+| `task shaders:verify` | The committed `.spv` match their GLSL, compiled with `-Iinclude` (needs the SDK) |
 
 ### Signing off a fix
 

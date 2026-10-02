@@ -591,7 +591,7 @@ const (
 func (e *Engine) SetLightDebugMode(mode LightDebugMode) { e.lightDebugMode = mode }
 
 // lightFlags packs the current debug mode into the header bits
-// shaders/lights.inc reads: bit0 = brute force, bit1 = debug heatmap.
+// shaders/include/lights.inc reads: bit0 = brute force, bit1 = debug heatmap.
 func (e *Engine) lightFlags() uint32 {
 	switch e.lightDebugMode {
 	case LightDebugHeatmap:
@@ -667,7 +667,7 @@ func (e *Engine) gatherLights() []renderer.GpuLight {
 		lights = append(lights, renderer.GpuLight{
 			PosRange: [4]float32{pl.Pos.X(), pl.Pos.Y(), pl.Pos.Z(), pl.Range},
 			Color:    [4]float32{pl.Color.X(), pl.Color.Y(), pl.Color.Z(), 0},
-			// DirCone stays zero: lightSpotFactor in shaders/lights.inc reads
+			// DirCone stays zero: lightSpotFactor in shaders/include/lights.inc reads
 			// that as "omnidirectional", which is the value a plain point
 			// light has to reach the GPU with.
 			Params: [4]float32{volumetricIntensity(pl.Volumetric), 0, 0, 0},
@@ -765,7 +765,7 @@ func (e *Engine) clusterFrameLights(view, proj mgl32.Mat4, w, h int) ([]renderer
 func (e *Engine) LightStats() lightcluster.Stats { return e.lightStats }
 
 // spotLightGpuLight converts one SpotLight into the GpuLight the shader
-// reads (shaders/lights.inc's packed form): DirCone.xyz is the unit
+// reads (shaders/include/lights.inc's packed form): DirCone.xyz is the unit
 // direction the light points, DirCone.w is cos(outer half-angle), and
 // Color.a is cos(inner half-angle). A zero-length Dir has no cone to aim, so
 // it reaches the GPU as a plain point light (DirCone left at zero) -- see

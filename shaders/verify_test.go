@@ -67,7 +67,13 @@ func TestCommittedSPIRVMatchesGLSL(t *testing.T) {
 	for _, src := range sources {
 		t.Run(src, func(t *testing.T) {
 			fresh := filepath.Join(out, filepath.Base(src)+".spv")
-			cmd := exec.Command(glslc, src, "-o", fresh)
+			// -Iinclude must match `task shaders`. The shared fragments live in
+			// shaders/include so shaders/include/include.go can embed them, and
+			// every shader names them bare so the search path is what resolves
+			// them. Omitting it fails the compile outright rather than
+			// producing different bytes, but the task and this test have to
+			// agree on the flag or they are no longer checking the same build.
+			cmd := exec.Command(glslc, "-Iinclude", src, "-o", fresh)
 			if msg, err := cmd.CombinedOutput(); err != nil {
 				t.Fatalf("glslc failed: %v\n%s", err, msg)
 			}

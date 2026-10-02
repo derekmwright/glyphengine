@@ -155,7 +155,7 @@ where the plain texture already sat, so joints stay at set 1 and shadow at set 2
 — the layout the skinned pipeline has always used. The only thing genuinely
 missing was a fragment shader declaring the shadow set at 2 instead of 1.
 
-`shaders/material_shading.inc` holds the shading both variants share;
+`shaders/include/material_shading.inc` holds the shading both variants share;
 `lit_material.frag` and `skinned_lit_material.frag` differ only in that
 declaration. That the split changed nothing is checkable: extracting it left
 `lit_material.frag.spv` byte-identical.

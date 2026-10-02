@@ -55,6 +55,17 @@ a plain `git clone`; the root `go.work` covers the same thing for workspace
 users. If you copy an example into your own project, drop that `replace` and
 `go get github.com/derekmwright/glyphengine` instead.
 
+**Some examples import `x`.** `07-terrain` and `25-lod-forest` build their island
+with `github.com/derekmwright/glyphengine/x/terrainfield`, in the third module in
+this repository -- the one for systems that have *a look* rather than a mechanism,
+so the engine does not have to pick an island for you
+([ADR 0012](../docs/adr/0012-an-x-module-for-opinionated-systems.md),
+[`x/README.md`](../x/README.md)). It was `examples/internal/terrainfield`, which
+nothing outside here could reach. For a game an `x` package is a normal import:
+`go get github.com/derekmwright/glyphengine/x` alongside the engine. The
+dependency runs one way only -- the examples may import the engine and `x`, and
+neither may import the examples.
+
 **`-screenshot out.png`** writes a PNG of the last rendered frame, captured by
 the engine itself rather than by an external grabber. Combined with `-frames N`
 it is reproducible, which is how the images in the README are made.

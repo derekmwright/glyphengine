@@ -4,7 +4,15 @@ go 1.27
 // pulls example code or assets, while `git clone` still gets everything. This
 // workspace makes local edits to the engine resolve for the examples without
 // any replace directive -- and go.work is ignored by consumers.
+//
+// ./x is the module for opinionated systems built on the engine's public seams
+// (ADR 0012). The order of these entries is the dependency direction, which the
+// module boundaries enforce rather than merely document: the engine requires
+// neither of the others, x requires the engine, and the examples require both.
+// An engine package that imports x would make the engine depend on its own
+// opinions; ximport_test.go fails the build if one does.
 use (
 	.
+	./x
 	./examples
 )

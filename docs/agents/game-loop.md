@@ -427,7 +427,7 @@ are unchanged, and stock sky shaders render as before.
 | 1 | 0 | `ShadowData` UBO, beginning with `mat4 cascadeVP[2]` |
 | 1 | 1 | `sampler2DArrayShadow`, two directional cascades |
 | 1 | 2 | Point-shadow depth sampler (`samplerCube`, manual comparison) |
-| 1 | 3–5 | Clustered lights, grid, and light-index storage buffers; see `shaders/lights.inc` |
+| 1 | 3–5 | Clustered lights, grid, and light-index storage buffers; see `shaders/include/lights.inc` |
 | 1 | 6 | Application-owned std140 uniform block, 4096 bytes, vertex and fragment stages |
 
 Minimal declarations and a lookup, also exercised by `cmd/skyshadowcheck`:

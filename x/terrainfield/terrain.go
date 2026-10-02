@@ -1,4 +1,19 @@
-// Package terrainfield shares 07-terrain's heightmap recipe with the forest example.
+// Package terrainfield builds an island heightmap from value-noise fBm.
+//
+// This is an opinion, not a mechanism, which is why it lives in x rather than in
+// the engine (ADR 0012). The engine owns glyphengine.Heightmap: the grid, the
+// O(1) height query, the file format, and the renderable mesh built from the
+// same grid -- none of which a game can reach past from outside. What it does
+// not own is a *shape*. Five octaves at halving amplitude, a radial falloff
+// starting at 0.35 of the half-diagonal, and a 14-unit height scale are one
+// particular island, picked because it read well in 07-terrain and gives
+// 25-lod-forest slopes to put trees on. A game wanting ridges, dunes or a
+// crater replaces all of it and still wants the engine's Heightmap underneath.
+//
+// Deterministic for a given seed by construction: the lattice is hashed rather
+// than drawn from a stateful generator, so the same seed gives the same
+// []float32 regardless of platform or evaluation order. The examples' committed
+// screenshots depend on that, and terrain_test.go pins it.
 package terrainfield
 
 import (
@@ -12,7 +27,11 @@ import (
 
 const heightScale = 14.0
 
-// Load uses the terrain example's procedural grid unless a .heightmap is named.
+// Load returns the procedural island unless path names a .heightmap file, in
+// which case that file is loaded instead and seed is ignored. The escape hatch
+// is here because a sculpted terrain exported through cmd/heightmapconv has to
+// be swappable for the generated one without the caller branching -- see
+// docs/agents/terrain-heightmap.md.
 func Load(path string, seed int64) (*glyph.Heightmap, error) {
 	if path != "" {
 		dir, base := filepath.Split(path)

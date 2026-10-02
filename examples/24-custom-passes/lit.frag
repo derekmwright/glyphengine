@@ -53,7 +53,10 @@ layout(push_constant) uniform PushConstants {
 layout(set = 1, binding = 7) uniform sampler2D applicationField;
 layout(location = 0) out vec4 outColor;
 
-#include "../../shaders/lighting.inc"
+// Named bare, not by a path into shaders/: `task shaders` compiles every
+// shader with -Iinclude, and a package outside this repository resolves the
+// same name out of a temp dir written from shaders/include.
+#include "lighting.inc"
 
 void main() {
     vec4 texSample = texture(texSampler, fragUV);

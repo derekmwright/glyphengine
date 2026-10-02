@@ -357,7 +357,7 @@ on screen you had to write `0.0039`. The error was largest exactly in the dark
 values a HUD is built from, and invisible until someone compared the colour they
 picked against the pixel they got.
 
-`ui.frag` and `msdf.frag` now decode with `srgbToLinear` (`shaders/srgb.inc`)
+`ui.frag` and `msdf.frag` now decode with `srgbToLinear` (`shaders/include/srgb.inc`)
 before writing, so what a game writes is what it sees.
 
 **Texels do not go through it.** A colour texture is created as

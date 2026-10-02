@@ -430,7 +430,7 @@ func (s *Scene) SetNightGrade(g NightGrade) { s.nightGrade = g }
 func (s *Scene) NightGrade() NightGrade { return s.nightGrade }
 
 // SkyPalette is the six colours the atmosphere blends between: zenith and
-// horizon for day, for twilight and for night. `shaders/atmosphere.inc` mixes
+// horizon for day, for twilight and for night. `shaders/include/atmosphere.inc` mixes
 // night toward day on the daylight curve and then toward twilight on the
 // twilight curve, so these are endpoints rather than a gradient to sample.
 //

@@ -107,7 +107,7 @@ type SceneLighting struct {
 	Volumetrics *Volumetrics
 
 	// Lights are the unshadowed point + spot lights for the GPU light buffer
-	// (see shaders/lights.inc), in Clusters.Order: the cell lists in Clusters
+	// (see shaders/include/lights.inc), in Clusters.Order: the cell lists in Clusters
 	// index this slice, so the two must come from the same frame's binning.
 	Lights []GpuLight
 	// Clusters is that binning -- the froxel lookup, the cells and their

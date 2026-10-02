@@ -471,7 +471,7 @@ on `Sky`.
 scattering model, a sky with two suns, and the cloud, star and sun-disc colours
 are all still shader work, and `WithShaders` is the right escape hatch for
 them. The sun's own glow keeps a fixed warm ember (`atmSunGlow` in
-`shaders/atmosphere.inc`) after the directional light fades, which is a seventh
+`shaders/include/atmosphere.inc`) after the directional light fades, which is a seventh
 colour this does not reach. This is the case that is pure palette, which is
 most of what "another planet" means in practice.
 

@@ -22,7 +22,7 @@ const MaxLights = lightcluster.MaxLights
 const MaxPointLights = MaxLights
 
 // Light buffer header flag bits (see the uvec4 flags field in
-// shaders/lights.inc).
+// shaders/include/lights.inc).
 const (
 	// LightFlagBruteForce makes the fragment shader loop every uploaded
 	// light and ignore the cluster grid entirely. It is the reference
@@ -71,7 +71,7 @@ const (
 )
 
 // lightStorageBuffersPerSet is how many storage buffer bindings the shadow
-// descriptor set layout now carries (bindings 3, 4, 5 — see shaders/lights.inc).
+// descriptor set layout now carries (bindings 3, 4, 5 — see shaders/include/lights.inc).
 // Renderer.New checks the device's maxPerStageDescriptorStorageBuffers limit
 // against this the same way it already checks push constants against
 // pushConstantSize.
@@ -118,7 +118,7 @@ var (
 )
 
 // GpuLight is one light's 64-byte entry in the LightBuffer SSBO (the GpuLight
-// struct in shaders/lights.inc). It replaces the old 32-byte PointLightData
+// struct in shaders/include/lights.inc). It replaces the old 32-byte PointLightData
 // now that a light can also be a spot: DirCone is the zero vector for a point
 // light, which is why a GpuLight's zero value already means what
 // PointLightData's zero value meant -- no cone, and (with PosRange.w <= 0) no
@@ -151,7 +151,7 @@ type LightGridCell = lightcluster.Cell
 
 // packLightHeader writes the fixed 64-byte LightBuffer header into dst[:64]:
 // grid dimensions and light count, z-slice parameters, framebuffer size, and
-// flags. Matches the std430 layout in shaders/lights.inc exactly -- four
+// flags. Matches the std430 layout in shaders/include/lights.inc exactly -- four
 // consecutive 16-byte fields, so there is no padding to account for.
 //
 // Every number describing the grid comes from the Mapping the binner used for

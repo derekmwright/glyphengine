@@ -146,6 +146,16 @@ jobs:
   # Verified by breaking it: deleting shaders/clouds.frag.spv from the archive
   # fails this job with "pattern clouds.frag.spv: no matching files found"
   # while task ci stays green, which is the whole point.
+  #
+  # There are two consumers here now (ADR 0012). The second is the x module,
+  # built against the archived engine with GOWORK=off, and it is not a
+  # formality: a local `go build -C x ./...` resolves the engine through
+  # go.work, so an x package can depend on engine content that is present in
+  # the working tree and absent from the published module without anything
+  # noticing. shaders/include/*.inc are exactly that shape -- build-time inputs
+  # the engine itself never needs to ship, which reach x only because
+  # shaders/include/include.go embeds them -- so the x step reads the exported
+  # include set rather than merely compiling against it.
   consumer:
     name: go get consumer (linux)
     runs-on: ubuntu-latest
@@ -189,3 +199,72 @@ jobs:
 
           go mod tidy
           go build ./...
+
+      # The second consumer: the x module against the engine as published.
+      #
+      # Both modules are replaced to the archive, which is what a game that
+      # requires the engine and an x package gets from the proxy -- x pins an
+      # engine version and does not replace it (AGENTS.md rule 1), so this is
+      # also the only build in CI that proves x's requirement resolves without
+      # the workspace.
+      - name: Build x against the module as published
+        run: |
+          set -euxo pipefail
+          mkdir -p "$RUNNER_TEMP/engine" "$RUNNER_TEMP/xconsumer"
+          [ -e "$RUNNER_TEMP/engine/go.mod" ] || git archive HEAD | tar -x -C "$RUNNER_TEMP/engine"
+
+          export GOWORK=off
+          cd "$RUNNER_TEMP/xconsumer"
+
+          go mod init xconsumer
+          go mod edit -require=github.com/derekmwright/glyphengine@v0.0.0
+          go mod edit -require=github.com/derekmwright/glyphengine/x@v0.0.0
+          go mod edit -replace=github.com/derekmwright/glyphengine="$RUNNER_TEMP/engine"
+          go mod edit -replace=github.com/derekmwright/glyphengine/x="$RUNNER_TEMP/engine/x"
+
+          cat > main.go <<'EOF'
+          // Imports an x package and the engine's exported GLSL include set the
+          // way a game building on x would.
+          //
+          // Reading the include set is the part a plain compile would not catch.
+          // The .inc files are new embedded content: nothing in the engine's own
+          // build needs them at run time, because its SPIR-V is already
+          // compiled, so an export-ignore or an uncommitted fragment would leave
+          // every other job green and leave an x package unable to compile a
+          // shader at all.
+          package main
+
+          import (
+          	"fmt"
+          	"log"
+
+          	"github.com/derekmwright/glyphengine/shaders/include"
+          	"github.com/derekmwright/glyphengine/x/terrainfield"
+          )
+
+          func main() {
+          	hm, err := terrainfield.Load("", 1)
+          	if err != nil {
+          		log.Fatal(err)
+          	}
+          	names := include.Names()
+          	if len(names) == 0 {
+          		log.Fatal("the exported GLSL include set is empty in the published module")
+          	}
+          	var haveLighting bool
+          	for _, n := range names {
+          		if n == "lighting.inc" {
+          			haveLighting = true
+          		}
+          	}
+          	if !haveLighting {
+          		log.Fatalf("lighting.inc missing from the published include set: %v", names)
+          	}
+          	minX, minZ, maxX, maxZ := hm.Bounds()
+          	fmt.Printf("terrain %g,%g..%g,%g with %d GLSL includes\n", minX, minZ, maxX, maxZ, len(names))
+          }
+          EOF
+
+          go mod tidy
+          go build ./...
+          ./xconsumer
