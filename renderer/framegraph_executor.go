@@ -42,14 +42,20 @@ type graphNode struct {
 // The compiler owns only declarations. Vulkan objects and recording closures
 // stay here, with indexed bindings so execution never looks up a cache key.
 type frameGraph struct {
-	beforeShadows                          int
-	lodTimer, uploadTimer                  *AppPass
-	lodBuffers                             map[framegraph.ResourceID]graphImage
-	storage                                map[*StorageBuffer]framegraph.ResourceID
-	declarations                           []framegraph.Node
-	engine                                 [graphTonemap + 2]int
-	targets                                map[*RenderTarget]appGraphTarget
-	resolvedDepth                          framegraph.ResourceID
+	beforeShadows          int
+	lodTimer, uploadTimer  *AppPass
+	lodBuffers             map[framegraph.ResourceID]graphImage
+	storage                map[*StorageBuffer]framegraph.ResourceID
+	declarations           []framegraph.Node
+	engine                 [graphTonemap + 2]int
+	targets                map[*RenderTarget]appGraphTarget
+	resolvedDepth          framegraph.ResourceID
+	sunShadow, pointShadow framegraph.ResourceID
+	// shadowCascades is the declaration node standing in for the hand-recorded
+	// cascade passes, and -1 until extendAppGraph appends it. Only a graph an
+	// owning Renderer extended has one; Renderer.New compiles a plan before any
+	// application node exists.
+	shadowCascades                         int
 	depthNode                              int
 	plan                                   *framegraph.Plan
 	nodes                                  []graphNode
@@ -84,7 +90,7 @@ type graphFrame struct {
 }
 
 func newFrameGraph(samples core1_0.SampleCountFlags, depthFormat, swapchainFormat core1_0.Format, instances int, owner ...*Renderer) (*frameGraph, error) {
-	f := &frameGraph{}
+	f := &frameGraph{shadowCascades: -1}
 	g := framegraph.New()
 	image := func(name string, scale float32) framegraph.ImageDesc {
 		return framegraph.ImageDesc{Name: name, Format: hdrFormat, Extent: framegraph.Extent{Scale: scale},
@@ -107,11 +113,25 @@ func newFrameGraph(samples core1_0.SampleCountFlags, depthFormat, swapchainForma
 	}
 	legacy := []framegraph.Use{{Resource: f.color, Access: framegraph.ColorWrite, HasResolve: msaa, ResolveTo: f.hdr},
 		{Resource: f.depth, Access: framegraph.DepthWrite}}
-	for _, name := range []string{"sun shadow maps", "point shadow maps"} {
+	// The shadow maps are imported per-frame depth arrays the hand-recorded
+	// passes own. They are declared DepthSampledRead because
+	// DepthStencilReadOnlyOptimal is the layout their cascade and cube-face
+	// passes exit into and the layout bindings 1 and 2 of the light set name;
+	// a derived barrier has to agree with the image the executor hands it.
+	// Layers and Instances are declared so such a barrier covers every cascade
+	// or face of the right frame's copy rather than layer zero of image zero.
+	for i, name := range []string{"sun shadow maps", "point shadow maps"} {
 		d = image(name, 1)
 		d.Format, d.Aspect = depthFormat, core1_0.ImageAspectDepth
-		d.Imported, d.InitialLayout = true, core1_0.ImageLayoutShaderReadOnlyOptimal
-		legacy = append(legacy, framegraph.Use{Resource: g.AddImage(d), Access: framegraph.SampledRead})
+		d.Imported, d.InitialLayout = true, core1_0.ImageLayoutDepthStencilReadOnlyOptimal
+		d.Layers, d.Instances = [2]uint32{ShadowCascades, 6}[i], maxFramesInFlight
+		id := g.AddImage(d)
+		if i == 0 {
+			f.sunShadow = id
+		} else {
+			f.pointShadow = id
+		}
+		legacy = append(legacy, framegraph.Use{Resource: id, Access: framegraph.DepthSampledRead})
 	}
 	add := func(n framegraph.Node, record func(*graphFrame)) int {
 		id := len(f.nodes)

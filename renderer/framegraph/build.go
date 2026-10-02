@@ -23,11 +23,12 @@ type compiledUse struct {
 }
 
 type resourceUses struct {
-	usage       core1_0.ImageUsageFlags
-	present     bool
-	onlyResolve bool
-	used        bool
-	lastLayout  core1_0.ImageLayout
+	usage        core1_0.ImageUsageFlags
+	present      bool
+	onlyResolve  bool
+	used         bool
+	depthSampled bool
+	lastLayout   core1_0.ImageLayout
 }
 
 type imageState struct {
@@ -193,6 +194,9 @@ func (g *Graph) groupEnds(ni int) bool {
 // Contents and layouts are separate facts: a skipped group leaves the same
 // layouts, but its writes cannot initialize contents on the skipped path.
 func (g *Graph) validateReads(uses [][]compiledUse) error {
+	if err := g.validateRewrites(uses); err != nil {
+		return err
+	}
 	written := make([]bool, len(g.images))
 	entry := make([]bool, len(g.images))
 	for i, d := range g.images {
@@ -215,6 +219,36 @@ func (g *Graph) validateReads(uses [][]compiledUse) error {
 		}
 		if g.groupEnds(ni) {
 			copy(written, entry)
+		}
+	}
+	return nil
+}
+
+// validateRewrites enforces the ordering a Rewrites declaration claims: the
+// node that replaces the contents comes first, and every reader follows it.
+// Without the declaration an imported resource's layout and contents both look
+// valid from node zero, so a reader scheduled too early compiles and samples
+// what the previous frame left -- which is what this is here to refuse.
+//
+// Only resources that actually carry a Rewrites use are constrained, so a graph
+// that declares none is unaffected.
+func (g *Graph) validateRewrites(uses [][]compiledUse) error {
+	rewritten := make([]int, len(g.images))
+	for i := range rewritten {
+		rewritten[i] = -1
+	}
+	for ni := range uses {
+		for _, u := range uses[ni] {
+			if u.Rewrites && rewritten[u.Resource] < 0 {
+				rewritten[u.Resource] = ni
+			}
+		}
+	}
+	for ni, n := range g.nodes {
+		for _, u := range uses[ni] {
+			if at := rewritten[u.Resource]; reads(u.Access) && at >= 0 && ni < at {
+				return g.fail(n.Name, u.Resource, fmt.Sprintf("read before %q rewrites this frame's contents", g.nodes[at].Name))
+			}
 		}
 	}
 	return nil
@@ -280,12 +314,18 @@ func (g *Graph) validate() ([][]compiledUse, []resourceUses, error) {
 			if u.Resource < 0 || int(u.Resource) >= len(g.images) {
 				return nil, nil, g.fail(n.Name, u.Resource, "unknown resource")
 			}
-			if u.Access < SampledRead || u.Access > VertexRead {
+			if u.Access < SampledRead || u.Access > DepthSampledRead {
 				return nil, nil, g.fail(n.Name, u.Resource, "unknown access")
+			}
+			if u.Rewrites && !writes(u.Access) {
+				return nil, nil, g.fail(n.Name, u.Resource, "Rewrites requires a write access")
 			}
 			_, buffer := g.buffers[u.Resource]
 			if (buffer && bufferUsage(u.Access) == 0) || (!buffer && (u.Access == VertexRead || u.Access == IndirectRead)) {
 				return nil, nil, g.fail(n.Name, u.Resource, "access incompatible with resource kind")
+			}
+			if u.Access == DepthSampledRead && g.images[u.Resource].Aspect&core1_0.ImageAspectDepth == 0 {
+				return nil, nil, g.fail(n.Name, u.Resource, "depth sampling requires a depth aspect")
 			}
 			if buffer && (u.HasResolve || u.FinalLayout != core1_0.ImageLayoutUndefined) {
 				return nil, nil, g.fail(n.Name, u.Resource, "buffers have no image layout or resolve")
@@ -352,6 +392,7 @@ func (g *Graph) validate() ([][]compiledUse, []resourceUses, error) {
 			}
 			s.used = true
 			s.present = u.Access == Present
+			s.depthSampled = s.depthSampled || u.Access == DepthSampledRead
 			s.usage |= usageFor(u.Access)
 			s.onlyResolve = s.onlyResolve && u.HasResolve
 			s.lastLayout = accessState(n.Kind, u.Use).layout
@@ -379,6 +420,12 @@ func restingLayout(s resourceUses) core1_0.ImageLayout {
 	switch {
 	case s.present:
 		return ImageLayoutPresentSrc
+	// A depth image sampled through DepthSampledRead rests in the depth
+	// read-only layout, which is also a legal destination for its attachment
+	// passes -- so the write and the read need no transition between them, only
+	// a memory dependency. The shadow maps are kept exactly that way.
+	case s.depthSampled:
+		return core1_0.ImageLayoutDepthStencilReadOnlyOptimal
 	case s.usage&core1_0.ImageUsageSampled != 0:
 		return core1_0.ImageLayoutShaderReadOnlyOptimal
 	case s.usage&core1_0.ImageUsageDepthStencilAttachment != 0:
@@ -396,7 +443,7 @@ func restingLayout(s resourceUses) core1_0.ImageLayout {
 func attachment(a Access) bool { return a >= ColorWrite && a <= DepthLoadWrite }
 func isDepth(a Access) bool    { return a == DepthWrite || a == DepthLoadWrite }
 func reads(a Access) bool {
-	return a == SampledRead || a == StorageRead || a == StorageReadWrite || a == ColorLoadWrite || a == DepthLoadWrite || a == TransferSrc || a == Present || a == VertexRead || a == IndirectRead
+	return a == SampledRead || a == DepthSampledRead || a == StorageRead || a == StorageReadWrite || a == ColorLoadWrite || a == DepthLoadWrite || a == TransferSrc || a == Present || a == VertexRead || a == IndirectRead
 }
 func writes(a Access) bool {
 	return attachment(a) || a == StorageWrite || a == StorageReadWrite || a == TransferDst
@@ -404,7 +451,7 @@ func writes(a Access) bool {
 
 func usageFor(a Access) core1_0.ImageUsageFlags {
 	switch a {
-	case SampledRead:
+	case SampledRead, DepthSampledRead:
 		return core1_0.ImageUsageSampled
 	case StorageRead, StorageWrite, StorageReadWrite:
 		return core1_0.ImageUsageStorage

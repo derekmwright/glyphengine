@@ -77,6 +77,14 @@ const (
 	Present
 	IndirectRead
 	VertexRead
+	// DepthSampledRead is a sampled read of a depth image that rests in
+	// DepthStencilReadOnlyOptimal rather than ShaderReadOnlyOptimal. Both
+	// layouts are legal for sampling depth, and the renderer's shadow maps use
+	// the depth one: it is what their descriptors name and what their
+	// attachment passes leave them in, so nothing transitions between the
+	// cascade write and the shader read. Declaring such a read as SampledRead
+	// would derive a barrier naming a layout the image is not in.
+	DepthSampledRead
 )
 
 type Use struct {
@@ -97,6 +105,18 @@ type Use struct {
 	// ColorWrite, DepthWrite and TransferDst accept it. A discarded transfer
 	// destination must be fully overwritten. Resolve targets always discard.
 	Discard bool
+	// Rewrites declares that this write replaces the resource's contents for
+	// the rest of the frame, so later nodes read what it produced. Reads of the
+	// same resource at earlier nodes are then an ordering mistake rather than a
+	// deliberate look at what the previous frame left, and Build reports them
+	// naming the reader. Requires a write access.
+	//
+	// It exists for a resource whose contents a Legacy node replaces every
+	// frame while its layout never changes -- the shadow cascades, which the
+	// renderer records by hand. Nothing distinguishes that case from an import
+	// read as it stands, so without this flag a dispatch scheduled ahead of the
+	// cascade passes would compile and silently sample the previous frame.
+	Rewrites bool
 }
 
 type Clear struct {

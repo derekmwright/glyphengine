@@ -8,6 +8,9 @@ import (
 	"github.com/vkngwrapper/core/v3/core1_0"
 )
 
+// withAppFrame builds the application half of a recording fixture. compute[0]
+// adds a dispatch; compute[1] makes that dispatch declare ReadsShadows, which
+// is the only difference between the two pinned compute streams.
 func withAppFrame(fx *frame, passes bool, compute ...bool) *frame {
 	h := &fakeHandles{next: 10000}
 	r := &Renderer{msaaSamples: core1_0.Samples4, depth: &depthResources{format: core1_0.FormatD32SignedFloat}, sc: &swapchainDetails{imageFormat: core1_0.FormatB8G8R8A8SRGB, imageViews: make([]core1_0.ImageView, 1), extent: fx.extent}}
@@ -26,7 +29,7 @@ func withAppFrame(fx *frame, passes bool, compute ...bool) *frame {
 		target := &RenderTarget{r: r, desc: RenderTargetDesc{Name: "compute output", Format: TargetR32F, Scale: 1, History: true, Storage: true}, color: &appImages{extent: fx.extent}}
 		target.texture.target = target
 		r.appTargets = append(r.appTargets, target)
-		c := &AppCompute{desc: AppComputeDesc{Name: "fixture compute", Stage: StageBeforeScene, Reads: []*Texture{r.appTargets[0].Texture(), target.Texture()}, Writes: []*RenderTarget{target}}, dispatch: [3]uint32{80, 45, 1}}
+		c := &AppCompute{desc: AppComputeDesc{Name: "fixture compute", Stage: StageBeforeScene, Reads: []*Texture{r.appTargets[0].Texture(), target.Texture()}, Writes: []*RenderTarget{target}, ReadsShadows: len(compute) > 1 && compute[1]}, dispatch: [3]uint32{80, 45, 1}}
 		p := &AppPass{r: r, desc: AppPassDesc{Name: c.desc.Name, Stage: c.desc.Stage, Reads: c.desc.Reads}, enabled: true, compute: c, pipeline: h.pipeline(), layout: h.layout(), sets: []core1_0.DescriptorSet{h.descSet(), h.descSet()}}
 		c.pass = p
 		r.appPasses = append(r.appPasses, p)
@@ -45,7 +48,10 @@ func withAppFrame(fx *frame, passes bool, compute ...bool) *frame {
 		// evidence that a frame with nothing queued records what it always did.
 		// Verified: spending one here leaves the call counts at 3353 and 3382
 		// and moves both hashes (0x4b9e77888c85b5ff, 0x629f25430c127a68).
-		if n.name == "streamed uploads" {
+		// The sun cascade declaration is the same case: it records nothing, and
+		// the hashes below being unchanged across its arrival is the evidence
+		// that declaring the cascade write added no command to any frame.
+		if n.name == "streamed uploads" || n.name == shadowCascadeNode {
 			continue
 		}
 		h.n() // Preserve the old fixture's subsequent draw handles.

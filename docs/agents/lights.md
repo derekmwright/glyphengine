@@ -47,7 +47,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-09-19
+verified: 2026-10-02 # plus the compute-stage visibility of bindings 0 and 1
 ---
 
 # Light a scene with hundreds of point and spot lights
@@ -220,6 +220,17 @@ gives you yours; the CPU cost is the `cluster` phase of the engine's CPU timer
   stopped being true when the palette moved into that buffer; corrected here.)
   A stale shader declares the wrong descriptor type at binding 3 or the wrong
   block size at binding 0; run it under `task validate`, which will say so.
+- **An application compute dispatch can read bindings 0 and 1, and nothing
+  else on this set.** The directional cascades and their comparison sampler are
+  visible to the compute stage, so a half-resolution dispatch can shadow its own
+  work; it declares `AppComputeDesc.ReadsShadows` to get the frame-graph edge
+  from the cascade passes, and with shadows disabled the lookup reads exactly 1.0.
+  See [`render-targets.md`](render-targets.md#directional-shadows-from-compute).
+  Bindings 2-5 -- the point cube map and the three clustered light buffers --
+  are fragment-only, so a compute shader that declares one of them is rejected by
+  the validation layer with `VUID-VkComputePipelineCreateInfo-layout-07988`.
+  Clustered lighting from compute is not supported; the froxel lookup needs
+  `gl_FragCoord` and a view depth a dispatch does not have.
 
 ## Lights from a glTF level
 

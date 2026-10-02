@@ -19,6 +19,7 @@ api:
   - renderer.AppPass.SetDraws
   - renderer.AppPass.SetPushConstants
   - renderer.AppComputeDesc
+  - renderer.AppComputeDesc.ReadsShadows
   - renderer.CreateAppCompute
   - renderer.DestroyAppCompute
   - renderer.AppCompute.SetEnabled
@@ -40,7 +41,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: procedural
-verified: 2026-09-24 # storage buffers, sampler probes, dynamic rendering and explicit barriers
+verified: 2026-10-02 # directional shadow sampling from compute; storage buffers, sampler probes and explicit barriers
 ---
 
 # Application render targets, graphics and compute passes
@@ -168,10 +169,11 @@ is visible to the compute stage.
 
 Compute set 0 binds the unused fallback texture set, set 1 binds the shared
 light set, and set 2 has four combined samplers at bindings 0–3 and four storage
-images at 4–7 in `General`. The application bindings 6–10 in set 1 are also
-visible to compute; engine bindings 0–5 retain their existing graphics-stage
-visibility. Unused sampled inputs hold the white fallback. Declare only the
-storage bindings provided in `Writes`.
+images at 4–7 in `General`. In set 1, the application bindings 6–10 and the
+directional shadow bindings 0 and 1 are visible to compute; engine bindings 2–5
+(the point cube map and the clustered light buffers) remain fragment-only.
+Unused sampled inputs hold the white fallback. Declare only the storage bindings
+provided in `Writes`.
 
 ```glsl
 layout(set=2, binding=0) uniform sampler2D input0;            // Reads[0..3]
@@ -185,6 +187,65 @@ The device enables extended storage-image formats when supported. Compute
 executes on the existing graphics queue. There is no second queue and no async
 compute. The graph derives graphics-to-compute and compute-to-graphics barriers;
 a dispatch runs without a render pass.
+
+### Directional shadows from compute
+
+```go
+compute, err := r.CreateAppCompute(renderer.AppComputeDesc{
+    Name: "air scatter", Stage: renderer.StageBeforeScene, Comp: scatterSPV,
+    Writes: []*renderer.RenderTarget{radiance}, ReadsShadows: true,
+})
+```
+
+`ReadsShadows` declares that the shader samples the directional cascades at
+**set 1 bindings 0 and 1** — the `ShadowData` block and the comparison
+`sampler2DArrayShadow`. It adds the frame-graph edge from the cascade passes to
+the dispatch, so their depth writes are made visible to the compute reads with
+the cascade map in `DepthStencilReadOnlyOptimal` on both sides. Declare it
+whenever the shader reads either binding. The descriptors are bound either way,
+so a shader sampling them without declaring it reads whatever a neighbouring
+pass's barriers happened to leave visible; a dispatch that leaves the field
+false records exactly the stream it recorded before.
+
+Only the directional cascades are reachable. Bindings 2–5 — the point cube map
+and the three clustered light buffers — stay fragment-only, and a compute shader
+that declares one of them is rejected by the validation layer with
+`VUID-VkComputePipelineCreateInfo-layout-07988`.
+
+```glsl
+// Set 1 bindings 0 and 1 in a .comp, identical to the fragment declaration.
+layout(set = 1, binding = 0, std140) uniform ShadowData {
+    mat4 cascadeVP[2];
+    vec4 nightGrade;
+    vec4 skyPalette[6];
+    vec4 volumetric;
+} shadow;
+layout(set = 1, binding = 1) uniform sampler2DArrayShadow shadowMap;
+```
+
+The lookup is the one `shaders/lighting.inc` performs: project the world position
+by `shadow.cascadeVP[c]`, map XY into 0..1, take the first cascade whose
+projection lies inside its frustum, and compare `proj.z` minus a bias. The
+sampler is `CompareOpLessOrEqual` with linear filtering, so every tap is a
+hardware percentage-closer fetch returning 0 (occluded) to 1 (lit). There is no
+non-comparison view of the map.
+
+**With shadows disabled the lookup reads exactly 1.0 — fully lit — and that is
+the documented unshadowed value.** No dummy image and no second code path: the
+cascade passes still run every frame and still clear each layer to depth 1.0,
+and `SceneLighting.CascadeVPs` is then the zero matrix, so the projected position
+is the cascade centre at depth 0 and the comparison answers 1.0. The compute and
+fragment paths agree because they sample the same descriptor.
+
+The dispatch must run after the cascade passes. Every `PassStage` does, because
+the cascades are recorded before the first application stage; a declaration that
+landed ahead of them is a graph compile error naming the node rather than a
+silent read of the previous frame's layers. See
+[frame graph](frame-graph.md#application-nodes).
+
+The cascade map is not swapchain-sized, so a resize or rebuild leaves it and its
+light-set descriptors in place; only the dispatch's own relative targets and
+their input sets are replaced.
 
 ## Application storage buffers
 
@@ -262,14 +323,15 @@ layout(set=2, binding=3) uniform sampler2D input3; // Reads[3]
 ```
 
 Set 1 is the shared shadow/light set. It is also set 1 for custom sky, static
-lit, terrain and water shaders, and set 2 for skinned lit shaders. Existing
-bindings 0â€“5 retain their engine layouts and stage visibility; use the engine
-`lit.frag`/`lights.inc` layouts for their complete block declarations.
+lit, terrain and water shaders, and set 2 for skinned lit shaders. Bindings 0
+and 1 are also visible to compute, as described under `ReadsShadows` above;
+bindings 2-5 retain their engine layouts and fragment-only visibility. Use the
+engine `lit.frag`/`lights.inc` layouts for their complete block declarations.
 
 | Binding | Descriptor |
 |---|---|
-| 0 | `ShadowData` uniform buffer: cascades, night grade, palette, volumetrics; vertex and fragment |
-| 1 | Directional shadow `sampler2DArrayShadow`; fragment |
+| 0 | `ShadowData` uniform buffer: cascades, night grade, palette, volumetrics; vertex, fragment and compute |
+| 1 | Directional shadow `sampler2DArrayShadow`; fragment and compute |
 | 2 | Point shadow `samplerCube`; fragment |
 | 3 | Light storage buffer; fragment |
 | 4 | Cluster grid storage buffer; fragment |
@@ -397,6 +459,21 @@ The graphics-plus-compute recording fixture pins 3390 calls against 3382 for
 graphics alone: four compute commands, two incoming barrier groups, one layout
 return barrier and one additional scene-input barrier. Both kinds together
 still record zero allocations at 7, 97 and 511 engine draws.
+
+`go run ./cmd/apppasscheck -shadowcompute -validate -provoke-recreate` is the
+sampling gate for `ReadsShadows`, and it samples rather than merely creating a
+pipeline. A half-resolution dispatch writes the cascade comparison of a known
+world position per texel, a half-resolution fullscreen pass writes the same
+lookup through the fragment path, and a comparison pass reports both plus their
+difference at 255x, so one captured byte of blue is 1/65025 of disagreement. The
+two must agree, the probe patch must be both shadowed and lit, moving the sun
+must change what the dispatch read, and a shadows-off phase must read exactly 1.0
+everywhere. The dispatch also reads a 4x4 LUT at set 2 and the application
+uniform block at set 1 binding 6, whose product is reported in the capture's top
+band — the white fallback texture is 1.0, so a lost LUT binding would otherwise
+hide itself. `task custompasses` runs it and keeps the capture in
+`.task/custompasses/shadowcompute.png`; `task validate`, `task syncvalidate` and
+`task determinism` run it too.
 
 `go run ./cmd/apppasscheck -filter -validate -provoke-recreate` writes four
 known values into 2x2 R16F targets and samples fractional and out-of-range

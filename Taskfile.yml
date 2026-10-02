@@ -58,6 +58,7 @@ tasks:
       - cmd/apppasscheck/*.vert
       - cmd/apppasscheck/*.frag
       - cmd/apppasscheck/*.comp
+      - cmd/apppasscheck/*.inc
       - shaders/*.vert
       - shaders/*.frag
       - shaders/*.comp
@@ -529,6 +530,24 @@ tasks:
         check 25-lod-forest -gpu -indexed
         unset GLYPHENGINE_PROVOKE_RECREATE_FRAMES
         exit $status
+      - |
+        # The consumer's shape from issue #157, which no example reaches: a
+        # half-resolution compute dispatch reading the directional cascades at
+        # set 1 bindings 0 and 1 alongside the application uniform block at
+        # binding 6 and a lookup table at set 2. Before the Compute stage flag
+        # was on those two bindings this run reported
+        # VUID-VkComputePipelineCreateInfo-layout-07988 at pipeline creation,
+        # and the layer is the only thing that says so -- the dispatch itself
+        # produced plausible pixels. It also compares what the dispatch read
+        # against the fragment path's answer at the same world positions.
+        cd ..
+        out=$(GLYPHENGINE_FIXED_FRAME_TIME=16.667ms GLYPHENGINE_PROVOKE_RECREATE_FRAMES=12 go run ./cmd/apppasscheck -shadowcompute -provoke-recreate -validate -frames 40 2>&1) || { echo "$out"; exit 1; }
+        probe=$(echo "VULKAN ERROR: self-check" | grep -cE "VULKAN (ERROR|WARNING)" || true)
+        [ "$probe" = "1" ] || { echo "cannot count validation messages"; exit 1; }
+        msgs=$(echo "$out" | grep -cE "VULKAN (ERROR|WARNING)" || true)
+        [ "$msgs" = "0" ] || { echo "$out"; exit 1; }
+        if echo "$out" | grep -q "07988"; then echo "$out"; exit 1; fi
+        echo "$out"
 
   syncvalidate:
     desc: "Run the validation suite with synchronization hazard detection (needs GPU and SDK)"
@@ -550,6 +569,16 @@ tasks:
         msgs=$(echo "$out" | grep -cE "VULKAN (ERROR|WARNING)" || true)
         if [ "$msgs" != "0" ]; then echo "$out"; exit 1; fi
         echo "apppasscheck -compute -buffers -churn -provoke-recreate: clean"
+      - |
+        # The cascade-write-to-compute-read edge (#157). Synchronization
+        # validation is the only thing that can say the declared barrier is the
+        # one the dispatch needed, and a swapchain rebuild mid-run is where a
+        # descriptor still naming a retired probe image would surface.
+        out=$(GLYPHENGINE_VALIDATION=1 GLYPHENGINE_SYNC_VALIDATION=1 GLYPHENGINE_FIXED_FRAME_TIME=16.667ms GLYPHENGINE_PROVOKE_RECREATE_FRAMES=12,40 go run ./cmd/apppasscheck -shadowcompute -provoke-recreate -validate -frames 60 2>&1) || { echo "$out"; exit 1; }
+        echo "$out" | grep -q "Vulkan synchronization validation enabled" || { echo "$out"; exit 1; }
+        msgs=$(echo "$out" | grep -cE "VULKAN (ERROR|WARNING)" || true)
+        if [ "$msgs" != "0" ]; then echo "$out"; exit 1; fi
+        echo "apppasscheck -shadowcompute -provoke-recreate: clean"
 
   reload:
     desc: "Check that swapping a level for a freshly loaded copy never drops a frame's geometry"
@@ -828,9 +857,9 @@ tasks:
 
         # Application graphics passes, including previous-frame history.
         # Run from the repository root so every harness scratch file stays in .task.
-        for mode in "" "-history" "-compute" "-compute -history"; do
+        for mode in "" "-history" "-compute" "-compute -history" "-shadowcompute"; do
           frames=90
-          case "$mode" in *compute*) frames=260;; esac
+          case "$mode" in *-compute*) frames=260;; esac
           (cd .. && GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./cmd/apppasscheck -frames $frames $mode -screenshot .task/app-determinism-a.png) >/dev/null 2>&1 || status=1
           (cd .. && GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./cmd/apppasscheck -frames $frames $mode -screenshot .task/app-determinism-b.png) >/dev/null 2>&1 || status=1
           if samefile ../.task/app-determinism-a.png ../.task/app-determinism-b.png; then
@@ -1567,6 +1596,9 @@ tasks:
       - |
         cd ..
         go run ./cmd/apppasscheck -filter -frames 24 -validate -provoke-recreate -screenshot .task/custompasses/filter.png
+      - |
+        cd ..
+        GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./cmd/apppasscheck -shadowcompute -frames 24 -validate -provoke-recreate -screenshot .task/custompasses/shadowcompute.png
 
   shafts:
     desc: "Check that light shafts reach through the gaps between occluders"

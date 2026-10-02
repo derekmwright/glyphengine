@@ -1,0 +1,26 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "shadowprobe.inc"
+
+// The consumer's shape (issue #157): a half-resolution dispatch reading the
+// directional cascades at set 1 bindings 0 and 1, the application uniform block
+// at set 1 binding 6, and a lookup table at set 2 binding 0.
+layout(set = 1, binding = 6, std140) uniform ApplicationParameters { vec4 values[256]; } application;
+layout(set = 2, binding = 0) uniform sampler2D sunLUT;
+layout(set = 2, binding = 4, r32f) uniform image2D shadowOut;
+layout(set = 2, binding = 5, r32f) uniform image2D shapeOut;
+layout(local_size_x = 8, local_size_y = 8) in;
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(shadowOut);
+    if (any(greaterThanEqual(pixel, size))) {
+        return;
+    }
+    imageStore(shadowOut, pixel, vec4(probeShadow(vec2(pixel) + 0.5, pc.data[0].xy)));
+    // The LUT texel and the uniform go to their own image rather than scaling the
+    // comparison: multiplying by them would make a wrong value look like a shadow
+    // disagreement, and the white fallback texture is 1.0, so a lost LUT binding
+    // would have scaled by exactly one and hidden itself.
+    imageStore(shapeOut, pixel, vec4(texelFetch(sunLUT, ivec2(0), 0).r * application.values[0].x));
+}

@@ -9,6 +9,13 @@ import (
 
 func (r *Renderer) appendComputeGraph(f *frameGraph, p *AppCompute, group int, appendNode func(framegraph.Node, graphNode)) {
 	n := framegraph.Node{Name: p.desc.Name, Kind: framegraph.Compute, OptionalGroup: group, Timed: p.desc.Timed}
+	if p.desc.ReadsShadows {
+		// Declared first so the barrier it derives heads the dispatch's entry
+		// group: the cascade depth writes made visible to this shader's reads.
+		// No return edge -- the map is not an application target, and nothing in
+		// the graph touches it again before the next frame's cascade passes.
+		n.Uses = append(n.Uses, framegraph.Use{Resource: f.sunShadow, Access: framegraph.DepthSampledRead})
+	}
 	for _, b := range p.desc.Buffers {
 		n.Uses = append(n.Uses, framegraph.Use{Resource: f.storage[b], Access: framegraph.StorageReadWrite})
 	}
