@@ -134,7 +134,11 @@ func TestAppPassAllocs(t *testing.T) {
 }
 
 func TestAppPassDescriptions(t *testing.T) {
-	r := &Renderer{}
+	// GPUTimestamps on purpose: without it a Timed pass is refused with
+	// ErrCapabilityUnavailable before the shared-capacity check below is
+	// reached. The 17th-timing case asserts the capacity message rather than
+	// just the field name for the same reason -- both errors name Timed.
+	r := &Renderer{caps: Capabilities{GPUTimestamps: true}}
 	target := &RenderTarget{r: r, desc: RenderTargetDesc{Format: TargetR16F, Scale: 1}}
 	target.texture.target = target
 	good := AppPassDesc{Name: "test", Stage: StageBeforeScene, Target: target, Fullscreen: true, Vert: shaders.DepthResolveVertSpv, Frag: shaders.DepthResolveFragSpv}
@@ -168,7 +172,7 @@ func TestAppPassDescriptions(t *testing.T) {
 		r.appPasses = append(r.appPasses, &AppPass{desc: AppPassDesc{Timed: true}})
 	}
 	good.Timed = true
-	if err := r.validateAppPass(good); err == nil || !strings.Contains(err.Error(), "Timed") {
+	if err := r.validateAppPass(good); err == nil || !strings.Contains(err.Error(), "at most sixteen") {
 		t.Fatalf("17th timing: %v", err)
 	}
 	for _, d := range []RenderTargetDesc{{Format: 99, Scale: 1}, {Format: TargetR16F}, {Format: TargetR16F, Width: 1}} {

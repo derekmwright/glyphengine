@@ -3,7 +3,6 @@ package renderer
 import (
 	"encoding/binary"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/vkngwrapper/core/v3/core1_0"
@@ -206,30 +205,21 @@ type gpuTimer struct {
 	recorded [maxFramesInFlight]bool
 }
 
-// newGPUTimer creates the query pool, or returns a disabled timer when the device
-// cannot timestamp graphics work.
+// newGPUTimer creates the query pool, or returns a disabled timer when the
+// device cannot timestamp graphics work.
 //
-// Two separate capabilities have to hold, and a device can have one without the
-// other: the limit says timestamps work on graphics and compute queues at all,
-// and timestampValidBits says this particular queue family writes meaningful
-// bits. Checking only the first is how this silently returns zeros on hardware
-// that reports support but not on the queue being used.
-func newGPUTimer(instanceDriver core1_0.CoreInstanceDriver, deviceDriver core1_0.DeviceDriver, physicalDevice core1_0.PhysicalDevice, graphicsFamily int) (*gpuTimer, error) {
+// Both the gate and the tick period come from the negotiated report rather than
+// from a second round of driver queries. That is what makes
+// Capabilities.GPUTimestamps true exactly when timestamps are actually
+// recorded, and it is what lets a Timed application pass be refused at
+// construction instead of silently never measured. The two device answers
+// behind the flag, and why one without the other returns zeros on real
+// hardware, are in negotiateCapabilities.
+func newGPUTimer(deviceDriver core1_0.DeviceDriver, caps Capabilities) (*gpuTimer, error) {
 	t := &gpuTimer{}
 
-	props, err := instanceDriver.GetPhysicalDeviceProperties(physicalDevice)
-	if err != nil {
+	if !caps.GPUTimestamps {
 		return t, nil // not fatal; the engine renders fine without timing
-	}
-	if !props.Limits.TimestampComputeAndGraphics {
-		log.Println("GPU timing unavailable: device does not support graphics timestamps")
-		return t, nil
-	}
-
-	families := instanceDriver.GetPhysicalDeviceQueueFamilyProperties(physicalDevice)
-	if graphicsFamily >= len(families) || families[graphicsFamily].TimestampValidBits == 0 {
-		log.Println("GPU timing unavailable: graphics queue writes no timestamp bits")
-		return t, nil
 	}
 
 	pool, _, err := deviceDriver.CreateQueryPool(nil, core1_0.QueryPoolCreateInfo{
@@ -241,7 +231,7 @@ func newGPUTimer(instanceDriver core1_0.CoreInstanceDriver, deviceDriver core1_0
 	}
 
 	t.pool = pool
-	t.period = props.Limits.TimestampPeriod
+	t.period = caps.timestampPeriod
 	t.supported = true
 	t.scratch = make([]byte, queriesPerFrame*8)
 	return t, nil

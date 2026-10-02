@@ -27,6 +27,8 @@ api:
   - renderer.AppCompute.SetPushConstants
   - renderer.StorageBufferDesc
   - renderer.StorageBuffer
+  - renderer.Capabilities
+  - renderer.ErrCapabilityUnavailable
   - renderer.Renderer.CreateStorageBuffer
   - renderer.Renderer.UploadStorageBuffer
   - renderer.Renderer.DestroyStorageBuffer
@@ -46,7 +48,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: procedural
-verified: 2026-10-02 # directional shadow sampling from compute; application submission counts per pass; storage buffers, sampler probes and explicit barriers; exported GLSL include set
+verified: 2026-10-02 # directional shadow sampling from compute; application submission counts per pass; storage buffers, sampler probes and explicit barriers; exported GLSL include set; Timed refused without device timestamps (#160)
 ---
 
 # Application render targets, graphics and compute passes
@@ -500,6 +502,22 @@ timed pass is rejected. `GPUTimings.App` contains `{Name, Ms}` in creation
 order, with both timestamp edges written even for disabled passes. Existing
 `Pass` values and `GPUTimings.Pass` retain their meaning. Timing slices are
 renderer-owned views; copy them if retaining them across frames.
+
+`Timed` also needs the device to timestamp the graphics queue. When it cannot,
+`CreateAppPass` and `CreateAppCompute` refuse the descriptor with an error
+wrapping `renderer.ErrCapabilityUnavailable` rather than creating a pass whose
+row would never appear in `GPUTimings.App` — a missing row reads as a free
+effect. Ask once instead of handling the error:
+
+```go
+timed := r.Capabilities().GPUTimestamps
+```
+
+That is the one optional capability an application pass needs today. Which
+fallbacks the engine takes on its own and which it hands back is on
+[`game-loop.md`](game-loop.md#what-the-device-granted-and-who-owns-the-fallback);
+`Capabilities` also reports the negotiated MSAA count every pass pipeline is
+built against.
 
 Recording uses retained command scratch and allocates zero bytes per frame.
 Creating resources and rebuilding the graph are setup work and can allocate.

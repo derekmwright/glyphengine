@@ -135,13 +135,13 @@ func runShadowCompute(o options) error {
 		return err
 	}
 	fragment, err := r.CreateAppPass(renderer.AppPassDesc{Name: "fragment shadow probe", Stage: renderer.StageBeforeScene,
-		Target: drawn, Fullscreen: true, Vert: shaders.DepthResolveVertSpv, Frag: shadowProbeFrag, Timed: true})
+		Target: drawn, Fullscreen: true, Vert: shaders.DepthResolveVertSpv, Frag: shadowProbeFrag, Timed: r.Capabilities().GPUTimestamps})
 	if err != nil {
 		return err
 	}
 	compute, err := r.CreateAppCompute(renderer.AppComputeDesc{Name: "compute shadow probe", Stage: renderer.StageBeforeScene,
 		Comp: shadowProbeComp, Reads: []*renderer.Texture{lut.Texture()},
-		Writes: []*renderer.RenderTarget{computed, shape}, ReadsShadows: true, Timed: true})
+		Writes: []*renderer.RenderTarget{computed, shape}, ReadsShadows: true, Timed: r.Capabilities().GPUTimestamps})
 	if err != nil {
 		return err
 	}

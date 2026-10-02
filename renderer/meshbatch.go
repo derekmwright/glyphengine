@@ -10,7 +10,9 @@ import (
 // SetMeshRangeBatching opts into batching adjacent opaque, plain-lit ranges
 // of one arena with identical material state. Other draws retain their paths.
 // Bounds and transforms remain per range, including each shadow view. Drivers
-// without multiDrawIndirect and drawIndirectFirstInstance use direct draws.
+// without multiDrawIndirect and drawIndirectFirstInstance use direct draws --
+// the same geometry, one call per range instead of one for the group, which is
+// why this does not refuse. Capabilities reports which path a run took.
 // Like other renderer mutation, call on the renderer thread between frames.
 func (r *Renderer) SetMeshRangeBatching(enabled bool) { r.rangeBatching = enabled }
 
@@ -48,7 +50,6 @@ func sameMeshBatch(a, b *RenderObject) bool {
 func (r *Renderer) prepareMeshBatches(draws []RenderObject, frame int) ([]RenderObject, error) {
 	f := &r.rangeBatchFrames[frame]
 	if len(draws) > f.capacity {
-		features := r.instanceDriver.GetPhysicalDeviceFeatures(r.physicalDevice)
 		props, err := r.instanceDriver.GetPhysicalDeviceProperties(r.physicalDevice)
 		if err != nil {
 			return nil, err
@@ -69,7 +70,10 @@ func (r *Renderer) prepareMeshBatches(draws []RenderObject, frame int) ([]Render
 			r.DeferDestroy(func() { oldV.destroy(r); oldC.destroy(r) })
 		}
 		f.vertices, f.commands, f.capacity = v, c, capacity
-		f.multi = features.MultiDrawIndirect && features.DrawIndirectFirstInstance
+		// Read from the negotiated report rather than queried again here: the
+		// draw path a frame takes and the path Capabilities says it took are
+		// then the same two bits.
+		f.multi = r.caps.MultiDrawIndirect && r.caps.DrawIndirectFirstInstance
 		f.limit = max(1, props.Limits.MaxDrawIndirectCount)
 	}
 	f.draws = f.draws[:0]

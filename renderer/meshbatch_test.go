@@ -11,14 +11,8 @@ import (
 	"github.com/vkngwrapper/core/v3/core1_0"
 )
 
-type batchTestInstance struct {
-	bufferTestInstance
-	multi, first bool
-}
+type batchTestInstance struct{ bufferTestInstance }
 
-func (d batchTestInstance) GetPhysicalDeviceFeatures(core1_0.PhysicalDevice) *core1_0.PhysicalDeviceFeatures {
-	return &core1_0.PhysicalDeviceFeatures{MultiDrawIndirect: d.multi, DrawIndirectFirstInstance: d.first}
-}
 func (d batchTestInstance) GetPhysicalDeviceProperties(p core1_0.PhysicalDevice) (*core1_0.PhysicalDeviceProperties, error) {
 	v, e := d.bufferTestInstance.GetPhysicalDeviceProperties(p)
 	v.Limits.MaxDrawIndirectCount = 2
@@ -57,9 +51,13 @@ func (d *batchDrawDriver) CmdDrawIndexed(cb core1_0.CommandBuffer, n, count int,
 }
 
 func TestMeshBatchArgumentsFallbackAndViews(t *testing.T) {
-	for _, caps := range [][2]bool{{true, true}, {false, true}, {true, false}, {false, false}} {
+	for _, feat := range [][2]bool{{true, true}, {false, true}, {true, false}, {false, false}} {
 		r, bd := bufferFixture()
-		r.instanceDriver = batchTestInstance{multi: caps[0], first: caps[1]}
+		r.instanceDriver = batchTestInstance{}
+		// The draw path is read from the negotiated report now, not queried
+		// again at buffer growth, so this is where the device's two features
+		// enter the fixture. See prepareMeshBatches.
+		r.caps = Capabilities{MultiDrawIndirect: feat[0], DrawIndirectFirstInstance: feat[1]}
 		sources := batchSources()
 		sources[2].ShadowOnly = true
 		draws, err := r.prepareMeshBatches(sources, 0)
@@ -84,7 +82,7 @@ func TestMeshBatchArgumentsFallbackAndViews(t *testing.T) {
 		if stats.Instances != 2 || stats.Triangles != 4 {
 			t.Fatal(stats)
 		}
-		if caps[0] && caps[1] {
+		if feat[0] && feat[1] {
 			if len(d.indirect) != 1 || d.indirect[0] != [3]int{0, 2, 20} {
 				t.Fatal(d.indirect)
 			}
@@ -106,7 +104,7 @@ func TestMeshBatchArgumentsFallbackAndViews(t *testing.T) {
 		// All three visible requires two API calls when maxDrawIndirectCount=2.
 		b.sources[2].ShadowOnly = false
 		b.record(d, stats, core1_0.CommandBuffer{}, nil)
-		if caps[0] && caps[1] && len(d.indirect) != 4 {
+		if feat[0] && feat[1] && len(d.indirect) != 4 {
 			t.Fatal("device draw limit ignored", d.indirect)
 		}
 		r.rangeBatchFrames[0].destroy(r)
@@ -116,7 +114,8 @@ func TestMeshBatchArgumentsFallbackAndViews(t *testing.T) {
 
 func TestMeshBatchMaterialBoundaryAndFrameStorage(t *testing.T) {
 	r, d := bufferFixture()
-	r.instanceDriver = batchTestInstance{multi: true, first: true}
+	r.instanceDriver = batchTestInstance{}
+	r.caps = Capabilities{MultiDrawIndirect: true, DrawIndirectFirstInstance: true}
 	sources := batchSources()
 	sources[2].Roughness = 0.7
 	for f := range maxFramesInFlight {
@@ -147,7 +146,8 @@ func TestMeshBatchMaterialBoundaryAndFrameStorage(t *testing.T) {
 
 func TestMeshBatchCreationUnwind(t *testing.T) {
 	create := func(r *Renderer) error {
-		r.instanceDriver = batchTestInstance{multi: true, first: true}
+		r.instanceDriver = batchTestInstance{}
+		r.caps = Capabilities{MultiDrawIndirect: true, DrawIndirectFirstInstance: true}
 		_, err := r.prepareMeshBatches(batchSources(), 0)
 		return err
 	}
@@ -195,7 +195,8 @@ func TestMeshBatchCreationUnwind(t *testing.T) {
 
 func TestMeshBatchSteadyRecordingAllocations(t *testing.T) {
 	r, driver := bufferFixture()
-	r.instanceDriver = batchTestInstance{multi: true, first: true}
+	r.instanceDriver = batchTestInstance{}
+	r.caps = Capabilities{MultiDrawIndirect: true, DrawIndirectFirstInstance: true}
 	sources := batchSources()
 	gpu := &fakeDriver{}
 	stats := &RenderStats{}

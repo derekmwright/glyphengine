@@ -48,13 +48,17 @@ api:
   - renderer.Renderer.SetShaderParameters
   - renderer.ShaderParameterBytes
   - renderer.Renderer.Shaders
+  - glyphengine.Engine.Capabilities
+  - renderer.Capabilities
+  - renderer.Renderer.Capabilities
+  - renderer.ErrCapabilityUnavailable
 example: examples/02-cube
 run: task example:02-cube
 requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-10-02 # the draw list's order and the rejected opaque policy; releasing mid-frame (#153)
+verified: 2026-10-02 # the draw list's order and the rejected opaque policy; releasing mid-frame (#153); the capabilities report and who owns which fallback (#160)
 ---
 
 # Run a game loop with Engine and Game
@@ -127,6 +131,84 @@ func main() {
 ```
 
 Full program: `examples/02-cube`.
+
+## What the device granted, and who owns the fallback
+
+`glyph.WithMSAA(4)` above is a request. The device answers it, and the answer
+is not always yes. `Engine.Capabilities()` is that answer, fixed once the
+engine is built:
+
+```go
+caps := e.Capabilities()
+log.Printf("%s (%s): %dx MSAA, %gx anisotropy, timestamps=%v",
+	caps.GPUName, caps.DriverName, caps.MSAASamples, caps.MaxAnisotropy, caps.GPUTimestamps)
+```
+
+| Field | What it says |
+|---|---|
+| `MSAASamples` | The negotiated count: 1, 2, 4 or 8. Halved until the device supports it for colour **and** depth |
+| `MaxAnisotropy` | The sampler anisotropy in use, or `0` when the device has no anisotropic filtering |
+| `MultiDrawIndirect`, `DrawIndirectFirstInstance` | Whether `SetMeshRangeBatching` collapses a group into one indirect draw or issues one draw per range |
+| `GPUTimestamps` | Whether `GPUTimings` can ever be valid, and whether a `Timed` application pass can be created |
+| `PortabilitySubset` | The device implements a subset of Vulkan — MoltenVK, in practice |
+| `RayQuery` | Whether this renderer can issue a ray query. `false` on every device today: the extensions are not enabled yet (#159) |
+| `GPUName`, `DriverName`, `DriverVersion`, `APIVersion`, `VendorID`, `DeviceID` | Who the device is. `DriverName` is empty on a device without `VK_KHR_driver_properties` |
+
+It is a plain value. Reading it costs nothing, mutating the copy you get
+changes nothing, and nothing in the renderer moves it after `New`.
+
+### The split
+
+**The engine owns the fallback when the output is identical, and reports it
+here.** Multi-draw indirect is the clearest case: with it a batched group is
+one `vkCmdDrawIndexedIndirect`, without it the same ranges are one
+`vkCmdDrawIndexed` each, and the two produce the same pixels. There is nothing
+for a game to decide, so nothing refuses — but `Capabilities` says which path
+the run took, because "the same pixels, slower" is still worth knowing when a
+frame budget is missed on one machine and met on another. MSAA and anisotropy
+are the same shape: the engine negotiates down, the picture changes only in the
+way a lower setting changes it, and the report says what it settled on.
+
+**The game owns the fallback when the technique changes the look, and gets the
+report and a typed error to do it.** Screen-space probes instead of ray-traced
+ones is not a slower path to the same image; it is a different image, and
+choosing between them is a decision about the game's look. The engine will not
+make it. Read `Capabilities` once at load, pick the path, and build for it.
+
+A constructor that needs an optional capability wraps
+`renderer.ErrCapabilityUnavailable` rather than degrading quietly:
+
+```go
+p, err := r.CreateAppPass(desc) // desc.Timed = true
+if errors.Is(err, renderer.ErrCapabilityUnavailable) {
+	// This device cannot timestamp the graphics queue, so the pass would
+	// never appear in GPUTimings().App. Create it unmeasured instead.
+	desc.Timed = false
+	p, err = r.CreateAppPass(desc)
+}
+if err != nil {
+	return err
+}
+```
+
+The refusal is deliberate and the reasoning is the split above. A `Timed` pass
+asks for a measurement; on a device with no usable timestamps there is no
+measurement to give, and a pass created anyway would run forever while its row
+stayed missing from the frame breakdown — a game would read that as the effect
+being free. Asking the report first, as `examples/24-custom-passes` and
+`cmd/apppasscheck` do, is one line and no error handling at all:
+
+```go
+timed := r.Capabilities().GPUTimestamps
+```
+
+The negotiated sample count and the device identity in this report are also what
+the state trace's `config=` field folds, so two runs on different GPUs or across
+a driver update cannot diff clean, and a report disagreeing with what the
+pipelines were built for fails a test rather than misleading someone -- see
+[`state-trace.md`](state-trace.md). What `Timed` and the other optional
+capabilities an application pass or target can need do when they are missing is
+on [`render-targets.md`](render-targets.md).
 
 ## Background captures
 

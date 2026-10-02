@@ -16,9 +16,10 @@ api:
   - renderer.Hasher
   - renderer.NewHash
   - renderer.HashPOD
+  - renderer.Capabilities
 assets: none
 run: task determinism
-verified: 2026-09-24 # grassbake, grassatlas, grasspc, config and the prime provocation
+verified: 2026-10-02 # grassbake, grassatlas, grasspc, config and the prime provocation; the device half of config= is folded from Capabilities (#160)
 ---
 
 # Finding a render that differs run to run
@@ -165,6 +166,20 @@ talking to the same driver:
   identity is in there for the same reason: a driver update between two runs
   is exactly the kind of "first run of a session" difference that leaves every
   other field in this file agreeing.
+
+  The device half of `config=` -- the negotiated sample count and the GPU and
+  driver identity -- is folded from `renderer.Capabilities`, the same value a
+  game reads to pick between techniques (see
+  [`game-loop.md`](game-loop.md#what-the-device-granted-and-who-owns-the-fallback)).
+  That is deliberate: a report claiming 4x MSAA while the pipelines were built
+  for 2x would be a lie in the API *and* a `config=` that could not see the
+  difference, and one source cannot disagree with itself.
+  `TestCapabilitiesHashAgreesWithTrace` predicts this field from
+  `Capabilities()` alone, so a field whose source drifts fails rather than
+  quietly stops carrying its difference. `DriverName` is the one reported field
+  deliberately left out of the fold: it comes from `VK_KHR_driver_properties`
+  and is empty on a device without it, and a field that is sometimes absent
+  cannot carry a difference.
 
 None of them reproduced issue #40 on the machine they were added on; what they
 change is that the next sighting is a diff rather than an argument.

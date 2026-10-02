@@ -12,6 +12,7 @@ import (
 	"github.com/vkngwrapper/core/v3/core1_0"
 	"github.com/vkngwrapper/extensions/v3/ext_debug_utils"
 	"github.com/vkngwrapper/extensions/v3/khr_dynamic_rendering"
+	"github.com/vkngwrapper/extensions/v3/khr_get_physical_device_properties2"
 	"github.com/vkngwrapper/extensions/v3/khr_surface"
 	khr_surface_loader "github.com/vkngwrapper/extensions/v3/khr_surface/loader"
 	"github.com/vkngwrapper/extensions/v3/khr_swapchain"
@@ -163,10 +164,16 @@ type Renderer struct {
 	msaa                  *msaaResources
 	msaaSamples           core1_0.SampleCountFlags
 
+	// caps is what the device granted, negotiated once in New and never
+	// written again. msaaSamples above and deviceIdent below are both derived
+	// from it; see adopt. Everything that asks the device a question asks this
+	// instead, so the report and the renderer cannot describe two devices.
+	caps Capabilities
+
 	// deviceIdent is the GPU and driver this process got, folded once at
-	// startup and emitted as part of the trace's config= field. A driver
-	// update, or a different GPU picked on a hybrid machine, changes what
-	// every shader compiles to while leaving the simulation and the draw
+	// startup from caps and emitted as part of the trace's config= field. A
+	// driver update, or a different GPU picked on a hybrid machine, changes
+	// what every shader compiles to while leaving the simulation and the draw
 	// sequence identical -- and none of it shows up anywhere else in the
 	// trace, so two runs that straddled one would have diffed clean.
 	deviceIdent Hasher
@@ -348,7 +355,6 @@ type Renderer struct {
 	rangeBatchFrames [maxFramesInFlight]meshBatchFrame
 	jointBuffers     []*JointBuffer
 	dynamicMeshes    map[*Mesh]*dynamicMesh
-	maxAnisotropy    float32 // 0 = anisotropic filtering unavailable
 
 	// Reported to Vulkan at instance creation; see WithApplicationName.
 	appName    string
@@ -647,60 +653,28 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 		return nil, fmt.Errorf("renderer: select physical device: %w", err)
 	}
 
-	// Clamp the requested MSAA level to what the device supports for both
-	// color and depth framebuffers, halving until a supported count is found.
-	if props, err := instanceDriver.GetPhysicalDeviceProperties(r.physicalDevice); err == nil {
-		// The push constant block is shared by every pipeline and is already
-		// larger than Vulkan's guaranteed 128 bytes, so check it rather than
-		// discovering the limit as a pipeline that will not create.
-		if lim := props.Limits.MaxPushConstantsSize; lim < pushConstantSize {
-			return nil, fmt.Errorf("renderer: device allows %d bytes of push constants, engine needs %d",
-				lim, pushConstantSize)
-		}
-		log.Printf("Push constants: %d bytes used of %d available", pushConstantSize, props.Limits.MaxPushConstantsSize)
-
-		// The clustered light data (LightBuffer, ClusterGrid, LightIndices)
-		// lives in three storage buffer bindings on one fragment-stage
-		// descriptor set. Vulkan 1.0 core guarantees at least 4 per stage, so
-		// this should never fire, but it is the same "check the limit rather
-		// than discover it as a pipeline that will not create" reasoning as
-		// the push constant check above -- a silent 0 here would be a device
-		// that simply cannot run this renderer.
-		if lim := props.Limits.MaxPerStageDescriptorStorageBuffers; lim < lightStorageBuffersPerSet {
-			return nil, fmt.Errorf("renderer: device allows %d storage buffers per stage, engine needs %d for clustered lighting",
-				lim, lightStorageBuffersPerSet)
-		}
-		supported := props.Limits.FramebufferColorSampleCounts & props.Limits.FramebufferDepthSampleCounts
-		requested := r.msaaSamples
-		for r.msaaSamples > core1_0.Samples1 && supported&r.msaaSamples == 0 {
-			r.msaaSamples >>= 1
-		}
-		if r.msaaSamples != requested {
-			log.Printf("MSAA: requested %dx not supported, using %dx", requested, r.msaaSamples)
-		} else {
-			log.Printf("MSAA: %dx", r.msaaSamples)
-		}
-
-		// Folded here because props is already in hand; see deviceIdent. The
-		// pipeline cache UUID is the field that moves on a driver update
-		// without the name or the version necessarily moving with it.
-		r.deviceIdent = NewHash.
-			Bytes([]byte(props.DriverName)).
-			Uint64(uint64(props.DriverVersion)).
-			Uint64(uint64(props.APIVersion)).
-			Int(int(props.VendorID)).
-			Int(int(props.DeviceID)).
-			Int(int(props.DriverType)).
-			Bytes(props.PipelineCacheUUID[:])
-
-		if instanceDriver.GetPhysicalDeviceFeatures(r.physicalDevice).SamplerAnisotropy {
-			r.maxAnisotropy = props.Limits.MaxSamplerAnisotropy
-			log.Printf("Anisotropic filtering: %gx", r.maxAnisotropy)
-		}
+	// Step 3b: what the device grants.
+	//
+	// Asked once, here, and reduced to one report the game reads, the trace
+	// hashes and the GPU timer is sized from. A failed query is fatal rather
+	// than skipped: this block used to hang off `if err == nil`, so a device
+	// whose properties could not be read would have carried on with the
+	// REQUESTED sample count, an unfolded device identity and no anisotropy,
+	// and nothing would have said so.
+	features2 := khr_get_physical_device_properties2.CreateExtensionDriverFromCoreDriver(instanceDriver)
+	answers, err := queryDevice(instanceDriver, features2, r.physicalDevice, r.indices.graphicsFamily)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: %w", err)
 	}
+	if err := requireDeviceLimits(answers.props); err != nil {
+		return nil, err
+	}
+	requestedSamples := r.msaaSamples
+	r.adopt(negotiateCapabilities(answers, requestedSamples))
+	r.caps.logCapabilities(requestedSamples)
 
 	// Step 4: Logical device
-	r.deviceDriver, err = createLogicalDevice(instanceDriver, r.physicalDevice, r.indices)
+	r.deviceDriver, err = createLogicalDevice(instanceDriver, features2, r.physicalDevice, r.indices, answers)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create logical device: %w", err)
 	}
@@ -1055,7 +1029,7 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 		return nil, fmt.Errorf("renderer: device cannot use R16G16B16A16_SFLOAT as a sampleable colour attachment")
 	}
 	r.hdr, err = createHDRTargets(r.instanceDriver, r.deviceDriver, r.physicalDevice,
-		r.descriptorPool, r.descriptorSetLayout, r.sc.extent, len(r.sc.imageViews), r.maxAnisotropy, "HDR target")
+		r.descriptorPool, r.descriptorSetLayout, r.sc.extent, len(r.sc.imageViews), r.caps.MaxAnisotropy, "HDR target")
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create HDR targets: %w", err)
 	}
@@ -1091,7 +1065,7 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	// blending, which is why this is a warning rather than an error.
 	if r.sc.captureCapable {
 		r.sceneColor, err = createSceneColorTarget(r.instanceDriver, r.deviceDriver, r.physicalDevice,
-			r.descriptorPool, r.descriptorSetLayout, r.sc.extent, hdrFormat, r.maxAnisotropy)
+			r.descriptorPool, r.descriptorSetLayout, r.sc.extent, hdrFormat, r.caps.MaxAnisotropy)
 		if err != nil {
 			return nil, fmt.Errorf("renderer: create scene color target: %w", err)
 		}
@@ -1277,7 +1251,7 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	// The scene draws into the HDR views; only the tonemap pass touches the
 	// swapchain.
 
-	r.gpuTimer, err = newGPUTimer(r.instanceDriver, r.deviceDriver, r.physicalDevice, r.indices.graphicsFamily)
+	r.gpuTimer, err = newGPUTimer(r.deviceDriver, r.caps)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create GPU timer: %w", err)
 	}
@@ -1711,7 +1685,7 @@ func (r *Renderer) rebuildSwapchainTargets(oldExtent core1_0.Extent2D, undo *reb
 	// chains and the sets that point into them are size-dependent, so both
 	// are rebuilt together.
 	r.hdr, err = createHDRTargets(r.instanceDriver, r.deviceDriver, r.physicalDevice,
-		r.descriptorPool, r.descriptorSetLayout, r.sc.extent, len(r.sc.imageViews), r.maxAnisotropy, "HDR target")
+		r.descriptorPool, r.descriptorSetLayout, r.sc.extent, len(r.sc.imageViews), r.caps.MaxAnisotropy, "HDR target")
 	if err != nil {
 		return fmt.Errorf("renderer: recreate HDR targets: %w", err)
 	}
@@ -1788,7 +1762,7 @@ func (r *Renderer) rebuildSwapchainTargets(oldExtent core1_0.Extent2D, undo *reb
 
 	if r.sc.captureCapable {
 		r.sceneColor, err = createSceneColorTarget(r.instanceDriver, r.deviceDriver, r.physicalDevice,
-			r.descriptorPool, r.descriptorSetLayout, r.sc.extent, hdrFormat, r.maxAnisotropy)
+			r.descriptorPool, r.descriptorSetLayout, r.sc.extent, hdrFormat, r.caps.MaxAnisotropy)
 		if err != nil {
 			return fmt.Errorf("renderer: recreate scene color target: %w", err)
 		}
@@ -2155,6 +2129,12 @@ func (r *Renderer) traceStaticGPUState(t *StateTrace) {
 	// every grass pixel a little while leaving the sky and the HUD alone.
 	// None of it appeared anywhere in the trace; w= and h= were the whole of
 	// what it said about the device.
+	//
+	// The device half of this field -- the sample count and deviceIdent -- is a
+	// function of Capabilities and nothing else, so the report a game branches
+	// on and the identity two traces are compared by cannot drift apart.
+	// TestCapabilitiesHashAgreesWithTrace holds that by predicting this value
+	// from Capabilities() alone; break one field's source and it fails.
 	cfg := NewHash.
 		Int(int(r.msaaSamples)).
 		Bool(r.msaa != nil).
