@@ -223,6 +223,7 @@ task example:24-custom-passes # application render targets, graphics/compute pas
 task example:25-lod-forest     # per-instance culling, distance levels, dithered fades and baked impostors
 task example:26-mesh-ranges    # distinct patches as separate meshes, shared arena ranges or indirect batches
 task example:27-streaming      # patches uploaded while frames render: synchronous, dynamic or batched
+task example:28-overdraw       # the overdraw baseline: a field that hides itself, and a control that does not
 ```
 
 ## Building

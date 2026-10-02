@@ -90,7 +90,9 @@ is against an identical scene rather than two. Under `task bench` conventions,
 | 2500 | 0.296 ms | 3.686 ms | 8 vs 3578 |
 
 Those are `cpu_drawlist + cpu_record` — building the draw list and recording the
-command buffer, which is the cost this removes. The instanced column is flat
+command buffer, which is the cost this removes. Measured before the sort became
+its own phase: re-running these needs `cpu_drawlist + cpu_drawsort + cpu_record`
+to compare against them. See [profiling](profiling.md). The instanced column is flat
 because it is one draw call whatever the count; the variation in it is noise.
 
 **The threshold is around 300.** At 100 props the saving is 0.06 ms, which is

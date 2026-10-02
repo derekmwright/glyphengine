@@ -35,6 +35,7 @@ Each is a complete, self-contained `main()` — copy one and start editing.
 | 25 | `25-lod-forest` | 3,600 trees over the terrain heightmap: per-instance culling, distance levels, dithered transitions, an eight-view impostor, and a single-level control | procedural |
 | 26 | `26-mesh-ranges` | 400 distinct procedural patches drawn three ways: one mesh each, ranges of one shared arena, and the same ranges through indirect batches; `-mode` and `-count` select, `-index32=false` stores uint16 indices | procedural |
 | 27 | `27-streaming` | 400 procedural patches published two per rendered frame while the scene draws, three ways: synchronous device-local meshes, host-visible dynamic meshes, and the batched asynchronous uploader; `-mode`, `-count` and `-per-frame` select | procedural |
+| 28 | `28-overdraw` | The overdraw baseline: 1,024 terrain patches sharing one five-map material under 196 clustered lights, laid out so a grazing view hides most of them behind each other, with `-overlap=false` as the no-overlap control; both arms measure their own screen-space depth complexity and fail if it has drifted. Nothing to look at -- it is what a depth prepass or occlusion culling gets measured against | procedural |
 
 More land as the extraction proceeds — glTF loading, skinned animation,
 shadows, MSDF text, YAML UI, audio, and particles. Numbering has gaps on

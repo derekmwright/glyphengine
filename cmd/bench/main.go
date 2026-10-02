@@ -6,11 +6,12 @@
 // workload is the same between runs; the numbers are means over those frames,
 // so they do not depend on which frame the run happened to end on.
 //
-//	task bench                    # every scene
-//	task bench -- -scene grass    # one of them
-//	task bench -- -scene patches  # interleaved distinct-geometry submission
-//	task bench -- -scene stream   # interleaved streamed uploads
-//	task bench -- -json out.json  # for diffing between commits
+//	task bench                     # every scene
+//	task bench -- -scene grass     # one of them
+//	task bench -- -scene patches   # interleaved distinct-geometry submission
+//	task bench -- -scene stream    # interleaved streamed uploads
+//	task bench -- -scene overdraw  # the overdraw baseline and its no-overlap control
+//	task bench -- -json out.json   # for diffing between commits
 //
 // What it does not do is compare against a stored baseline. Frame cost depends
 // on the GPU, the driver, the display mode and what else is running, so a
@@ -153,7 +154,7 @@ type result struct {
 func main() {
 	only := flag.String("scene", "", "run only the named scene")
 	jsonOut := flag.String("json", "", "also write results as JSON to this path")
-	repeat := flag.Int("repeat", 1, "run N times; patches and stream retain interleaved samples, other scenes keep the fastest")
+	repeat := flag.Int("repeat", 1, "run N times; patches, stream and overdraw retain interleaved samples, other scenes keep the fastest")
 	// extra exists so a sweep -- a resolution, a step count, a light count --
 	// can be measured with this tool's parsing and this tool's table instead
 	// of a one-off script that reports something subtly different. It is
@@ -171,6 +172,13 @@ func main() {
 	}
 	if *only == "stream" {
 		if err := runStream(*repeat, *jsonOut, *extra); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+	if *only == "overdraw" {
+		if err := runOverdraw(*repeat, *jsonOut, *extra); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
@@ -227,7 +235,7 @@ func run(sc scene) (*result, error) {
 		"GLYPHENGINE_BENCH_LABEL="+sc.name,
 	)
 
-	if strings.HasPrefix(sc.name, "lod") || strings.HasPrefix(sc.name, "patches") || strings.HasPrefix(sc.name, "stream") {
+	if strings.HasPrefix(sc.name, "lod") || strings.HasPrefix(sc.name, "patches") || strings.HasPrefix(sc.name, "stream") || strings.HasPrefix(sc.name, "overdraw") {
 		cmd.Env = append(cmd.Env, "GLYPHENGINE_FIXED_FRAME_TIME=16.667ms")
 	}
 
@@ -255,10 +263,10 @@ func run(sc scene) (*result, error) {
 		}
 		r.Values[fields[i]] = v
 	}
-	// PATCHES and STREAM are the same shape: one tab-separated line of
+	// PATCHES, STREAM and OVERDRAW are the same shape: one tab-separated line of
 	// key/value pairs a scene prints for columns the BENCH line has no name
-	// for. Both fold into the same map.
-	for _, tag := range []string{"PATCHES", "STREAM"} {
+	// for. They all fold into the same map.
+	for _, tag := range []string{"PATCHES", "STREAM", "OVERDRAW"} {
 		p := regexp.MustCompile(tag + `\t([^\r\n]+)`).FindSubmatch(out)
 		if p == nil {
 			continue
@@ -342,6 +350,70 @@ func runPatches(repeat int, jsonOut, extra string) error {
 				results = append(results, *r)
 				fmt.Printf("%s: record %.3f ms CPU %.3f ms GPU %.3f ms draws %.0f instances %.0f geometry buffers %.0f bytes %.0f Alloc %.6f ms\n", r.Scene, r.Values["cpu_record"], r.Values["cpu_total"], r.Values["gpu_total"], r.Values["n_draws"], r.Values["n_instances"], r.Values["n_geometry_buffers"], r.Values["geometry_bytes"], r.Values["alloc_ms"])
 			}
+		}
+	}
+	if jsonOut != "" {
+		writeJSON(jsonOut, results)
+	}
+	return nil
+}
+
+// runOverdraw is the engine's overdraw baseline, in two arms: 28-overdraw's
+// grazing field where the patches hide each other, and the overhead control
+// where none of them does.
+//
+// It is here to be a before-and-after for work that has not been done yet -- an
+// opt-in depth prepass, hierarchical-Z occlusion culling. Nothing in the engine
+// removes hidden opaque fragments today, so every such mechanism is a bet that
+// what it removes outweighs what it costs unconditionally, and that bet can only
+// be settled against a scene with hidden work AND a scene without it. The
+// control is not decoration: ordering opaque draws front to back inside their
+// state group saved 0.82 ms of a 7.06 ms opaque pass on the overlap arm and cost
+// 1.01 ms on the control, which is why that policy does not exist. See
+// docs/agents/game-loop.md.
+//
+// Interleaved overlap / control / overlap / control with every sample retained,
+// for the reason runPatches is: the differences worth seeing here are a fraction
+// of one pass, the machine's own drift over a run is the same size, and keeping
+// the fastest run of each arm would let the drift decide. Report each arm's mean
+// and its range, and compare a change against the range rather than against a
+// single pair.
+//
+// gpu_opaque is the column; gpu_total is there to show the saving is not moving
+// to another pass, cpu_drawsort to show the draw list is being ordered rather
+// than rebuilt, and depth complexity to show each arm is still the arm it is
+// named after -- the example fails rather than reporting a drifted one.
+//
+// 1280x720 by default. The cost is screen-dependent -- the fragments a hidden
+// draw wastes are fragments, and there are nine times as many at 4K -- so
+// -extra "-width 3840 -height 2160" is the other half of any serious reading.
+func runOverdraw(repeat int, jsonOut, extra string) error {
+	if repeat < 3 {
+		repeat = 3
+	}
+	var results []result
+	for trial := 0; trial < repeat; trial++ {
+		for _, arm := range []string{"overlap", "control"} {
+			if err := patchesGPUIdle(); err != nil {
+				return err
+			}
+			sc := scene{
+				name: fmt.Sprintf("overdraw-%s-%d", arm, trial+1),
+				dir:  "28-overdraw",
+				args: []string{"-frames", "200", "-overlap=" + strconv.FormatBool(arm == "overlap")},
+			}
+			sc.args = append(sc.args, strings.Fields(extra)...)
+			r, err := run(sc)
+			if err != nil {
+				return err
+			}
+			if err := patchesGPUIdle(); err != nil {
+				return fmt.Errorf("discard %s: %w", sc.name, err)
+			}
+			results = append(results, *r)
+			fmt.Printf("%-24s gpu opaque %6.3f ms  gpu total %6.3f ms  cpu sort %6.3f ms  cpu total %7.3f ms  draws %4.0f  depth complexity %.2f\n",
+				r.Scene, r.Values["gpu_opaque"], r.Values["gpu_total"], r.Values["cpu_drawsort"],
+				r.Values["cpu_total"], r.Values["n_draws"], r.Values["overlap_ratio"])
 		}
 	}
 	if jsonOut != "" {

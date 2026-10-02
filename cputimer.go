@@ -21,8 +21,16 @@ const (
 	CPUAnimate
 	// CPULateUpdate is Game.LateUpdate.
 	CPULateUpdate
-	// CPUDrawList is building, culling and sorting the draw list.
+	// CPUDrawList is building and culling the draw list.
 	CPUDrawList
+	// CPUDrawSort is ordering it: building the sort keys and running the sort.
+	//
+	// Split out of CPUDrawList because what the sort costs is a question of its
+	// own -- see drawOrder, where the answer was a microbenchmark and nothing
+	// else -- and a column that also carried the component walk and the frustum
+	// tests cannot answer it. It is a slice of CPUDrawList's old value rather
+	// than work added beside it, so the phases still sum to the frame.
+	CPUDrawSort
 	// CPUCluster is binning the unshadowed lights into the froxel grid:
 	// gathering them, culling them against the frustum, and filling the cells.
 	//
@@ -77,6 +85,8 @@ func (p CPUPhase) String() string {
 		return "lateupdate"
 	case CPUDrawList:
 		return "drawlist"
+	case CPUDrawSort:
+		return "drawsort"
 	case CPUCluster:
 		return "cluster"
 	case CPUGPUWait:
