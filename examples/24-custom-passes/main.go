@@ -86,6 +86,12 @@ func (g *game) Init(e *glyph.Engine) error {
 		return nil
 	}
 
+	// Timed passes need timestamps on the graphics queue, and a device without
+	// them refuses the descriptor rather than creating a pass whose cost never
+	// appears in the breakdown. Asking the report once is the whole of handling
+	// it; see renderer.Capabilities.
+	timed := r.Capabilities().GPUTimestamps
+
 	// 1. A world-XZ light map, not a screen overlay. Three quads contribute
 	// to one half-resolution R16F image; additive blending keeps their overlap.
 	pattern, err := r.CreateRenderTarget(renderer.RenderTargetDesc{
@@ -96,7 +102,7 @@ func (g *game) Init(e *glyph.Engine) error {
 	}
 	g.pattern, err = r.CreateAppPass(renderer.AppPassDesc{
 		Name: "light pattern", Stage: renderer.StageBeforeScene, Target: pattern,
-		Vert: patternVert, Frag: patternFrag, Blend: renderer.BlendAdditive, Timed: true,
+		Vert: patternVert, Frag: patternFrag, Blend: renderer.BlendAdditive, Timed: timed,
 	})
 	if err != nil {
 		return err
@@ -127,7 +133,7 @@ func (g *game) Init(e *glyph.Engine) error {
 	g.smooth, err = r.CreateAppCompute(renderer.AppComputeDesc{
 		Name: "temporal smoothing", Stage: renderer.StageBeforeScene, Comp: smoothComp,
 		Reads:  []*renderer.Texture{pattern.Texture(), g.field.Texture()},
-		Writes: []*renderer.RenderTarget{g.field}, Timed: true,
+		Writes: []*renderer.RenderTarget{g.field}, Timed: timed,
 	})
 	if err != nil {
 		return err
@@ -150,7 +156,7 @@ func (g *game) Init(e *glyph.Engine) error {
 	g.fog, err = r.CreateAppPass(renderer.AppPassDesc{
 		Name: "distance fog", Stage: renderer.StageBeforeBloom, Target: fog,
 		Fullscreen: true, Vert: shaders.DepthResolveVertSpv, Frag: fogFrag,
-		Reads: []*renderer.Texture{r.SceneColor(), depth}, Timed: true,
+		Reads: []*renderer.Texture{r.SceneColor(), depth}, Timed: timed,
 	})
 	if err != nil {
 		return err
@@ -159,7 +165,7 @@ func (g *game) Init(e *glyph.Engine) error {
 		Name: "depth-aware composite", Stage: renderer.StageBeforeBloom,
 		Target: nil, Load: true, Blend: renderer.BlendAdditive,
 		Fullscreen: true, Vert: shaders.DepthResolveVertSpv, Frag: compositeFrag,
-		Reads: []*renderer.Texture{fog.Texture(), depth}, Timed: true,
+		Reads: []*renderer.Texture{fog.Texture(), depth}, Timed: timed,
 	})
 	// Renderer.Destroy releases these resources. For effects with shorter
 	// lifetimes, destroy their passes/compute first, then their targets.

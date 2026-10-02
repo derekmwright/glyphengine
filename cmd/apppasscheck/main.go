@@ -124,6 +124,10 @@ func run(o options) error {
 	for i := 0; i < len(bufferData); i += 4 {
 		binary.LittleEndian.PutUint32(bufferData[i:], math.Float32bits(1))
 	}
+	// A timed pass is refused outright on a device that cannot timestamp the
+	// graphics queue, so ask once rather than per descriptor. The timing
+	// assertions below are already gated on the same answer.
+	timed := r.Capabilities().GPUTimestamps
 	var temporal = make(map[int]image.Image)
 	var targets []*renderer.RenderTarget
 	var passes []*renderer.AppPass
@@ -137,14 +141,14 @@ func run(o options) error {
 			return err
 		}
 		targets = []*renderer.RenderTarget{t, filtered}
-		p, err := r.CreateAppPass(renderer.AppPassDesc{Name: "pattern", Stage: renderer.StageBeforeScene, Target: t, DepthTest: true, Reads: []*renderer.Texture{r.FallbackTexture(), r.FallbackTexture()}, Vert: meshVert, Frag: pattern, Timed: true})
+		p, err := r.CreateAppPass(renderer.AppPassDesc{Name: "pattern", Stage: renderer.StageBeforeScene, Target: t, DepthTest: true, Reads: []*renderer.Texture{r.FallbackTexture(), r.FallbackTexture()}, Vert: meshVert, Frag: pattern, Timed: timed})
 		if err != nil {
 			return err
 		}
 		p.SetDraws(draws)
 		if o.history {
 			r.DestroyAppPass(p)
-			p, err = r.CreateAppPass(renderer.AppPassDesc{Name: "history pattern", Stage: renderer.StageBeforeScene, Target: t, DepthTest: true, Reads: []*renderer.Texture{t.Texture(), r.FallbackTexture()}, Vert: meshVert, Frag: pattern, Timed: true})
+			p, err = r.CreateAppPass(renderer.AppPassDesc{Name: "history pattern", Stage: renderer.StageBeforeScene, Target: t, DepthTest: true, Reads: []*renderer.Texture{t.Texture(), r.FallbackTexture()}, Vert: meshVert, Frag: pattern, Timed: timed})
 			if err != nil {
 				return err
 			}
@@ -177,7 +181,7 @@ func run(o options) error {
 					return err
 				}
 			}
-			compute, err = r.CreateAppCompute(renderer.AppComputeDesc{Name: "compute blur", Stage: renderer.StageBeforeScene, Comp: code, Buffers: buffers, Reads: []*renderer.Texture{t.Texture(), computed.Texture(), r.FallbackTexture()}, Writes: []*renderer.RenderTarget{computed}, Timed: true})
+			compute, err = r.CreateAppCompute(renderer.AppComputeDesc{Name: "compute blur", Stage: renderer.StageBeforeScene, Comp: code, Buffers: buffers, Reads: []*renderer.Texture{t.Texture(), computed.Texture(), r.FallbackTexture()}, Writes: []*renderer.RenderTarget{computed}, Timed: timed})
 			if err != nil {
 				return err
 			}
@@ -189,11 +193,11 @@ func run(o options) error {
 			compute.SetEnabled(!o.disabled)
 			output = computed
 		}
-		f, err := r.CreateAppPass(renderer.AppPassDesc{Name: "depth filter", Stage: renderer.StageBeforeBloom, Target: filtered, Reads: []*renderer.Texture{r.SceneColor(), r.SceneDepth()}, Vert: shaders.DepthResolveVertSpv, Frag: filter, Fullscreen: true, Timed: true})
+		f, err := r.CreateAppPass(renderer.AppPassDesc{Name: "depth filter", Stage: renderer.StageBeforeBloom, Target: filtered, Reads: []*renderer.Texture{r.SceneColor(), r.SceneDepth()}, Vert: shaders.DepthResolveVertSpv, Frag: filter, Fullscreen: true, Timed: timed})
 		if err != nil {
 			return err
 		}
-		a, err := r.CreateAppPass(renderer.AppPassDesc{Name: "additive composite", Stage: renderer.StageBeforeBloom, Load: true, Blend: renderer.BlendAdditive, Reads: []*renderer.Texture{filtered.Texture()}, Vert: shaders.DepthResolveVertSpv, Frag: add, Fullscreen: true, Timed: true})
+		a, err := r.CreateAppPass(renderer.AppPassDesc{Name: "additive composite", Stage: renderer.StageBeforeBloom, Load: true, Blend: renderer.BlendAdditive, Reads: []*renderer.Texture{filtered.Texture()}, Vert: shaders.DepthResolveVertSpv, Frag: add, Fullscreen: true, Timed: timed})
 		if err != nil {
 			return err
 		}

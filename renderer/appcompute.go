@@ -49,6 +49,7 @@ func (p *AppCompute) SetPushConstants(data []byte) error { return p.pass.SetPush
 
 func (r *Renderer) validateAppCompute(d AppComputeDesc) error {
 	fail := func(field, why string) error { return fmt.Errorf("app compute %q: %s: %s", d.Name, field, why) }
+	wrap := func(field string, err error) error { return fmt.Errorf("app compute %q: %s: %w", d.Name, field, err) }
 	if d.Stage < StageBeforeScene || d.Stage > StageBeforeTonemap {
 		return fail("Stage", "unknown stage")
 	}
@@ -94,7 +95,7 @@ func (r *Renderer) validateAppCompute(d AppComputeDesc) error {
 			return fail("Reads", fmt.Sprintf("target %q needs History when also written", t.target.desc.Name))
 		}
 	}
-	return r.validateAppTiming(d.Timed, fail)
+	return r.validateAppTiming(d.Timed, fail, wrap)
 }
 
 func (r *Renderer) CreateAppCompute(d AppComputeDesc) (_ *AppCompute, err error) {

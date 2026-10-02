@@ -856,7 +856,7 @@ func (r *Renderer) createTexture(pixels []byte, width, height int, opts textureO
 	if opts.mipmap {
 		mipMode = core1_0.SamplerMipmapModeLinear
 		maxLod = float32(mipLevels)
-		maxAniso = r.maxAnisotropy
+		maxAniso = r.caps.MaxAnisotropy
 	}
 
 	sampler, _, err := r.deviceDriver.CreateSampler(nil, core1_0.SamplerCreateInfo{

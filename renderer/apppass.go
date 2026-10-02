@@ -77,6 +77,7 @@ func (p *AppPass) SetPushConstants(data []byte) error {
 
 func (r *Renderer) validateAppPass(d AppPassDesc) error {
 	fail := func(field, why string) error { return fmt.Errorf("app pass %q: %s: %s", d.Name, field, why) }
+	wrap := func(field string, err error) error { return fmt.Errorf("app pass %q: %s: %w", d.Name, field, err) }
 	if d.Stage < StageBeforeScene || d.Stage > StageBeforeTonemap {
 		return fail("Stage", "unknown stage")
 	}
@@ -109,7 +110,7 @@ func (r *Renderer) validateAppPass(d AppPassDesc) error {
 			return fail("Reads", "cannot read Target without History")
 		}
 	}
-	if err := r.validateAppTiming(d.Timed, fail); err != nil {
+	if err := r.validateAppTiming(d.Timed, fail, wrap); err != nil {
 		return err
 	}
 	for _, sh := range []struct {
@@ -178,8 +179,26 @@ func (r *Renderer) validateAppName(name string, fail func(string, string) error)
 	return nil
 }
 
-func (r *Renderer) validateAppTiming(timed bool, fail func(string, string) error) error {
+// validateAppTiming refuses a timed pass the device cannot time, then enforces
+// the shared timing capacity.
+//
+// The refusal is the one place the engine hands a missing optional capability
+// back to the game instead of absorbing it, and the distinction is what it is
+// the caller asked for. Batched ranges without multi-draw indirect still draw
+// the geometry, so the engine takes that fallback silently and reports it in
+// Capabilities. A pass asking to be Timed is asking for a measurement, and on a
+// device that cannot timestamp the graphics queue there is no measurement to
+// give: the pass would be created, run forever, and never once appear in
+// GPUTimings().App. A game would read a frame breakdown with its own effect
+// missing from it and conclude the effect was free.
+//
+// wrap puts the sentinel behind the caller's "app pass %q: Timed:" prefix with
+// %w, so errors.Is reaches ErrCapabilityUnavailable through it.
+func (r *Renderer) validateAppTiming(timed bool, fail func(string, string) error, wrap func(string, error) error) error {
 	if timed {
+		if !r.caps.GPUTimestamps {
+			return wrap("Timed", unavailable("GPU timestamps"))
+		}
 		n := 0
 		for _, p := range r.appPasses {
 			if p.desc.Timed {

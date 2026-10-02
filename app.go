@@ -1022,6 +1022,16 @@ func (e *Engine) FPS() float64 {
 // way WithMaxFrames counts them.
 func (e *Engine) FrameCount() int { return e.frameCount }
 
+// Capabilities returns what the GPU and driver granted this renderer: the
+// negotiated MSAA count, the anisotropy level, which optional features are
+// present, and who the device is. Fixed once the engine is built.
+//
+// Read it to choose between two techniques whose results are not the same
+// picture — the engine has already taken every fallback that produces the same
+// one, and says in here which it took. See renderer.Capabilities,
+// renderer.ErrCapabilityUnavailable and docs/agents/game-loop.md.
+func (e *Engine) Capabilities() renderer.Capabilities { return e.renderer.Capabilities() }
+
 // GPUTimings returns the most recent per-pass GPU cost in milliseconds.
 //
 // Measured with timestamp queries on the GPU's own clock, so the numbers are

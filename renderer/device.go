@@ -66,7 +66,13 @@ func pickPhysicalDevice(instanceDriver core1_0.CoreInstanceDriver, surfaceExt kh
 
 // createLogicalDevice creates a Vulkan logical device with queues for the
 // graphics/present queues and the required dynamic-rendering capabilities.
-func createLogicalDevice(instanceDriver core1_0.CoreInstanceDriver, physicalDevice core1_0.PhysicalDevice, indices queueFamilyIndices) (core1_0.CoreDeviceDriver, error) {
+//
+// It takes the device's own answers rather than asking for them a second time,
+// so the features and extensions it ENABLES are exactly the ones Capabilities
+// REPORTS. Those used to be two independent sets of queries, which is how a
+// report of something the device was never created with would have gone
+// unnoticed.
+func createLogicalDevice(instanceDriver core1_0.CoreInstanceDriver, features2 khr_get_physical_device_properties2.ExtensionDriver, physicalDevice core1_0.PhysicalDevice, indices queueFamilyIndices, a deviceAnswers) (core1_0.CoreDeviceDriver, error) {
 	// Build unique queue family set
 	uniqueFamilies := map[int]struct{}{
 		indices.graphicsFamily: {},
@@ -81,9 +87,10 @@ func createLogicalDevice(instanceDriver core1_0.CoreInstanceDriver, physicalDevi
 		})
 	}
 
-	// Enable anisotropic filtering when the GPU supports it (queried again in
-	// Renderer.New to size MaxAnisotropy for texture samplers).
-	supported := instanceDriver.GetPhysicalDeviceFeatures(physicalDevice)
+	// Anisotropic filtering is enabled when the GPU supports it; the level the
+	// samplers are then given is Capabilities.MaxAnisotropy, negotiated from
+	// this same feature bit.
+	supported := a.features
 
 	// VUID-VkDeviceCreateInfo-pProperties-04451: if the physical device
 	// supports VK_KHR_portability_subset, it *must* be enabled here. Every
@@ -93,23 +100,14 @@ func createLogicalDevice(instanceDriver core1_0.CoreInstanceDriver, physicalDevi
 	// Conditional for the same reason the instance opt-in is: a conformant
 	// driver does not advertise this, and asking for it there would fail device
 	// creation on every machine that works today.
-	available, _, err := instanceDriver.EnumerateDeviceExtensionProperties(physicalDevice)
-	if err != nil {
-		return nil, fmt.Errorf("enumerate device extensions: %w", err)
-	}
-	props, err := instanceDriver.GetPhysicalDeviceProperties(physicalDevice)
-	if err != nil {
-		return nil, fmt.Errorf("query driver properties: %w", err)
-	}
-	deviceExtensions, err := dynamicRenderingExtensions(available, props)
+	deviceExtensions, err := dynamicRenderingExtensions(a.extensions, a.props)
 	if err != nil {
 		return nil, err
 	}
-	features2 := khr_get_physical_device_properties2.CreateExtensionDriverFromCoreDriver(instanceDriver)
-	if err := requireDynamicRendering(features2, physicalDevice, props.DriverName); err != nil {
+	if err := requireDynamicRendering(features2, physicalDevice, a.props.DriverName); err != nil {
 		return nil, err
 	}
-	if _, ok := available[khr_portability_subset.ExtensionName]; ok {
+	if portabilitySubset(a.extensions) {
 		deviceExtensions = append(deviceExtensions, khr_portability_subset.ExtensionName)
 		log.Printf("Portability subset enabled (%s)", khr_portability_subset.ExtensionName)
 	}
@@ -131,6 +129,33 @@ func createLogicalDevice(instanceDriver core1_0.CoreInstanceDriver, physicalDevi
 
 	log.Println("Logical device created")
 	return deviceDriver, nil
+}
+
+// requireDeviceLimits refuses a device that cannot run this renderer at all,
+// as opposed to one that runs it with less -- the latter is Capabilities' job.
+//
+// Both limits are checked here rather than discovered as a pipeline that will
+// not create, because a Vulkan result code from vkCreateGraphicsPipelines does
+// not say which limit it was.
+func requireDeviceLimits(props *core1_0.PhysicalDeviceProperties) error {
+	// The push constant block is shared by every pipeline and is already
+	// larger than Vulkan's guaranteed 128 bytes.
+	if lim := props.Limits.MaxPushConstantsSize; lim < pushConstantSize {
+		return fmt.Errorf("renderer: device allows %d bytes of push constants, engine needs %d",
+			lim, pushConstantSize)
+	}
+	log.Printf("Push constants: %d bytes used of %d available", pushConstantSize, props.Limits.MaxPushConstantsSize)
+
+	// The clustered light data (LightBuffer, ClusterGrid, LightIndices) lives
+	// in three storage buffer bindings on one fragment-stage descriptor set.
+	// Vulkan 1.0 core guarantees at least 4 per stage, so this should never
+	// fire -- a silent 0 here would be a device that simply cannot run this
+	// renderer.
+	if lim := props.Limits.MaxPerStageDescriptorStorageBuffers; lim < lightStorageBuffersPerSet {
+		return fmt.Errorf("renderer: device allows %d storage buffers per stage, engine needs %d for clustered lighting",
+			lim, lightStorageBuffersPerSet)
+	}
+	return nil
 }
 
 // Keep the Vulkan 1.0 baseline by explicitly enabling the extension dependency

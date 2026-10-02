@@ -230,7 +230,11 @@ func TestAppComputeZeroAndDisabledTimings(t *testing.T) {
 }
 
 func TestAppComputeDescriptions(t *testing.T) {
-	r := &Renderer{}
+	// GPUTimestamps on purpose: without it a Timed dispatch is refused with
+	// ErrCapabilityUnavailable before the shared-capacity check below is
+	// reached. That case asserts the capacity message rather than just the
+	// field name for the same reason -- both errors name Timed.
+	r := &Renderer{caps: Capabilities{GPUTimestamps: true}}
 	target := &RenderTarget{r: r, desc: RenderTargetDesc{Name: "output", Storage: true}}
 	target.texture.target = target
 	good := AppComputeDesc{Name: "check", Stage: StageBeforeScene, Comp: computeCode(t), Writes: []*RenderTarget{target}}
@@ -276,8 +280,8 @@ func TestAppComputeDescriptions(t *testing.T) {
 		r.appPasses = append(r.appPasses, p)
 	}
 	good.Timed = true
-	if err := r.validateAppCompute(good); err == nil || !strings.Contains(err.Error(), "Timed") {
-		t.Fatal("shared timing capacity not enforced")
+	if err := r.validateAppCompute(good); err == nil || !strings.Contains(err.Error(), "at most sixteen") {
+		t.Fatalf("shared timing capacity not enforced: %v", err)
 	}
 }
 

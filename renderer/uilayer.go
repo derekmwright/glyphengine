@@ -64,7 +64,7 @@ func (r *Renderer) createUILayerTargets() (*uiLayerTarget, error) {
 
 	var err error
 	t.color, err = createHDRTargets(r.instanceDriver, r.deviceDriver, r.physicalDevice,
-		r.descriptorPool, r.descriptorSetLayout, r.sc.extent, count, r.maxAnisotropy, "UI glow layer")
+		r.descriptorPool, r.descriptorSetLayout, r.sc.extent, count, r.caps.MaxAnisotropy, "UI glow layer")
 	if err != nil {
 		return nil, err
 	}
