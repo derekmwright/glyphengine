@@ -58,7 +58,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-10-02 # the draw list's order and the rejected opaque policy; releasing mid-frame (#153); the capabilities report and who owns which fallback (#160)
+verified: 2026-10-02 # the draw list's order and the rejected opaque policy; releasing mid-frame (#153); the capabilities report and who owns which fallback (#160); the depth prepass measured on both arms at both resolutions and removed by its own rule (#158)
 ---
 
 # Run a game loop with Engine and Game
@@ -818,30 +818,154 @@ comparison already reads "farther first", so a negated depth reads as "nearer
 first" for opaque draws and leaves the blended tail alone, and `drawOrder` stays
 24 bytes.
 
-### A depth prepass is still worth asking about, and the baseline is kept
+### A depth prepass was measured and removed
 
-The overlap arm says there is recoverable work: 0.82 ms of a 7.06 ms opaque pass
-at 4K, found by draw-level rejection alone, on a field with 3.28x depth
-complexity — and since that figure counts one DRAW hiding another, a per-pixel
-mechanism would see more. A prepass rejects per pixel rather than per draw, so it
-would find more of it, and — this is the part the numbers above argue for — it
-would not pay the locality penalty, because it does not reorder the main pass.
-Against that it costs a second geometry pass over 1.6 M triangles and has to get
-alpha test, displacement, reverse-Z and MSAA depth matching right.
+An opt-in depth prepass was built, measured against a rule written before the
+run, and removed. It is the second mechanism this scene has rejected, on the same
+clause.
 
-`examples/28-overdraw` and `task bench -- -scene overdraw` are kept as the
-baseline for exactly that, and for hierarchical-Z occlusion culling after it. Both
-are bets that what they remove outweighs what they cost unconditionally, and that
-is a bet only a pair of arms can settle: the overlap arm says how much there is to
-win, and the control says what every scene without hidden work is being charged
-for it. The control is not a formality — it is what rejected the sort, on numbers
-the overlap arm alone would have approved.
+The idea answered the paragraph above exactly: a prepass rejects per pixel rather
+than per draw, so it finds more than draw-level rejection does, and it does not
+reorder the main pass, so it pays none of the locality penalty that sank
+front-to-back ordering. It did both of those things, convincingly. What it could
+not do is be free on a scene with nothing hidden.
 
-One result from that same scene is worth carrying into either design. Spawning the
-field nearest row first, so submission order is both front to back and
-row-major, takes the opaque pass from 7.06 ms to 5.95 ms at 3840x2160 with no
-engine change at all (`-spawn fronttoback`). Any mechanism proposed here has to
-beat 5.95, not 7.06.
+The rule, written first:
+
+> Ship the option if, on the overlap arm at 3840x2160, `gpu_total` falls by more
+> than the within-mode scatter; the control arm's `gpu_total` rises by less than
+> that scatter; and `task determinism` captures are byte-identical with the
+> prepass on. Otherwise remove the option and record the numbers that said no.
+
+`gpu_total` and not `gpu_opaque`, because a prepass is a pass of its own: a saving
+inside the opaque pass that the new pass more than spends reads as a win from
+`gpu_opaque` alone.
+
+Same scene and conditions as the ordering measurement above —
+`examples/28-overdraw`, 1024 patches of 2048 triangles under one five-map PBR
+material, 196 clustered point lights, spawned farthest row first, 200 frames
+under `GLYPHENGINE_FIXED_FRAME_TIME=16.667ms`, nothing else on the GPU, AMD Radeon
+RX 7900 XTX. Four cells, three trials each, interleaved off/on inside each arm so
+the machine's own drift could not decide the result.
+
+`gpu_total`, in milliseconds:
+
+| resolution | arm | depth complexity | prepass off | prepass on | mean change | within-mode scatter |
+|---|---|---:|---|---|---|---|
+| 1280x720 | overlap | 3.28 | 2.204 / 2.124 / 2.194 | 1.946 / 1.926 / 2.002 | **-0.216** | 0.080 / 0.076 |
+| 1280x720 | control | 1.02 | 7.534 / 7.693 / 7.804 | 8.605 / 8.630 / 8.570 | **+0.925** | 0.270 / 0.060 |
+| 3840x2160 | overlap | 3.28 | 8.156 / 8.134 / 8.038 | 4.243 / 4.392 / 4.414 | **-3.760** | 0.118 / 0.171 |
+| 3840x2160 | control | 1.02 | 9.730 / 9.455 / 9.263 | 10.362 / 9.869 / 9.881 | **+0.555** | 0.467 / 0.493 |
+
+Where the time went at 3840x2160, which is what makes the two arms legible.
+`gpu_opaque` fell from 7.594 to 2.929 on the overlap arm — the prepass removed
+61 % of the lit pass — and from 9.080 to 8.875 on the control, where there is
+almost nothing hidden to remove. The prepass itself cost 0.816 ms on the overlap
+arm and 0.790 ms on the control, which is the point: it costs very nearly the same
+either way, because it is the same geometry submitted a second time. Overlap nets
+-3.85, control nets +0.585, and the measured `gpu_total` changes of -3.760 and
++0.555 agree with that to within the scatter. `cpu_record` rose by 0.542 ms on the
+overlap arm and 0.575 ms on the control, the second submission's CPU price.
+`cpu_total` sat at 16.4 to 16.6 ms in all 24 samples, which is vsync. Draw counts
+doubled with the option on, as they must: the qualifying draws are submitted
+twice.
+
+**The rule's verdict: do not ship.** Clause one passes enormously — a 3.760 ms
+fall against a 0.171 ms scatter, twenty-two times over, and 46 % of that frame.
+Clause three passes: two capture pairs and a draw-sequence pair with the prepass
+on all repeat byte for byte. Clause two fails at both resolutions: the control
+rises 0.555 ms against a 0.493 ms scatter at 4K and 0.925 ms against 0.270 ms at
+720p. The 4K margin is narrow, and pairing the samples by trial is what settles it
+rather than softening it — the control rose on every single trial, by +0.632,
++0.414 and +0.618, so the rise is a real cost and not the scatter.
+
+That is the same clause, and very nearly the same number, that rejected
+front-to-back ordering: about one millisecond of the opaque pass charged to a
+scene where nothing is hidden at all. The option being off by default does not
+rescue it, and the rule already knew the default would be off — what the control
+measures is whether the mechanism is worth having, not whether it is worth
+defaulting to.
+
+Worth recording against the bar this page sets: the prepass DOES clear it. The
+overlap arm's opaque pass came to 2.929 ms against the 5.95 ms that spawn order
+alone reaches, and a 4.350 ms total frame against 7.600. The win on a scene with
+hidden work is real and large. It is the control that says no.
+
+**Where the recovered time probably is, instead.** #154's hierarchical-Z
+occlusion test removes hidden draws without submitting a second geometry pass at
+all, so it has no fixed cost to charge the control — which is exactly the clause
+this failed. Measure it on these same four cells. A prepass gated on measured
+depth complexity is the other way out, and it would need a cheap online estimate
+of a number this scene computes offline from projected bounds.
+
+#### To rebuild it
+
+The option was `WithDepthPrepass(bool)` on both `renderer` and `glyphengine`,
+default off, reported through `Capabilities.DepthPrepass`. Four things made it
+work, and the last three are each a half-day if they are rediscovered rather than
+read:
+
+1. A `Graphics` frame-graph node declaring the scene depth image as `DepthWrite`
+   with a clear of 0 and `Discard`, spliced by NODE index immediately before the
+   hand-recorded scene — after the `StageBeforeScene` application passes, so its
+   clear wipes their depth writes exactly as the scene's clear already did.
+   `bindSceneTargets` then loads depth instead of clearing it. A scene target left
+   clearing depth is the silent failure: the frame renders, validation is silent,
+   and every equal-compare draw tests against an empty buffer and vanishes.
+   Declaring `Use.FinalLayout` as the depth attachment layout was needed too, or
+   the compiler restores depth's resting layout on the way out — the sampled one,
+   as soon as an application pass reads scene depth — and the scene pass
+   transitions it straight back, two barriers that move nothing and a
+   write-after-write against the prepass's own writes.
+2. Depth-only vertex stages that are twins of `lit.vert` and
+   `lit_instanced.vert`, not of `shadow.vert` and `shadow_instanced.vert`. The
+   shadow instanced stage writes `pc.vp * inModel * vec4(...)`, which GLSL
+   left-associates into a matrix-matrix product and then a matrix-vector one,
+   while the lit one writes `pc.vp * (inModel * vec4(...))` — two matrix-vector
+   products. Different arithmetic, and under an EQUAL compare a surface that
+   disagrees in the low bits is not shaded differently, it is not drawn. Writing
+   the pair to match and checking the emitted SPIR-V was enough; `invariant
+   gl_Position` was tried on top and changed nothing, 1674 differing pixels before
+   and after, so it is not the lever it looks like.
+3. The push-constant stage mask. The prepass pushed 128 bytes through the lit
+   layout, whose single range declares 256 bytes for the vertex AND fragment
+   stages. `VUID-vkCmdPushConstants-offset-01796` requires a push's `stageFlags`
+   to include every stage of each range it overlaps — not, as it reads naturally,
+   to be included by them. Pushing vertex-only there is a violation on every
+   draw: 30 validation errors over 30 frames of `07-terrain`, 6480 over
+   `28-overdraw`, and nothing else in the matrix said a word. The shadow passes
+   are legal only because their own layouts declare 128 vertex-only bytes.
+4. `pipelineFormats` takes a NODE index while the `graph*` constants are
+   DECLARATION indices. Nothing had noticed, because the only graph whose two
+   indices coincide is the one `Renderer.New` compiles — and a node inserted ahead
+   of the engine's own tail is what stops them coinciding. The first run on
+   hardware panicked in `New` on a nil `RenderPass`, having asked the
+   scene-colour copy for its attachment formats. Anything inserted there,
+   hierarchical-Z included, needs those lookups to go through `f.engine`.
+
+What qualified: static, non-skinned, non-double-sided meshes — plain lit, material
+or emissive — plus plain instance sets, behind one predicate both the prepass and
+the main pass's pipeline choice read, because a draw the prepass skips and the
+main pass tests with EQUAL disappears. Excluded: grass, LOD fade buckets,
+impostors and anything else a fragment shader can discard; skinned draws;
+double-sided draws, whose cull mode decides which faces write depth; terrain and
+water, which have their own passes; translucent draws; and instance sets drawn
+indirectly or through a mesh-range batch. On the six examples the equivalence gate
+covered, that reached 1 draw on `07-terrain` and `08-grass`, 2 on `19-instanced`,
+4 on `24-custom-passes`, 5 on `18-translucent` and 6 on `16-materials` — worth
+knowing before reading a saving: the mechanism reaches a prop field, and barely
+touches a scene that is mostly flora.
+
+Two notes on gating it, rather than on the engine. `19-instanced` draws its own
+draw-call count on screen with `Engine.Debugf`, and the prepass legitimately
+changes that count, so its two captures differed by 1674 of 921600 pixels with
+every one of them inside the text while the scene was identical to the last bit: a
+byte-comparison gate cannot include a readout of a counter the thing under test
+changes. And the control worth having is the prepass node kept, its depth clear
+kept, the equal compare kept, and its draws withheld — every prepassed surface
+then fails the test against a cleared buffer, which fails loudly if the comparator
+is blind, if the depth tested is not the depth written, or if the main pass is
+still comparing `Greater`.
 
 ## Headless and CI
 
