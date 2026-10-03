@@ -45,10 +45,12 @@ var update = flag.Bool("update", false, "recompile and rewrite the committed .sp
 // building this will not have one -- the same bargain `task shaders:verify`
 // makes.
 //
-// Verified by breaking it, 2026-10-02: changing the span clamp in
-// water-scatter.frag from `min(travel, pc.march.x)` to
-// `min(travel, pc.march.x * 2.0)` without recompiling fails with
-// "water-scatter.frag.spv is stale (7496 bytes committed, 7516 fresh)".
+// Verified by breaking it, 2026-10-02 and again 2026-10-03 after the parameter
+// block moved off push constants: changing the span clamp in
+// water-scatter.frag from `min(travel, params.march.x)` to
+// `min(travel, params.march.x * 2.0)` without recompiling fails with
+// "water-scatter.frag.spv is stale (7532 bytes committed, 7552 fresh)" --
+// 7496/7516 on the push-constant version of the same shader.
 func TestCommittedSPIRVMatchesGLSL(t *testing.T) {
 	glslc, ok := findGlslc(t)
 	if !ok {

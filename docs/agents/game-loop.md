@@ -59,7 +59,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-10-03 # Engine.Renderer listed, with the rule that a package is handed a renderer rather than reaching through the engine (#169); the hierarchical-Z follow-up measured and removed (#154); the draw list's order and the rejected opaque policy; releasing mid-frame (#153); the capabilities report and who owns which fallback (#160); the depth prepass measured and removed by its own rule (#158); the sky slot, the one ShaderSet stage group with no embedded fallback (#161 step 4)
+verified: 2026-10-03 # the global block named as the game's, with AppPassDesc.Params as the per-pass alternative (#170); Engine.Renderer listed (#169); the hierarchical-Z follow-up measured and removed (#154); the draw list's order and the rejected opaque policy; releasing mid-frame (#153); the capabilities report and who owns which fallback (#160); the depth prepass measured and removed by its own rule (#158); the sky slot, the one ShaderSet stage group with no embedded fallback (#161 step 4)
 ---
 
 # Run a game loop with Engine and Game
@@ -582,7 +582,14 @@ On RX 7900 XTX the paired diagnostic reads 89/255 in both passes with shadows,
 ### Application data for custom shaders
 
 `e.Renderer().SetShaderParameters(data)` supplies a fixed 4096-byte application
-block without repurposing the sky palette or rebuilding pipelines. The renderer
+block without repurposing the sky palette or rebuilding pipelines.
+
+This block is **the game's**, and the setter replaces the whole of it, so it is
+the wrong place for a package the game imports to keep its own numbers: two
+owners means the game partitioning bytes by hand. An application pass has its
+own private block instead --
+[`AppPassDesc.Params`](render-targets.md#a-passs-own-uniform-block), at set 2
+binding 12 -- and the two are independent. The renderer
 copies the slice immediately, clears the unused tail, and uploads to the current
 frame slot only after its fence completes. Sky and lit shaders read the same
 frame's data. Call from `Init`, `Update` or `LateUpdate` on the frame thread;

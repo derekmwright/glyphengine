@@ -41,6 +41,16 @@ type AppPassDesc struct {
 	Vert, Frag []byte
 	Fullscreen bool
 	Timed      bool
+	// Params is the size in bytes of a uniform block private to this pass, at
+	// set 2 binding 12, written through SetParams. It must be a multiple of 16
+	// and at most AppParamBytes; 0 means the pass has no block, and then its
+	// descriptor layout, its pipeline and its per-frame descriptor writes are
+	// exactly what they were before the block existed.
+	//
+	// It is separate from the game's 4096-byte block at set 1 binding 6, which
+	// SetShaderParameters replaces whole: a package the game imports cannot
+	// claim a slice of that one without the game partitioning bytes by hand.
+	Params int
 }
 
 type AppPass struct {
@@ -53,6 +63,11 @@ type AppPass struct {
 	sets               []core1_0.DescriptorSet
 	draws              []RenderObject
 	push               [32]float32
+	// params is nil for a pass that declared none, and every decision about the
+	// block -- which set layout to allocate from, whether to write the
+	// descriptor, whether to copy anything per frame -- reads this rather than
+	// desc.Params, so there is one answer to it.
+	params *appParams
 }
 
 func (p *AppPass) SetEnabled(on bool) { p.enabled = on }
@@ -83,6 +98,9 @@ func (r *Renderer) validateAppPass(d AppPassDesc) error {
 	}
 	if d.Blend < BlendNone || d.Blend > BlendAlpha {
 		return fail("Blend", "unknown blend mode")
+	}
+	if err := validateAppParams(d.Params, fail); err != nil {
+		return err
 	}
 	if err := r.validateAppName(d.Name, fail); err != nil {
 		return err
@@ -252,7 +270,7 @@ func (r *Renderer) CreateAppPass(d AppPassDesc) (_ *AppPass, err error) {
 	if err = r.validateAppPass(d); err != nil {
 		return nil, err
 	}
-	if err = r.ensureAppLayout(); err != nil {
+	if err = r.ensureAppLayout(d.Params > 0); err != nil {
 		return nil, err
 	}
 	d.Reads = slices.Clone(d.Reads)
@@ -264,13 +282,20 @@ func (r *Renderer) CreateAppPass(d AppPassDesc) (_ *AppPass, err error) {
 			p.release()
 		}
 	}()
+	if d.Params > 0 {
+		// Inside the unwind above, and before the pipeline: appLayoutFor reads
+		// p.params to pick the set layout the pipeline is created against.
+		if err = r.createAppParams(p, d.Params); err != nil {
+			return nil, err
+		}
+	}
 	f, e := r.buildAppGraph()
 	if e != nil {
 		return nil, e
 	}
 	index := f.appNode(p)
 	rp := f.pipelineFormats(index)
-	p.pipeline, p.layout, err = createAppPipeline(r.deviceDriver, d, rp, r.descriptorSetLayout, r.shadow.descriptorSetLayout, r.appSetLayout, f.plan.Steps[index].RenderPass.Samples)
+	p.pipeline, p.layout, err = createAppPipeline(r.deviceDriver, d, rp, r.descriptorSetLayout, r.shadow.descriptorSetLayout, r.appLayoutFor(p), f.plan.Steps[index].RenderPass.Samples)
 	if err != nil {
 		return nil, fmt.Errorf("app pass %q: pipeline: %w", d.Name, err)
 	}
@@ -298,6 +323,8 @@ func (r *Renderer) DestroyAppPass(p *AppPass) {
 func (p *AppPass) release() {
 	d := p.r.deviceDriver
 	p.releaseSets()
+	p.params.release(d)
+	p.params = nil
 	if p.pipeline.Handle() != 0 {
 		d.DestroyPipeline(p.pipeline, nil)
 		p.pipeline = core1_0.Pipeline{}
@@ -308,26 +335,59 @@ func (p *AppPass) release() {
 	}
 }
 
-func (r *Renderer) ensureAppLayout() error {
-	if r.appSetLayout.Handle() != 0 {
+// ensureAppLayout creates the graphics pass set-2 layout, in the plain form or
+// the one that also declares the private uniform block.
+//
+// Two layouts rather than one that always declares the block: a pass that asks
+// for no Params allocates from a layout byte-identical to the one it always
+// had, so its pipeline, its descriptor writes and its recorded stream are
+// unchanged. A single layout with an always-declared, sometimes-unwritten
+// uniform descriptor would be a pass reading an undefined descriptor the moment
+// a shader touched the binding, and would charge the pool for every pass.
+func (r *Renderer) ensureAppLayout(params bool) error {
+	if params && r.appParamsSetLayout.Handle() != 0 {
+		return nil
+	}
+	if !params && r.appSetLayout.Handle() != 0 {
 		return nil
 	}
 	bindings := make([]core1_0.DescriptorSetLayoutBinding, 4)
 	for i := range bindings {
 		bindings[i] = core1_0.DescriptorSetLayoutBinding{Binding: i, DescriptorType: core1_0.DescriptorTypeCombinedImageSampler, DescriptorCount: 1, StageFlags: core1_0.StageVertex | core1_0.StageFragment}
 	}
+	if params {
+		bindings = append(bindings, core1_0.DescriptorSetLayoutBinding{Binding: appParamsBinding, DescriptorType: core1_0.DescriptorTypeUniformBuffer, DescriptorCount: 1, StageFlags: core1_0.StageVertex | core1_0.StageFragment})
+	}
 	l, _, err := r.deviceDriver.CreateDescriptorSetLayout(nil, core1_0.DescriptorSetLayoutCreateInfo{Bindings: bindings})
-	r.appSetLayout = l
+	if params {
+		r.appParamsSetLayout = l
+	} else {
+		r.appSetLayout = l
+	}
 	return err
+}
+
+// appLayoutFor is the set-2 layout p's pipeline and descriptor sets use. A nil
+// pass is the scene-depth node, a graphics pass with no block of its own.
+func (r *Renderer) appLayoutFor(p *AppPass) core1_0.DescriptorSetLayout {
+	switch {
+	case p == nil:
+		return r.appSetLayout
+	case p.compute != nil && p.params != nil:
+		return r.computeParamsSetLayout
+	case p.compute != nil:
+		return r.computeSetLayout
+	case p.params != nil:
+		return r.appParamsSetLayout
+	}
+	return r.appSetLayout
 }
 
 func (r *Renderer) allocatePassSets(p *AppPass, n int) ([]core1_0.DescriptorSet, error) {
 	l := make([]core1_0.DescriptorSetLayout, n)
+	layout := r.appLayoutFor(p)
 	for i := range l {
-		l[i] = r.appSetLayout
-		if p != nil && p.compute != nil {
-			l[i] = r.computeSetLayout
-		}
+		l[i] = layout
 	}
 	s, _, err := r.deviceDriver.AllocateDescriptorSets(core1_0.DescriptorSetAllocateInfo{DescriptorPool: r.descriptorPool, SetLayouts: l})
 	return s, err

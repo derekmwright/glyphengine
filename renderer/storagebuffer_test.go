@@ -105,7 +105,10 @@ func bufferFixture() (*Renderer, *bufferTestDriver) {
 	r.instanceDriver = bufferTestInstance{}
 	return r, d
 }
-func bufferBalance(t *testing.T, d *bufferTestDriver) {
+
+// testing.TB rather than *testing.T so a meta-check can hand it a recording
+// stand-in and observe whether it would have failed; see assertBalanced.
+func bufferBalance(t testing.TB, d *bufferTestDriver) {
 	t.Helper()
 	for kind, n := range d.created {
 		if n != d.destroyed[kind] {

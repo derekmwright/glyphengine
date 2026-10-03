@@ -235,8 +235,15 @@ func createDescriptorPool(deviceDriver core1_0.DeviceDriver, maxSets int) (core1
 				// It is counted anyway because allocation fails outright
 				// otherwise, which would be a startup error on the first scene
 				// with enough textures rather than anything visible here.
-				// One additional application UBO descriptor per shadow/light set.
-				DescriptorCount: maxSets + appPoolTextureSets + uiLayerSetFactor*(maxHDRSets+maxBloomSets) + 36 + maxMaterials + maxFramesInFlight,
+				// One additional application UBO descriptor per shadow/light set,
+				// and one per pass-input set, because a pass that declares
+				// AppPassDesc.Params allocates its set from a layout carrying a
+				// uniform buffer at appParamsBinding. Counted for all of them
+				// rather than for the ones that declare it: the pool is sized
+				// once at startup, before any pass exists, and a game whose
+				// first Params pass failed to allocate a descriptor would see a
+				// creation error with nothing wrong except the count here.
+				DescriptorCount: maxSets + appPoolTextureSets + appPoolInputSets + uiLayerSetFactor*(maxHDRSets+maxBloomSets) + 36 + maxMaterials + maxFramesInFlight,
 			},
 			{
 				Type: core1_0.DescriptorTypeStorageBuffer,

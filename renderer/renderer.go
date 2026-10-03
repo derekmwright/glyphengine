@@ -120,15 +120,20 @@ type Renderer struct {
 	appPasses                     []*AppPass // graphics and compute, in creation order
 	computeSetLayout              core1_0.DescriptorSetLayout
 	appSetLayout                  core1_0.DescriptorSetLayout
-	shaderTextures                [ShaderTextureSlots]*Texture
-	shaderTargets                 [ShaderTextureSlots]*RenderTarget
-	hdrReadTexture                Texture
-	appWrites                     [1]core1_0.WriteDescriptorSet
-	appInfos                      [1]core1_0.DescriptorImageInfo
-	depthResolve                  *sceneDepthResources
-	waterFormats                  renderingFormats
-	sceneColor                    *sceneColorTarget
-	grass                         *GrassSystem
+	// The same two layouts with a pass's private uniform block declared at
+	// appParamsBinding. Created only once a pass asks for Params, so a program
+	// that asks for none allocates from exactly the layouts it always did.
+	computeParamsSetLayout core1_0.DescriptorSetLayout
+	appParamsSetLayout     core1_0.DescriptorSetLayout
+	shaderTextures         [ShaderTextureSlots]*Texture
+	shaderTargets          [ShaderTextureSlots]*RenderTarget
+	hdrReadTexture         Texture
+	appWrites              [1]core1_0.WriteDescriptorSet
+	appInfos               [1]core1_0.DescriptorImageInfo
+	depthResolve           *sceneDepthResources
+	waterFormats           renderingFormats
+	sceneColor             *sceneColorTarget
+	grass                  *GrassSystem
 	// waterPlanes is scratch for the per-frame split of blended draws onto
 	// either side of the water, kept so a frame that draws water does not
 	// allocate to classify against it. See waterorder.go.

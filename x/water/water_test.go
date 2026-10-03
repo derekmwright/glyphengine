@@ -154,9 +154,15 @@ func TestPackIsInactiveAboveTheSurface(t *testing.T) {
 }
 
 // TestPackedScatterBlockMatchesTheShaderLayout reads the bytes back the way
-// water-scatter.frag declares them, because the push block is an interface
+// water-scatter.frag declares them, because the parameter block is an interface
 // between Go and SPIR-V that nothing else checks. A field swapped with its
 // neighbour compiles, links, renders, and renders nonsense.
+//
+// The block moved from the 128 application push bytes to the pass's own uniform
+// block at set 2 binding 12 (AppPassDesc.Params). The byte layout did not move
+// with it: std140 lays a mat4 and a run of vec4s out exactly as these offsets
+// read them, which is why every number below is unchanged and why `task xwater`
+// reproduces its recorded sweep.
 func TestPackedScatterBlockMatchesTheShaderLayout(t *testing.T) {
 	o := DefaultOptions(10)
 	w := &Water{opts: o, enabled: true}
@@ -166,7 +172,7 @@ func TestPackedScatterBlockMatchesTheShaderLayout(t *testing.T) {
 	if !w.pack(vp, eye, sun, [3]float32{1, 0.9, 0.8}, 640, 360) {
 		t.Fatal("pack reported inactive for a submerged camera in daylight")
 	}
-	f := floats(w.scatterPush[:])
+	f := floats(w.scatterParams[:])
 
 	for i := 0; i < 16; i++ {
 		if f[i] != vp[i] {
@@ -195,7 +201,7 @@ func TestPackedScatterBlockMatchesTheShaderLayout(t *testing.T) {
 	near(t, "target width", f[30], 640)
 	near(t, "target height", f[31], 360)
 
-	c := floats(w.compositePush[:])
+	c := floats(w.compositeParams[:])
 	for i := 0; i < 16; i++ {
 		if c[i] != vp[i] {
 			t.Fatalf("composite inverseVP[%d] = %v, want %v", i, c[i], vp[i])
@@ -233,7 +239,7 @@ func TestShaftLightIsZeroWhereTheSourceReturnsZero(t *testing.T) {
 	shaftsZero(t, w, "below ScatterMaxDepth")
 	// Exactly at it is still lit, matching the source's strict comparison.
 	w.pack(vp, mgl32.Vec3{0, -o.ScatterMaxDepth, 0}, noon, white, 64, 36)
-	if floats(w.scatterPush[:])[22] == 0 {
+	if floats(w.scatterParams[:])[22] == 0 {
 		t.Error("at exactly ScatterMaxDepth the shafts are off; the source's test is depth > max, not >=")
 	}
 	// Sun at or below the ramp's onset: the source's `if(day<=0.0) return vec3(0)`.
@@ -249,7 +255,7 @@ func TestShaftLightIsZeroWhereTheSourceReturnsZero(t *testing.T) {
 	// The body term is NOT zero at night, which is what BodyNightFloor is for:
 	// a night dive is dark, not black. If this ever reads zero the hoist above
 	// has leaked into the wrong term.
-	c := floats(w.compositePush[:])
+	c := floats(w.compositeParams[:])
 	if c[20] == 0 || c[21] == 0 || c[22] == 0 {
 		t.Errorf("body radiance %v %v %v is zero at night; BodyNightFloor should survive", c[20], c[21], c[22])
 	}
@@ -257,7 +263,7 @@ func TestShaftLightIsZeroWhereTheSourceReturnsZero(t *testing.T) {
 
 func shaftsZero(t *testing.T, w *Water, when string) {
 	t.Helper()
-	f := floats(w.scatterPush[:])
+	f := floats(w.scatterParams[:])
 	for i, name := range []string{"r", "g", "b"} {
 		if f[20+i] != 0 {
 			t.Errorf("%s: shaft light %s = %v, want exactly 0", when, name, f[20+i])
@@ -301,8 +307,8 @@ func TestRefractedSunMatchesGLSL(t *testing.T) {
 //
 // pack is the only place in the per-frame path where a Go allocation could
 // appear: everything it touches is a fixed array on the Water, and
-// AppPass.SetPushConstants copies out of those arrays into a fixed array of its
-// own with no allocation on the success path. The gate's -allocs mode measures a
+// AppPass.SetParams copies out of those arrays into a buffer of its own,
+// allocated once at pass creation, with no allocation on the success path. The gate's -allocs mode measures a
 // real frame loop with a real renderer, which is the half this cannot see.
 func TestUpdateAllocatesNothing(t *testing.T) {
 	w := &Water{opts: DefaultOptions(10), enabled: true}

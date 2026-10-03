@@ -10,7 +10,8 @@ import (
 
 // AppComputeDesc schedules a compute dispatch on the graphics queue. Reads are
 // sampled at set 2 bindings 0..3; Writes are storage images at bindings 4..7.
-// Buffers supplies up to four read/write storage buffers at bindings 8..11.
+// Buffers supplies up to four read/write storage buffers at bindings 8..11, and
+// Params a private uniform block at binding 12.
 // Calls require the renderer thread, as do application graphics passes.
 type AppComputeDesc struct {
 	Name    string
@@ -28,6 +29,12 @@ type AppComputeDesc struct {
 	// the stream it recorded before.
 	ReadsShadows bool
 	Timed        bool
+	// Params is the size in bytes of a uniform block private to this dispatch,
+	// at set 2 binding 12, written through SetParams. The rules are
+	// AppPassDesc.Params' rules: a multiple of 16, at most AppParamBytes, and 0
+	// for a dispatch that records exactly what it recorded before the block
+	// existed.
+	Params int
 }
 
 // AppCompute shares ordering, timing and lifetime with application graphics work.
@@ -47,6 +54,10 @@ func (p *AppCompute) SetDispatch(x, y, z uint32) { p.dispatch = [3]uint32{x, y, 
 // The first half contains the scene VP and an identity model matrix.
 func (p *AppCompute) SetPushConstants(data []byte) error { return p.pass.SetPushConstants(data) }
 
+// SetParams copies into the dispatch's own uniform block at set 2 binding 12.
+// See AppPass.SetParams for the slot discipline and the size rules.
+func (p *AppCompute) SetParams(data []byte) error { return p.pass.SetParams(data) }
+
 func (r *Renderer) validateAppCompute(d AppComputeDesc) error {
 	fail := func(field, why string) error { return fmt.Errorf("app compute %q: %s: %s", d.Name, field, why) }
 	wrap := func(field string, err error) error { return fmt.Errorf("app compute %q: %s: %w", d.Name, field, err) }
@@ -64,6 +75,9 @@ func (r *Renderer) validateAppCompute(d AppComputeDesc) error {
 	}
 	if len(d.Buffers) > 4 {
 		return fail("Buffers", "at most four buffers")
+	}
+	if err := validateAppParams(d.Params, fail); err != nil {
+		return err
 	}
 	for i, b := range d.Buffers {
 		if b == nil || b.r != r || b.destroyed {
@@ -102,13 +116,13 @@ func (r *Renderer) CreateAppCompute(d AppComputeDesc) (_ *AppCompute, err error)
 	if err = r.validateAppCompute(d); err != nil {
 		return nil, err
 	}
-	if err = r.ensureComputeLayout(); err != nil {
+	if err = r.ensureComputeLayout(d.Params > 0); err != nil {
 		return nil, fmt.Errorf("app compute %q: input layout: %w", d.Name, err)
 	}
 	d.Reads, d.Writes = slices.Clone(d.Reads), slices.Clone(d.Writes)
 	d.Buffers = slices.Clone(d.Buffers)
 	c := &AppCompute{desc: d}
-	p := &AppPass{r: r, desc: AppPassDesc{Name: d.Name, Stage: d.Stage, Reads: d.Reads, Timed: d.Timed}, enabled: true, compute: c}
+	p := &AppPass{r: r, desc: AppPassDesc{Name: d.Name, Stage: d.Stage, Reads: d.Reads, Timed: d.Timed, Params: d.Params}, enabled: true, compute: c}
 	c.pass = p
 	r.appPasses = append(r.appPasses, p)
 	defer func() {
@@ -117,10 +131,15 @@ func (r *Renderer) CreateAppCompute(d AppComputeDesc) (_ *AppCompute, err error)
 			p.release()
 		}
 	}()
+	if d.Params > 0 {
+		if err = r.createAppParams(p, d.Params); err != nil {
+			return nil, err
+		}
+	}
 	if _, err = r.buildAppGraph(); err != nil {
 		return nil, err
 	}
-	p.pipeline, p.layout, err = createAppComputePipeline(r.deviceDriver, d.Comp, r.descriptorSetLayout, r.shadow.descriptorSetLayout, r.computeSetLayout)
+	p.pipeline, p.layout, err = createAppComputePipeline(r.deviceDriver, d.Comp, r.descriptorSetLayout, r.shadow.descriptorSetLayout, r.appLayoutFor(p))
 	if err != nil {
 		return nil, fmt.Errorf("app compute %q: pipeline: %w", d.Name, err)
 	}
@@ -138,8 +157,14 @@ func (r *Renderer) DestroyAppCompute(p *AppCompute) {
 	}
 }
 
-func (r *Renderer) ensureComputeLayout() error {
-	if r.computeSetLayout.Handle() != 0 {
+// ensureComputeLayout creates the dispatch set-2 layout, in the plain form or
+// the one that also declares the private uniform block. The two-layout
+// reasoning is ensureAppLayout's.
+func (r *Renderer) ensureComputeLayout(params bool) error {
+	if params && r.computeParamsSetLayout.Handle() != 0 {
+		return nil
+	}
+	if !params && r.computeSetLayout.Handle() != 0 {
 		return nil
 	}
 	bindings := make([]core1_0.DescriptorSetLayoutBinding, 12)
@@ -153,9 +178,16 @@ func (r *Renderer) ensureComputeLayout() error {
 		}
 		bindings[i] = core1_0.DescriptorSetLayoutBinding{Binding: i, DescriptorType: kind, DescriptorCount: 1, StageFlags: core1_0.StageCompute}
 	}
+	if params {
+		bindings = append(bindings, core1_0.DescriptorSetLayoutBinding{Binding: appParamsBinding, DescriptorType: core1_0.DescriptorTypeUniformBuffer, DescriptorCount: 1, StageFlags: core1_0.StageCompute})
+	}
 	l, _, err := r.deviceDriver.CreateDescriptorSetLayout(nil, core1_0.DescriptorSetLayoutCreateInfo{Bindings: bindings})
 	if err == nil {
-		r.computeSetLayout = l
+		if params {
+			r.computeParamsSetLayout = l
+		} else {
+			r.computeSetLayout = l
+		}
 	}
 	return err
 }
