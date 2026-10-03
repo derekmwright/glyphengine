@@ -19,7 +19,7 @@ api:
   - renderer.Capabilities
 assets: none
 run: task determinism
-verified: 2026-10-02 # sky= replaced by env=, which hashes the whole EnvironmentState (#161 step 3); grassbake, grassatlas, grasspc, config and the prime provocation; the device half of config= is folded from Capabilities (#160)
+verified: 2026-10-03 # sky= replaced by env= (#161 step 3); lod=, which nothing documented; grassbake, grassatlas, grasspc, config and the prime provocation; the device half of config= is folded from Capabilities (#160)
 ---
 
 # Finding a render that differs run to run
@@ -110,6 +110,7 @@ cascades=71e68c… lights=0/e79af2… grass=124/82b4a2… outcome=present render
 | `w`, `h` | Swapchain extent |
 | `cloudframe` | The cloud history counter, which only advances on a full present |
 | `particles`, `particlesbehind` | Staged instance count and hash, and how many are behind water |
+| `lod` | One entry per LOD bucket draw: the placements and the 256-byte selection push block on a GPU set, the uploaded bucket on a CPU one, plus the level and the retired count |
 | `dynmesh` | Dynamic-mesh count and order-independent content hash |
 | `dynmeshorder` | The order the dynamic-mesh **map** was walked in |
 | `cascades` | The shadow cascade view-projections |

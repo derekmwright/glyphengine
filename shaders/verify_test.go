@@ -47,6 +47,20 @@ func TestCommittedSPIRVMatchesGLSL(t *testing.T) {
 		t.Fatalf("glob: %v", err)
 	}
 	sources = append(sources, frags...)
+	// The engine's own compute stages, which this test did not cover at all until
+	// #154's evaluation added a second one and noticed: lodselect.comp is
+	// embedded from committed .spv exactly as the graphics stages are, and a
+	// stale one is just as invisible -- it still compiles, links and renders.
+	// Verified by widening a .comp's workgroup to 16x8 without recompiling:
+	// "depthpyramid.comp.spv is stale (3444 bytes committed, 3460 fresh)", on the
+	// shader that evaluation added. A comment-only edit does NOT fail it, because
+	// glslc without -g emits the same bytes for it, which is the right behaviour
+	// and worth knowing before trusting this to catch an edit.
+	comps, err := filepath.Glob("*.comp")
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	sources = append(sources, comps...)
 	probes, err := filepath.Glob("../cmd/skyshadowcheck/*.frag")
 	if err != nil {
 		t.Fatal(err)

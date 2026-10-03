@@ -97,3 +97,114 @@ func TestIslandEdgesDropToZero(t *testing.T) {
 		t.Fatal("the centre sample is 0; the field is empty and the edge check proves nothing")
 	}
 }
+
+// TestRidgeHidesItsFarFlank is the only property the ridge has to have, and the
+// property the measurement it exists for is void without: a camera low on one
+// flank must not be able to see the TREE TOPS on the other.
+//
+// Tree tops rather than ground, because that is what the occlusion bench hides:
+// placements 6 m tall standing on the far flank. Checked as geometry rather than
+// as a picture, because it is a statement about the field and not about the
+// renderer -- for a sight line from an eye 2 m over the near flank to a point 6 m
+// over a far sample, the crest between them has to be higher than the line. A
+// ridge that flattened would turn the occlusion bench into two controls, and
+// nothing else in this repository would notice.
+//
+// Verified by breaking it, 2026-10-02, three ways. ridgeCrest 26 to 6 reports
+// "the crest is only 8.2 m high; there is no ridge to hide behind". 26 to 14
+// keeps a crest and still reports "far tree top at z=6.2 is visible over the
+// crest (line 17.01 m, crest 16.25 m)". And ridgeWidth 46 to 180 -- a crest of
+// the full height spread into a dome, which the crest check alone would pass --
+// reports the same at line 31.78 m against the 28.25 m crest, because the far
+// flank it lifts is what comes back into view.
+func TestRidgeHidesItsFarFlank(t *testing.T) {
+	const grid, tree = 129, 6.0
+	heights := ridgeHeights(grid, grid, 1, ridgeCrest)
+	at := func(iz int) (z, h float64) {
+		// The grid spans -100..100 in world Z; samples are taken down the
+		// middle in X, which is where the bench puts its camera.
+		return -100 + 200*float64(iz)/float64(grid-1), float64(heights[iz*grid+grid/2])
+	}
+	eyeZ, eyeGround := at(grid / 3)
+	eyeY := eyeGround + 2
+	crestZ, crestY := at(grid / 2)
+	if crestY < 10 {
+		t.Fatalf("the crest is only %.1f m high; there is no ridge to hide behind", crestY)
+	}
+	hidden, visible := 0, 0
+	for iz := grid/2 + 4; iz < grid-8; iz++ {
+		z, h := at(iz)
+		top := h + tree
+		// Height of the eye-to-treetop line where it crosses the crest.
+		line := eyeY + (top-eyeY)*(crestZ-eyeZ)/(z-eyeZ)
+		if line < crestY {
+			hidden++
+			continue
+		}
+		visible++
+		if visible < 4 {
+			t.Errorf("far tree top at z=%.1f is visible over the crest (line %.2f m, crest %.2f m)", z, line, crestY)
+		}
+	}
+	if hidden < visible {
+		t.Fatalf("%d far tree tops hidden, %d visible: this ridge hides less than half of its far flank", hidden, visible)
+	}
+	t.Logf("crest %.2f m; %d of %d far tree tops hidden from an eye 2 m over the near flank", crestY, hidden, hidden+visible)
+}
+
+// TestRidgeEdgesDropToZero is TestIslandEdgesDropToZero for the ridge: the same
+// falloff, the same reason -- HeightAt stops returning ground past the bounds.
+func TestRidgeEdgesDropToZero(t *testing.T) {
+	const grid = 129
+	heights := ridgeHeights(grid, grid, 1, ridgeCrest)
+	for i := 0; i < grid; i++ {
+		for _, idx := range []int{i, (grid-1)*grid + i, i * grid, i*grid + grid - 1} {
+			if heights[idx] != 0 {
+				t.Fatalf("edge sample %d is %g, want 0", idx, heights[idx])
+			}
+		}
+	}
+	if heights[grid/2*grid+grid/2] == 0 {
+		t.Fatal("the crest sample is 0; the field is empty and the edge check proves nothing")
+	}
+}
+
+// TestAZeroCrestHidesNothing is the control's half of the property above, and
+// the reason crest is a parameter: with the ridge taken out, the SAME ground,
+// noise, grid and camera hide nothing, which is what an occlusion measurement
+// has to be compared against.
+//
+// Verified by breaking it, 2026-10-02: passing ridgeCrest here instead of 0
+// reports "0 of 53 far tree tops visible with no crest".
+func TestAZeroCrestHidesNothing(t *testing.T) {
+	const grid, tree = 129, 6.0
+	heights := ridgeHeights(grid, grid, 1, 0)
+	at := func(iz int) (z, h float64) {
+		return -100 + 200*float64(iz)/float64(grid-1), float64(heights[iz*grid+grid/2])
+	}
+	eyeZ, eyeGround := at(grid / 3)
+	eyeY := eyeGround + 2
+	visible := 0
+	for iz := grid/2 + 4; iz < grid-8; iz++ {
+		z, h := at(iz)
+		top := h + tree
+		blocked := false
+		// Every sample between the eye and the target, not just the crest line:
+		// with no crest there is no single place the ground could rise.
+		for s := grid / 3; s < iz; s++ {
+			sz, sh := at(s)
+			line := eyeY + (top-eyeY)*(sz-eyeZ)/(z-eyeZ)
+			if sh > line {
+				blocked = true
+				break
+			}
+		}
+		if !blocked {
+			visible++
+		}
+	}
+	if visible < 40 {
+		t.Fatalf("%d of 53 far tree tops visible with no crest; the control still hides things", visible)
+	}
+	t.Logf("no crest: %d of 53 far tree tops visible from an eye 2 m up", visible)
+}

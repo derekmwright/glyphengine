@@ -180,6 +180,11 @@ tasks:
     cmds:
       - go test ./... -count=1
       - go test -C x ./... -count=1
+      # The examples module too, which had no tests until 29-ridge: its bench
+      # arms are pure geometry -- a ridge, a camera and six thousand placements --
+      # so whether each arm is the arm it is named after can be checked here
+      # rather than in the GPU gate that was going to be measured on it.
+      - go test -C examples ./... -count=1
 
   test:race:
     desc: Run tests under the race detector (the parallel movement phase needs it)
@@ -287,6 +292,14 @@ tasks:
         # silently approving whatever is next measured on it.
         check 28-overdraw -count 256
         check 28-overdraw -count 256 -overlap=false
+        # Both arms of the occlusion baseline, at 1200 placements rather than its
+        # own 6000 so startup stays short. Nothing in the engine removes hidden
+        # instances, so this renders no feature -- but both arms assert about the
+        # scene they rendered, a visible pixel floor and a measured hidden share,
+        # so a camera that drifted off the ridge fails here rather than quietly
+        # approving whatever is measured on it next.
+        check 29-ridge -count 1200
+        check 29-ridge -count 1200 -arm open
         check 27-streaming -count 40
         check 20-screens
         # The same clipping reached through focus rather than through a flag.
@@ -341,6 +354,12 @@ tasks:
         # before it reaches a picture.
         check 28-overdraw -count 256
         check 28-overdraw -count 256 -overlap=false
+        # Both arms of the occlusion baseline, plus the panning one. 6,000 GPU
+        # LOD placements over terrain is a shape no other entry here has, and
+        # the arms assert about the scene they rendered rather than only running.
+        check 29-ridge -count 1200
+        check 29-ridge -count 1200 -arm open
+        check 29-ridge -count 1200 -pan
         # The streamed uploader, against the two paths it replaces. 20
         # patches at two a frame fits inside CHECK_FRAMES with room for
         # the last one to land and its staging to retire.
@@ -892,7 +911,7 @@ tasks:
         # run to run, which no other entry here would notice because no other
         # entry turns the march on. -skylamp is in it because the sky's march
         # is a second copy of the jitter in a second shader.
-        for ex in "08-grass" "08-grass -timeofday 0.0" "08-grass -timeofday 0.03" "09-water" "12-particles" "06-skinned -demo" "15-kitchen-sink -demo" "09-water -plume -ghost -marker -submerged" "09-water -time 0.72 -yaw 1.771 -pitch -0.185 -pillars" "13-ui -glow on" "21-streetlights -volumetric 1 -lampvolumetric 1 -skylamp" "24-custom-passes" "25-lod-forest" "25-lod-forest -gpu"; do
+        for ex in "08-grass" "08-grass -timeofday 0.0" "08-grass -timeofday 0.03" "09-water" "12-particles" "06-skinned -demo" "15-kitchen-sink -demo" "09-water -plume -ghost -marker -submerged" "09-water -time 0.72 -yaw 1.771 -pitch -0.185 -pillars" "13-ui -glow on" "21-streetlights -volumetric 1 -lampvolumetric 1 -skylamp" "24-custom-passes" "25-lod-forest" "25-lod-forest -gpu" "29-ridge -pan"; do
           set -- $ex
           name=$1; shift
           shot 16.667ms $name a "$*"
@@ -1112,7 +1131,7 @@ tasks:
             status=1
           fi
         }
-        for ex in "08-grass" "08-grass -timeofday 0.0" "08-grass -timeofday 0.03" "09-water" "12-particles" "06-skinned -demo" "15-kitchen-sink -demo" "09-water -plume -ghost -marker -submerged" "18-translucent" "13-ui" "10-text" "19-instanced" "21-streetlights" "24-custom-passes" "25-lod-forest" "25-lod-forest -gpu"; do
+        for ex in "08-grass" "08-grass -timeofday 0.0" "08-grass -timeofday 0.03" "09-water" "12-particles" "06-skinned -demo" "15-kitchen-sink -demo" "09-water -plume -ghost -marker -submerged" "18-translucent" "13-ui" "10-text" "19-instanced" "21-streetlights" "24-custom-passes" "25-lod-forest" "25-lod-forest -gpu" "29-ridge -pan"; do
           drawseq "$ex"
         done
 
