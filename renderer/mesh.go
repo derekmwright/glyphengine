@@ -26,6 +26,19 @@ type Mesh struct {
 	BoundCenter [3]float32 // object-space bounding sphere center
 	BoundRadius float32    // object-space bounding sphere radius (0 = skip culling)
 
+	// BoundMin and BoundMax are the object-space axis-aligned box, which the
+	// bounding sphere above is drawn around. Both come from the same single
+	// walk over the vertices, so a mesh has either both or neither.
+	//
+	// The box exists because the sphere is the wrong bound for a FLAT mesh and
+	// the depth-complexity estimate is an area. A 4 m square patch with 1.5 m
+	// of relief has a bounding sphere of radius 2.93 m, whose box is 5.86 m on
+	// a side -- 2.1x the patch's projected area, which would read as 2.1x the
+	// depth complexity. Frustum culling does not care (a looser bound only
+	// costs it a draw it could have rejected); an estimate that decides whether
+	// a pass runs does. See depthComplexityEstimate.
+	BoundMin, BoundMax [3]float32
+
 	// upload is the streamed copy this mesh is still waiting for, and nil
 	// once it has landed (or for a mesh created synchronously). The recorder
 	// reads exactly this: a non-nil upload means the draw is skipped, so a
@@ -35,9 +48,13 @@ type Mesh struct {
 	destroyed bool
 }
 
-func computeBoundingSphere(vertices []Vertex) ([3]float32, float32) {
+// computeBounds returns the object-space bounding sphere and the object-space
+// axis-aligned box in one walk over the vertices. Both, from one call, so a
+// mesh cannot end up with a sphere and no box -- which the estimate would read
+// as zero projected area and silently leave out of its sum.
+func computeBounds(vertices []Vertex) (center [3]float32, radius float32, lo, hi [3]float32) {
 	if len(vertices) == 0 {
-		return [3]float32{}, 0
+		return [3]float32{}, 0, [3]float32{}, [3]float32{}
 	}
 	var cx, cy, cz float64
 	for i := range vertices {
@@ -50,6 +67,7 @@ func computeBoundingSphere(vertices []Vertex) ([3]float32, float32) {
 	cy /= n
 	cz /= n
 
+	lo, hi = vertices[0].Pos, vertices[0].Pos
 	var maxDist2 float64
 	for i := range vertices {
 		dx := float64(vertices[i].Pos[0]) - cx
@@ -59,8 +77,12 @@ func computeBoundingSphere(vertices []Vertex) ([3]float32, float32) {
 		if d2 > maxDist2 {
 			maxDist2 = d2
 		}
+		for a := 0; a < 3; a++ {
+			lo[a] = min(lo[a], vertices[i].Pos[a])
+			hi[a] = max(hi[a], vertices[i].Pos[a])
+		}
 	}
-	return [3]float32{float32(cx), float32(cy), float32(cz)}, float32(math.Sqrt(maxDist2))
+	return [3]float32{float32(cx), float32(cy), float32(cz)}, float32(math.Sqrt(maxDist2)), lo, hi
 }
 
 // createBuffer allocates a Vulkan buffer with the given usage and memory properties.
@@ -167,13 +189,15 @@ func (r *Renderer) CreateMesh(vertices []Vertex) (*Mesh, error) {
 		return nil, fmt.Errorf("create vertex buffer: %w", err)
 	}
 
-	center, radius := computeBoundingSphere(vertices)
+	center, radius, lo, hi := computeBounds(vertices)
 	m := &Mesh{
 		vertexBuffer: buf,
 		vertexMemory: mem,
 		VertexCount:  len(vertices),
 		BoundCenter:  center,
 		BoundRadius:  radius,
+		BoundMin:     lo,
+		BoundMax:     hi,
 	}
 	r.meshes = append(r.meshes, m)
 	return m, nil
@@ -199,7 +223,7 @@ func (r *Renderer) CreateIndexedMesh(vertices []Vertex, indices []uint16) (*Mesh
 		return nil, fmt.Errorf("create index buffer: %w", err)
 	}
 
-	center, radius := computeBoundingSphere(vertices)
+	center, radius, lo, hi := computeBounds(vertices)
 	m := &Mesh{
 		vertexBuffer: vbuf,
 		vertexMemory: vmem,
@@ -210,6 +234,8 @@ func (r *Renderer) CreateIndexedMesh(vertices []Vertex, indices []uint16) (*Mesh
 		indexType:    core1_0.IndexTypeUInt16,
 		BoundCenter:  center,
 		BoundRadius:  radius,
+		BoundMin:     lo,
+		BoundMax:     hi,
 	}
 	r.meshes = append(r.meshes, m)
 	return m, nil
@@ -235,7 +261,7 @@ func (r *Renderer) CreateIndexedMesh32(vertices []Vertex, indices []uint32) (*Me
 		return nil, fmt.Errorf("create index buffer: %w", err)
 	}
 
-	center, radius := computeBoundingSphere(vertices)
+	center, radius, lo, hi := computeBounds(vertices)
 	m := &Mesh{
 		vertexBuffer: vbuf,
 		vertexMemory: vmem,
@@ -246,6 +272,8 @@ func (r *Renderer) CreateIndexedMesh32(vertices []Vertex, indices []uint32) (*Me
 		indexType:    core1_0.IndexTypeUInt32,
 		BoundCenter:  center,
 		BoundRadius:  radius,
+		BoundMin:     lo,
+		BoundMax:     hi,
 	}
 	r.meshes = append(r.meshes, m)
 	return m, nil
@@ -304,7 +332,7 @@ func (r *Renderer) createIndexedMeshAsync(vertices []Vertex, idata []byte, index
 		return nil, nil, fmt.Errorf("create index buffer: %w", err)
 	}
 
-	center, radius := computeBoundingSphere(vertices)
+	center, radius, lo, hi := computeBounds(vertices)
 	m := &Mesh{
 		vertexBuffer: vbuf,
 		vertexMemory: vmem,
@@ -315,6 +343,8 @@ func (r *Renderer) createIndexedMeshAsync(vertices []Vertex, idata []byte, index
 		indexType:    kind,
 		BoundCenter:  center,
 		BoundRadius:  radius,
+		BoundMin:     lo,
+		BoundMax:     hi,
 	}
 	// Freshly created buffers: no frame in flight can be reading them, so the
 	// batch needs no leading barrier for this destination.

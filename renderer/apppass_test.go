@@ -34,7 +34,7 @@ func withAppFrame(fx *frame, passes bool, compute ...bool) *frame {
 		c.pass = p
 		r.appPasses = append(r.appPasses, p)
 	}
-	g, err := newFrameGraph(r.msaaSamples, r.depth.format, r.sc.imageFormat, 1, r)
+	g, err := newFrameGraph(r.msaaSamples, r.depth.format, r.sc.imageFormat, 1, false, r)
 	if err != nil {
 		panic(err)
 	}

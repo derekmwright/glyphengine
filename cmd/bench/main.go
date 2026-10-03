@@ -10,7 +10,8 @@
 //	task bench -- -scene grass     # one of them
 //	task bench -- -scene patches   # interleaved distinct-geometry submission
 //	task bench -- -scene stream    # interleaved streamed uploads
-//	task bench -- -scene overdraw  # the overdraw baseline and its no-overlap control
+//	task bench -- -scene overdraw  # both overdraw arms, depth prepass off, on and auto
+//	task bench -- -scene prepasssweep # net prepass cost against depth complexity
 //	task bench -- -scene ridge     # the occlusion baseline and its nothing-hidden control
 //	task bench -- -json out.json   # for diffing between commits
 //
@@ -21,6 +22,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/csv"
 	"encoding/json"
 	"flag"
@@ -150,6 +152,19 @@ type result struct {
 	Scene  string             `json:"scene"`
 	Frames int                `json:"frames"`
 	Values map[string]float64 `json:"values"`
+
+	// Started and Ended bracket this sample in wall-clock time, so a run can be
+	// matched against an external record of what the GPU was doing while it ran.
+	//
+	// Not decoration, and not for measuring anything -- the timings come from
+	// timestamp queries and the engine's own phase timer, and wall clock is far
+	// too coarse to add to them. They are here because the discipline these
+	// numbers are collected under says to discard a run that shared the card,
+	// and a run that cannot be placed in time cannot be discarded: a background
+	// excursion seen in a counter log is attributable to "one of the fifty-four
+	// runs" without them, which is the same as attributable to none.
+	Started string `json:"started"`
+	Ended   string `json:"ended"`
 }
 
 func main() {
@@ -163,6 +178,14 @@ func main() {
 	// 02-cube would fail, and failing loudly on one named scene is clearer
 	// than silently skipping it in a run of twenty.
 	extra := flag.String("extra", "", "extra arguments appended to the scene's own, e.g. -extra \"-width 1920 -height 1080\"; requires -scene")
+	// prepasssweep only. Nine cells is the right default and the wrong thing to
+	// be stuck with: a crossing can fall outside the ladder at one resolution --
+	// it does at 3840x2160, where the break-even sits below the lowest default
+	// cell -- and bracketing it then means three more cells, not fifty-four
+	// again. Each cell is eye:pitch:expectedComplexity, and the expected value
+	// is checked against what the run measures, so a mistyped cell fails rather
+	// than silently plotting against the wrong x.
+	cells := flag.String("cells", "", "prepasssweep: replace the sweep's cells, as eye:pitch:complexity[,...]")
 	flag.Parse()
 	if *only == "patches" {
 		if err := runPatches(*repeat, *jsonOut, *extra); err != nil {
@@ -180,6 +203,13 @@ func main() {
 	}
 	if *only == "overdraw" {
 		if err := runOverdraw(*repeat, *jsonOut, *extra); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+	if *only == "prepasssweep" {
+		if err := runPrepassSweep(*repeat, *jsonOut, *extra, *cells); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
@@ -243,7 +273,24 @@ func run(sc scene) (*result, error) {
 		"GLYPHENGINE_BENCH_LABEL="+sc.name,
 	)
 
-	if strings.HasPrefix(sc.name, "lod") || strings.HasPrefix(sc.name, "patches") || strings.HasPrefix(sc.name, "stream") || strings.HasPrefix(sc.name, "overdraw") || strings.HasPrefix(sc.name, "ridge") {
+	// The scenes whose numbers are only comparable under the fixed clock, by
+	// name prefix.
+	//
+	// This list is a trap and the check below is what disarms it. A scene added
+	// without its prefix here loses the fixed clock SILENTLY: it still runs, it
+	// still prints a BENCH line, and its timings are simply no longer comparable
+	// between arms -- which is indistinguishable from noise in the result and
+	// invisible in the output. That happened: the prepass sweep was added as
+	// "sweep-..." and ran eighteen samples at wall-clock pace before anyone
+	// noticed, because nothing said so.
+	fixedClock := false
+	for _, prefix := range []string{"lod", "patches", "stream", "overdraw", "ridge", "sweep"} {
+		if strings.HasPrefix(sc.name, prefix) {
+			fixedClock = true
+			break
+		}
+	}
+	if fixedClock {
 		cmd.Env = append(cmd.Env, "GLYPHENGINE_FIXED_FRAME_TIME=16.667ms")
 	}
 
@@ -252,6 +299,15 @@ func run(sc scene) (*result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("run failed after %s: %w\n%s", time.Since(start).Round(time.Millisecond), err, out)
 	}
+	// The child's own word for it, not this process's intent. An environment
+	// variable that did not arrive, a value the engine refused to parse, or a
+	// prefix that stopped matching all read the same from here, and all three
+	// produce a run whose timings mean nothing next to another run's.
+	if fixedClock && !bytes.Contains(out, []byte("Fixed frame time:")) {
+		return nil, fmt.Errorf("%s: the run never reported a fixed frame time, so its timings are not comparable with any other sample", sc.name)
+	}
+
+	ended := time.Now()
 
 	m := benchLine.FindSubmatch(out)
 	if m == nil {
@@ -262,7 +318,8 @@ func run(sc scene) (*result, error) {
 	if len(fields) < 2 {
 		return nil, fmt.Errorf("malformed BENCH line")
 	}
-	r := &result{Scene: fields[0], Values: map[string]float64{}}
+	r := &result{Scene: fields[0], Values: map[string]float64{},
+		Started: start.Format("15:04:05"), Ended: ended.Format("15:04:05")}
 	r.Frames, _ = strconv.Atoi(fields[1])
 	for i := 2; i+1 < len(fields); i += 2 {
 		v, err := strconv.ParseFloat(fields[i+1], 64)
@@ -371,15 +428,22 @@ func runPatches(repeat int, jsonOut, extra string) error {
 // where none of them does.
 //
 // It is here to be a before-and-after for work on hidden FRAGMENTS, as runRidge
-// below is for hidden instances. Nothing in the engine removes hidden opaque work
-// today -- an opt-in depth prepass and a hierarchical-Z occlusion test were both
-// built, measured against these baselines and removed -- so every such mechanism
-// is a bet that what it removes outweighs what it costs unconditionally, and that
-// bet can only be settled against a scene with hidden work AND a scene without it. The
-// control is not decoration: ordering opaque draws front to back inside their
-// state group saved 0.82 ms of a 7.06 ms opaque pass on the overlap arm and cost
-// 1.01 ms on the control, which is why that policy does not exist. See
+// below is for hidden instances. A mechanism that removes hidden opaque work
+// costs something unconditionally, so it is a bet that what it removes
+// outweighs what it costs, and that bet can only be settled against a scene with
+// hidden work AND a scene without it. The control is not decoration: ordering
+// opaque draws front to back inside their state group saved 0.82 ms of a 7.06 ms
+// opaque pass on the overlap arm and cost 1.01 ms on the control, which is why
+// that policy does not exist, and an unconditional depth prepass and a
+// hierarchical-Z occlusion test were both removed by the same clause. See
 // docs/agents/game-loop.md.
+//
+// The depth prepass is back as DepthPrepassAuto, which is why there are three
+// prepass arms here rather than one: off is the baseline, on is the mechanism's
+// full cost and full saving, and auto is what a game would actually run. Auto on
+// the overlap arm has to recover nearly all of what on recovers, and auto on the
+// control has to cost nothing -- which is the clause the unconditional option
+// failed, measured the same way.
 //
 // Interleaved overlap / control / overlap / control with every sample retained,
 // for the reason runPatches is: the differences worth seeing here are a fraction
@@ -388,10 +452,15 @@ func runPatches(repeat int, jsonOut, extra string) error {
 // and its range, and compare a change against the range rather than against a
 // single pair.
 //
-// gpu_opaque is the column; gpu_total is there to show the saving is not moving
-// to another pass, cpu_drawsort to show the draw list is being ordered rather
-// than rebuilt, and depth complexity to show each arm is still the arm it is
-// named after -- the example fails rather than reporting a drifted one.
+// gpu_total is the column the prepass is judged on, not gpu_opaque: the prepass
+// is a pass of its own, so a saving inside the opaque pass that the new pass more
+// than spends would read as a win on gpu_opaque alone. gpu_prepass is what it
+// costs, cpu_record is the second geometry submission's CPU price AND the
+// per-frame estimate's, prepass_estimate is the number auto decided on, and
+// depth complexity shows each arm is still the arm it is named after -- the
+// example fails rather than reporting a drifted one, and it also fails if a
+// prepass arm recorded no prepass draws at all, if the estimate disagrees with
+// the offline grid, or if auto changed its mind mid-run.
 //
 // 1280x720 by default. The cost is screen-dependent -- the fragments a hidden
 // draw wastes are fragments, and there are nine times as many at 4K -- so
@@ -403,26 +472,155 @@ func runOverdraw(repeat int, jsonOut, extra string) error {
 	var results []result
 	for trial := 0; trial < repeat; trial++ {
 		for _, arm := range []string{"overlap", "control"} {
-			if err := patchesGPUIdle(); err != nil {
-				return err
+			for _, prepass := range []string{"off", "on", "auto"} {
+				if err := patchesGPUIdle(); err != nil {
+					return err
+				}
+				sc := scene{
+					name: fmt.Sprintf("overdraw-%s-prepass-%s-%d", arm, prepass, trial+1),
+					dir:  "28-overdraw",
+					args: []string{"-frames", "200", "-overlap=" + strconv.FormatBool(arm == "overlap"), "-prepass", prepass},
+				}
+				sc.args = append(sc.args, strings.Fields(extra)...)
+				r, err := run(sc)
+				if err != nil {
+					return err
+				}
+				if err := patchesGPUIdle(); err != nil {
+					return fmt.Errorf("discard %s: %w", sc.name, err)
+				}
+				results = append(results, *r)
+				fmt.Printf("%-40s gpu total %6.3f ms  opaque %6.3f ms  prepass %6.3f ms  cpu record %6.3f ms  cpu total %7.3f ms  draws %5.0f  prepass draws %5.0f  depth complexity %.2f  estimate %.2f\n",
+					r.Scene, r.Values["gpu_total"], r.Values["gpu_opaque"], r.Values["gpu_prepass"],
+					r.Values["cpu_record"], r.Values["cpu_total"], r.Values["n_draws"],
+					r.Values["prepass_draws"], r.Values["depth_complexity"], r.Values["prepass_estimate"])
 			}
-			sc := scene{
-				name: fmt.Sprintf("overdraw-%s-%d", arm, trial+1),
-				dir:  "28-overdraw",
-				args: []string{"-frames", "200", "-overlap=" + strconv.FormatBool(arm == "overlap")},
+		}
+	}
+	if jsonOut != "" {
+		writeJSON(jsonOut, results)
+	}
+	return nil
+}
+
+// prepassSweepCells are the camera placements the threshold sweep measures, in
+// descending depth complexity.
+//
+// Nine cells rather than a formula, because depth complexity is not monotone in
+// either flag on its own: raising the eye reduces how much a patch hides the one
+// behind it, but it also shrinks the field on screen, and past a point the field
+// becomes a thin band near the horizon whose covered area collapses and whose
+// RATIO shoots up -- eye 64 at the default pitch measures 16.19, which is a
+// degenerate frame and not a cell. These nine were chosen by running
+// `28-overdraw -probe` over a grid of eye and pitch, which costs no GPU at all,
+// and keeping a monotone ladder with the field still filling a reasonable share
+// of the frame. The complexity column is what -probe measured at 180 cells, and
+// it is here so a cell that has drifted is visible as a disagreement with what
+// the run reports rather than as a quietly different sweep.
+//
+// The grazing layout bottoms out around 1.2: the only way to reach 1.0 is the
+// overhead control, which is a different camera orientation and therefore a
+// different screen-space locality, so it is NOT a cell here. `-scene overdraw`
+// measures it as its own arm.
+type prepassSweepCell struct {
+	eye, pitch float64
+	complexity float64 // what -probe measures, for drift
+}
+
+var prepassSweepCells = []prepassSweepCell{
+	{2.4, -0.005, 3.279},
+	{4, -0.005, 3.031},
+	{6, -0.005, 2.594},
+	{10, -0.10, 2.300},
+	{16, -0.25, 2.026},
+	{26, -0.45, 1.818},
+	{40, -0.80, 1.609},
+	{64, -1.00, 1.416},
+	{120, -1.30, 1.208},
+}
+
+// runPrepassSweep measures the depth prepass's NET change in gpu_total against
+// the scene's depth complexity, which is what sets DepthPrepassAuto's threshold.
+//
+// The break-even is where that net change crosses zero. Above it the prepass pays
+// for itself; below it a game that ran the prepass would be paying for nothing,
+// which is the clause that removed the unconditional option. The threshold sits
+// ABOVE the crossing by the sweep's own scatter at that cell, so a scene sitting
+// on the break-even does not run a pass it cannot pay for.
+//
+// Off and on interleaved inside each cell, three trials, every sample kept: the
+// same discipline runOverdraw uses and for the same reason, which is that three
+// runs of one arm followed by three of the other produced a false 2-4 % GPU
+// difference on this machine from warm-up alone.
+//
+// Both bench resolutions have to be run, with -extra, and they are not expected
+// to agree: the prepass's saving is in fragments and scales with the pixel count,
+// while its cost is a second geometry submission and does not, so 4K breaks even
+// at a lower complexity than 720p. The threshold is the HIGHER crossing, and what
+// that costs at the other resolution is part of the record.
+func runPrepassSweep(repeat int, jsonOut, extra, cellSpec string) error {
+	if repeat < 3 {
+		repeat = 3
+	}
+	cells := prepassSweepCells
+	if cellSpec != "" {
+		cells = nil
+		for _, part := range strings.Split(cellSpec, ",") {
+			f := strings.Split(strings.TrimSpace(part), ":")
+			if len(f) != 3 {
+				return fmt.Errorf("-cells %q: each cell is eye:pitch:complexity", part)
 			}
-			sc.args = append(sc.args, strings.Fields(extra)...)
-			r, err := run(sc)
-			if err != nil {
-				return err
+			var c prepassSweepCell
+			var err error
+			if c.eye, err = strconv.ParseFloat(f[0], 64); err != nil {
+				return fmt.Errorf("-cells %q: eye: %w", part, err)
 			}
-			if err := patchesGPUIdle(); err != nil {
-				return fmt.Errorf("discard %s: %w", sc.name, err)
+			if c.pitch, err = strconv.ParseFloat(f[1], 64); err != nil {
+				return fmt.Errorf("-cells %q: pitch: %w", part, err)
 			}
-			results = append(results, *r)
-			fmt.Printf("%-24s gpu opaque %6.3f ms  gpu total %6.3f ms  cpu sort %6.3f ms  cpu total %7.3f ms  draws %4.0f  depth complexity %.2f\n",
-				r.Scene, r.Values["gpu_opaque"], r.Values["gpu_total"], r.Values["cpu_drawsort"],
-				r.Values["cpu_total"], r.Values["n_draws"], r.Values["overlap_ratio"])
+			if c.complexity, err = strconv.ParseFloat(f[2], 64); err != nil {
+				return fmt.Errorf("-cells %q: complexity: %w", part, err)
+			}
+			cells = append(cells, c)
+		}
+	}
+	var results []result
+	for trial := 0; trial < repeat; trial++ {
+		for _, cell := range cells {
+			for _, prepass := range []string{"off", "on"} {
+				if err := patchesGPUIdle(); err != nil {
+					return err
+				}
+				sc := scene{
+					name: fmt.Sprintf("sweep-dc%.2f-prepass-%s-%d", cell.complexity, prepass, trial+1),
+					dir:  "28-overdraw",
+					args: []string{"-frames", "200", "-sweep",
+						"-eye", strconv.FormatFloat(cell.eye, 'f', -1, 64),
+						"-pitch", strconv.FormatFloat(cell.pitch, 'f', -1, 64),
+						"-prepass", prepass},
+				}
+				sc.args = append(sc.args, strings.Fields(extra)...)
+				r, err := run(sc)
+				if err != nil {
+					return err
+				}
+				if err := patchesGPUIdle(); err != nil {
+					return fmt.Errorf("discard %s: %w", sc.name, err)
+				}
+				// The cell's label against the cell's own measurement. A sweep
+				// whose cells have drifted plots the right numbers against the
+				// wrong x, which is the one mistake a sweep can make that still
+				// looks like a result.
+				if got := r.Values["depth_complexity"]; got < cell.complexity*0.95 || got > cell.complexity*1.05 {
+					return fmt.Errorf("%s: measured depth complexity %.3f, cell is labelled %.3f -- the layout or the camera has changed and this sweep's x axis is wrong", sc.name, got, cell.complexity)
+				}
+				results = append(results, *r)
+				fmt.Printf("%-34s %s-%s  depth complexity %5.2f  estimate %5.2f  covered %5.2f  gpu total %6.3f ms  opaque %6.3f ms  prepass %6.3f ms  cpu record %6.3f ms  draws %5.0f  prepass draws %5.0f\n",
+					r.Scene, r.Started, r.Ended,
+					r.Values["depth_complexity"], r.Values["prepass_estimate"], r.Values["prepass_covered"],
+					r.Values["gpu_total"], r.Values["gpu_opaque"], r.Values["gpu_prepass"],
+					r.Values["cpu_record"], r.Values["n_draws"], r.Values["prepass_draws"])
+			}
 		}
 	}
 	if jsonOut != "" {

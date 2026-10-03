@@ -34,6 +34,7 @@ examples/.determinism/
 examples/.hud/
 examples/.sky/
 examples/.lights/
+examples/.prepass/
 examples/.waterlight/
 examples/.waterblend/
 examples/.nightlight/

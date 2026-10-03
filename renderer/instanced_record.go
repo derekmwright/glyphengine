@@ -27,6 +27,7 @@ func recordInstanced(
 	cmdBuf core1_0.CommandBuffer,
 	instancedPipeline core1_0.Pipeline,
 	instancedDoubleSidedPipeline core1_0.Pipeline,
+	prepass depthPrepassPipelines,
 	litPipelineLayout core1_0.PipelineLayout,
 	viewport core1_0.Viewport,
 	scissor core1_0.Rect2D,
@@ -51,6 +52,12 @@ func recordInstanced(
 		p := instancedPipeline
 		if d.DoubleSided {
 			p = instancedDoubleSidedPipeline
+		}
+		// The equal-compare twin for a set the prepass wrote. Same predicate as
+		// the prepass recorded by, and it rejects double-sided and LOD sets, so
+		// this cannot collide with either branch around it.
+		if prepass.active && depthPrepassQualifies(d) {
+			p = prepass.instanced
 		}
 		var atlas *ImpostorAtlas
 		if set.lod != nil {

@@ -14,6 +14,7 @@ api:
   - framegraph.Step.AfterBarriers
   - framegraph.DepthSampledRead
   - framegraph.Use.Rewrites
+  - framegraph.Use.FinalLayout
   - renderer.recordCommandBuffer
   - renderer.Pass
   - renderer.AppComputeDesc
@@ -29,7 +30,7 @@ requires:
   - VK_KHR_dynamic_rendering
   - vulkan-sdk
 assets: procedural
-verified: 2026-10-03 # the mip-chain barrier trap recorded after #154's evaluation; the cascade declaration and compute shadow reads; dynamic rendering, attachment barriers and the streamed upload node
+verified: 2026-10-03 # the optional depth prepass node, FinalLayout on a graphics attachment, and why the node stays on a frame DepthPrepassAuto declined; the mip-chain barrier trap recorded after #154's evaluation; the cascade declaration and compute shadow reads; dynamic rendering, attachment barriers and the streamed upload node
 ---
 
 # Record the renderer's frame graph
@@ -138,6 +139,56 @@ undo stack; fixed targets survive. Application input sets are per frame slot
 and rewritten only after its fence wait, or while the device is idle on resize.
 History binds distinct read/write instances chosen by frame index. See
 [render targets](render-targets.md) for the public and shader contracts.
+
+## The optional depth prepass node
+
+A renderer built with `WithDepthPrepass` splices one more engine-owned
+declaration, `depth prepass`, immediately before the hand-recorded scene. It is a
+real `Graphics` node: it declares the depth image as `DepthWrite` with a clear of
+0 and `Discard`, so the compiler derives the entry barrier that orders its depth
+writes against the previous frame, builds it a depth-only rendering instance with
+no colour attachment at all, and gives it its own `PassDepthPrepass` timer
+bracket. Its record closure draws the qualifying opaque set and nothing else; the
+hand-recorded scene then loads that depth instead of clearing it.
+
+Spliced by node index after the application nodes are appended, rather than added
+in `newFrameGraph`'s own sequence, for two reasons. The `graph*` constants index
+the declaration list `extendAppGraph` walks, so prepending there would renumber
+them and make that walk name the wrong nodes. And the position matters: an
+application pass at `StageBeforeScene` with `DepthTest` declares a depth write of
+its own, which the scene's clear has always wiped, and keeping the prepass after
+those passes means its clear wipes it too — so turning the option on cannot change
+what such a pass contributes.
+
+The declaration carries `FinalLayout: DepthStencilAttachmentOptimal`. Without it
+the compiler would restore depth's resting layout on the way out, and that resting
+layout is the sampled one as soon as an application pass reads scene depth: the
+node would transition depth out of the attachment layout and the scene pass would
+transition it straight back. Those two barriers achieve nothing, and the second is
+a write-after-write against the prepass's own depth writes with no stage in its
+source scope that covers them. With the declaration there are no exit barriers at
+all; `TestDepthPrepassLeavesDepthAnAttachment` holds that, and it fails loudly
+rather than silently if depth stops resting in the sampled layout, so it cannot
+quietly become vacuous.
+
+`Use.FinalLayout` on a `Graphics` node means exactly that — the layout this node
+leaves — and replaces the derived exit transition. It requires an attachment
+access there. On a `Legacy` node it keeps its older meaning, a description of what
+a hand-recorded pass really does, and applies to every access it declares,
+including the storage states the application previous-frame nodes name.
+
+With the option off there is no declaration, no node and no step, and a frame
+records the driver calls it always did; `goldenStreamHash` in `renderer` is what
+says so.
+
+`DepthPrepassAuto` does not change any of that. The declaration, the node and its
+depth clear exist for every frame of an Auto renderer, and the per-frame decision
+only changes whether the node's record closure submits any draws — because the
+scene pass LOADS depth whenever the prepass exists, so something has to clear it,
+and a plan that varied frame to frame would have to be recompiled frame to frame.
+A frame Auto declined is therefore a node that clears depth, submits nothing, and
+leaves the main pass binding the ordinary `Greater` variants;
+`TestDepthPrepassInactiveFrameSubmitsNothing` holds both halves of that.
 
 ## Buffers and generated draws
 
@@ -294,6 +345,13 @@ other GPU objects still retire through their existing lifetime mechanisms.
   hazard: declaring the cascade map's read as `SampledRead` rather than
   `DepthSampledRead` produces exactly that, since the cascade passes leave it in
   `DepthStencilReadOnlyOptimal`.
+- The depth prepass's two silent failures are both about what the scene pass does
+  next. A scene target that still CLEARS depth renders, validates clean, and
+  leaves every equal-compare draw testing against an empty buffer; a depth
+  attachment the compiler gave `StoreOpDontCare` throws the prepass's work away
+  the same way. `TestDepthPrepassSceneTargetLoadsDepth` and
+  `TestDepthPrepassNodePrecedesTheSceneAndKeepsItsDepth` hold both, and
+  `task prepass` is what sees them in pixels.
 - Stale attachment bindings or descriptors after resize name retired views.
   Failure-injection tests cover remaining allocation sites;
   `TestResizeCreatesNoRenderPassesOrFramebuffers` requires zero obsolete objects.

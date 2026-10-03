@@ -15,7 +15,7 @@ type appGraphTarget struct{ write, read, depth framegraph.ResourceID }
 const shadowCascadeNode = "sun shadow cascades"
 
 func (r *Renderer) buildAppGraph() (*frameGraph, error) {
-	f, err := newFrameGraph(r.msaaSamples, r.depth.format, r.sc.imageFormat, len(r.sc.imageViews), r)
+	f, err := newFrameGraph(r.msaaSamples, r.depth.format, r.sc.imageFormat, len(r.sc.imageViews), r.depthPrepassMode != DepthPrepassOff, r)
 	if err != nil {
 		return nil, err
 	}

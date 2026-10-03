@@ -269,6 +269,7 @@ are that pipeline's own real-Blender fixture, in the same spirit as
 | `task stream` | A patch grid streamed in over 100 frames matches one built synchronously, standalone and in an arena (needs a GPU) |
 | `task lod` | CPU/GPU LOD culling, fades, impostors, exact indexed/nonindexed captures, replacement lifetime and interleaved performance (needs a GPU) |
 | `task lights` | Clustered and brute-force light renderers produce byte-identical images (needs a GPU) |
+| `task prepass` | The optional depth prepass renders byte-identical frames to the pass without it, in both `On` and `Auto`, with a control that must differ (needs a GPU) |
 | `task nightlight` | Warm lamps stay warm on the ground after the night shift (needs a GPU) |
 | `task waterlight` | A lamp beside a lake reaches the water, in the lamp's colour (needs a GPU) |
 | `task volumetric` | A light's beam is in the air inside its cone and nowhere else (needs a GPU) |

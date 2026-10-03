@@ -154,8 +154,8 @@ func (a *MeshArena) alloc(vertices []Vertex, indices []uint32, async bool) (*Mes
 	}
 	vdata := unsafe.Slice((*byte)(unsafe.Pointer(&vertices[0])), len(vertices)*sizeOf[Vertex]())
 	uploads := []bufferUpload{{a.vertices.buffer, v.first * sizeOf[Vertex](), vdata}, {a.indices.buffer, i.first * width, idata}}
-	center, radius := computeBoundingSphere(vertices)
-	m := &Mesh{vertexBuffer: a.vertices.buffer, indexBuffer: a.indices.buffer, VertexCount: len(vertices), IndexCount: len(indices), indexType: kind, firstIndex: uint32(i.first), vertexOffset: v.first, owner: a, BoundCenter: center, BoundRadius: radius}
+	center, radius, lo, hi := computeBounds(vertices)
+	m := &Mesh{vertexBuffer: a.vertices.buffer, indexBuffer: a.indices.buffer, VertexCount: len(vertices), IndexCount: len(indices), indexType: kind, firstIndex: uint32(i.first), vertexOffset: v.first, owner: a, BoundCenter: center, BoundRadius: radius, BoundMin: lo, BoundMax: hi}
 	var ticket *UploadTicket
 	var err error
 	if async {

@@ -135,8 +135,15 @@ func (g *Graph) Build() (*Plan, error) {
 			if n.Kind != Legacy && needsBarrier(u, barrierBefore, after) {
 				step.Barriers = append(step.Barriers, barrier(u.Resource, barrierBefore, after))
 			}
-			if n.Kind == Graphics && attachment(u.Access) && after.layout != r.Resting {
-				rest := g.restingState(u.Resource, r.Resting, uses)
+			// A graphics attachment returns to its resting layout on the way out,
+			// unless the declaration names the layout this node leaves instead.
+			// See Use.FinalLayout.
+			leave := r.Resting
+			if n.Kind == Graphics && u.FinalLayout != core1_0.ImageLayoutUndefined {
+				leave = u.FinalLayout
+			}
+			if n.Kind == Graphics && attachment(u.Access) && after.layout != leave {
+				rest := g.restingState(u.Resource, leave, uses)
 				step.AfterBarriers = append(step.AfterBarriers, barrier(u.Resource, after, rest))
 				after = rest
 			}
@@ -329,6 +336,15 @@ func (g *Graph) validate() ([][]compiledUse, []resourceUses, error) {
 			}
 			if buffer && (u.HasResolve || u.FinalLayout != core1_0.ImageLayoutUndefined) {
 				return nil, nil, g.fail(n.Name, u.Resource, "buffers have no image layout or resolve")
+			}
+			// On a Graphics node FinalLayout replaces the exit transition the
+			// compiler derives for an attachment, so on any other access it
+			// would be a promise about a transition that does not exist. A
+			// Legacy node's FinalLayout describes a hand-recorded pass's own
+			// exit state and applies to every access it declares, including the
+			// storage states the application previous-frame nodes name.
+			if n.Kind == Graphics && u.FinalLayout != core1_0.ImageLayoutUndefined && !attachment(u.Access) {
+				return nil, nil, g.fail(n.Name, u.Resource, "FinalLayout on a graphics node requires an attachment access")
 			}
 			if (u.Clear != nil && u.Access != ColorWrite && u.Access != DepthWrite) ||
 				(u.Discard && u.Access != ColorWrite && u.Access != DepthWrite && u.Access != TransferDst) {

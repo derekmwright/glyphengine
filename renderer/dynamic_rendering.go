@@ -19,6 +19,24 @@ func colorDepthFormats(color, depth core1_0.Format) renderingFormats {
 	return f
 }
 func renderingOptions(f renderingFormats) common.NextOptions { return common.NextOptions{Next: f} }
+
+// engineFormats is pipelineFormats for one of the engine's tail nodes, named by
+// its DECLARATION index -- which is what the graph* constants are.
+//
+// The two indexes are not the same thing, and the difference is a nil
+// dereference rather than a wrong number: the plan's steps are indexed by node,
+// and a node index is a declaration index plus everything inserted ahead of it.
+// Application passes and GPU LOD only ever insert ahead of the whole tail, so
+// Renderer.New's own graph used to be the one case where they coincided and
+// every caller here could get away with the constant. The depth prepass inserts
+// one node ahead of the scene in that same graph, after which
+// pipelineFormats(graphWater) reads the scene-colour COPY -- a transfer node with
+// no rendering instance at all. Measured: it panics in New on an RX 7900 XTX
+// before the first frame. Go through f.engine and the question cannot come up.
+func (f *frameGraph) engineFormats(declaration int) renderingFormats {
+	return f.pipelineFormats(f.engine[declaration])
+}
+
 func (f *frameGraph) pipelineFormats(node int) renderingFormats {
 	d := f.plan.Steps[node].RenderPass
 	out := renderingFormats{}
@@ -130,9 +148,22 @@ func (r *Renderer) bindSceneTargets() {
 			t.transition(r.hdr.images[i], core1_0.ImageAspectColor, 0, core1_0.ImageLayoutUndefined, core1_0.ImageLayoutShaderReadOnlyOptimal)
 		}
 		t.info.ColorAttachments = []khr_dynamic_rendering.RenderingAttachmentInfo{a}
-		dep := attachmentInfo(r.depth.views[i], true, core1_0.AttachmentLoadOpClear, core1_0.AttachmentStoreOpStore, core1_0.ClearValueDepthStencil{Depth: 0})
+		// With the depth prepass on, the prepass node owns the clear and this
+		// pass loads what it wrote; the incoming layout is then the attachment
+		// layout that node left rather than Undefined, and the barrier
+		// transition() emits for an equal pair is still the edge that orders the
+		// prepass's depth writes before this pass's depth reads.
+		//
+		// Discarding here instead would throw the prepass away silently: the
+		// frame would render exactly as it does today except that every
+		// equal-compare draw would test against a cleared buffer and vanish.
+		depthLoad, depthFrom := core1_0.AttachmentLoadOpClear, core1_0.ImageLayoutUndefined
+		if r.depthPrepassMode != DepthPrepassOff {
+			depthLoad, depthFrom = core1_0.AttachmentLoadOpLoad, core1_0.ImageLayoutDepthStencilAttachmentOptimal
+		}
+		dep := attachmentInfo(r.depth.views[i], true, depthLoad, core1_0.AttachmentStoreOpStore, core1_0.ClearValueDepthStencil{Depth: 0})
 		t.info.DepthAttachment = &dep
-		t.transition(r.depth.images[i], depthAspect(r.depth.format), 0, core1_0.ImageLayoutUndefined, core1_0.ImageLayoutDepthStencilAttachmentOptimal)
+		t.transition(r.depth.images[i], depthAspect(r.depth.format), 0, depthFrom, core1_0.ImageLayoutDepthStencilAttachmentOptimal)
 		r.sceneTargets[i] = t
 	}
 }

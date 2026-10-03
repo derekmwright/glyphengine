@@ -69,7 +69,7 @@ func TestAppTextureGraphAndSceneViews(t *testing.T) {
 	color, depth := r.SceneColor(), r.SceneDepth()
 	p := &AppPass{r: r, desc: AppPassDesc{Stage: StageBeforeBloom, Target: r.appTargets[0], Reads: []*Texture{r.appTargets[1].Texture(), color, depth, {}}}}
 	r.appPasses = []*AppPass{p}
-	f, err := newFrameGraph(core1_0.Samples4, r.depth.format, core1_0.FormatB8G8R8A8SRGB, 2, r)
+	f, err := newFrameGraph(core1_0.Samples4, r.depth.format, core1_0.FormatB8G8R8A8SRGB, 2, false, r)
 	if err != nil {
 		t.Fatal(err)
 	}

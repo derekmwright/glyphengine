@@ -127,6 +127,26 @@ func (s *commandScratch) pushShadowConstants(d core1_0.DeviceDriver, cmdBuf core
 	d.CmdPushConstants(cmdBuf, layout, core1_0.StageVertex, 0, unsafe.Slice((*byte)(unsafe.Pointer(&s.shadowPC[0])), 128))
 }
 
+// pushPrepassConstants uploads the depth prepass's 128 bytes through a layout
+// whose range covers 256 bytes for the vertex AND fragment stages, which is what
+// litPipelineLayout is.
+//
+// The stage flags are the whole reason this is not pushShadowConstants.
+// VUID-vkCmdPushConstants-offset-01796 requires the stageFlags of a push to
+// include EVERY stage of every range it overlaps -- not merely to be included by
+// them, which is the way round it is natural to read it and the way round this
+// was written first. The shadow layouts declare their 128 bytes for the vertex
+// stage alone, so pushing StageVertex there is correct; pushing StageVertex
+// through the lit layout is a spec violation on every draw. Measured: 30
+// validation errors over 30 frames of 07-terrain, 6480 over 28-overdraw, and
+// nothing else in the matrix said a word.
+//
+// The fragment stage never reads these bytes -- the prepass's fragment stage is
+// the null shadow.frag -- so naming it costs nothing but the correct flag.
+func (s *commandScratch) pushPrepassConstants(d core1_0.DeviceDriver, cmdBuf core1_0.CommandBuffer, layout core1_0.PipelineLayout) {
+	d.CmdPushConstants(cmdBuf, layout, core1_0.StageVertex|core1_0.StageFragment, 0, unsafe.Slice((*byte)(unsafe.Pointer(&s.shadowPC[0])), 128))
+}
+
 // setViewport and setScissor exist because CmdSetViewport/CmdSetScissor take
 // their argument as ...Viewport/...Rect2D. Every call site here passes a
 // single bare value, and spreading one into a variadic parameter of an

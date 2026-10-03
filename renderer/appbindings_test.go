@@ -137,7 +137,7 @@ func TestAppHistoryVisibility(t *testing.T) {
 		r := &Renderer{depth: &depthResources{format: core1_0.FormatD32SignedFloat}}
 		target := &RenderTarget{r: r, desc: RenderTargetDesc{Name: "previous output", Format: TargetR16F, Scale: 1, History: history}}
 		r.appTargets = []*RenderTarget{target}
-		f, err := newFrameGraph(core1_0.Samples4, r.depth.format, core1_0.FormatB8G8R8A8SRGB, 3, r)
+		f, err := newFrameGraph(core1_0.Samples4, r.depth.format, core1_0.FormatB8G8R8A8SRGB, 3, false, r)
 		if err != nil {
 			t.Fatal(err)
 		}

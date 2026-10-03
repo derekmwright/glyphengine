@@ -30,7 +30,7 @@ func (fx *frame) record(d core1_0.DeviceDriver, frameIndex int) error {
 		fx.starsPipeline, fx.celestialPipeline, fx.uiPipeline, fx.msdfPipeline, fx.skinnedPipeline,
 		fx.grassPipeline, fx.waterPipeline, fx.godRayPipeline, fx.graph, 0,
 		fx.sceneColor, noClouds, fx.cloudSet, fx.bloom, fx.tonemap, fx.particlePipeline,
-		fx.terrainPipeline, fx.mat, &fx.stats, fx.pipelineLayout, fx.skyPipelineLayout, fx.litPipelineLayout,
+		fx.terrainPipeline, fx.mat, fx.prepass, &fx.stats, fx.pipelineLayout, fx.skyPipelineLayout, fx.litPipelineLayout,
 		fx.skinnedPipelineLayout, fx.terrainPipeLayout, fx.extent, fx.draws, fx.overlays, fx.celestials,
 		fx.uiOverlays, fx.msdfOverlays, fx.lighting, fx.split, fx.fallbackTexture, fx.milkyWayTex,
 		fx.shadow, fx.grass, fx.grassLOD, fx.impostor, fx.grassImpostorPipeline, fx.particles,

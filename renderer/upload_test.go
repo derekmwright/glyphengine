@@ -447,7 +447,7 @@ func TestStreamedStorageBufferDeclaresItsDestination(t *testing.T) {
 	p := &AppPass{r: r, desc: AppPassDesc{Name: c.desc.Name, Stage: c.desc.Stage}, enabled: true, compute: c}
 	c.pass = p
 	r.appPasses = []*AppPass{p}
-	f, err := newFrameGraph(core1_0.Samples4, core1_0.FormatD32SignedFloat, core1_0.FormatB8G8R8A8SRGB, 1, r)
+	f, err := newFrameGraph(core1_0.Samples4, core1_0.FormatD32SignedFloat, core1_0.FormatB8G8R8A8SRGB, 1, false, r)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -503,7 +503,7 @@ func uploadFrame(t *testing.T, queue bool) *frame {
 		r.beginUploadBatch()
 	}
 	var err error
-	fx.graph, err = newFrameGraph(core1_0.Samples4, core1_0.FormatD32SignedFloat, core1_0.FormatB8G8R8A8SRGB, 1, r)
+	fx.graph, err = newFrameGraph(core1_0.Samples4, core1_0.FormatD32SignedFloat, core1_0.FormatB8G8R8A8SRGB, 1, false, r)
 	if err != nil {
 		t.Fatal(err)
 	}

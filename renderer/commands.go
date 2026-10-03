@@ -483,6 +483,7 @@ func recordCommandBuffer(
 	particlePipeline core1_0.Pipeline,
 	terrainPipeline core1_0.Pipeline,
 	mat materialPipelines,
+	prepass depthPrepassPipelines,
 	stats *RenderStats,
 	pipelineLayout core1_0.PipelineLayout,
 	// skyPipelineLayout is pipelineLayout plus the shadow/light set at set 1.
@@ -744,9 +745,25 @@ func recordCommandBuffer(
 		}
 	}
 
+	// The shadow maps are finished here, so this is where the bracket closes.
+	// It used to close after the scene pass had already begun, which charged
+	// PassShadow for the pre-scene graph steps -- application passes at
+	// StageBeforeScene, and now the depth prepass. Those have brackets of
+	// their own, and a pass counted twice makes the passes sum to more than
+	// the frame total, which is the one arithmetic check this instrument has.
+	timer.end(deviceDriver, cmdBuf, frame, PassShadow)
+	if graph.prepass < 0 {
+		// No prepass node, so nothing writes this pair -- and a query that is
+		// reset and never written makes the WHOLE frame's readback come back
+		// NotReady, not just this pass's. Same reason the water arm writes its
+		// skipped brackets.
+		timer.begin(deviceDriver, cmdBuf, frame, PassDepthPrepass)
+		timer.end(deviceDriver, cmdBuf, frame, PassDepthPrepass)
+	}
+
 	// ── Main render pass ──
 	if graph.engine[graphLegacy] > 0 {
-		graph.frame = graphFrame{driver: deviceDriver, cmd: cmdBuf, imageIndex: imageIndex, frame: frame, extent: extent, scratch: scratch, timer: timer, stats: stats, shadowDS: shadow.descriptorSets[frame], lighting: lighting}
+		graph.frame = graphFrame{driver: deviceDriver, cmd: cmdBuf, imageIndex: imageIndex, frame: frame, extent: extent, scratch: scratch, timer: timer, stats: stats, shadowDS: shadow.descriptorSets[frame], lighting: lighting, draws: draws, prepass: prepass}
 		if err := graph.executeSteps(graph.beforeShadows, graph.engine[graphLegacy]); err != nil {
 			return err
 		}
@@ -780,7 +797,6 @@ func recordCommandBuffer(
 	// Shadow descriptor set for this frame
 	shadowDS := shadow.descriptorSets[frame]
 
-	timer.end(deviceDriver, cmdBuf, frame, PassShadow)
 	timer.begin(deviceDriver, cmdBuf, frame, PassTerrain)
 	// Terrain pass: splat-mapped ground via the dedicated terrain pipeline
 	// (set 0 = 4 detail/splat samplers, set 1 = shadow). Rendered before the
@@ -831,6 +847,11 @@ func recordCommandBuffer(
 	var lastMaterial *Material
 	bindValid := false
 	currentMaterial := false
+	// currentEqual joins the bind cache's key because the equal-compare twin is
+	// a fourth pipeline dimension: two draws alike in skinning, sidedness and
+	// material can still differ in whether the prepass wrote them, and without
+	// this the second would be recorded against the first one's pipeline.
+	currentEqual := false
 
 	for i := range draws {
 		d := &draws[i]
@@ -854,7 +875,15 @@ func recordCommandBuffer(
 
 		// Switch pipeline if needed
 		doubleSided := d.DoubleSided
-		if skinned != currentSkinned || doubleSided != currentDoubleSided || material != currentMaterial {
+		// prepassed draws take the equal-compare twin of whichever variant
+		// they would otherwise use: the depth is already in the buffer, so
+		// testing EQUAL against it rejects every fragment the prepass did not
+		// keep, before the five-map material shader runs on it. The predicate
+		// is the same one the prepass recorded by, and it excludes everything
+		// skinned and double-sided, so the arms of this switch it can reach
+		// are exactly the two below.
+		equal := prepass.active && depthPrepassQualifies(d)
+		if skinned != currentSkinned || doubleSided != currentDoubleSided || material != currentMaterial || equal != currentEqual {
 			switch {
 			case skinned && material:
 				deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, mat.skinned)
@@ -862,10 +891,14 @@ func recordCommandBuffer(
 				deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, skinnedPipeline)
 			case material && doubleSided:
 				deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, mat.doubleSided)
+			case material && equal:
+				deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, prepass.material)
 			case material:
 				deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, mat.pipeline)
 			case doubleSided:
 				deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, litDoubleSidedPipeline)
+			case equal:
+				deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, prepass.lit)
 			default:
 				deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, pipeline)
 			}
@@ -874,6 +907,7 @@ func recordCommandBuffer(
 			currentSkinned = skinned
 			currentDoubleSided = doubleSided
 			currentMaterial = material
+			currentEqual = equal
 			bindValid = false
 		}
 
@@ -956,7 +990,7 @@ func recordCommandBuffer(
 	// Instance sets, inside the opaque pass so they depth-test against
 	// everything else exactly as individually drawn props would.
 	recordInstanced(deviceDriver, stats, cmdBuf, instancedPipeline, instancedDoubleSidedPipeline,
-		litPipelineLayout, viewport, scissor, draws, lighting, fallbackTexture, shadowDS, scratch)
+		prepass, litPipelineLayout, viewport, scissor, draws, lighting, fallbackTexture, shadowDS, scratch)
 
 	timer.end(deviceDriver, cmdBuf, frame, PassOpaque)
 	timer.begin(deviceDriver, cmdBuf, frame, PassGrass)

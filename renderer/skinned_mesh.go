@@ -28,7 +28,7 @@ func (r *Renderer) CreateSkinnedIndexedMesh(vertices []SkinnedVertex, indices []
 		return nil, fmt.Errorf("create skinned index buffer: %w", err)
 	}
 
-	center, radius := computeSkinnedBoundingSphere(vertices)
+	center, radius, lo, hi := computeSkinnedBounds(vertices)
 	m := &Mesh{
 		vertexBuffer: vbuf,
 		vertexMemory: vmem,
@@ -39,6 +39,8 @@ func (r *Renderer) CreateSkinnedIndexedMesh(vertices []SkinnedVertex, indices []
 		indexType:    core1_0.IndexTypeUInt16,
 		BoundCenter:  center,
 		BoundRadius:  radius,
+		BoundMin:     lo,
+		BoundMax:     hi,
 	}
 	r.meshes = append(r.meshes, m)
 	return m, nil
@@ -64,7 +66,7 @@ func (r *Renderer) CreateSkinnedIndexedMesh32(vertices []SkinnedVertex, indices 
 		return nil, fmt.Errorf("create skinned index buffer: %w", err)
 	}
 
-	center, radius := computeSkinnedBoundingSphere(vertices)
+	center, radius, lo, hi := computeSkinnedBounds(vertices)
 	m := &Mesh{
 		vertexBuffer: vbuf,
 		vertexMemory: vmem,
@@ -75,14 +77,20 @@ func (r *Renderer) CreateSkinnedIndexedMesh32(vertices []SkinnedVertex, indices 
 		indexType:    core1_0.IndexTypeUInt32,
 		BoundCenter:  center,
 		BoundRadius:  radius,
+		BoundMin:     lo,
+		BoundMax:     hi,
 	}
 	r.meshes = append(r.meshes, m)
 	return m, nil
 }
 
-func computeSkinnedBoundingSphere(vertices []SkinnedVertex) ([3]float32, float32) {
+// computeSkinnedBounds is computeBounds over skinned vertices, in the rest pose.
+// A skinned mesh never reaches the depth-prepass estimate -- the predicate
+// excludes it -- but the box is filled anyway so Mesh keeps its invariant that
+// a mesh has both bounds or neither.
+func computeSkinnedBounds(vertices []SkinnedVertex) (center [3]float32, radius float32, lo, hi [3]float32) {
 	if len(vertices) == 0 {
-		return [3]float32{}, 0
+		return [3]float32{}, 0, [3]float32{}, [3]float32{}
 	}
 	var cx, cy, cz float64
 	for i := range vertices {
@@ -95,6 +103,7 @@ func computeSkinnedBoundingSphere(vertices []SkinnedVertex) ([3]float32, float32
 	cy /= n
 	cz /= n
 
+	lo, hi = vertices[0].Pos, vertices[0].Pos
 	var maxDist2 float64
 	for i := range vertices {
 		dx := float64(vertices[i].Pos[0]) - cx
@@ -104,6 +113,10 @@ func computeSkinnedBoundingSphere(vertices []SkinnedVertex) ([3]float32, float32
 		if d2 > maxDist2 {
 			maxDist2 = d2
 		}
+		for a := 0; a < 3; a++ {
+			lo[a] = min(lo[a], vertices[i].Pos[a])
+			hi[a] = max(hi[a], vertices[i].Pos[a])
+		}
 	}
-	return [3]float32{float32(cx), float32(cy), float32(cz)}, float32(math.Sqrt(maxDist2))
+	return [3]float32{float32(cx), float32(cy), float32(cz)}, float32(math.Sqrt(maxDist2)), lo, hi
 }

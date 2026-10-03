@@ -49,6 +49,7 @@ type frame struct {
 	bloom                                                                                          bloomPass
 	tonemap                                                                                        tonemapPass
 	mat                                                                                            materialPipelines
+	prepass                                                                                        depthPrepassPipelines
 	stats                                                                                          RenderStats
 	pipelineLayout, skyPipelineLayout, litPipelineLayout, skinnedPipelineLayout, terrainPipeLayout core1_0.PipelineLayout
 	skyVolumetricPipeline                                                                          core1_0.Pipeline

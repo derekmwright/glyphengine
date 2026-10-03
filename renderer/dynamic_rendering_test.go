@@ -70,7 +70,7 @@ func TestDynamicWaterBindings(t *testing.T) {
 	for _, samples := range []core1_0.SampleCountFlags{core1_0.Samples1, core1_0.Samples4} {
 		fx := buildFrame(7)
 		var err error
-		fx.graph, err = newFrameGraph(samples, core1_0.FormatD32SignedFloat, core1_0.FormatB8G8R8A8SRGB, 1)
+		fx.graph, err = newFrameGraph(samples, core1_0.FormatD32SignedFloat, core1_0.FormatB8G8R8A8SRGB, 1, false)
 		if err != nil {
 			t.Fatal(err)
 		}
