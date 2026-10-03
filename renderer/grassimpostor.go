@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"image"
 	"log"
-	"math"
 	"unsafe"
 
 	"github.com/go-gl/mathgl/mgl32"
@@ -449,7 +448,7 @@ func (r *Renderer) readbackImage(img core1_0.Image, w, h int) (*image.RGBA, erro
 	raw := unsafe.Slice((*uint16)(ptr), w*h*4)
 	out := image.NewRGBA(image.Rect(0, 0, w, h))
 	for i := 0; i < w*h*4; i++ {
-		v := half16(raw[i])
+		v := Float16Value(raw[i])
 		if v < 0 {
 			v = 0
 		}
@@ -459,31 +458,6 @@ func (r *Renderer) readbackImage(img core1_0.Image, w, h int) (*image.RGBA, erro
 		out.Pix[i] = uint8(v*255 + 0.5)
 	}
 	return out, nil
-}
-
-// half16 decodes an IEEE half. Written out rather than taking a dependency
-// because this is the only place the engine reads one back.
-func half16(h uint16) float32 {
-	sign := uint32(h>>15) << 31
-	exp := uint32(h>>10) & 0x1f
-	mant := uint32(h) & 0x3ff
-	switch exp {
-	case 0:
-		if mant == 0 {
-			return math.Float32frombits(sign)
-		}
-		shift := uint32(0)
-		for mant&0x400 == 0 {
-			mant <<= 1
-			shift++
-		}
-		mant &= 0x3ff
-		return math.Float32frombits(sign | (127-15-shift+1)<<23 | mant<<13)
-	case 0x1f:
-		return math.Float32frombits(sign | 0xff<<23 | mant<<13)
-	default:
-		return math.Float32frombits(sign | (exp+127-15)<<23 | mant<<13)
-	}
 }
 
 // createGrassImpostorPipeline builds the billboard pass.

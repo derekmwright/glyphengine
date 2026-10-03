@@ -640,7 +640,7 @@ func (r *Renderer) uploadGLTFImages(rd *gltfRead) (map[int]*Texture, error) {
 		// image's wrap mode is per-Texture (image+sampler pair) data this
 		// loader now has to honour instead (issue #69).
 		tex, err := r.createTexture(d.pixels, d.width, d.height, textureOptions{
-			srgb:     !dataImages[i],
+			format:   rgba8(!dataImages[i]),
 			filter:   core1_0.FilterLinear,
 			addressU: wrap.u,
 			addressV: wrap.v,

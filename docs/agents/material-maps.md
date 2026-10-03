@@ -21,7 +21,7 @@ api:
 assets: procedural
 example: examples/16-materials
 run: go run ./16-materials
-verified: 2026-09-21
+verified: 2026-10-03 # unchanged; cross-referenced textures.md for the rest of the constructor family (#178)
 ---
 
 # Material maps
@@ -75,6 +75,10 @@ leans the same wrong way. Nothing errors, the validation layer says nothing, and
 the result looks like a badly authored map rather than a loading bug.
 
 `LoadTexture` on a normal map is the single easiest way to get this wrong.
+
+[`textures.md`](textures.md) is the whole constructor family in one table,
+including the half- and single-precision float uploads for maps that need more
+than eight bits per channel.
 
 ## Per-object factors still apply
 

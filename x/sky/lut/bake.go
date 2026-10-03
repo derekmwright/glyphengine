@@ -1,10 +1,10 @@
 package lut
 
 import (
-	"fmt"
 	"math"
 
 	glyph "github.com/derekmwright/glyphengine"
+	"github.com/derekmwright/glyphengine/renderer"
 )
 
 // The table's three axes and its size. skylut.frag compiles the same four
@@ -43,48 +43,32 @@ import (
 //	                per texel there, against the 23.5-degree half width of the
 //	                tight halo.
 //
-// 64 x 32 x 32 is 65,536 texels, 256 KB as RGBA8. Laid out with proximity
+// 64 x 32 x 32 is 65,536 texels, 512 KB as RGBA16F. Laid out with proximity
 // across within a sun-elevation slice, the slices across after it, and view
 // elevation down: 1024 by 64.
 const (
 	lutView = 64
 	lutSun  = 32
 	lutProx = 32
-
-	// lutRange is the linear radiance the 8-bit encoding spans. Values are
-	// stored as sqrt(v/lutRange) and squared back in the shader, which spends
-	// the 255 levels where a sky needs them -- the night sky is four thousandths
-	// of the daylit horizon, and a linear encode would quantise it to nothing.
-	//
-	// 3.0 because the default palette's brightest texel is 2.505 -- measured, see
-	// TestTheDefaultPaletteHeadroom -- in red, looking straight at a sun 1.5
-	// degrees above the horizon from a view elevation of -0.006, where the tight
-	// halo, the broad wash and the twilight horizon colour all peak together.
-	// That is 84 percent of the range, so almost none of the 255 levels is spent
-	// on headroom nothing reaches. Raising the
-	// palette can exceed it, and Bake refuses rather than clipping: a clipped
-	// table is a flat white patch where the sun is, which looks like a shader
-	// bug rather than an encoding limit.
-	//
-	// It is a constant and not an option because skylut.frag has it compiled in;
-	// a per-sky range would have to reach the shader, and the only route for
-	// that is Renderer.SetShaderParameters, which is one 4096-byte block the
-	// whole application shares. Taking it for one float would make this package
-	// incompatible with any game that wanted it.
-	//
-	// The cost of eight bits is banding, and it is the reason to want a
-	// different texture format; see lut.md.
-	lutRange = 3.0
 )
 
-// Bake returns the table a Sky uploads: RGBA8 pixels, width by height.
+// Bake returns the table a Sky uploads: half-float RGBA pixels, four per texel,
+// width by height, in the layout renderer.CreateTextureRGBA16F takes.
 //
 // It is exported because the bake is the whole model and nothing else in this
-// package can be checked without it -- the unit tests read the gradient, the
-// sun side and the encoding out of these bytes with no GPU at all -- and because
-// a game that wants to inspect or precompute the table should not have to
-// reimplement it.
-func Bake(opts Options) (pixels []byte, width, height int, err error) {
+// package can be checked without it -- the unit tests read the gradient, the sun
+// side and the table's error out of these values with no GPU at all -- and
+// because a game that wants to inspect or precompute the table should not have
+// to reimplement it.
+//
+// It used to return RGBA8 bytes holding sqrt(v/3), with a refusal for any
+// palette whose brightest texel passed 3.0. The transfer, the ceiling and the
+// refusal are all gone: the engine can upload R16G16B16A16_SFLOAT now (issue
+// #178), and radiance written straight into it costs 0.05 percent at every
+// brightness instead of 2 percent at a tenth of full scale and 13 percent at two
+// thousandths. There is no range to exceed -- half-float reaches 65504 -- so a
+// bright palette is a bright sky rather than an error. See lut.md.
+func Bake(opts Options) (pixels []uint16, width, height int, err error) {
 	if err := opts.validate(); err != nil {
 		return nil, 0, 0, err
 	}
@@ -95,15 +79,10 @@ func Bake(opts Options) (pixels []byte, width, height int, err error) {
 	return bake(pal, opts.Keys)
 }
 
-func bake(skyPal glyph.SkyPalette, keys []Key) (pixels []byte, width, height int, err error) {
+func bake(skyPal glyph.SkyPalette, keys []Key) (pixels []uint16, width, height int, err error) {
 	pal := endpoints(skyPal)
 	width, height = lutSun*lutProx, lutView
-	pixels = make([]byte, width*height*4)
-
-	// The brightest texel and where it was, so the error below can say which
-	// part of the sky overflowed rather than only that something did.
-	var peak float32
-	var peakSun, peakView, peakProx float32
+	pixels = make([]uint16, width*height*4)
 
 	for slice := 0; slice < lutSun; slice++ {
 		s := sunElevationAt(slice)
@@ -130,22 +109,19 @@ func bake(skyPal glyph.SkyPalette, keys []Key) (pixels []byte, width, height int
 				c := domeColor(pal, e, s, prox, sunCol)
 				at := (row*width + slice*lutProx + col) * 4
 				for ch := 0; ch < 3; ch++ {
-					if c[ch] > peak {
-						peak, peakSun, peakView, peakProx = c[ch], s, e, prox
-					}
-					pixels[at+ch] = encode(c[ch])
+					// Radiance, not a transfer of it. The one rounding left is
+					// half-float's own, and it is relative rather than absolute
+					// -- which is what a sky needs, since the night dome is four
+					// thousandths of the daylit horizon and an absolute step
+					// would quantise it to nothing.
+					pixels[at+ch] = renderer.Float16(c[ch])
 				}
 				// Opaque. The dome is drawn with blending off and writes the
 				// alpha the stars and the discs would blend against; this sky
 				// draws neither, and 1 is "nothing in the way".
-				pixels[at+3] = 255
+				pixels[at+3] = renderer.Float16(1)
 			}
 		}
-	}
-	if peak > lutRange {
-		return nil, 0, 0, fmt.Errorf(
-			"x/sky/lut: the baked sky reaches %.3f at sun elevation %.3f, view elevation %.3f, sun proximity %.3f, above the %.1f the 8-bit encoding spans; dim the palette",
-			peak, peakSun, peakView, peakProx, float32(lutRange))
 	}
 	return pixels, width, height, nil
 }
@@ -182,32 +158,6 @@ func signedSquare(q float32) float32 {
 		return -q * q
 	}
 	return q * q
-}
-
-// encode and decode are the 8-bit transfer. Squaring in the shader is one
-// multiply, which is why it is a square rather than an sRGB curve: the precision
-// at the top of the range is within a few percent either way, and sRGB's four
-// constants and a branch are not free in a shader whose whole claim is that it
-// is a fetch.
-//
-// Interpolation happens in the ENCODED domain, both inside a texel pair (the
-// sampler's) and across the two slices (the shader's mix). That is a slight bow
-// toward the darker of two neighbours and it is consistent everywhere, which
-// matters more than being right in a space the hardware cannot filter in.
-func encode(v float32) byte {
-	if v <= 0 {
-		return 0
-	}
-	t := math.Sqrt(float64(v) / lutRange)
-	if t > 1 {
-		t = 1
-	}
-	return byte(math.Round(t * 255))
-}
-
-func decode(b byte) float32 {
-	t := float32(b) / 255
-	return t * t * lutRange
 }
 
 // ── the model ──

@@ -145,17 +145,21 @@ func (g *game) Init(e *glyph.Engine) error {
 			// same slot the sky was bound to, from outside the package. This is
 			// "sample a constant texel" done without touching the shader or
 			// needing a Vulkan SDK, so the gate's own break is re-runnable by
-			// anyone. 0x51 is sqrt(0.3/3) encoded, so the frame comes out a
-			// plausible mid sky rather than black -- a break that produced an
-			// obviously empty frame would prove less.
-			pix := make([]byte, 2*2*4)
+			// anyone. 0.3 radiance, so the frame comes out a plausible mid sky
+			// rather than black -- a break that produced an obviously empty frame
+			// would prove less.
+			//
+			// Through the same constructor the table uses, rather than a narrower
+			// one: a break that went in through a different upload path could
+			// differ from the real thing in a way that made it prove less.
+			pix := make([]uint16, 2*2*4)
 			for i := range pix {
-				pix[i] = 0x51
+				pix[i] = renderer.Float16(0.3)
 				if i%4 == 3 {
-					pix[i] = 0xFF
+					pix[i] = renderer.Float16(1)
 				}
 			}
-			tex, err := e.Renderer().CreateDataTexture(pix, 2, 2)
+			tex, err := e.Renderer().CreateTextureRGBA16F(pix, 2, 2, renderer.TextureOptions{Filter: renderer.FilterLinear})
 			if err != nil {
 				return err
 			}

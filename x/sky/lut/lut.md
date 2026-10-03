@@ -33,7 +33,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: procedural
-verified: 2026-10-03 # new package, ADR 0012 step 5; the second filling of the sky slot, with its own gate (task xskylut) and 18 recorded unit breaks
+verified: 2026-10-03 # the table moved to renderer.CreateTextureRGBA16F (#178): the sqrt transfer, the 3.0 ceiling and Bake's refusal are gone, Bake returns []uint16 of half-float bits (an api BREAK), and the error is 0.049 percent at every level instead of 2 to 13; new package before that, ADR 0012 step 5, with its own gate (task xskylut) and a recorded break above every unit check
 ---
 
 # x/sky/lut
@@ -82,7 +82,7 @@ errors without the other. This has a third: the table.
 |---|---|
 | `glyph.WithShaders(skylut.Shaders())` | No sky. The source asks for a dome, the renderer has no pipeline, the frame is the clear colour with the right light on it. Nothing errors. |
 | `e.Scene.Env = sky` | A dome pipeline built and never used. |
-| The table | Not possible: `New` takes the renderer and binds it, so there is no way to hold the source without it. An unbound slot samples the renderer's white fallback, which would be a white sky. |
+| The table | Not possible: `New` takes the renderer and binds it, so there is no way to hold the source without it. An unbound slot samples the renderer's white fallback, which would be a white sky — and white is 1.0, which the dome now takes at face value because there is no transfer to flatten it. |
 
 `New` is where the table is baked, uploaded and bound, which is why it needs the
 renderer and why it is called from `Init` rather than from `main`. `Destroy`
@@ -90,9 +90,9 @@ releases the slot and then the texture.
 
 ## The table
 
-Three axes, 64 by 32 by 32 texels, 256 KB as RGBA8, laid out 1024 by 64 with
-proximity across inside a sun-elevation slice, the slices across after it, and
-view elevation down.
+Three axes, 64 by 32 by 32 texels, 512 KB as `R16G16B16A16_SFLOAT`, laid out 1024
+by 64 with proximity across inside a sun-elevation slice, the slices across after
+it, and view elevation down.
 
 | Axis | Texels | Spacing |
 |---|---|---|
@@ -138,43 +138,74 @@ across the middle of a 640x480 frame (`lutskycheck -pitch 0`, compared with
 `cmd/pngsame`). The axis is scaled so that near the horizon one screen pixel is
 about one texel: at 480 pixels over a 60-degree vertical field of view the first
 pixel above the horizon moves `v` by 1.05 texels, an LOD of 0.07. The chain was
-reachable — `CreateDataTexture` builds 11 levels for this 1024x64 image and sets
-`MaxLod` to the count — it is simply never reached, and those 11 levels are about
-85 KB of waste on top of the table's 256.
+reachable at the time of that measurement — `CreateDataTexture` built 11 levels
+for this 1024x64 image and set `MaxLod` to the count — and simply never reached,
+which made those 11 levels about 85 KB of waste on top of the table's 256.
 
 Kept anyway, because it is free and unconditional. A coarser axis or a smaller
 table would be relying on that measurement rather than on the call, which is the
 kind of thing [AGENTS.md rule 12](../../../AGENTS.md#rules-that-matter) is about:
 the number is recorded next to the line so the next person can re-run it.
 
-### Eight bits, and the engine gap behind them
+Since the table moved to `CreateTextureRGBA16F` there is no chain to reach at all
+— the upload asks for none — so what the measurement now says is that losing
+those 11 levels changed nothing.
 
-The table is RGBA8, encoded as `sqrt(v/3)` and squared back in the shader. 3.0 is
-the ceiling because the default palette's brightest texel is **2.505** — in red,
-looking straight at a sun 1.5 degrees up, where the tight halo, the broad wash and
-the twilight horizon colour all peak together — so 84 percent of the range is
-used. `Bake` refuses a palette that would exceed it rather than clipping, because
-a clipped table is a flat white patch where the sun is and that reads as a shader
-bug rather than as an encoding limit.
+### Half-float radiance, and the eight bits it replaced
 
-What eight bits cost, measured over the whole default table against the model
-evaluated at each texel's own coordinates:
+The table is `R16G16B16A16_SFLOAT` and holds **radiance**. There is no transfer in
+the bake, nothing to undo in the shader, and no ceiling for a palette to exceed.
 
-| | Worst error |
-|---|---|
-| Absolute, anywhere | 0.0105 (half an encoded step at the top of the range is 0.0118) |
-| Relative, above 0.1 | 2.1 percent |
-| Relative, above 0.01 | 6.5 percent |
-| Relative, above 0.002 | 13.4 percent |
+It used to be RGBA8 holding `sqrt(v/3)`, squared back in `skylut.frag`, with 3.0
+compiled into both sides and `Bake` refusing any palette whose brightest texel
+passed it. That was not a choice; it was the only CPU upload the engine had. It
+has `CreateTextureRGBA16F` now (issue #178, and this package is that issue's
+worked example), and the whole encoding went with the move.
 
-The relative figure is `2*(0.5/255)/sqrt(v/3)`: it is the square transfer and
-nothing else, and it cannot be improved by choosing a different curve — any
-monotone transfer spending 255 levels over a 0-to-3 range lands within a few
-percent of this. **It can only be improved by a wider format, and there is no
-public way to upload one.** `CreateTexture`, `CreateDataTexture`,
-`CreateTextureLinear` and `CreateTextureNearest` are all RGBA8, and
-`CreateRenderTarget` takes no CPU pixels. That is a rule-14 gap and it is filed
-as one rather than patched here; see [below](#the-engine-gap).
+What it cost and what it costs, measured over the whole default table against the
+model evaluated at each texel's own coordinates — `TestTheTableIsTheModel`, which
+logs all four lines:
+
+| | `RGBA8`, `sqrt(v/3)` | `RGBA16F`, radiance |
+|---|---|---|
+| Relative, above 0.1 | 2.1 percent | **0.0488 percent** |
+| Relative, above 0.01 | 6.5 percent | **0.0488 percent** |
+| Relative, above 0.002 | 13.4 percent | **0.0488 percent** |
+| Absolute, anywhere | 0.0105 | **0.00098** |
+| Size | 256 KB, plus 85 KB of mip levels nothing read | **512 KB, no chain** |
+
+The eight-bit figure was `2*(0.5/255)/sqrt(v/3)` — the transfer and nothing else,
+unimprovable by any other curve over 255 levels. The half-float figure is
+`2^-11`, half a step of a 10-bit significand, and **it is the same at every
+level**, which is the whole shape of the change: the eight-bit table was worst in
+absolute terms at the top of its range and worst in relative terms at the bottom,
+and this one is relative everywhere. The three rows reading alike is the result,
+not a copy-paste.
+
+Three more things went with the transfer:
+
+- **The ceiling, and `Bake`'s refusal.** The default palette's brightest texel is
+  **2.504** — in red, looking straight at a sun 1.5 degrees up, where the tight
+  halo, the broad wash and the twilight horizon colour all peak together — which
+  used to be 84 percent of a 3.0 range. Half-float reaches 65504.
+  `TestABrightPaletteNeedsNoRefusing` bakes a palette five times Earth's, peaking
+  at 5.750, and holds it to the same 0.0488 percent.
+- **Interpolation in an encoded domain.** Both blends — the sampler's inside a
+  texel pair and the shader's `mix` across two sun slices — bowed toward the
+  darker of two neighbours, consistently, because the hardware cannot filter in a
+  space it does not know about. They are in linear radiance now.
+- **`Bake`'s signature.** It returns `[]uint16` of half-float bits where it
+  returned `[]byte`. That is an **api break** on an experimental package, recorded
+  here and in `verified`; `renderer.Float16` and `renderer.Float16Value` are the
+  transfer in both directions.
+
+What is left is the table's own resolution, which is a different thing from its
+precision: 64 by 32 by 32 texels of a smooth function, interpolated. That has not
+changed and this page's axis table is where it is described.
+
+The cost of the move is **256 KB** of video memory, against a frame this package
+exists to make cheaper. See [Cost](#cost), which is unchanged — the fetch is the
+same fetch, minus a multiply.
 
 ## The day: four keys
 
@@ -293,7 +324,8 @@ changing `bake.go`.
 | `glyphengine.EnvironmentSource` / `EnvironmentState` | The per-frame light, air and `DrawSky`. |
 | `glyphengine.StaticSource` | Called, not repeated, for the light and the air — the same choice `x/sky`'s fixed-hour path makes, for the same reason. |
 | `glyphengine.SkyPalette`, `DefaultSkyPalette` | The six endpoints the table is baked from. |
-| `renderer.Renderer.CreateDataTexture`, `DestroyTexture` | The table. The api-listed constructor, and the right one: the table holds numbers, so an sRGB decode would corrupt every one of them. |
+| `renderer.Renderer.CreateTextureRGBA16F`, `DestroyTexture` | The table, at `TextureOptions{Filter: FilterLinear}` — the sampler is what interpolates two of the three axes. |
+| `renderer.TextureOptions`, `renderer.Float16`, `renderer.Float16Value` | The sampler choice, and the transfer in both directions: `Bake` encodes with the first and the unit tests read the table back with the second. |
 | `renderer.SetShaderTexture`, `renderer.ShaderTextureSlots` | Binding it. |
 | `shaders/include`'s `FS` | Reading `atmosphere.inc` back in a test, and `-I` for the compile. |
 | The fixed shader layouts in [render-targets.md](../../../docs/agents/render-targets.md) | Set 1 binding 10 for the table, and the push block member order that lands `sunColor.w` and `fog.zw` where the recorder writes them. |
@@ -307,6 +339,16 @@ game that needs all four cannot use this sky.
 
 ## Cost
 
+> **These figures are PRE-MOVE and await re-measurement.** They were taken with
+> the RGBA8 `sqrt(v/3)` table and the squaring that went with it, before the move
+> to `R16G16B16A16_SFLOAT` (issue #178). What changed in the fetch is small and in
+> this package's favour — two vec3 multiplies gone from the fragment, no mip chain to
+> allocate — and against it the table is 512 KB instead of 256, so a sampler fetch
+> costs more bandwidth. Neither direction is a guess worth publishing: the numbers
+> below are the old build's, and `task xskylut -cost` has not been re-run because
+> a timing comparison taken while another process holds the GPU is not a
+> measurement. Treat the shape as indicative and the digits as stale.
+
 Measured by `task xskylut`, on a scene that is nothing but sky: a camera at the
 origin pitched up 0.6 radians with no geometry at all, so every pixel is a dome
 fragment and the sky pass's own GPU bracket (`renderer.PassSky`) is the cost of
@@ -314,7 +356,8 @@ shading a full frame of it. 640x480, MSAA off, 300 frames with the first 60
 discarded, three interleaved trials of four configurations.
 
 Three independent runs of the whole comparison, each figure the mean of that
-run's three interleaved trials, in milliseconds. RX 7900 XTX, 2026-10-03.
+run's three interleaved trials, in milliseconds. RX 7900 XTX, 2026-10-03, **with
+the eight-bit table**.
 
 | | sky pass | cloud pass | frame |
 |---|---|---|---|
@@ -359,12 +402,12 @@ than because 13 percent needed the room.
 | The keys are `x/sky`'s cycle at four hours: sun direction to the bit, directional light and ambient to 1e-6 | `TestDefaultKeysAreXSkysCycle` |
 | What four keys cost: the largest sun-elevation disagreement over the whole cycle | `TestTheSunAgreesBetweenTheKeysToo` |
 | Every axis inverts the shader's mapping, and the ends are the ends | `TestAxesInvertTheShadersMapping` |
-| The shader's four grid constants are the bake's, and it fetches with `textureLod` | `TestShaderAndBakeAgreeOnTheGrid` |
 | The engine's `atmosphere.inc` still says what `bake.go` copied | `TestAtmosphereIncStillSaysWhatWeCopied` |
 | The gradient falls from horizon to zenith at all 32 hours, with the floor split where there is light to measure | `TestTheGradientFallsFromHorizonToZenith` |
 | The sun's side is brighter at dawn, which is the proximity axis doing anything | `TestTheSunSideIsBrighterAtDawn` |
-| The decoded table is the model, and by how much it is not | `TestTheTableIsTheModel`, `TestTheDefaultPaletteHeadroom` |
-| A palette too bright for the encoding is refused rather than clipped | `TestBakeRefusesAPaletteItCannotEncode` |
+| The decoded table is the model, and by how much it is not | `TestTheTableIsTheModel`, `TestTheDefaultPaletteBrightestTexel` |
+| A palette five times Earth's bakes, because there is no ceiling left to refuse | `TestABrightPaletteNeedsNoRefusing` |
+| The shader's grid matches the bake, it fetches level 0, and it does NOT decode | `TestShaderAndBakeAgreeOnTheGrid` |
 | The state is `StaticSource` plus one flag, and every zero in it is load-bearing | `TestStateIsStaticSourcePlusTheDome` |
 | The directional light goes out when the sun sets | `TestTheSunGoesOutWhenItSets` |
 | The clock wraps, and advances in simulation seconds through `Scene.Tick` | `TestTheClockWrapsAndAdvancesInSeconds` |
@@ -380,30 +423,44 @@ bloom and no camera in the way; the gate reads what a frame actually does with
 them, through the sampler, the slice blend, the tonemap and eight more bits of
 rounding.
 
-Every unit check above was broken and watched to fail — eighteen breaks,
-including the two in the shader and one in the engine's own `atmosphere.inc` —
-and each one's message is recorded in the comment above it. The gate's break is
+Every unit check above was broken and watched to fail, and each break's observed
+message is recorded in the comment above the check it broke — including three in
+the shader (a grid constant, the `textureLod`, and putting the squaring back) and
+one in the engine's own `atmosphere.inc`. The count is deliberately not given
+here: this page said "eighteen" before the move added breaks and replaced two
+others, and a tally in prose is a number that goes stale without anything
+noticing. Read the comments. The gate's break is
 re-runnable and needs no SDK: `lutskycheck -flat` binds one constant texel over
 the table through the same `SetShaderTexture` slot, from outside the package,
-which is "sample a constant texel" without touching the shader.
+which is "sample a constant texel" without touching the shader. It builds that
+texel with `renderer.CreateTextureRGBA16F` too, so the break goes in through the
+same constructor the table does rather than through a narrower one that could
+behave differently.
 
-## The engine gap
+## The engine gap, and what closing it looked like
 
-**There is no public way to upload a texture wider than eight bits per channel.**
-All four of `CreateTexture`, `CreateDataTexture`, `CreateTextureLinear` and
-`CreateTextureNearest` are `R8G8B8A8`, and `CreateRenderTarget` — which does have
-`TargetRGBA16F` — takes no CPU pixels. A lookup table holding radiance is the
-case that wants one: the numbers above are the entire reason this sky bands where
-`x/sky`'s does not, and they are a property of the format rather than of anything
-in this package.
+This section used to read "**there is no public way to upload a texture wider
+than eight bits per channel**", with the error table above as the entire reason
+this sky banded where `x/sky`'s did not. It is kept, rewritten, because the loop
+it went through is the one [`x/README.md`](../../README.md#dependency-direction)
+describes and the record of a closed gap is more useful than its absence.
 
-Filed as a rule-14 issue against the engine rather than patched from here, which
-is the loop [`x/README.md`](../../README.md#dependency-direction) describes. Two
-smaller ones noticed with it, both documentation rather than code:
-`renderer.ShaderTextureSlots` is not on an `api` list although
-`renderer.SetShaderTexture` is, and neither `CreateTextureLinear` nor
-`CreateTextureNearest` is on one either — this package uses `CreateDataTexture`
-because it is the one that is.
+What happened: the gap was filed as a rule-14 issue against the engine (#178)
+rather than patched from here, the engine grew `CreateTextureRGBA16F` and
+`CreateTextureR32F` with `TextureOptions` and the half-float transfer, and this
+package moved onto them as the issue's worked example and re-measured. The
+engine's own page for them is
+[`docs/agents/textures.md`](../../../docs/agents/textures.md); the mechanism is
+the upload path and the format, and the opinion — which range of radiance a sky
+needs and how finely — stayed here.
+
+The two documentation gaps noticed alongside it are closed in the same change:
+`renderer.ShaderTextureSlots` is on
+[`render-targets.md`](../../../docs/agents/render-targets.md)'s `api` list beside
+`SetShaderTexture`, and the whole constructor family — `CreateTexture`,
+`CreateTextureLinear`, `CreateTextureNearest` and the `Load*` pair, none of which
+was on any list — is on `textures.md`. This package used `CreateDataTexture`
+because it was the only listed one; it now uses the one that is right.
 
 ## Failure modes
 
@@ -417,9 +474,13 @@ because it is the one that is.
   one of the two places it has to be set. See
   [the palette is baked](#the-palette-is-baked-and-that-is-the-real-cost).
 - **No clouds, no stars, no sun.** Working as intended; use `x/sky`.
-- **`New` returns "the baked sky reaches ... above the 3.0 the 8-bit encoding
-  spans".** A palette bright enough to clip the table. Dim it, or use `x/sky`,
-  whose dome reads the palette per frame and has no ceiling.
+- **A dark dome, black at night, with the light and the fog right.** A
+  `skylut.frag` that still squares its fetch against a table that holds radiance.
+  `TestShaderAndBakeAgreeOnTheGrid` fails on it; a stale committed `.spv` is the
+  way it gets there, so run `task xskylut:shaders`.
+- **A palette bright enough to clip the table.** No longer a thing: `Bake`
+  refused one above 3.0 when the table was eight-bit, and half-float has no
+  ceiling.
 - **A thin wrong-coloured ring around the sun at some hours.** The half-texel
   inset on the proximity axis has been lost, so the sampler's filter is reaching
   across a slice boundary into the next hour's sky.

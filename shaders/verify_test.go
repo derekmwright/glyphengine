@@ -31,7 +31,7 @@ import (
 // `task ci` runs, and which is where a stale one of those three is caught.
 //
 // The count assertion below is what stops a glob that stopped matching from
-// passing here by having nothing left to check. 68 sources today; the floor is
+// passing here by having nothing left to check. 69 sources today; the floor is
 // 60, low enough not to need editing for a new shader and high enough that losing
 // a whole glob trips it -- verified by narrowing the *.frag glob to sky*.frag,
 // which leaves 44 and fails.
@@ -77,7 +77,7 @@ func TestCommittedSPIRVMatchesGLSL(t *testing.T) {
 		t.Fatal(err)
 	}
 	sources = append(sources, probes...)
-	for _, pattern := range []string{"../cmd/apppasscheck/*.vert", "../cmd/apppasscheck/*.frag", "../cmd/apppasscheck/*.comp", "../examples/*/*.vert", "../examples/*/*.frag", "../examples/*/*.comp"} {
+	for _, pattern := range []string{"../cmd/apppasscheck/*.vert", "../cmd/apppasscheck/*.frag", "../cmd/apppasscheck/*.comp", "../cmd/widetexcheck/*.frag", "../examples/*/*.vert", "../examples/*/*.frag", "../examples/*/*.comp"} {
 		app, err := filepath.Glob(pattern)
 		if err != nil {
 			t.Fatal(err)
@@ -85,7 +85,7 @@ func TestCommittedSPIRVMatchesGLSL(t *testing.T) {
 		sources = append(sources, app...)
 	}
 	if len(sources) < 60 {
-		t.Fatalf("%d shader sources found, and there were 68; the globs are not matching what this test thinks they are", len(sources))
+		t.Fatalf("%d shader sources found, and there were 69; the globs are not matching what this test thinks they are", len(sources))
 	}
 
 	out := t.TempDir()
