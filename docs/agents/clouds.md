@@ -8,30 +8,49 @@ capability: environment
 status: stable
 since: v0.4.0
 api:
-  - glyphengine.Sky.CloudSteps
-  - glyphengine.Sky.Cirrus
+  - sky.Sky.CloudSteps
+  - sky.Sky.Cirrus
+  - sky.CloudsOff
+  - sky.CloudsLow
+  - sky.CloudsHigh
+  - sky.Shaders
+  - sky.Fill
+  - glyphengine.EnvironmentState.CloudSteps
   - glyphengine.EnvironmentState.Cirrus
+  - renderer.ShaderSet.CloudsFrag
+  - renderer.SceneLighting.CloudSteps
   - renderer.SceneLighting.Cirrus
-  - glyphengine.CloudsOff
-  - glyphengine.CloudsLow
-  - glyphengine.CloudsHigh
 requires:
   - cgo
   - vulkan-runtime
 assets: none
 example: examples/09-water
 run: task example:09-water -- -background -time 0.755 -pitch -0.55 -yaw 1.771 -cirrus 0.5
-verified: 2026-10-02 # the ambient fill reads the frame's EnvironmentState.SkyPalette, which a custom source can now supply (#161 step 3)
+verified: 2026-10-02 # the cloud shape and lighting are x/sky/clouds.frag now, in the sky slot; the half-res target, its history, its barriers and the palette descriptor stayed in the engine (#161 step 4)
 ---
 
 # Clouds
 
-```go
-import glyph "github.com/derekmwright/glyphengine"
+The cloud *shape and lighting* are `x/sky/clouds.frag`. The half-resolution
+target they march into, its temporal history, its barriers and the descriptor set
+that carries the palette are the engine's. `CloudsFrag` is one of the three
+stages in the sky slot (see [environment](environment.md)), and the engine embeds
+nothing for it: with it nil no cloud pipeline is created and no march is recorded.
+Both halves are needed.
 
-func outdoorEnvironment() *glyph.Environment {
-    env := glyph.DefaultEnvironment()
-    env.Sky.CloudSteps = glyph.CloudsHigh
+```go
+import (
+    glyph "github.com/derekmwright/glyphengine"
+    xsky "github.com/derekmwright/glyphengine/x/sky"
+)
+
+// the shader half, at glyph.New
+opts := []glyph.Option{glyph.WithShaders(xsky.Shaders())}
+
+// the values half
+func outdoorEnvironment() *xsky.Environment {
+    env := xsky.DefaultEnvironment()
+    env.Sky.CloudSteps = xsky.CloudsHigh
     env.Sky.Cirrus = 0.5 // optional high wisps; 0 disables, 1 is full strength
     return env
 }
@@ -43,11 +62,12 @@ sets the coarse ray stride; occupied intervals use quarter-sized steps, with a
 budget of four times the count. It is not a fixed total number of samples.
 
 `Cirrus` is independent. Set `CloudSteps = CloudsOff` and `Cirrus > 0` for only
-high clouds, or set both to zero for clear sky. `DefaultSky` leaves cirrus at
+high clouds, or set both to zero for clear sky. `sky.DefaultSky` leaves cirrus at
 zero so existing games keep their cloud coverage. Both controls can change at
 runtime without rebuilding GPU resources. Custom `EnvironmentSource` users
 supply the same fields in `EnvironmentState`; direct renderer callers use
-`renderer.SceneLighting`.
+`renderer.SceneLighting`. None of the three reaches the march without a shader in
+the slot to run it.
 
 ## Sunset and night
 
@@ -68,9 +88,14 @@ byte-identical to the previous lighting with cirrus disabled.
 
 Night direct light remains `(0.030, 0.036, 0.055)`, deliberately boosted for
 legibility. Ambient fill comes from the frame's `EnvironmentState.SkyPalette` --
-`Scene.SetSkyPalette` for a built-in source, the source's own otherwise -- shared
-with the dome, fog and water. Changing direct cloud-light colours requires replacing
-`ShaderSet.CloudsFrag` through `WithShaders`.
+`Scene.SetSkyPalette` for a source with no opinion about it, the source's own
+otherwise -- shared with the dome, fog and water. The palette and its default
+stayed in the engine for that reason: fog and water read it with no clouds and no
+dome at all.
+
+Changing direct cloud-light colours means supplying a different `CloudsFrag`.
+`sky.Fill` is the way to keep this package's dome and stars and replace only the
+clouds: it leaves any stage the caller already set alone.
 
 ## Rendering and cost
 
@@ -82,17 +107,26 @@ and distance/horizon fades. It has no volumetric self-shadowing.
 
 Both layers draw into the same half-resolution target. RGB holds scattered
 radiance and alpha holds transmittance. Cirrus is composed behind cumulus;
-`sky.frag` then composites that result over the full-resolution dome. The
+`x/sky/sky.frag` then composites that result over the full-resolution dome. The
 cloud pass draws the full target; only the later sky composite is rejected
 by terrain depth. Cirrus adds no render pass, GPU resource or CPU allocation.
+
+The target, its sampler, its descriptor sets and the two barriers around the
+march are `renderer/clouds.go` and stay in the engine. That is a deliberate
+split rather than where the knife happened to fall: those sets are the only place
+in the engine that writes binding 1 of the shared texture set, which is the
+per-frame block the *dome* reads the palette out of. A dome supplied with no
+cloud stage beside it is a supported configuration, so the target cannot be
+conditional on `CloudsFrag` â€” and `shaders/sky.vert`, the fullscreen triangle the
+march draws, is shared with seven other passes besides.
 
 Measured on a Radeon RX 7900 XTX, three interleaved 200-frame runs of
 `09-water -time 0.755 -pitch -0.38 -yaw 1.771` at 1280x720/MSAA 4, fixed clock:
 
 | Setting | Cloud pass | Whole GPU frame |
 | --- | --- | --- |
-| Cumulus, cirrus 0 | 0.863–0.868 ms | 1.249–1.264 ms |
-| Cumulus, cirrus 1 | 0.888–0.892 ms | 1.281–1.294 ms |
+| Cumulus, cirrus 0 | 0.863-0.868 ms | 1.249-1.264 ms |
+| Cumulus, cirrus 1 | 0.888-0.892 ms | 1.281-1.294 ms |
 
 These are one view and one GPU. Measure the game's workload with `task bench`
 or `GLYPHENGINE_TIMING=tsv`; grass or other passes can dominate a real scene.
@@ -116,9 +150,19 @@ pixel and four samples from the **history** texture; it is not a current-frame
 neighbourhood clamp. Still-image checks do not establish motion quality.
 
 History buffers use a frame counter, not the swapchain image index, with
-`maxFramesInFlight + 1` targets. The pass runs every frame, including when both
-layers are disabled, so its sampled image always has a valid layout. Zero
-steps and zero cirrus write fully transmissive pixels.
+`maxFramesInFlight + 1` targets (`cloudBufferCount`). With a cloud shader in the
+slot the pass runs every frame, including when both layers are disabled: zero
+steps and zero cirrus write fully transmissive pixels, so the sampled image
+always has a valid layout and the dome's composite is a no-op.
+
+With **no** cloud shader the march is skipped outright â€” no barrier, no pass, no
+draw â€” and the valid layout comes from `primeSampledImages` instead, which clears
+the targets once at creation and after a resize. It clears them to
+`{0, 0, 0, 1}`, and alpha is transmittance, so that is exactly the no-op the
+march would have written: `skyColor * a + rgb` is the identity at `a = 1`. A dome
+with no clouds beside it is therefore correct rather than undefined, and it is the
+prime that makes that a guarantee rather than a coincidence about what fresh
+device memory happened to hold.
 
 There is no weather map, user-specified layer altitude or cloud shadow on the
 ground. Lowering `CloudSteps` also changes which noise octaves resolve, so it
@@ -139,3 +183,13 @@ Also run `task ci`, `task validate`, `task determinism`, `task sky`, and
 `task skypalette` after renderer changes. For visual review, the example accepts
 `-background` and all automated tasks set `GLYPHENGINE_BACKGROUND=1` to avoid
 requesting keyboard focus.
+
+Editing `clouds.frag` now means recompiling it with `task xsky:shaders`, not
+`task shaders`: the source and its committed `.spv` are in `x/sky`, and
+`x/sky/spirv_test.go` fails under `task ci` if the two have parted company. The
+`.spv` is compiled through the engine's exported include set â€” `clouds.frag`
+calls `atmSkyPalette` and `atmTwilight` out of `atmosphere.inc` â€” so a changed
+signature in that set fails at build rather than at draw. `task skymigration`
+holds the other end: one of its three scenes is this example at its default hour
+with cumulus on, compared against a capture taken before the shader left the
+engine.

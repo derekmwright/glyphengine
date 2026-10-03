@@ -22,6 +22,7 @@ import (
 	"github.com/derekmwright/glyphengine/input"
 	"github.com/derekmwright/glyphengine/renderer"
 	"github.com/derekmwright/glyphengine/shaders"
+	xsky "github.com/derekmwright/glyphengine/x/sky"
 	"github.com/go-gl/mathgl/mgl32"
 )
 
@@ -56,10 +57,10 @@ type game struct {
 
 func (g *game) Init(e *glyph.Engine) error {
 	r := e.Renderer()
-	e.Env = &glyph.Environment{
+	e.Env = &xsky.Environment{
 		Sun:     &glyph.DirectionalLight{Direction: [3]float32{0.6, 0.8, 0.3}, Color: lightColor},
 		Ambient: &glyph.AmbientLight{Color: [3]float32{0.10, 0.12, 0.16}},
-		Sky:     &glyph.Sky{FixedSunElevation: 0.4},
+		Sky:     &xsky.Sky{FixedSunElevation: 0.4},
 	}
 	plane, err := r.CreatePlane(160, 160)
 	if err != nil {
@@ -232,7 +233,10 @@ func main() {
 	if *passes != "on" && *passes != "off" {
 		log.Fatal("-passes must be on or off")
 	}
-	sh := renderer.DefaultShaders()
+	// The sky slot and this example's own lit shader in one set. Fill leaves
+	// every stage it is not responsible for alone, so the override below still
+	// lands.
+	sh := xsky.Fill(renderer.DefaultShaders())
 	if *passes == "on" {
 		sh.LitFrag = litFrag
 	}

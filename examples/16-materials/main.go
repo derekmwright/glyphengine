@@ -42,6 +42,7 @@ import (
 	glyph "github.com/derekmwright/glyphengine"
 	"github.com/derekmwright/glyphengine/input"
 	"github.com/derekmwright/glyphengine/renderer"
+	xsky "github.com/derekmwright/glyphengine/x/sky"
 )
 
 func init() {
@@ -342,14 +343,16 @@ func (g *game) Init(e *glyph.Engine) error {
 	// the sun overhead the relief flattens out, because the shading difference
 	// between a tile face and its bevel is largest when the light is nearly
 	// parallel to the surface.
-	e.SetDayCycleSpeed(g.speed / 150.0)
-	e.SetTimeOfDay(0.30)
+	env := xsky.DefaultEnvironment()
+	env.Cycle.TimeOfDay = 0.30
+	env.Cycle.Speed = g.speed / 150.0
 	if g.tod >= 0 {
 		// Freeze the clock, so a given time of day can be inspected and
 		// screenshots of it are reproducible. Same flag as 09-water.
-		e.SetTimeOfDay(g.tod)
-		e.SetDayCycleSpeed(0)
+		env.Cycle.SetTimeOfDay(g.tod)
+		env.Cycle.Speed = 0
 	}
+	e.Scene.Env = env
 
 	// ACES filmic. Measured against the alternatives on this scene, at a fixed
 	// sun, on the two things that matter here -- how much surface shading
@@ -414,6 +417,7 @@ func main() {
 	flag.Parse()
 
 	opts := []glyph.Option{
+		glyph.WithShaders(xsky.Shaders()),
 		glyph.WithTitle("GlyphEngine - 16 Materials"),
 		glyph.WithWindowSize(*width, *height),
 		glyph.WithMSAA(4),

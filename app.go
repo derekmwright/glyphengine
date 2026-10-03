@@ -191,8 +191,17 @@ func WithUIGlow() Option {
 // a game can override one pipeline without supplying all of them:
 //
 //	custom := renderer.DefaultShaders()
-//	custom.SkyFrag = myAlienSkySpv
+//	custom.LitFrag = myLitFragSpv
 //	e, err := glyph.New(&game{}, glyph.WithShaders(custom))
+//
+// It is also how a sky gets drawn at all. Three stages -- SkyFrag, StarsFrag and
+// CloudsFrag -- are the sky slot, and the engine embeds none of them, so an
+// engine with no shader option has no dome, no stars and no clouds. x/sky is the
+// sky the engine used to ship:
+//
+//	e, err := glyph.New(&game{}, glyph.WithShaders(sky.Shaders()))
+//
+// See the sky slot on renderer.ShaderSet.
 //
 // This is a straight passthrough to renderer.WithShaders, and exists because
 // without it the seam was unreachable from Engine. A game that wanted a sky
@@ -1277,37 +1286,18 @@ func (e *Engine) Elapsed() float32 { return e.elapsed }
 // the same frame in every run and a capture of it is comparable.
 func (e *Engine) UnscaledElapsed() float32 { return e.unscaledElapsed }
 
-// SetFogDensity sets the environment's fog density (0 disables fog).
+// SetFogDensity is gone. It worked by type-switching on the three built-in
+// sources to reach their Fog field, and two of those three left for x/sky with
+// the day cycle -- so the engine can no longer reach the fog of the source nearly
+// every scene has. Keeping it would have left `e.SetFogDensity(0.008)` compiling,
+// returning, and doing nothing, which is the exact shape of quietly-green this
+// repository keeps paying for. A game sets fog on the source that owns it:
 //
-// A shortcut for the common case: it reaches the Fog of any of the three
-// built-in sources. It does nothing when the scene uses a custom
-// EnvironmentSource, which owns its own fog — reach through Scene.Env instead.
-func (e *Engine) SetFogDensity(d float32) {
-	// Each case hands back the address of its own Fog field, so a scene with no
-	// Fog at all gets one rather than silently ignoring the call.
-	var fog **Fog
-	switch env := e.Scene.Env.(type) {
-	case *Environment:
-		if env != nil {
-			fog = &env.Fog
-		}
-	case *DayCycleSource:
-		if env != nil {
-			fog = &env.Fog
-		}
-	case *StaticSource:
-		if env != nil {
-			fog = &env.Fog
-		}
-	}
-	if fog == nil {
-		return
-	}
-	if *fog == nil {
-		*fog = &Fog{}
-	}
-	(*fog).Density = d
-}
+//	env := sky.DefaultEnvironment()
+//	env.Fog.Density = 0.008
+//
+// FogDensity below stays: it reads the resolved frame state, so it answers for
+// any source.
 
 // FogDensity returns the current fog density.
 func (e *Engine) FogDensity() float32 { return e.Scene.Environment().FogDensity }
@@ -2321,6 +2311,26 @@ func (e *Engine) handleDebugKeys() {
 		r.SetTonemap(exposure, float32(next), white)
 		log.Printf("debug: tonemap curve %d, %s", next, tonemapCurveNames[next])
 	}
+}
+
+// smoothstep is the standard Hermite interpolant, matching GLSL's, so a curve
+// computed here and the same curve computed in a shader agree.
+//
+// It arrived with the day/night cycle and left with it; shaftEdgeFade is the
+// engine's one remaining caller, so it lives beside it rather than in a file of
+// its own. x/sky has its own copy for its curves, which is a duplicated four
+// lines of a function defined by the GLSL spec rather than a shared seam.
+func smoothstep(edge0, edge1, x float32) float32 {
+	if edge1 == edge0 {
+		return 0
+	}
+	t := (x - edge0) / (edge1 - edge0)
+	if t < 0 {
+		t = 0
+	} else if t > 1 {
+		t = 1
+	}
+	return t * t * (3 - 2*t)
 }
 
 // Light-shaft screen-edge fade. See shaftEdgeFade.

@@ -21,6 +21,26 @@ import "github.com/derekmwright/glyphengine/shaders"
 // push-constant ranges the engine's pipelines declare. A mismatch is a
 // pipeline-creation failure at startup, or — worse — a shader that links and
 // draws nothing. Run with WithValidation while developing one.
+//
+// # The sky slot
+//
+// SkyFrag, StarsFrag and CloudsFrag are the one exception to the fallback above:
+// DefaultShaders leaves all three nil, and nil here means absent rather than
+// "take the engine's". No pipeline is created for a nil stage and no draw is
+// recorded for it, so an engine with none of the three has no dome, no stars and
+// no cloud march, and a frame with no geometry in it is the clear colour.
+//
+// That is deliberate, and it is the shape ADR 0012 calls a slot: everything
+// about WHEN and WHERE those three are drawn is the engine's -- the far-plane
+// depth state, the pass order, the alpha the dome writes for the stars and the
+// discs to blend against, the half-resolution cloud target and its barriers --
+// and everything about what they LOOK like is an opinion, which the engine does
+// not ship. x/sky fills the slot with the sky the engine used to have:
+//
+//	glyph.WithShaders(sky.Shaders())
+//
+// SkyVert is not in the slot. It is the fullscreen triangle eight passes draw,
+// including the tonemap, so it has a default like everything else.
 // Application data can be supplied through Renderer.SetShaderParameters;
 // see ShaderParameterBytes for its separate, fixed descriptor contract.
 type ShaderSet struct {
@@ -38,20 +58,23 @@ type ShaderSet struct {
 	ShadowVert, ShadowFrag     []byte // depth-only shadow pass
 	ShadowSkinnedVert          []byte // depth-only, skinned
 	ShadowInstancedVert        []byte // depth-only, model matrix per instance
-	SkyVert, SkyFrag           []byte // sky; set 0=clouds/environment, set 1=shadow/lights (see docs/agents/game-loop.md)
+	// SkyVert is the fullscreen triangle at the reverse-Z far plane, shared by
+	// eight passes (see shaders.SkyVertSpv). SkyFrag is the dome, and it is one
+	// of the three stages of the SKY SLOT below.
+	SkyVert, SkyFrag []byte // sky; set 0=clouds/environment, set 1=shadow/lights (see docs/agents/game-loop.md)
 	// SkyVolumetricFrag is the in-scattering over the pixels nothing else
 	// covered -- a beam aimed at the night sky. It is a draw of its own and
 	// not four lines at the end of SkyFrag; skyvolumetric.frag records the
 	// three pixels that cost. Uses SkyVert.
 	SkyVolumetricFrag            []byte
-	StarsVert, StarsFrag         []byte // star field
+	StarsVert, StarsFrag         []byte // star field; StarsFrag is in the sky slot
 	GrassVert, GrassFrag         []byte // instanced grass
 	GrassBakeVert, GrassBakeFrag []byte // impostor atlas bake
 	GrassImpostorVert            []byte // billboard LOD (pairs with GrassFrag)
 	WaterVert, WaterFrag         []byte // animated water surface
 	GodRayFrag                   []byte // screen-space light shafts (uses SkyVert)
 	TonemapFrag                  []byte // HDR resolve to the swapchain (uses SkyVert)
-	CloudsFrag                   []byte // volumetric clouds at half res (uses SkyVert)
+	CloudsFrag                   []byte // volumetric clouds at half res (uses SkyVert); in the sky slot
 	BloomPrefilterFrag           []byte // bloom bright-pass (uses SkyVert)
 	BloomDownFrag                []byte // bloom downsample (uses SkyVert)
 	BloomUpFrag                  []byte // bloom upsample (uses SkyVert)
@@ -63,6 +86,9 @@ type ShaderSet struct {
 
 // DefaultShaders returns the shader set the engine embeds. Copy it, override
 // the stages you care about, and pass the result to WithShaders.
+//
+// SkyFrag, StarsFrag and CloudsFrag come back nil: the engine embeds no dome,
+// stars or clouds of its own. See the sky slot on ShaderSet.
 func DefaultShaders() ShaderSet {
 	return ShaderSet{
 		TriangleVert:     shaders.TriangleVertSpv,
@@ -87,10 +113,8 @@ func DefaultShaders() ShaderSet {
 		ShadowSkinnedVert:      shaders.ShadowSkinnedVertSpv,
 		ShadowInstancedVert:    shaders.ShadowInstancedVertSpv,
 		SkyVert:                shaders.SkyVertSpv,
-		SkyFrag:                shaders.SkyFragSpv,
 		SkyVolumetricFrag:      shaders.SkyVolumetricFragSpv,
 		StarsVert:              shaders.StarsVertSpv,
-		StarsFrag:              shaders.StarsFragSpv,
 		GrassVert:              shaders.GrassVertSpv,
 		GrassFrag:              shaders.GrassFragSpv,
 		GrassBakeVert:          shaders.GrassBakeVertSpv,
@@ -100,8 +124,6 @@ func DefaultShaders() ShaderSet {
 		WaterFrag:              shaders.WaterFragSpv,
 		GodRayFrag:             shaders.GodRayFragSpv,
 		TonemapFrag:            shaders.TonemapFragSpv,
-
-		CloudsFrag: shaders.CloudsFragSpv,
 
 		BloomPrefilterFrag: shaders.BloomPrefilterFragSpv,
 		BloomDownFrag:      shaders.BloomDownFragSpv,
@@ -118,6 +140,10 @@ func DefaultShaders() ShaderSet {
 
 // withDefaults returns s with every nil stage filled in from the embedded
 // defaults, so callers can override one shader without supplying the rest.
+//
+// The sky slot is absent from the list below on purpose, not by omission: there
+// is nothing embedded to fall back to, and a nil SkyFrag, StarsFrag or
+// CloudsFrag has to survive this so New can see it and skip the pipeline.
 func (s ShaderSet) withDefaults() ShaderSet {
 	d := DefaultShaders()
 	pairs := []struct {
@@ -137,16 +163,15 @@ func (s ShaderSet) withDefaults() ShaderSet {
 		{&s.ShadowVert, d.ShadowVert}, {&s.ShadowFrag, d.ShadowFrag},
 		{&s.ShadowSkinnedVert, d.ShadowSkinnedVert},
 		{&s.ShadowInstancedVert, d.ShadowInstancedVert},
-		{&s.SkyVert, d.SkyVert}, {&s.SkyFrag, d.SkyFrag},
+		{&s.SkyVert, d.SkyVert},
 		{&s.SkyVolumetricFrag, d.SkyVolumetricFrag},
-		{&s.StarsVert, d.StarsVert}, {&s.StarsFrag, d.StarsFrag},
+		{&s.StarsVert, d.StarsVert},
 		{&s.GrassVert, d.GrassVert}, {&s.GrassFrag, d.GrassFrag},
 		{&s.GrassBakeVert, d.GrassBakeVert}, {&s.GrassBakeFrag, d.GrassBakeFrag},
 		{&s.GrassImpostorVert, d.GrassImpostorVert},
 		{&s.WaterVert, d.WaterVert}, {&s.WaterFrag, d.WaterFrag},
 		{&s.GodRayFrag, d.GodRayFrag},
 		{&s.TonemapFrag, d.TonemapFrag},
-		{&s.CloudsFrag, d.CloudsFrag},
 		{&s.BloomPrefilterFrag, d.BloomPrefilterFrag},
 		{&s.BloomDownFrag, d.BloomDownFrag},
 		{&s.BloomUpFrag, d.BloomUpFrag},

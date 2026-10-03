@@ -36,6 +36,7 @@ import (
 	glyph "github.com/derekmwright/glyphengine"
 	"github.com/derekmwright/glyphengine/input"
 	"github.com/derekmwright/glyphengine/renderer"
+	xsky "github.com/derekmwright/glyphengine/x/sky"
 )
 
 func init() {
@@ -60,6 +61,8 @@ type game struct {
 	fireflies *glyph.ParticleEmitter
 	sparks    *glyph.ParticleEmitter
 	dust      *glyph.ParticleEmitter
+
+	tod float32
 
 	t float32
 }
@@ -123,8 +126,12 @@ func (g *game) Init(e *glyph.Engine) error {
 	dustCfg.NightOnly = false
 	g.dust = glyph.NewParticleEmitter(dustCfg, -12, 12, -12, 12, 0.4, 0.5, 5.0)
 
-	e.SetTimeOfDay(0.80) // blue hour: fireflies out, geometry still readable
-	e.SetDayCycleSpeed(0)
+	env := xsky.DefaultEnvironment()
+	// Blue hour by default: fireflies out, geometry still readable. It arrives
+	// through the game struct rather than being set after New, because the
+	// cycle is the source's now and the source is built here.
+	env.Cycle.SetTimeOfDay(g.tod)
+	e.Scene.Env = env
 
 	g.camera = glyph.NewCamera(15)
 	g.camera.Pitch = 0.22
@@ -175,6 +182,7 @@ func main() {
 	flag.Parse()
 
 	opts := []glyph.Option{
+		glyph.WithShaders(xsky.Shaders()),
 		glyph.WithTitle("GlyphEngine - 12 Particles"),
 		glyph.WithWindowSize(*width, *height),
 		glyph.WithMSAA(4),
@@ -191,13 +199,12 @@ func main() {
 		opts = append(opts, glyph.WithScreenshot(*shot))
 	}
 
-	e, err := glyph.New(&game{}, opts...)
+	e, err := glyph.New(&game{tod: float32(*tod)}, opts...)
 	if err != nil {
 		log.Fatalf("create engine: %v", err)
 	}
 	defer e.Destroy()
 
-	e.SetTimeOfDay(float32(*tod))
 	e.Run()
 	log.Printf("rendered %d frames", e.FrameCount())
 }

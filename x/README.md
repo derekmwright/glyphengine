@@ -25,9 +25,17 @@ mechanism. The question is whether a reasonable game would want a different one.
 
 When an opinion is found already in the engine core, the response is **an ADR
 naming the seam it moves behind and the `x` package it moves to** — not a quiet
-deletion. The sky, clouds, water and grass are all in the core today and all
-fail the list above; they also hold up committed captures and games already
-built on them. Naming the seam is the work.
+deletion. The sky, the clouds, the water surface and the grass all failed the
+list above and were all in the core; they also hold up committed captures and
+games already built on them, so deleting one because it fails the list would
+break those without replacing them. Naming the seam is the work.
+
+The sky and the clouds have since gone, together, to [`sky`](sky/). What that
+cost is on its page, and worth knowing before starting the next one: an ADR, the
+contract carved on the engine side first (`EnvironmentSource`), a pinned table of
+what every resolved state used to be, three shaders that had to compile to
+byte-identical SPIR-V from their new home, and a capture gate holding the pixels.
+The water surface and the grass are still in the core.
 
 ## Layout
 
@@ -86,6 +94,12 @@ Three parts of that surface are not Go identifiers and are easy to forget:
 - **The GLSL include set** (below): an include's function signatures are as much
   an API as a Go one.
 - **`EnvironmentSource`** and the per-frame values the engine reads from it.
+- **The sky slot** in `renderer.ShaderSet`: `SkyFrag`, `StarsFrag` and
+  `CloudsFrag` are three stages `renderer.DefaultShaders()` deliberately leaves
+  nil, so a nil stage means "no pipeline and no draw" rather than "take the
+  engine's". A package filling it also binds to the descriptor sets, the
+  push-constant packing and the blend and depth states those draws are recorded
+  with, none of which are Go identifiers either.
 
 A breaking change to any of them is announced **in the page's `verified` note and
 in the release notes, in the same change that breaks it**. A page that still
@@ -149,10 +163,22 @@ two.
 
 | Package | What it is | Page |
 |---|---|---|
+| [`sky`](sky/) | The Earth sky: the day cycle, the dome, the sun and moon discs, the stars and the cloud layers | [`sky.md`](sky/sky.md) |
 | [`terrainfield`](terrainfield/) | An island heightmap from value-noise fBm | [`terrainfield.md`](terrainfield/terrainfield.md) |
 | [`water`](water/) | The underwater volume: absorption, the water's own colour and sun shafts | [`water.md`](water/water.md) |
 
-The environment carve, `x/sky` and `x/sky/lut` are steps 3 to 5 of the sequence
-in ADR 0012. `x/water` is step 2, and its page records which parts of the
-atmosphere it deliberately left to a sibling package and why -- that boundary
-argument is the part worth reading before adding the next one.
+`x/sky` is step 4 of the sequence in ADR 0012 and the one the sequence was for:
+an opinion that was already in the engine core, holding up twenty-two committed
+captures and games built on it, moved out behind a gate that holds the pixels
+still (`task skymigration`). Its page records the mechanism-versus-opinion split,
+why the engine kept a *slot* rather than handing the whole thing to an
+application pass set, and the one tuned constant the engine still has. `x/water` is step 2, and its page records which
+parts of the atmosphere it deliberately left to a sibling package — that
+boundary argument and `x/sky`'s are the two worth reading before adding another
+package. `x/sky/lut` is step 5.
+
+A package that supplies shader stages the engine deliberately embeds none of, as
+`x/sky` is the first to do, carries **two halves that have to arrive together**:
+the Go seam (an `EnvironmentSource`, a pass, a component) and the SPIR-V, through
+`glyph.WithShaders(sky.Shaders())`. Neither errors without the other, so say so
+on the page and in the package doc; `x/sky`'s failure modes lead with it.

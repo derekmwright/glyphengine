@@ -39,6 +39,7 @@ import (
 	glyph "github.com/derekmwright/glyphengine"
 	"github.com/derekmwright/glyphengine/input"
 	"github.com/derekmwright/glyphengine/renderer"
+	xsky "github.com/derekmwright/glyphengine/x/sky"
 )
 
 //go:embed assets
@@ -210,14 +211,16 @@ func (g *game) Init(e *glyph.Engine) error {
 	}
 
 	// ── world ──
-	e.SetDayCycleSpeed(1.0 / 300.0)
+	env := xsky.DefaultEnvironment()
+	env.Cycle.Speed = 1.0 / 300.0
 	// Morning sun by default, for long shadows across the grass. A flag because
 	// the sky and star work only shows at night, and the cycle takes five
 	// minutes to get there.
-	e.SetTimeOfDay(g.timeOfDay)
+	env.Cycle.SetTimeOfDay(g.timeOfDay)
 	// Enough haze to hide where the grass stops, not so much that the far side
 	// of the island turns into sky.
-	e.SetFogDensity(0.0075)
+	env.Fog.Density = 0.0075
+	e.Scene.Env = env
 
 	// Third person, pitched down. Grass blades stand about chest-high on this
 	// character, so a level camera buries it in them -- looking down over its
@@ -512,6 +515,7 @@ func main() {
 	flag.Parse()
 
 	opts := []glyph.Option{
+		glyph.WithShaders(xsky.Shaders()),
 		glyph.WithTitle("GlyphEngine - 15 Kitchen Sink"),
 		glyph.WithDebugKeys(),
 		glyph.WithWindowSize(*width, *height),

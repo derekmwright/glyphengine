@@ -19,7 +19,7 @@ engine in. There is no editor application and no runtime that loads your game.
 | Path | Module | Purpose |
 |---|---|---|
 | `/` | `glyphengine` | Engine root package plus subpackages |
-| `/x` | `glyphengine/x` | Opinionated systems on the engine's public seams, one package per system |
+| `/x` | `glyphengine/x` | Opinionated systems on the engine's public seams, one package per system: `sky`, `water`, `terrainfield` |
 | `/examples` | `glyphengine/examples` | Runnable examples, one concept each |
 | `/docs/adr` | — | Architecture decision records and their index |
 | `/docs/agents` | — | Machine-readable capability docs (see below) |
@@ -53,6 +53,11 @@ the `x` packages that happen to import the engine's root package. See
    them with `go:embed`, so without them the module does not build for anyone
    who runs `go get`. `glslc` is an authoring-only dependency. If you edit a
    `.vert`/`.frag`, run `task shaders` and commit the regenerated `.spv`.
+
+   An `x` package commits its own `.spv` beside its GLSL for the same reason
+   and regenerates them through the same mechanism: `task xsky:shaders`,
+   `task xwater:shaders`. The engine embeds no dome, star or cloud shader at all
+   — see rule 14's note on the sky slot.
 
    The shared fragments live in `shaders/include/` and are named bare:
    `#include "lighting.inc"`, resolved by the `-Iinclude` every `glslc`
@@ -155,12 +160,24 @@ the `x` packages that happen to import the engine's root package. See
 
     **When one is found in the core, the response is an ADR naming the seam it
     moves behind and the `x` package it moves to — not a quiet deletion.** The
-    sky, clouds, water and grass all fail the test above, all predate the rule,
-    and all hold up committed captures and games already built on them. Deleting
-    one because it fails the test breaks those without replacing them. Naming
-    the seam is the work; the move is the easy part afterwards. See
+    sky, the clouds, the water surface and the grass all fail the test above, all
+    predate the rule, and all hold up committed captures and games already built
+    on them. Deleting one because it fails the test breaks those without
+    replacing them. Naming the seam is the work; the move is the easy part
+    afterwards. See
     [ADR 0012](docs/adr/0012-an-x-module-for-opinionated-systems.md) and
     [`x/README.md`](x/README.md), which carries the same test as a page.
+
+    The sky and the clouds have gone, to [`x/sky`](x/sky/sky.md). The seam that
+    got them out is worth knowing because the water surface and the grass will
+    want one like it: the engine kept every mechanism — the far-plane triangle,
+    the pass order, the depth states, the cloud target and its barriers — and
+    `renderer.ShaderSet` grew a **sky slot**, three fragment stages
+    (`SkyFrag`, `StarsFrag`, `CloudsFrag`) that `DefaultShaders()` leaves nil and
+    that build no pipeline and record no draw when they are. The engine therefore
+    draws no sky of its own, and `NewScene` leaves `Scene.Env` nil. A package
+    filling a slot like that ships **two halves that must arrive together**, the
+    Go source and the SPIR-V, and neither errors without the other.
 
 ## Architecture decisions
 
@@ -256,6 +273,8 @@ are that pipeline's own real-Blender fixture, in the same spirit as
 | `task ci` | Lint, build, test, race, across all three modules |
 | `task shaders:verify` | The committed `.spv` match their GLSL, compiled with `-Iinclude` (needs the SDK) |
 | `task xwater:shaders` | Recompile `x/water`'s `.spv` through the exported include set; its own test verifies them under `task ci` (needs the SDK) |
+| `task xsky:shaders` | The same for `x/sky`'s dome, star and cloud shaders (needs the SDK) |
+| `task skymigration` | Three scenes render exactly what the built-in sky rendered before it moved to `x/sky`, in pixels and in `env=` (needs a GPU) |
 
 ### Signing off a fix
 

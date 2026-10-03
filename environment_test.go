@@ -1,7 +1,6 @@
 package glyphengine
 
 import (
-	"math"
 	"testing"
 
 	"github.com/go-gl/mathgl/mgl32"
@@ -37,46 +36,21 @@ func TestNilEnvironmentIsEmpty(t *testing.T) {
 	s.Tick(1.0 / 60)
 }
 
-// TestEnvironmentPiecesAreIndependent checks each piece can be present or
-// absent on its own, which is what "composable" has to mean to be worth doing.
-func TestEnvironmentPiecesAreIndependent(t *testing.T) {
-	t.Run("sky without a cycle", func(t *testing.T) {
-		env := &Environment{Sky: DefaultSky()}
-		s := env.State()
-		if !s.DrawSky {
-			t.Error("sky not drawn")
-		}
-		// No cycle means no bodies to place, so no discs.
-		if s.DrawSun || s.DrawMoon {
-			t.Error("celestial discs drawn with no cycle to position them")
-		}
-		if s.SunColor != ([3]float32{}) {
-			t.Errorf("sun light %v with no cycle and no fixed sun", s.SunColor)
-		}
-	})
-
-	t.Run("cycle without a sky", func(t *testing.T) {
-		env := &Environment{Cycle: &DayNight{TimeOfDay: 0.5}}
-		s := env.State()
-		if s.DrawSky || s.DrawStars || s.DrawSun || s.DrawMoon {
-			t.Error("something was drawn with no Sky")
-		}
-		// The light still works: a game can supply its own skybox and keep the
-		// engine's sun.
-		if s.SunColor == ([3]float32{}) {
-			t.Error("no sun light at noon")
-		}
-		if !s.CastShadows {
-			t.Error("no shadows at noon")
-		}
-	})
-
-	t.Run("fixed light without a cycle", func(t *testing.T) {
-		env := &Environment{
+// TestStaticSourcePiecesAreIndependent checks each piece of the engine's own
+// environment can be present or absent on its own, which is what "composable"
+// has to mean to be worth doing.
+//
+// It is the surviving half of a test that covered the Environment composite. The
+// cycle-and-dome half went to x/sky with them, and what is left is the rules the
+// engine still owns -- which x/sky's fixed-hour path now delegates to, so these
+// subtests are load-bearing for two packages.
+func TestStaticSourcePiecesAreIndependent(t *testing.T) {
+	t.Run("fixed light", func(t *testing.T) {
+		src := &StaticSource{
 			Sun:     &DirectionalLight{Direction: [3]float32{0, 1, 0}, Color: [3]float32{1, 1, 1}},
 			Ambient: &AmbientLight{Color: [3]float32{0.2, 0.2, 0.2}},
 		}
-		s := env.State()
+		s := src.State()
 		if s.SunDir != ([3]float32{0, 1, 0}) || s.SunColor != ([3]float32{1, 1, 1}) {
 			t.Errorf("fixed sun not used: dir %v color %v", s.SunDir, s.SunColor)
 		}
@@ -88,37 +62,31 @@ func TestEnvironmentPiecesAreIndependent(t *testing.T) {
 		}
 	})
 
-	t.Run("a cycle overrides fixed light", func(t *testing.T) {
-		env := &Environment{
-			Cycle: &DayNight{TimeOfDay: 0.5},
-			Sun:   &DirectionalLight{Direction: [3]float32{1, 0, 0}, Color: [3]float32{9, 9, 9}},
-		}
-		if s := env.State(); s.SunColor == ([3]float32{9, 9, 9}) {
-			t.Error("fixed sun used while a cycle is present")
+	t.Run("a black sun casts nothing", func(t *testing.T) {
+		src := &StaticSource{Sun: &DirectionalLight{Direction: [3]float32{0, 1, 0}}}
+		if src.State().CastShadows {
+			t.Error("a sun with no colour in it still built the cascades")
 		}
 	})
 
 	t.Run("fog is independent", func(t *testing.T) {
-		if s := (&Environment{}).State(); s.FogDensity != 0 {
+		if s := (&StaticSource{}).State(); s.FogDensity != 0 {
 			t.Errorf("fog %v with no Fog", s.FogDensity)
 		}
-		env := &Environment{Fog: &Fog{Density: 0.02}}
-		if s := env.State(); s.FogDensity != 0.02 {
+		src := &StaticSource{Fog: &Fog{Density: 0.02}}
+		if s := src.State(); s.FogDensity != 0.02 {
 			t.Errorf("fog density %v; want 0.02", s.FogDensity)
 		}
 	})
 
-	t.Run("stars can be disabled independently", func(t *testing.T) {
-		env := &Environment{
-			Cycle: &DayNight{TimeOfDay: 0}, // midnight
-			Sky:   &Sky{Stars: false, SunDisc: true, MoonDisc: true},
+	t.Run("ambient alone", func(t *testing.T) {
+		src := &StaticSource{Ambient: &AmbientLight{Color: [3]float32{0.1, 0.1, 0.12}}, ClearColor: [3]float32{0.02, 0.02, 0.03}}
+		s := src.State()
+		if s.Ambient != ([3]float32{0.1, 0.1, 0.12}) || s.ClearColor != ([3]float32{0.02, 0.02, 0.03}) {
+			t.Errorf("an interior resolved to %+v", s)
 		}
-		s := env.State()
-		if !s.DrawSky {
-			t.Error("sky not drawn")
-		}
-		if s.DrawStars {
-			t.Error("stars drawn with Stars=false")
+		if s.SunColor != ([3]float32{}) || s.CastShadows {
+			t.Error("ambient alone produced a directional light")
 		}
 	})
 }
@@ -144,6 +112,7 @@ func TestCustomEnvironmentSource(t *testing.T) {
 		FogDensity: 0.05,
 		DrawSky:    false,
 		ClearColor: [3]float32{0.01, 0.0, 0.02},
+		StarFade:   0.42,
 	}}
 
 	s := NewScene()
@@ -165,17 +134,12 @@ func TestCustomEnvironmentSource(t *testing.T) {
 		t.Errorf("sun colour %v; want the custom value", got.SunColor)
 	}
 
-	// The built-in conveniences must not misreport a custom environment as
-	// having a cycle it does not have.
-	if s.DayNight() != nil {
-		t.Error("DayNight() returned a cycle for a custom environment")
+	// StarVisibility is the one convenience that survived the cycle leaving,
+	// because it reads the resolved state rather than reaching for a clock. A
+	// custom source has to be able to drive it.
+	if got := s.StarVisibility(); got != 0.42 {
+		t.Errorf("StarVisibility() = %v for a custom source that said 0.42", got)
 	}
-	if s.TimeOfDay() != 0 {
-		t.Errorf("TimeOfDay() = %v for a custom environment", s.TimeOfDay())
-	}
-	// And must not panic.
-	s.SetTimeOfDay(0.5)
-	s.SetDayCycleSpeed(1)
 }
 
 // TestSkyPaletteSurvivesACustomEnvironment is the property that lets the palette
@@ -231,63 +195,33 @@ func TestSkyPaletteSurvivesACustomEnvironment(t *testing.T) {
 	}
 }
 
-// TestDefaultEnvironmentMatchesOldBehaviour guards the migration: a scene that
-// says nothing about its environment should look like it did before the split.
-func TestDefaultEnvironmentMatchesOldBehaviour(t *testing.T) {
-	s := NewScene()
-	got := s.Environment()
-
-	if !got.DrawSky {
-		t.Error("default scene has no sky")
-	}
-	if s.TimeOfDay() != 0.25 {
-		t.Errorf("default time of day %v; want sunrise at 0.25", s.TimeOfDay())
-	}
-	if dn := s.DayNight(); dn == nil {
-		t.Fatal("default scene has no day/night cycle")
-	} else if dn.Speed != 0 {
-		t.Errorf("default cycle speed %v; time should not pass unless asked", dn.Speed)
-	}
-	if got.FogDensity != DefaultFogDensity {
-		t.Errorf("default fog %v; want %v", got.FogDensity, DefaultFogDensity)
-	}
-}
-
-// TestCloudStepsFlowThrough checks the quality knob actually reaches the
-// resolved state, including the off case.
+// TestNewSceneHasNoEnvironment is the engine half of the sky migration, stated
+// as a property: a scene the engine builds has no opinion about the sky in it.
 //
-// It is the one setting here with a measured frame-time cost attached to it, so
-// a game turning clouds off has to actually get a sky without them rather than
-// a sky that quietly ignores the request.
-func TestCloudStepsFlowThrough(t *testing.T) {
-	for _, steps := range []int{CloudsOff, CloudsLow, CloudsHigh, 7} {
-		env := &Environment{Sky: &Sky{CloudSteps: steps}}
-		if got := env.State().CloudSteps; got != steps {
-			t.Errorf("CloudSteps %d resolved to %d", steps, got)
-		}
+// It is the inverse of the test it replaced. TestDefaultEnvironmentMatchesOldBehaviour
+// asserted that NewScene handed out a dome, a day cycle frozen at sunrise and
+// the engine's haze, because it did -- whether the game wanted them or not.
+// Those are x/sky's now, and sky.DefaultEnvironment is what a scene that wants
+// them says. What the engine owes is nothing at all.
+//
+// Verified to fail: putting a source back in NewScene's literal reports
+// `NewScene installed an environment: *glyphengine.StaticSource`.
+func TestNewSceneHasNoEnvironment(t *testing.T) {
+	s := NewScene()
+	if s.Env != nil {
+		t.Fatalf("NewScene installed an environment: %T", s.Env)
 	}
-	// No sky at all means no clouds, whatever the field said.
-	env := &Environment{}
-	if got := env.State().CloudSteps; got != 0 {
-		t.Errorf("CloudSteps %d with no Sky", got)
+	st := s.Environment()
+	if st.DrawSky || st.DrawStars || st.DrawSun || st.DrawMoon {
+		t.Errorf("a fresh scene draws something in the sky: %+v", st)
 	}
-	if DefaultSky().CloudSteps != CloudsHigh {
-		t.Errorf("DefaultSky has CloudSteps %d, want CloudsHigh", DefaultSky().CloudSteps)
+	if st.SunColor != ([3]float32{}) || st.Ambient != ([3]float32{}) || st.FogDensity != 0 {
+		t.Errorf("a fresh scene has light or air in it: %+v", st)
 	}
-
-	// Changing it between frames has to take effect without rebuilding
-	// anything, because a graphics-settings slider will do exactly that.
-	live := &Environment{Sky: DefaultSky()}
-	if got := live.State().CloudSteps; got != CloudsHigh {
-		t.Fatalf("CloudSteps %d before change", got)
-	}
-	live.Sky.CloudSteps = CloudsOff
-	if got := live.State().CloudSteps; got != CloudsOff {
-		t.Errorf("CloudSteps %d after setting CloudsOff at runtime", got)
-	}
-	live.Sky.CloudSteps = CloudsLow
-	if got := live.State().CloudSteps; got != CloudsLow {
-		t.Errorf("CloudSteps %d after setting CloudsLow at runtime", got)
+	// The two sentinel fields are still filled in, because applyFog and the
+	// water read them with no sky at all. See TestNilEnvironmentIsEmpty.
+	if st.SkyPalette != DefaultSkyPalette() || st.NightGrade != DefaultNightGrade() {
+		t.Errorf("a fresh scene lost the palette or the grade: %+v", st)
 	}
 }
 
@@ -295,7 +229,7 @@ func TestCloudStepsFlowThrough(t *testing.T) {
 // state, and that leaving it unset keeps the uniform behaviour every existing
 // scene was tuned against.
 func TestFogHeightFlowsThrough(t *testing.T) {
-	uniform := (&Environment{Fog: &Fog{Density: 0.01}}).State()
+	uniform := (&StaticSource{Fog: &Fog{Density: 0.01}}).State()
 	if uniform.FogHeight != 0 {
 		t.Errorf("FogHeight %v with no Height set; zero selects uniform density", uniform.FogHeight)
 	}
@@ -303,7 +237,7 @@ func TestFogHeightFlowsThrough(t *testing.T) {
 		t.Errorf("FogDensity %v", uniform.FogDensity)
 	}
 
-	height := (&Environment{Fog: &Fog{Density: 0.01, Height: 6, BaseHeight: 3}}).State()
+	height := (&StaticSource{Fog: &Fog{Density: 0.01, Height: 6, BaseHeight: 3}}).State()
 	if height.FogHeight != 6 || height.FogBaseHeight != 3 {
 		t.Errorf("height fog resolved to H=%v base=%v", height.FogHeight, height.FogBaseHeight)
 	}
@@ -315,114 +249,14 @@ func TestFogHeightFlowsThrough(t *testing.T) {
 	}
 }
 
-// TestRealSunDirTracksTheSunNotTheLight guards the split that keeps the sunset
-// glow off the midnight moon.
+// TestDefaultLightShaftShapeIsDrawable pins the shape a zero LightShaftShape
+// resolves to, which is the engine's and stays here: the shaft pass is the
+// engine's own, and the state carries whatever a source asked for untouched.
 //
-// EnvironmentState carries two directions on purpose: SunDir is whichever body
-// lights the scene, and RealSunDir is the sun itself. From dusk to dawn those
-// point opposite ways, and the atmosphere must follow the second. Collapsing
-// RealSunDir onto SunDir in Environment.State fails the midnight case here.
-func TestRealSunDirTracksTheSunNotTheLight(t *testing.T) {
-	env := &Environment{Cycle: &DayNight{}, Sky: DefaultSky()}
-
-	// Midnight: the moon is the primary light, so the two directions disagree
-	// and RealSunDir has to be the one pointing below the horizon.
-	env.Cycle.TimeOfDay = 0.0
-	s := env.State()
-	if s.RealSunDir[1] >= 0 {
-		t.Errorf("midnight: RealSunDir.y = %g, want below the horizon", s.RealSunDir[1])
-	}
-	if s.SunDir[1] <= 0 {
-		t.Fatalf("midnight: SunDir.y = %g, expected the moon to be the primary light", s.SunDir[1])
-	}
-	if s.RealSunDir == s.SunDir {
-		t.Error("midnight: RealSunDir equals SunDir, so the glow would follow the moon")
-	}
-
-	// SunElevation is documented as RealSunDir's y; if they can drift, the glow
-	// gets positioned by one and shaped by the other.
-	if s.SunElevation != s.RealSunDir[1] {
-		t.Errorf("SunElevation = %g but RealSunDir.y = %g", s.SunElevation, s.RealSunDir[1])
-	}
-
-	// Noon: the sun is the primary light, so the two agree and nothing about
-	// daytime scattering changes.
-	env.Cycle.TimeOfDay = 0.5
-	s = env.State()
-	if s.RealSunDir[1] <= 0 {
-		t.Errorf("noon: RealSunDir.y = %g, want above the horizon", s.RealSunDir[1])
-	}
-	if s.RealSunDir != s.SunDir {
-		t.Errorf("noon: RealSunDir %v and SunDir %v should be the same body", s.RealSunDir, s.SunDir)
-	}
-
-	// A fixed sun has no handover, so the light is the sun.
-	fixed := &Environment{Sun: &DirectionalLight{Direction: [3]float32{0, 1, 0}, Color: [3]float32{1, 1, 1}}}
-	if fs := fixed.State(); fs.RealSunDir != fs.SunDir {
-		t.Errorf("fixed sun: RealSunDir %v != SunDir %v", fs.RealSunDir, fs.SunDir)
-	}
-}
-
-// TestFixedSunElevationDrawsStars covers the sky-without-a-cycle path, which is
-// the documented way to get a static sky at a chosen hour.
-//
-// It used to give a static *night* an empty one. StarFade is only meaningful
-// with a Cycle to compute it from, so on this path it was never assigned, and
-// DrawStars reads it -- a scene frozen at midnight got the night palette,
-// night ambient and no stars at all. Nothing failed; there was simply nothing
-// in the sky.
-//
-// Verified by removing the StarFade assignment from the no-cycle branch of
-// Environment.State: this fails with DrawStars false at every elevation below
-// the horizon.
-func TestFixedSunElevationDrawsStars(t *testing.T) {
-	night := (&Environment{Sky: &Sky{Stars: true, FixedSunElevation: -0.5}}).State()
-	if !night.DrawStars {
-		t.Errorf("a sky frozen at elevation -0.5 draws no stars")
-	}
-	if night.StarFade < 0.99 {
-		t.Errorf("StarFade %.2f at elevation -0.5; want fully out", night.StarFade)
-	}
-
-	day := (&Environment{Sky: &Sky{Stars: true, FixedSunElevation: 0.6}}).State()
-	if day.DrawStars {
-		t.Errorf("a sky frozen at midday draws stars")
-	}
-
-	// And the two paths must agree. A cycle parked at the same elevation and a
-	// fixed sky at that elevation are the same sky; they read the curve from
-	// one place so they cannot disagree.
-	for _, tod := range []float32{0.02, 0.20, 0.30, 0.78, 0.90} {
-		dn := &DayNight{TimeOfDay: tod}
-		elev := dn.SunDir()[1]
-		cycled := (&Environment{Sky: &Sky{Stars: true}, Cycle: dn}).State()
-		fixed := (&Environment{Sky: &Sky{Stars: true, FixedSunElevation: elev}}).State()
-		if math.Abs(float64(cycled.StarFade-fixed.StarFade)) > 1e-6 {
-			t.Errorf("at elevation %+.3f a cycle gives StarFade %.4f and a fixed sky %.4f",
-				elev, cycled.StarFade, fixed.StarFade)
-		}
-	}
-}
-
-// TestLightShaftShapeReachesTheFrameState: what a game sets on the Sky is what
-// State hands the engine, untouched -- including the zeros, because resolving
-// them is the renderer's job and doing it here as well would make "zero means
-// default" true in two places that could come to disagree.
-//
-// Verified to fail: without the pass-through line in Environment.State the
-// frame state reports a zero shape for the custom case.
-func TestLightShaftShapeReachesTheFrameState(t *testing.T) {
-	env := DefaultEnvironment()
-	if got := env.State().LightShaftShape; got != (LightShaftShape{}) {
-		t.Errorf("an untouched Sky hands on the shape %+v, want the zero value", got)
-	}
-
-	want := LightShaftShape{Radius: 1.3, Threshold: [2]float32{0.3, 0.5}}
-	env.Sky.LightShaftShape = want
-	if got := env.State().LightShaftShape; got != want {
-		t.Errorf("State hands on the shape %+v, want %+v", got, want)
-	}
-
+// Whether the pass-through happens is x/sky's test, where the Sky field that
+// feeds it lives. This is the other end: the numbers a source that asks for
+// nothing gets.
+func TestDefaultLightShaftShapeIsDrawable(t *testing.T) {
 	if d := DefaultLightShaftShape(); d.Radius <= 0 || d.Decay <= 0 || d.Decay > 1 || !(d.Threshold[1] > d.Threshold[0]) {
 		t.Errorf("DefaultLightShaftShape is %+v, which is not a drawable shape", d)
 	}

@@ -36,6 +36,7 @@ import (
 
 	glyph "github.com/derekmwright/glyphengine"
 	"github.com/derekmwright/glyphengine/input"
+	xsky "github.com/derekmwright/glyphengine/x/sky"
 )
 
 //go:embed assets
@@ -106,8 +107,10 @@ func (g *game) Init(e *glyph.Engine) error {
 		g.crates = append(g.crates, crate{entity: ent, spin: 0.3 + float32(i)*0.15})
 	}
 
-	e.SetDayCycleSpeed(1.0 / 180.0)
-	e.SetTimeOfDay(0.38)
+	env := xsky.DefaultEnvironment()
+	env.Cycle.TimeOfDay = 0.38
+	env.Cycle.Speed = 1.0 / 180.0
+	e.Scene.Env = env
 
 	g.camera = glyph.NewCamera(11)
 	g.camera.Target = mgl32.Vec3{0, 1, 0}
@@ -146,6 +149,7 @@ func main() {
 	}
 
 	opts := []glyph.Option{
+		glyph.WithShaders(xsky.Shaders()),
 		glyph.WithTitle("GlyphEngine - 05 Textures"),
 		glyph.WithWindowSize(*width, *height),
 		glyph.WithMSAA(4),

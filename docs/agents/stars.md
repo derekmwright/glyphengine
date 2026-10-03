@@ -8,11 +8,19 @@ capability: environment
 status: stable
 since: v0.4.0
 api:
-  - glyphengine.Sky.Stars
-  - glyphengine.Sky.StarDensity
-  - glyphengine.Sky.MilkyWay
+  - sky.Sky.Stars
+  - sky.Sky.StarDensity
+  - sky.Sky.MilkyWay
+  - sky.Shaders
+  - sky.Fill
   - glyphengine.Scene.StarVisibility
   - glyphengine.EnvironmentState.StarFade
+  - glyphengine.EnvironmentState.StarDensity
+  - glyphengine.EnvironmentState.MilkyWay
+  - glyphengine.EnvironmentState.DrawStars
+  - renderer.ShaderSet.StarsFrag
+  - renderer.SceneLighting.StarDensity
+  - renderer.SceneLighting.MilkyWay
   - renderer.Renderer.SetMilkyWayTexture
   - renderer.EquirectToSkyMap
 requires:
@@ -21,32 +29,51 @@ requires:
 assets: none
 example: examples/09-water
 run: go run ./09-water -time 0.02
-verified: 2026-08-06
+verified: 2026-10-02 # the procedural field and band are x/sky/stars.frag now, in the sky slot; the pass, the blend, the panorama slot, EquirectToSkyMap and the octahedral convention stayed in the engine (#161 step 4)
 ---
 
 # Stars
 
-Part of `Sky`, so it arrives with `DefaultEnvironment()` and needs nothing to
-turn on:
+The star field and the galactic band are **two halves in two modules**, and both
+are needed. The engine owns the pass — one fullscreen additive draw at the
+reverse-Z far plane, after the dome — and the per-frame values it draws with. The
+*look* is `x/sky/stars.frag`, which the engine embeds nothing for: `StarsFrag` is
+one of the three stages in the sky slot (see
+[environment](environment.md)), and with it nil the pipeline is never created and
+nothing is drawn, whatever `DrawStars` says.
 
 ```go
-env.Sky = &glyph.Sky{
-    Stars:       true, // the pass runs at all
-    StarDensity: 1,    // scales the field; 0 leaves an empty sky
-    MilkyWay:    1,    // galactic band strength, 0 to 1
-}
+import (
+    glyph "github.com/derekmwright/glyphengine"
+    xsky "github.com/derekmwright/glyphengine/x/sky"
+)
+
+// the shader half
+e, err := glyph.New(&game{}, glyph.WithShaders(xsky.Shaders()))
+
+// the values half
+env := xsky.DefaultEnvironment()
+env.Sky.Stars = true       // the pass runs at all
+env.Sky.StarDensity = 1    // scales the field; 0 leaves an empty sky
+env.Sky.MilkyWay = 1       // galactic band strength, 0 to 1
+e.Scene.Env = env
 ```
 
-`DefaultSky()` sets all three. Everything is procedural — the engine ships no
-sky image.
+`sky.DefaultSky()` sets all three, so `sky.DefaultEnvironment()` needs nothing.
+Everything is procedural — neither the engine nor `x/sky` ships a sky image. See
+[`x/sky/sky.md`](../../x/sky/sky.md) for the package, and
+[`x/README.md`](../../x/README.md) for why a look lives outside the engine.
 
 `go run ./09-water -time 0.02` freezes the clock just past midnight, which is
 where to look at any of this.
 
 ## What is actually drawn
 
-One fullscreen pass, no vertex buffer, additive. It runs after the sky dome and
-composites far to near:
+One fullscreen pass, no vertex buffer, additive — the pipeline, the blend and the
+far-plane depth state are the engine's, and so is `shaders/stars.vert`, which is
+the same fullscreen triangle eight passes use. What follows is what
+`x/sky/stars.frag` puts in it. It runs after the sky dome and composites far to
+near:
 
 1. **The galactic band** — a two-component profile across the galactic plane, a
    narrow bright spine (`exp(-lat²·75)`) inside a wide faint halo
@@ -89,22 +116,26 @@ its edge.
 
 ## The fade lives in Go
 
-`DayNight.StarVisibility()` → `EnvironmentState.StarFade` → `tint.y`. There is **no
-GLSL copy** — a dead one used to sit in `atmosphere.inc` with different
-constants, and it has been removed. Editing the shader will not move the fade.
-See [day-night](day-night.md).
+`sky.DayNight.StarVisibility` → `EnvironmentState.StarFade` →
+`SceneLighting.NightFactor` → `tint.y`. There is **no GLSL copy** — a dead one
+used to sit in `atmosphere.inc` with different constants, and it has been
+removed. Editing the shader will not move the fade. See
+[day-night](day-night.md).
 
-`Environment` also gates the pass entirely:
+The source also gates the pass entirely, in `x/sky`'s `resolveSky`:
 
 ```go
-s.DrawStars = env.Sky.Stars && s.StarFade > 0
+s.DrawStars = a.sky.Stars && s.StarFade > 0
 ```
 
 so a daytime frame costs nothing, and the shader returns early on
 `nightFactor <= 0` besides.
 
-`Scene.StarVisibility()` reads the resolved value, which is how game code hangs
-things off nightfall — `examples/12-particles` starts its fireflies on it.
+`Scene.StarVisibility()` reads the resolved value, and it is the one day/night
+convenience the engine kept, because it asks the frame rather than reaching for a
+clock: it answers for a custom source too. That is how game code hangs things off
+nightfall — `examples/12-particles` starts its fireflies on it, and
+`examples/09-water` brightens its lamps on it.
 
 ## A real panorama
 
@@ -125,7 +156,19 @@ e.Renderer().SetMilkyWayTexture(tex)
 **The resample is not optional.** The pass samples a *hemi-octahedral* map — the
 upper hemisphere folded onto a square — and binding a raw equirect draws a
 mirrored, smeared sky rather than failing. `TestSkyMapMatchesTheShaderProjection`
-guards the two conventions against each other.
+in `renderer/skymap_test.go` guards the two conventions against each other, by
+transcribing the shader's fold into Go and checking it inverts
+`EquirectToSkyMap`.
+
+**That fold is now a cross-module convention**, and worth knowing before changing
+either side. `EquirectToSkyMap` and the texture slot are the engine's; the
+expression that decodes them is in `x/sky/stars.frag`. The test's whole premise is
+that nothing checks the two against each other at build time — it was already a
+language boundary, and it is a module boundary as well now, so a replacement star
+shader that folds the square differently gets a mirrored panorama and a green
+test. Any shader supplied in the `StarsFrag` slot that samples the Milky Way
+texture is binding to this convention, the same way it binds to the descriptor
+numbers in [render-targets](render-targets.md).
 
 Hemi-octahedral rather than equirect because an equirect wastes half its texels
 below a horizon the pass never samples, seams where `atan2` wraps — visibly,
@@ -148,22 +191,29 @@ with it, and `MilkyWay` still scales it.
 The band's noise is branched around when `MilkyWay` is zero, and the whole pass
 is skipped in daylight, so neither costs anything when off. When on it is one
 fullscreen pass of hash lookups — cheap next to the cloud raymarch, which is the
-expensive thing in this part of the frame. See
-[environment](environment.md#clouds-are-a-graphics-setting).
+expensive thing in this part of the frame. See [clouds](clouds.md).
 
 A supplied panorama is *cheaper* than the procedural band: one texture fetch
 against roughly fifty hashes.
 
 ## Failure modes
 
+- **No stars at night, and no dome either.** The sky slot is empty: nothing was
+  passed to `WithShaders`, so the engine built no star pipeline. The values half
+  alone draws nothing. Pass `glyph.WithShaders(xsky.Shaders())`.
 - **No stars at night.** `Sky` is nil, `Stars` is false, or the scene has no
   `Cycle` and `FixedSunElevation` is above the fade — `StarFade` is 0 and the
   pass never runs.
 - **`StarDensity: 0` still shows a band.** It scales the star field only. Set
   `MilkyWay: 0` for the galaxy.
 - **Editing `atmosphere.inc` does not change the fade.** It is in Go. See above.
+- **Editing `shaders/` does not change the field.** The star shader is
+  `x/sky/stars.frag`; `shaders/stars.vert` is only the fullscreen triangle.
+  Recompile with `task xsky:shaders` — the committed `.spv` is what is embedded,
+  and `x/sky/spirv_test.go` fails if the two have parted company.
 - **A supplied panorama looks mirrored or smeared.** It was bound without
-  `EquirectToSkyMap`.
+  `EquirectToSkyMap`, or a replacement star shader folds the octahedral square
+  the other way. See above.
 - **The band looks like a cloud.** Something has smoothed the grain, or
   stretched the noise. The band's own falloff supplies the long shape; stretching
   the noise on top of it turns every feature into a streak.

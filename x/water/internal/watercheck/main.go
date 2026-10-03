@@ -154,8 +154,9 @@ func (g *game) Init(e *glyph.Engine) error {
 	e.C.Static.Set(wall, &glyph.Static{})
 
 	// A fixed sun well up the sky, and no day cycle: the look must not depend on
-	// when the gate ran.
-	e.Scene.Env = &glyph.Environment{
+	// when the gate ran. StaticSource draws no dome either, which is what this
+	// gate wants -- every pixel it measures is water, wall or clear colour.
+	e.Scene.Env = &glyph.StaticSource{
 		Sun: &glyph.DirectionalLight{
 			Direction: mgl32.Vec3{0.25, 0.9, 0.35}.Normalize(),
 			Color:     [3]float32{1.0, 0.96, 0.9},

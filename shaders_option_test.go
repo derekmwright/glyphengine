@@ -34,11 +34,21 @@ func TestWithShadersReachesTheRenderer(t *testing.T) {
 		t.Fatalf("SkyFrag did not reach the renderer:\n got %q\nwant %q", got.SkyFrag, custom.SkyFrag)
 	}
 
-	// Break the fix and the check fails: dropping the append in
-	// config.rendererOptions leaves SkyFrag nil here, which is what the
-	// assertion above catches. Verified by doing it.
-	if bytes.Equal(got.SkyFrag, renderer.DefaultShaders().SkyFrag) {
-		t.Fatal("got the embedded default back, so the option was not applied")
+	// This used to compare against the embedded default as well, to prove the
+	// option had been APPLIED rather than that nothing had happened. That
+	// comparison cannot say anything any more: SkyFrag is the sky slot and the
+	// engine embeds nothing for it, so renderer.DefaultShaders().SkyFrag is nil
+	// and the comparison is nil against a payload however the code behaves.
+	// A dropped append leaves nil here, which the assertion above reports --
+	// verified by dropping the append in config.rendererOptions: it fails with
+	// `got ""`. The stage-carried-through half is
+	// TestWithShadersKeepsTheStagesItWasNotGiven, which uses stages that do have
+	// defaults.
+	//
+	// What is worth asserting is the premise, because the reasoning above goes
+	// stale the moment it stops holding.
+	if renderer.DefaultShaders().SkyFrag != nil {
+		t.Error("the engine embeds a sky dome again; the sky slot is gone and the note above is wrong")
 	}
 }
 
@@ -49,8 +59,18 @@ func TestWithoutWithShadersTheRendererIsUntouched(t *testing.T) {
 	// embedded defaults in later. A non-nil field here would mean the engine is
 	// pushing a set of its own, which would quietly outrank the renderer's
 	// own defaulting.
-	if got := applyRendererOptions(cfg.rendererOptions()).Shaders(); got.SkyFrag != nil {
-		t.Fatalf("an engine built with no shader option still set SkyFrag (%d bytes)", len(got.SkyFrag))
+	//
+	// LitFrag rather than SkyFrag, deliberately. SkyFrag is nil in the engine's
+	// own defaults now, so asserting it is nil here would pass whether or not the
+	// engine pushed a set -- which is the shape of check this repository has
+	// shipped green before.
+	//
+	// Verified to fail: giving config.rendererOptions an `else` branch that appends
+	// renderer.WithShaders(renderer.DefaultShaders()) reports `an engine built with
+	// no shader option still set LitFrag (46604 bytes)`. With SkyFrag as the subject
+	// it would have reported nothing, which is why the subject changed.
+	if got := applyRendererOptions(cfg.rendererOptions()).Shaders(); got.LitFrag != nil {
+		t.Fatalf("an engine built with no shader option still set LitFrag (%d bytes)", len(got.LitFrag))
 	}
 }
 

@@ -35,6 +35,7 @@ import (
 	glyph "github.com/derekmwright/glyphengine"
 	"github.com/derekmwright/glyphengine/ecs"
 	"github.com/derekmwright/glyphengine/input"
+	xsky "github.com/derekmwright/glyphengine/x/sky"
 )
 
 func init() {
@@ -119,8 +120,10 @@ func (g *game) Init(e *glyph.Engine) error {
 
 	e.RebuildStatics()
 
-	e.SetDayCycleSpeed(1.0 / 240.0)
-	e.SetTimeOfDay(0.32)
+	env := xsky.DefaultEnvironment()
+	env.Cycle.TimeOfDay = 0.32
+	env.Cycle.Speed = 1.0 / 240.0
+	e.Scene.Env = env
 
 	g.camera = glyph.NewFPCamera()
 	// The controller keeps the entity origin at the collider center, so the
@@ -222,6 +225,7 @@ func main() {
 	flag.Parse()
 
 	opts := []glyph.Option{
+		glyph.WithShaders(xsky.Shaders()),
 		glyph.WithTitle("GlyphEngine - 04 First Person"),
 		glyph.WithWindowSize(*width, *height),
 		glyph.WithMSAA(4),

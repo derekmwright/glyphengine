@@ -919,11 +919,20 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	}
 	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.celestialPipeline, nil) })
 
-	r.starsPipeline, err = createStarsPipeline(r.deviceDriver, r.shaders, r.sceneFormats, r.pipelineLayout, r.sc.extent, r.msaaSamples)
-	if err != nil {
-		return nil, fmt.Errorf("renderer: create stars pipeline: %w", err)
+	// Stars, the dome and the cloud march are the sky slot: three stages the
+	// engine embeds nothing for (see ShaderSet). A nil stage gets no pipeline,
+	// and the recorder draws nothing where there is no pipeline, so an engine
+	// with an empty slot has no sky rather than a broken one. The teardown step
+	// is pushed only where the pipeline was created, which is AGENTS.md rule 10
+	// read the only way it can be read here -- DestroyPipeline on a zero handle
+	// is a validation error, not a no-op.
+	if r.shaders.StarsFrag != nil {
+		r.starsPipeline, err = createStarsPipeline(r.deviceDriver, r.shaders, r.sceneFormats, r.pipelineLayout, r.sc.extent, r.msaaSamples)
+		if err != nil {
+			return nil, fmt.Errorf("renderer: create stars pipeline: %w", err)
+		}
+		r.onInit(func() { r.deviceDriver.DestroyPipeline(r.starsPipeline, nil) })
 	}
-	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.starsPipeline, nil) })
 
 	// The regular sky and additive volumetric sky share the light resources.
 	// Create their layout before either pipeline so teardown unwinds both first.
@@ -933,11 +942,16 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	}
 	r.onInit(func() { r.deviceDriver.DestroyPipelineLayout(r.skyPipelineLayout, nil) })
 
-	r.skyPipeline, err = createSkyPipeline(r.deviceDriver, r.shaders, r.sceneFormats, r.skyPipelineLayout, r.sc.extent, r.msaaSamples)
-	if err != nil {
-		return nil, fmt.Errorf("renderer: create sky pipeline: %w", err)
+	// The dome, when something supplied one. The LAYOUT above is created either
+	// way, because the in-scattering below shares it and that pass is the
+	// engine's own: a game with no dome still has air.
+	if r.shaders.SkyFrag != nil {
+		r.skyPipeline, err = createSkyPipeline(r.deviceDriver, r.shaders, r.sceneFormats, r.skyPipelineLayout, r.sc.extent, r.msaaSamples)
+		if err != nil {
+			return nil, fmt.Errorf("renderer: create sky pipeline: %w", err)
+		}
+		r.onInit(func() { r.deviceDriver.DestroyPipeline(r.skyPipeline, nil) })
 	}
-	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.skyPipeline, nil) })
 
 	// The in-scattering that fronts the sky -- a beam aimed at the night sky,
 	// which is the shot this whole feature exists for. See skyvolumetric.frag
@@ -1154,6 +1168,18 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 
 	// The cloud pass reuses the bloom downsample pass's shape: one half-float
 	// colour attachment, contents discarded, ending sampleable.
+	//
+	// The TARGET is created whether or not anything marches into it, unlike the
+	// pipeline below. Two reasons, and the second is the load-bearing one: it is
+	// the slot's target -- the engine owns the half-resolution pair, the history
+	// ping-pong and the barriers, and a package owns only the shader that paints
+	// it -- and its descriptor sets are the only place in the engine that writes
+	// binding 1 of the shared texture set, which is the per-frame block the DOME
+	// reads the sky palette out of. A dome with no cloud shader beside it is a
+	// supported configuration (cmd/skyshadowcheck is one), and making this
+	// conditional on CloudsFrag would hand that dome a set with no palette in it.
+	// The cost of leaving it unconditional is the memory with an empty slot:
+	// 2 x half of 1280x720 x RGBA16F, 3.7 MB, and no GPU work at all.
 	r.cloudFormats = r.frameGraph.pipelineFormats(graphBloom)
 
 	r.clouds, err = createCloudTargets(r.instanceDriver, r.deviceDriver, r.physicalDevice,
@@ -1169,12 +1195,14 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	}
 	r.onInit(func() { r.clouds.destroy(r.deviceDriver) })
 
-	r.cloudPipeline, err = createBloomPipeline(r.deviceDriver, r.shaders, r.shaders.CloudsFrag,
-		r.cloudFormats, r.pipelineLayout, false)
-	if err != nil {
-		return nil, fmt.Errorf("renderer: create cloud pipeline: %w", err)
+	if r.shaders.CloudsFrag != nil {
+		r.cloudPipeline, err = createBloomPipeline(r.deviceDriver, r.shaders, r.shaders.CloudsFrag,
+			r.cloudFormats, r.pipelineLayout, false)
+		if err != nil {
+			return nil, fmt.Errorf("renderer: create cloud pipeline: %w", err)
+		}
+		r.onInit(func() { r.deviceDriver.DestroyPipeline(r.cloudPipeline, nil) })
 	}
-	r.onInit(func() { r.deviceDriver.DestroyPipeline(r.cloudPipeline, nil) })
 
 	r.tonemapFormats = r.frameGraph.pipelineFormats(graphTonemap)
 
@@ -1880,11 +1908,41 @@ func (r *Renderer) rebuildAndAcquire(f int) (int, bool, error) {
 	return imageIndex, true, nil
 }
 
+// resolveSkySlot clears the draw flags for sky stages this renderer was not
+// given a shader for.
+//
+// An empty sky slot means no dome and no stars whatever the environment asked
+// for (see ShaderSet). It is resolved once, on the copy of SceneLighting the
+// frame will be recorded from, rather than at the two draws: a flag and a
+// pipeline that disagree is the kind of thing that reads as present in a trace
+// and absent in the picture, and the recorder is not the place to find out which
+// stages the renderer was built with.
+//
+// It is a method rather than four lines inline so that it can be made to fail.
+// A Renderer value with no device behind it is enough to call it, which is what
+// TestEmptySkySlotClearsTheDrawFlags does.
+//
+// The in-scattering is deliberately absent from this list: it is the engine's own
+// pass, it always has a pipeline, and a game with no dome still has air. The
+// cloud march has no flag to clear -- recordClouds returns early instead, because
+// the pass writes a target rather than the frame.
+func (r *Renderer) resolveSkySlot(l SceneLighting) SceneLighting {
+	if r.skyPipeline.Handle() == 0 {
+		l.DrawSky = false
+	}
+	if r.starsPipeline.Handle() == 0 {
+		l.DrawStars = false
+	}
+	return l
+}
+
 // DrawFrame records and submits one frame: waits for the in-flight fence, acquires
 // a swapchain image, records draw commands, submits to the GPU, and presents.
 func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, celestials []RenderObject, uiOverlays []UIRenderObject, msdfOverlays []RenderObject, lighting SceneLighting) error {
 	f := r.currentFrame
 	r.lastLODCull, r.lastLODUpload = 0, 0
+
+	lighting = r.resolveSkySlot(lighting)
 
 	if t := r.trace; t != nil {
 		t.Int("slot", f)

@@ -48,6 +48,7 @@ import (
 	"github.com/derekmwright/glyphengine/renderer"
 	"github.com/derekmwright/glyphengine/ui"
 	"github.com/derekmwright/glyphengine/ui/yamlui"
+	xsky "github.com/derekmwright/glyphengine/x/sky"
 )
 
 func init() {
@@ -159,9 +160,14 @@ func (g *game) Init(e *glyph.Engine) error {
 		}
 	})
 
-	g.worldScene.SetDayCycleSpeed(1.0 / 60.0)
-	g.worldScene.SetTimeOfDay(0.35)
-	g.menuScene.SetTimeOfDay(0.78) // dusk behind the menu
+	worldEnv := xsky.DefaultEnvironment()
+	worldEnv.Cycle.TimeOfDay = 0.35
+	worldEnv.Cycle.Speed = 1.0 / 60.0
+	g.worldScene.Env = worldEnv
+
+	menuEnv := xsky.DefaultEnvironment()
+	menuEnv.Cycle.TimeOfDay = 0.78 // dusk behind the menu
+	g.menuScene.Env = menuEnv
 
 	g.camera = glyph.NewCamera(8)
 	g.camera.Target = mgl32.Vec3{0, 1, 0}
@@ -439,6 +445,7 @@ func main() {
 	flag.Parse()
 
 	opts := []glyph.Option{
+		glyph.WithShaders(xsky.Shaders()),
 		glyph.WithTitle("GlyphEngine - 20 Screens"),
 		glyph.WithWindowSize(*width, *height),
 		glyph.WithMSAA(4),

@@ -35,9 +35,6 @@ var LitMaterialFragSpv []byte
 //go:embed tonemap.frag.spv
 var TonemapFragSpv []byte
 
-//go:embed clouds.frag.spv
-var CloudsFragSpv []byte
-
 //go:embed bloom_prefilter.frag.spv
 var BloomPrefilterFragSpv []byte
 
@@ -53,14 +50,15 @@ var TerrainFragSpv []byte
 //go:embed stars.vert.spv
 var StarsVertSpv []byte
 
-//go:embed stars.frag.spv
-var StarsFragSpv []byte
-
+// SkyVertSpv is the fullscreen triangle at the reverse-Z far plane. It is named
+// for the pass it was written for and used by eight: the dome, the stars, the
+// in-scattering, the cloud march, the shafts, the bloom chain, the tonemap and
+// the UI glow composite. It stays in the engine for that reason -- it is a
+// vertex stage with no look in it -- while the dome, star and cloud FRAGMENT
+// stages moved to x/sky and are nil here. See renderer.ShaderSet's sky slot.
+//
 //go:embed sky.vert.spv
 var SkyVertSpv []byte
-
-//go:embed sky.frag.spv
-var SkyFragSpv []byte
 
 //go:embed skyvolumetric.frag.spv
 var SkyVolumetricFragSpv []byte

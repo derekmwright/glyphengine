@@ -12,113 +12,19 @@ import (
 	"github.com/derekmwright/glyphengine/renderer"
 )
 
-// The four tables below were taken from the code as it stood before the
-// environment contract was carved: generated out of the then-current
-// Environment.State and buildMoonObject, printed at full float32 precision, and
-// pasted in unedited. They are not re-derivations of the curves, they are what
-// the engine actually produced -- which is the only thing that makes "nothing
-// moved" a claim rather than a hope. x/terrainfield's field digests were pinned
-// the same way, for the same reason.
+// staticCases are the fixed-light configurations the pins below were taken from:
+// generated out of the engine's Environment.State as it stood before the
+// environment contract was carved, printed at full float32 precision, and pasted
+// in unedited. They are not re-derivations of the rules, they are what the engine
+// actually produced -- which is the only thing that makes "nothing moved" a claim
+// rather than a hope.
 //
-// MoonDiscColor is the one column the pre-carve Environment.State did not have,
-// because the colour was computed in the draw path. Its values come from a
-// verbatim copy of what buildMoonObject computed, cross-checked against the
-// separate moonDiscPins table below, which was generated the same way.
-//
-// A capture gate cannot stand in for them. It needs a GPU, it visits a handful
-// of times of day, and it cannot tell a palette that shifted in the last bit
-// from a frame that dithered. These compare every field of every resolved state
-// at twenty-five points round the clock, exactly.
-var dayCyclePins = []struct {
-	tod   float32
-	state EnvironmentState
-}{
-	{0, EnvironmentState{SunDir: [3]float32{-6.0043254e-17, 0.9805807, 0.19611615}, SunColor: [3]float32{0.045, 0.052, 0.08}, RealSunDir: [3]float32{6.0043254e-17, -0.9805807, 0.19611615}, SunElevation: -0.9805807, Ambient: [3]float32{0.01, 0.013, 0.03}, FogDensity: 0.0075, StarFade: 1, MilkyWay: 1, StarDensity: 1, DrawSky: true, DrawStars: true, DrawMoon: true, SunDiscDir: [3]float32{6.0043254e-17, -0.9805807, 0.19611615}, MoonDiscDir: [3]float32{-6.0043254e-17, 0.9805807, 0.19611615}, MoonDiscColor: [3]float32{1.2750001, 1.3199999, 1.425}, CloudSteps: 32}},
-	{0.041666668, EnvironmentState{SunDir: [3]float32{-0.25379297, 0.94716823, 0.19611615}, SunColor: [3]float32{0.045, 0.052, 0.08}, RealSunDir: [3]float32{0.25379297, -0.94716823, 0.19611615}, SunElevation: -0.94716823, Ambient: [3]float32{0.010694444, 0.013694445, 0.031388886}, FogDensity: 0.0075, StarFade: 1, MilkyWay: 1, StarDensity: 1, DrawSky: true, DrawStars: true, DrawMoon: true, SunDiscDir: [3]float32{0.25379297, -0.94716823, 0.19611615}, MoonDiscDir: [3]float32{-0.25379297, 0.94716823, 0.19611615}, MoonDiscColor: [3]float32{1.2750001, 1.3199999, 1.425}, CloudSteps: 32}},
-	{0.083333336, EnvironmentState{SunDir: [3]float32{-0.49029034, 0.84920776, 0.19611615}, SunColor: [3]float32{0.045, 0.052, 0.08}, RealSunDir: [3]float32{0.49029034, -0.84920776, 0.19611615}, SunElevation: -0.84920776, Ambient: [3]float32{0.011388889, 0.014388889, 0.032777775}, FogDensity: 0.0075, StarFade: 1, MilkyWay: 1, StarDensity: 1, DrawSky: true, DrawStars: true, DrawMoon: true, SunDiscDir: [3]float32{0.49029034, -0.84920776, 0.19611615}, MoonDiscDir: [3]float32{-0.49029034, 0.84920776, 0.19611615}, MoonDiscColor: [3]float32{1.2750001, 1.3199999, 1.425}, CloudSteps: 32}},
-	{0.125, EnvironmentState{SunDir: [3]float32{-0.69337523, 0.69337523, 0.19611615}, SunColor: [3]float32{0.045, 0.052, 0.08}, RealSunDir: [3]float32{0.69337523, -0.69337523, 0.19611615}, SunElevation: -0.69337523, Ambient: [3]float32{0.012083333, 0.0150833335, 0.034166664}, FogDensity: 0.0075, StarFade: 1, MilkyWay: 1, StarDensity: 1, DrawSky: true, DrawStars: true, DrawMoon: true, SunDiscDir: [3]float32{0.69337523, -0.69337523, 0.19611615}, MoonDiscDir: [3]float32{-0.69337523, 0.69337523, 0.19611615}, MoonDiscColor: [3]float32{1.2750001, 1.3199999, 1.425}, CloudSteps: 32}},
-	{0.16666667, EnvironmentState{SunDir: [3]float32{-0.8492078, 0.4902903, 0.19611615}, SunColor: [3]float32{0.045, 0.052, 0.08}, RealSunDir: [3]float32{0.8492078, -0.4902903, 0.19611615}, SunElevation: -0.4902903, Ambient: [3]float32{0.012777777, 0.015777778, 0.035555553}, FogDensity: 0.0075, StarFade: 1, MilkyWay: 1, StarDensity: 1, DrawSky: true, DrawStars: true, DrawMoon: true, SunDiscDir: [3]float32{0.8492078, -0.4902903, 0.19611615}, MoonDiscDir: [3]float32{-0.8492078, 0.4902903, 0.19611615}, MoonDiscColor: [3]float32{1.2750001, 1.3199999, 1.425}, CloudSteps: 32}},
-	{0.20833333, EnvironmentState{SunDir: [3]float32{-0.94716823, 0.253793, 0.19611615}, SunColor: [3]float32{0.027125621, 0.031345163, 0.048223324}, RealSunDir: [3]float32{0.94716823, -0.253793, 0.19611615}, SunElevation: -0.253793, Ambient: [3]float32{0.042749994, 0.050708324, 0.08841665}, FogDensity: 0.0075, StarFade: 0.92728853, MilkyWay: 1, StarDensity: 1, DrawSky: true, DrawStars: true, DrawMoon: true, SunDiscDir: [3]float32{0.94716823, -0.253793, 0.19611615}, MoonDiscDir: [3]float32{-0.94716823, 0.253793, 0.19611615}, MoonDiscColor: [3]float32{1.2750001, 1.3199999, 1.425}, CloudSteps: 32}},
-	{0.25, EnvironmentState{SunDir: [3]float32{0.9805807, 0, 0.19611615}, SunColor: [3]float32{0.784, 0.4704, 0.2352}, RealSunDir: [3]float32{0.9805807, 0, 0.19611615}, Ambient: [3]float32{0.14, 0.115, 0.105}, FogDensity: 0.0075, MilkyWay: 1, StarDensity: 1, DrawSky: true, DrawSun: true, DrawMoon: true, SunDiscDir: [3]float32{0.9805807, 0, 0.19611615}, SunDiscColor: [3]float32{5, 3, 1.5}, MoonDiscDir: [3]float32{-0.9805807, -0, 0.19611615}, MoonDiscColor: [3]float32{0.7650001, 0.792, 0.855}, CloudSteps: 32, LightShafts: 0.25}},
-	{0.29166666, EnvironmentState{SunDir: [3]float32{0.94716823, 0.2537929, 0.19611615}, SunColor: [3]float32{1, 0.8499999, 0.71666646}, RealSunDir: [3]float32{0.94716823, 0.2537929, 0.19611615}, SunElevation: 0.2537929, Ambient: [3]float32{0.1904762, 0.18551588, 0.22063492}, FogDensity: 0.0075, MilkyWay: 1, StarDensity: 1, DrawSky: true, DrawSun: true, SunDiscDir: [3]float32{0.94716823, 0.2537929, 0.19611615}, SunDiscColor: [3]float32{5, 4.2499995, 3.5833323}, MoonDiscDir: [3]float32{-0.94716823, -0.2537929, 0.19611615}, MoonDiscColor: [3]float32{0, 0, 0}, CloudSteps: 32, LightShafts: 0.25, CastShadows: true}},
-	{0.33333334, EnvironmentState{SunDir: [3]float32{0.84920776, 0.4902904, 0.19611615}, SunColor: [3]float32{1, 0.9166666, 0.825}, RealSunDir: [3]float32{0.84920776, 0.4902904, 0.19611615}, SunElevation: 0.4902904, Ambient: [3]float32{0.20238096, 0.1984127, 0.23650795}, FogDensity: 0.0075, MilkyWay: 1, StarDensity: 1, DrawSky: true, DrawSun: true, SunDiscDir: [3]float32{0.84920776, 0.4902904, 0.19611615}, SunDiscColor: [3]float32{5, 4.583333, 4.125}, MoonDiscDir: [3]float32{-0.84920776, -0.4902904, 0.19611615}, MoonDiscColor: [3]float32{0, 0, 0}, CloudSteps: 32, LightShafts: 0.25, CastShadows: true}},
-	{0.375, EnvironmentState{SunDir: [3]float32{0.69337523, 0.69337523, 0.19611615}, SunColor: [3]float32{1, 0.9375, 0.85625}, RealSunDir: [3]float32{0.69337523, 0.69337523, 0.19611615}, SunElevation: 0.69337523, Ambient: [3]float32{0.21428572, 0.21130952, 0.25238097}, FogDensity: 0.0075, MilkyWay: 1, StarDensity: 1, DrawSky: true, DrawSun: true, SunDiscDir: [3]float32{0.69337523, 0.69337523, 0.19611615}, SunDiscColor: [3]float32{5, 4.6875, 4.28125}, MoonDiscDir: [3]float32{-0.69337523, -0.69337523, 0.19611615}, MoonDiscColor: [3]float32{0, 0, 0}, CloudSteps: 32, LightShafts: 0.25, CastShadows: true}},
-	{0.41666666, EnvironmentState{SunDir: [3]float32{0.4902904, 0.84920776, 0.19611615}, SunColor: [3]float32{1, 0.9583333, 0.8875}, RealSunDir: [3]float32{0.4902904, 0.84920776, 0.19611615}, SunElevation: 0.84920776, Ambient: [3]float32{0.22619048, 0.22420634, 0.26825398}, FogDensity: 0.0075, MilkyWay: 1, StarDensity: 1, DrawSky: true, DrawSun: true, SunDiscDir: [3]float32{0.4902904, 0.84920776, 0.19611615}, SunDiscColor: [3]float32{5, 4.7916665, 4.4375}, MoonDiscDir: [3]float32{-0.4902904, -0.84920776, 0.19611615}, MoonDiscColor: [3]float32{0, 0, 0}, CloudSteps: 32, LightShafts: 0.25, CastShadows: true}},
-	{0.45833334, EnvironmentState{SunDir: [3]float32{0.2537929, 0.94716823, 0.19611615}, SunColor: [3]float32{1, 0.9791667, 0.91875}, RealSunDir: [3]float32{0.2537929, 0.94716823, 0.19611615}, SunElevation: 0.94716823, Ambient: [3]float32{0.23809524, 0.23710318, 0.284127}, FogDensity: 0.0075, MilkyWay: 1, StarDensity: 1, DrawSky: true, DrawSun: true, SunDiscDir: [3]float32{0.2537929, 0.94716823, 0.19611615}, SunDiscColor: [3]float32{5, 4.8958335, 4.59375}, MoonDiscDir: [3]float32{-0.2537929, -0.94716823, 0.19611615}, MoonDiscColor: [3]float32{0, 0, 0}, CloudSteps: 32, LightShafts: 0.25, CastShadows: true}},
-	{0.5, EnvironmentState{SunDir: [3]float32{6.0043254e-17, 0.9805807, 0.19611615}, SunColor: [3]float32{1, 1, 0.95}, RealSunDir: [3]float32{6.0043254e-17, 0.9805807, 0.19611615}, SunElevation: 0.9805807, Ambient: [3]float32{0.25, 0.25, 0.3}, FogDensity: 0.0075, MilkyWay: 1, StarDensity: 1, DrawSky: true, DrawSun: true, SunDiscDir: [3]float32{6.0043254e-17, 0.9805807, 0.19611615}, SunDiscColor: [3]float32{5, 5, 4.75}, MoonDiscDir: [3]float32{-6.0043254e-17, -0.9805807, 0.19611615}, MoonDiscColor: [3]float32{0, 0, 0}, CloudSteps: 32, LightShafts: 0.25, CastShadows: true}},
-	{0.5416667, EnvironmentState{SunDir: [3]float32{-0.25379306, 0.94716823, 0.19611615}, SunColor: [3]float32{1, 0.9791666, 0.91875}, RealSunDir: [3]float32{-0.25379306, 0.94716823, 0.19611615}, SunElevation: 0.94716823, Ambient: [3]float32{0.23809522, 0.23710316, 0.284127}, FogDensity: 0.0075, MilkyWay: 1, StarDensity: 1, DrawSky: true, DrawSun: true, SunDiscDir: [3]float32{-0.25379306, 0.94716823, 0.19611615}, SunDiscColor: [3]float32{5, 4.895833, 4.59375}, MoonDiscDir: [3]float32{0.25379306, -0.94716823, 0.19611615}, MoonDiscColor: [3]float32{0, 0, 0}, CloudSteps: 32, LightShafts: 0.25, CastShadows: true}},
-	{0.5833333, EnvironmentState{SunDir: [3]float32{-0.49029022, 0.8492078, 0.19611615}, SunColor: [3]float32{1, 0.9583333, 0.8875}, RealSunDir: [3]float32{-0.49029022, 0.8492078, 0.19611615}, SunElevation: 0.8492078, Ambient: [3]float32{0.22619048, 0.22420636, 0.26825398}, FogDensity: 0.0075, MilkyWay: 1, StarDensity: 1, DrawSky: true, DrawSun: true, SunDiscDir: [3]float32{-0.49029022, 0.8492078, 0.19611615}, SunDiscColor: [3]float32{5, 4.7916665, 4.4375}, MoonDiscDir: [3]float32{0.49029022, -0.8492078, 0.19611615}, MoonDiscColor: [3]float32{0, 0, 0}, CloudSteps: 32, LightShafts: 0.25, CastShadows: true}},
-	{0.625, EnvironmentState{SunDir: [3]float32{-0.69337523, 0.69337523, 0.19611615}, SunColor: [3]float32{1, 0.9375, 0.85625}, RealSunDir: [3]float32{-0.69337523, 0.69337523, 0.19611615}, SunElevation: 0.69337523, Ambient: [3]float32{0.2142857, 0.21130952, 0.25238097}, FogDensity: 0.0075, MilkyWay: 1, StarDensity: 1, DrawSky: true, DrawSun: true, SunDiscDir: [3]float32{-0.69337523, 0.69337523, 0.19611615}, SunDiscColor: [3]float32{5, 4.6875, 4.28125}, MoonDiscDir: [3]float32{0.69337523, -0.69337523, 0.19611615}, MoonDiscColor: [3]float32{0, 0, 0}, CloudSteps: 32, LightShafts: 0.25, CastShadows: true}},
-	{0.6666667, EnvironmentState{SunDir: [3]float32{-0.8492078, 0.49029022, 0.19611615}, SunColor: [3]float32{1, 0.9166666, 0.825}, RealSunDir: [3]float32{-0.8492078, 0.49029022, 0.19611615}, SunElevation: 0.49029022, Ambient: [3]float32{0.20238094, 0.19841269, 0.23650792}, FogDensity: 0.0075, MilkyWay: 1, StarDensity: 1, DrawSky: true, DrawSun: true, SunDiscDir: [3]float32{-0.8492078, 0.49029022, 0.19611615}, SunDiscColor: [3]float32{5, 4.583333, 4.125}, MoonDiscDir: [3]float32{0.8492078, -0.49029022, 0.19611615}, MoonDiscColor: [3]float32{0, 0, 0}, CloudSteps: 32, LightShafts: 0.25, CastShadows: true}},
-	{0.7083333, EnvironmentState{SunDir: [3]float32{-0.94716823, 0.25379306, 0.19611615}, SunColor: [3]float32{1, 0.8333334, 0.7000001}, RealSunDir: [3]float32{-0.94716823, 0.25379306, 0.19611615}, SunElevation: 0.25379306, Ambient: [3]float32{0.19047618, 0.18551588, 0.22063491}, FogDensity: 0.0075, MilkyWay: 1, StarDensity: 1, DrawSky: true, DrawSun: true, SunDiscDir: [3]float32{-0.94716823, 0.25379306, 0.19611615}, SunDiscColor: [3]float32{5, 4.166667, 3.5000005}, MoonDiscDir: [3]float32{0.94716823, -0.25379306, 0.19611615}, MoonDiscColor: [3]float32{0, 0, 0}, CloudSteps: 32, LightShafts: 0.25, CastShadows: true}},
-	{0.75, EnvironmentState{SunDir: [3]float32{-0.9805807, 1.2008651e-16, 0.19611615}, SunColor: [3]float32{0.784, 0.392, 0.1568}, RealSunDir: [3]float32{-0.9805807, 1.2008651e-16, 0.19611615}, SunElevation: 1.2008651e-16, Ambient: [3]float32{0.14, 0.105, 0.1}, FogDensity: 0.0075, MilkyWay: 1, StarDensity: 1, DrawSky: true, DrawSun: true, DrawMoon: true, SunDiscDir: [3]float32{-0.9805807, 1.2008651e-16, 0.19611615}, SunDiscColor: [3]float32{5, 2.5, 1}, MoonDiscDir: [3]float32{0.9805807, -1.2008651e-16, 0.19611615}, MoonDiscColor: [3]float32{0.7650001, 0.792, 0.855}, CloudSteps: 32, LightShafts: 0.25, CastShadows: true}},
-	{0.7916667, EnvironmentState{SunDir: [3]float32{0.94716823, 0.25379306, 0.19611615}, SunColor: [3]float32{0.02712564, 0.03134518, 0.048223358}, RealSunDir: [3]float32{-0.94716823, -0.25379306, 0.19611615}, SunElevation: -0.25379306, Ambient: [3]float32{0.060708284, 0.05891663, 0.09479163}, FogDensity: 0.0075, StarFade: 0.9272887, MilkyWay: 1, StarDensity: 1, DrawSky: true, DrawStars: true, DrawMoon: true, SunDiscDir: [3]float32{-0.94716823, -0.25379306, 0.19611615}, MoonDiscDir: [3]float32{0.94716823, 0.25379306, 0.19611615}, MoonDiscColor: [3]float32{1.2750001, 1.3199999, 1.425}, CloudSteps: 32}},
-	{0.8333333, EnvironmentState{SunDir: [3]float32{0.8492078, 0.49029022, 0.19611615}, SunColor: [3]float32{0.045, 0.052, 0.08}, RealSunDir: [3]float32{-0.8492078, -0.49029022, 0.19611615}, SunElevation: -0.49029022, Ambient: [3]float32{0.023111114, 0.02844445, 0.062444452}, FogDensity: 0.0075, StarFade: 1, MilkyWay: 1, StarDensity: 1, DrawSky: true, DrawStars: true, DrawMoon: true, SunDiscDir: [3]float32{-0.8492078, -0.49029022, 0.19611615}, MoonDiscDir: [3]float32{0.8492078, 0.49029022, 0.19611615}, MoonDiscColor: [3]float32{1.2750001, 1.3199999, 1.425}, CloudSteps: 32}},
-	{0.875, EnvironmentState{SunDir: [3]float32{0.69337523, 0.69337523, 0.19611615}, SunColor: [3]float32{0.045, 0.052, 0.08}, RealSunDir: [3]float32{-0.69337523, -0.69337523, 0.19611615}, SunElevation: -0.69337523, Ambient: [3]float32{0.014083332, 0.017333332, 0.038833328}, FogDensity: 0.0075, StarFade: 1, MilkyWay: 1, StarDensity: 1, DrawSky: true, DrawStars: true, DrawMoon: true, SunDiscDir: [3]float32{-0.69337523, -0.69337523, 0.19611615}, MoonDiscDir: [3]float32{0.69337523, 0.69337523, 0.19611615}, MoonDiscColor: [3]float32{1.2750001, 1.3199999, 1.425}, CloudSteps: 32}},
-	{0.9166667, EnvironmentState{SunDir: [3]float32{0.49029022, 0.8492078, 0.19611615}, SunColor: [3]float32{0.045, 0.052, 0.08}, RealSunDir: [3]float32{-0.49029022, -0.8492078, 0.19611615}, SunElevation: -0.8492078, Ambient: [3]float32{0.012083333, 0.0150833335, 0.034166664}, FogDensity: 0.0075, StarFade: 1, MilkyWay: 1, StarDensity: 1, DrawSky: true, DrawStars: true, DrawMoon: true, SunDiscDir: [3]float32{-0.49029022, -0.8492078, 0.19611615}, MoonDiscDir: [3]float32{0.49029022, 0.8492078, 0.19611615}, MoonDiscColor: [3]float32{1.2750001, 1.3199999, 1.425}, CloudSteps: 32}},
-	{0.9583333, EnvironmentState{SunDir: [3]float32{0.25379306, 0.94716823, 0.19611615}, SunColor: [3]float32{0.045, 0.052, 0.08}, RealSunDir: [3]float32{-0.25379306, -0.94716823, 0.19611615}, SunElevation: -0.94716823, Ambient: [3]float32{0.011041667, 0.014041668, 0.032083333}, FogDensity: 0.0075, StarFade: 1, MilkyWay: 1, StarDensity: 1, DrawSky: true, DrawStars: true, DrawMoon: true, SunDiscDir: [3]float32{-0.25379306, -0.94716823, 0.19611615}, MoonDiscDir: [3]float32{0.25379306, 0.94716823, 0.19611615}, MoonDiscColor: [3]float32{1.2750001, 1.3199999, 1.425}, CloudSteps: 32}},
-	{1, EnvironmentState{SunDir: [3]float32{1.8012975e-16, 0.9805807, 0.19611615}, SunColor: [3]float32{0.045, 0.052, 0.08}, RealSunDir: [3]float32{-1.8012975e-16, -0.9805807, 0.19611615}, SunElevation: -0.9805807, Ambient: [3]float32{0.01, 0.013, 0.03}, FogDensity: 0.0075, StarFade: 1, MilkyWay: 1, StarDensity: 1, DrawSky: true, DrawStars: true, DrawMoon: true, SunDiscDir: [3]float32{-1.8012975e-16, -0.9805807, 0.19611615}, MoonDiscDir: [3]float32{1.8012975e-16, 0.9805807, 0.19611615}, MoonDiscColor: [3]float32{1.2750001, 1.3199999, 1.425}, CloudSteps: 32}},
-}
-
-// The edges, where the curves are not straight and a regular sweep steps over
-// them: the first light before sunrise at 0.22, the two sides of the shaft
-// window at 0.745 and 0.755 that the smoothstep was introduced to stop blinking
-// across, sunrise and sunset themselves, and the blue hour after each.
-var dayCycleEdgePins = []struct {
-	tod   float32
-	state EnvironmentState
-}{
-	{0.22, EnvironmentState{SunDir: [3]float32{-0.9632119, 0.18374251, 0.19611615}, SunColor: [3]float32{0.0055161547, 0.006374223, 0.009806497}, RealSunDir: [3]float32{0.9632119, -0.18374251, 0.19611615}, SunElevation: -0.18374251, Ambient: [3]float32{0.055, 0.065, 0.11}, FogDensity: 0.0075, StarFade: 0.62597257, MilkyWay: 1, StarDensity: 1, DrawSky: true, DrawStars: true, DrawMoon: true, SunDiscDir: [3]float32{0.9632119, -0.18374251, 0.19611615}, SunDiscColor: [3]float32{0.11499605, 0.06899764, 0.03449882}, MoonDiscDir: [3]float32{-0.9632119, 0.18374251, 0.19611615}, MoonDiscColor: [3]float32{1.2750001, 1.3199999, 1.425}, CloudSteps: 32}},
-	{0.245, EnvironmentState{SunDir: [3]float32{0.9800968, -0.030800752, 0.19611615}, SunColor: [3]float32{0.5687998, 0.3412799, 0.17063995}, RealSunDir: [3]float32{0.9800968, -0.030800752, 0.19611615}, SunElevation: -0.030800752, Ambient: [3]float32{0.12583335, 0.10666668, 0.10583333}, FogDensity: 0.0075, StarFade: 0.004349053, MilkyWay: 1, StarDensity: 1, DrawSky: true, DrawStars: true, DrawSun: true, DrawMoon: true, SunDiscDir: [3]float32{0.9800968, -0.030800752, 0.19611615}, SunDiscColor: [3]float32{4.948153, 2.9688919, 1.4844459}, MoonDiscDir: [3]float32{-0.9800968, 0.030800752, 0.19611615}, MoonDiscColor: [3]float32{0.9220839, 0.95462805, 1.0305643}, CloudSteps: 32, LightShafts: 0.24510969}},
-	{0.25, EnvironmentState{SunDir: [3]float32{0.9805807, 0, 0.19611615}, SunColor: [3]float32{0.784, 0.4704, 0.2352}, RealSunDir: [3]float32{0.9805807, 0, 0.19611615}, Ambient: [3]float32{0.14, 0.115, 0.105}, FogDensity: 0.0075, MilkyWay: 1, StarDensity: 1, DrawSky: true, DrawSun: true, DrawMoon: true, SunDiscDir: [3]float32{0.9805807, 0, 0.19611615}, SunDiscColor: [3]float32{5, 3, 1.5}, MoonDiscDir: [3]float32{-0.9805807, -0, 0.19611615}, MoonDiscColor: [3]float32{0.7650001, 0.792, 0.855}, CloudSteps: 32, LightShafts: 0.25}},
-	{0.3, EnvironmentState{SunDir: [3]float32{0.9325876, 0.30301616, 0.19611615}, SunColor: [3]float32{1, 0.9, 0.8}, RealSunDir: [3]float32{0.9325876, 0.30301616, 0.19611615}, SunElevation: 0.30301616, Ambient: [3]float32{0.19285715, 0.18809524, 0.22380953}, FogDensity: 0.0075, MilkyWay: 1, StarDensity: 1, DrawSky: true, DrawSun: true, SunDiscDir: [3]float32{0.9325876, 0.30301616, 0.19611615}, SunDiscColor: [3]float32{5, 4.5, 4}, MoonDiscDir: [3]float32{-0.9325876, -0.30301616, 0.19611615}, MoonDiscColor: [3]float32{0, 0, 0}, CloudSteps: 32, LightShafts: 0.25, CastShadows: true}},
-	{0.72, EnvironmentState{SunDir: [3]float32{-0.96321195, 0.18374233, 0.19611615}, SunColor: [3]float32{1, 0.7399997, 0.5599996}, RealSunDir: [3]float32{-0.96321195, 0.18374233, 0.19611615}, SunElevation: 0.18374233, Ambient: [3]float32{0.17749995, 0.16499992, 0.18999986}, FogDensity: 0.0075, MilkyWay: 1, StarDensity: 1, DrawSky: true, DrawSun: true, SunDiscDir: [3]float32{-0.96321195, 0.18374233, 0.19611615}, SunDiscColor: [3]float32{5, 3.6999986, 2.7999978}, MoonDiscDir: [3]float32{0.96321195, -0.18374233, 0.19611615}, MoonDiscColor: [3]float32{0, 0, 0}, CloudSteps: 32, LightShafts: 0.25, CastShadows: true}},
-	{0.745, EnvironmentState{SunDir: [3]float32{-0.9800968, 0.030800752, 0.19611615}, SunColor: [3]float32{0.94227904, 0.50883067, 0.24499248}, RealSunDir: [3]float32{-0.9800968, 0.030800752, 0.19611615}, SunElevation: 0.030800752, Ambient: [3]float32{0.14625, 0.11499998, 0.11499998}, FogDensity: 0.0075, MilkyWay: 1, StarDensity: 1, DrawSky: true, DrawSun: true, DrawMoon: true, SunDiscDir: [3]float32{-0.9800968, 0.030800752, 0.19611615}, SunDiscColor: [3]float32{5, 2.6999998, 1.2999997}, MoonDiscDir: [3]float32{0.9800968, -0.030800752, 0.19611615}, MoonDiscColor: [3]float32{0.6079162, 0.62937206, 0.67943573}, CloudSteps: 32, LightShafts: 0.25, CastShadows: true}},
-	{0.755, EnvironmentState{SunDir: [3]float32{-0.9800968, -0.030800752, 0.19611615}, SunColor: [3]float32{0.5687998, 0.2843999, 0.11375996}, RealSunDir: [3]float32{-0.9800968, -0.030800752, 0.19611615}, SunElevation: -0.030800752, Ambient: [3]float32{0.12916666, 0.09916666, 0.100833334}, FogDensity: 0.0075, StarFade: 0.004349053, MilkyWay: 1, StarDensity: 1, DrawSky: true, DrawStars: true, DrawSun: true, DrawMoon: true, SunDiscDir: [3]float32{-0.9800968, -0.030800752, 0.19611615}, SunDiscColor: [3]float32{4.948153, 2.4740765, 0.98963064}, MoonDiscDir: [3]float32{0.9800968, 0.030800752, 0.19611615}, MoonDiscColor: [3]float32{0.9220839, 0.95462805, 1.0305643}, CloudSteps: 32, LightShafts: 0.24510969}},
-	{0.78, EnvironmentState{SunDir: [3]float32{0.96321195, 0.18374233, 0.19611615}, SunColor: [3]float32{0.0055161137, 0.006374176, 0.009806424}, RealSunDir: [3]float32{-0.96321195, -0.18374233, 0.19611615}, SunElevation: -0.18374233, Ambient: [3]float32{0.075, 0.07, 0.105}, FogDensity: 0.0075, StarFade: 0.6259716, MilkyWay: 1, StarDensity: 1, DrawSky: true, DrawStars: true, DrawMoon: true, SunDiscDir: [3]float32{-0.96321195, -0.18374233, 0.19611615}, SunDiscColor: [3]float32{0.114998505, 0.057499252, 0.022999702}, MoonDiscDir: [3]float32{0.96321195, 0.18374233, 0.19611615}, MoonDiscColor: [3]float32{1.2750001, 1.3199999, 1.425}, CloudSteps: 32}},
-	{0.83, EnvironmentState{SunDir: [3]float32{0.85928947, 0.47239828, 0.19611615}, SunColor: [3]float32{0.045, 0.052, 0.08}, RealSunDir: [3]float32{-0.85928947, -0.47239828, 0.19611615}, SunElevation: -0.47239828, Ambient: [3]float32{0.023833336, 0.029333338, 0.06433334}, FogDensity: 0.0075, StarFade: 1, MilkyWay: 1, StarDensity: 1, DrawSky: true, DrawStars: true, DrawMoon: true, SunDiscDir: [3]float32{-0.85928947, -0.47239828, 0.19611615}, MoonDiscDir: [3]float32{0.85928947, 0.47239828, 0.19611615}, MoonDiscColor: [3]float32{1.2750001, 1.3199999, 1.425}, CloudSteps: 32}},
-}
-
-// The moon disc's colour, which was three constants, a horizon fade and a boost
-// inside buildMoonObject until it moved onto the state as MoonDiscColor. Pinned
-// because moving arithmetic between files is exactly where a reassociated
-// float32 multiply hides, and because every committed night capture has a moon
-// in it.
-var moonDiscPins = []struct {
-	tod   float32
-	color [3]float32
-}{
-	{0, [3]float32{1.2750001, 1.3199999, 1.425}},
-	{0.041666668, [3]float32{1.2750001, 1.3199999, 1.425}},
-	{0.083333336, [3]float32{1.2750001, 1.3199999, 1.425}},
-	{0.125, [3]float32{1.2750001, 1.3199999, 1.425}},
-	{0.16666667, [3]float32{1.2750001, 1.3199999, 1.425}},
-	{0.20833333, [3]float32{1.2750001, 1.3199999, 1.425}},
-	{0.25, [3]float32{0.7650001, 0.792, 0.855}},
-	{0.29166666, [3]float32{0, 0, 0}},
-	{0.33333334, [3]float32{0, 0, 0}},
-	{0.375, [3]float32{0, 0, 0}},
-	{0.41666666, [3]float32{0, 0, 0}},
-	{0.45833334, [3]float32{0, 0, 0}},
-	{0.5, [3]float32{0, 0, 0}},
-	{0.5416667, [3]float32{0, 0, 0}},
-	{0.5833333, [3]float32{0, 0, 0}},
-	{0.625, [3]float32{0, 0, 0}},
-	{0.6666667, [3]float32{0, 0, 0}},
-	{0.7083333, [3]float32{0, 0, 0}},
-	{0.75, [3]float32{0.7650001, 0.792, 0.855}},
-	{0.7916667, [3]float32{1.2750001, 1.3199999, 1.425}},
-	{0.8333333, [3]float32{1.2750001, 1.3199999, 1.425}},
-	{0.875, [3]float32{1.2750001, 1.3199999, 1.425}},
-	{0.9166667, [3]float32{1.2750001, 1.3199999, 1.425}},
-	{0.9583333, [3]float32{1.2750001, 1.3199999, 1.425}},
-	{1, [3]float32{1.2750001, 1.3199999, 1.425}},
-}
-
-// staticCases are the fixed-light configurations the pins below were taken from,
-// written as StaticSource because that is the type they belong to now. The pins
-// came out of Environment, before it had a second implementation to delegate to,
-// so each case checks both.
+// Three cases, where there were eight. The other five had a Sky in them and went
+// to x/sky with the dome; they are fixedSkyCases there, pinned against the same
+// generation. What is left is the whole of the environment the engine itself
+// resolves, which is the point of the split: these are the only fixed-light rules
+// that remain in one place, and x/sky's fixed-hour path calls them rather than
+// repeating them.
 var staticCases = []struct {
 	name string
 	src  StaticSource
@@ -132,16 +38,6 @@ var staticCases = []struct {
 		Ambient:    &AmbientLight{Color: [3]float32{0.18, 0.17, 0.20}},
 		ClearColor: [3]float32{0.03, 0.03, 0.045},
 	}},
-	{"fixed sky day", StaticSource{Sky: &Sky{Stars: true, StarDensity: 1, MilkyWay: 1, SunDisc: true, MoonDisc: true, CloudSteps: CloudsHigh, LightShafts: 0.25, FixedSunElevation: 0.6}}},
-	{"fixed sky night", StaticSource{Sky: &Sky{Stars: true, StarDensity: 1, MilkyWay: 1, SunDisc: true, MoonDisc: true, CloudSteps: CloudsHigh, LightShafts: 0.25, FixedSunElevation: -0.5}}},
-	{"fixed sky sunset", StaticSource{Sky: &Sky{Stars: true, StarDensity: 1, MilkyWay: 1, CloudSteps: CloudsHigh, LightShafts: 0.25, FixedSunElevation: -0.08}, Fog: &Fog{Density: 0.01, Height: 6, BaseHeight: 2}}},
-	{"sun+sky+fog", StaticSource{
-		Sun:     &DirectionalLight{Direction: [3]float32{0.8, 0.6, 0}, Color: [3]float32{1, 1, 1}},
-		Ambient: &AmbientLight{Color: [3]float32{0.05, 0.05, 0.05}},
-		Sky:     &Sky{Stars: true, StarDensity: 0.5, MilkyWay: 0.25, SunDisc: true, MoonDisc: true, Cirrus: 0.4, CloudSteps: CloudsLow, LightShafts: 0.4, FixedSunElevation: 0.2, LightShaftShape: LightShaftShape{Radius: 1.3, Decay: 0.9, Threshold: [2]float32{0.3, 0.5}}},
-		Fog:     &Fog{Density: 0.02, Height: 4, BaseHeight: 1},
-	}},
-	{"clamped sky", StaticSource{Sky: &Sky{StarDensity: -2, MilkyWay: 3, FixedSunElevation: 0.1}}},
 }
 
 // staticPins is what each case above resolved to before the carve.
@@ -152,11 +48,6 @@ var staticPins = []struct {
 	{"bare", EnvironmentState{}},
 	{"sun+ambient", EnvironmentState{SunDir: [3]float32{0.4, 0.8, 0.3}, SunColor: [3]float32{0.7, 0.68, 0.62}, RealSunDir: [3]float32{0.4, 0.8, 0.3}, Ambient: [3]float32{0.18, 0.17, 0.2}, CastShadows: true}},
 	{"interior", EnvironmentState{Ambient: [3]float32{0.18, 0.17, 0.2}, ClearColor: [3]float32{0.03, 0.03, 0.045}}},
-	{"fixed sky day", EnvironmentState{SunElevation: 0.6, MilkyWay: 1, StarDensity: 1, DrawSky: true, CloudSteps: 32, LightShafts: 0.25}},
-	{"fixed sky night", EnvironmentState{SunElevation: -0.5, StarFade: 1, MilkyWay: 1, StarDensity: 1, DrawSky: true, DrawStars: true, CloudSteps: 32}},
-	{"fixed sky sunset", EnvironmentState{SunElevation: -0.08, FogDensity: 0.01, FogHeight: 6, FogBaseHeight: 2, StarFade: 0.11807579, MilkyWay: 1, StarDensity: 1, DrawSky: true, DrawStars: true, CloudSteps: 32, LightShafts: 0.13939464}},
-	{"sun+sky+fog", EnvironmentState{SunDir: [3]float32{0.8, 0.6, 0}, SunColor: [3]float32{1, 1, 1}, RealSunDir: [3]float32{0.8, 0.6, 0}, SunElevation: 0.2, Ambient: [3]float32{0.05, 0.05, 0.05}, FogDensity: 0.02, FogHeight: 4, FogBaseHeight: 1, MilkyWay: 0.25, StarDensity: 0.5, DrawSky: true, CloudSteps: 16, Cirrus: 0.4, LightShafts: 0.4, LightShaftShape: LightShaftShape{Radius: 1.3, Decay: 0.9, Threshold: [2]float32{0.3, 0.5}}, CastShadows: true}},
-	{"clamped sky", EnvironmentState{SunElevation: 0.1, MilkyWay: 1, DrawSky: true}},
 }
 
 // diffState names the fields two states disagree on. A %+v of an
@@ -174,64 +65,19 @@ func diffState(got, want EnvironmentState) []string {
 	return out
 }
 
-func dayCycleFixture(tod float32) *DayCycleSource {
-	return &DayCycleSource{
-		Cycle: DayNight{TimeOfDay: tod},
-		Sky:   DefaultSky(),
-		Fog:   &Fog{Density: DefaultFogDensity},
-	}
-}
-
-// TestDayCycleSourceIsUnchanged is the whole proof of this refactor: the day
-// cycle resolves, field for field, to exactly what it resolved to before it
-// became a source in its own right.
+// TestStaticSourceIsUnchanged is the proof for the fixed-light path: the
+// configuration that survives into the engine once the sky leaves.
 //
-// Both ways in are checked, because both ship: DayCycleSource directly, and the
-// Environment composite that delegates to it. A split that quietly gave the two
-// different answers would leave every example on one of them and every new game
-// on the other.
+// It mattered for the carve, and it matters more now. StaticSource stopped
+// sharing a resolver with the day cycle in this change -- the shared envAir and
+// staticState went to x/sky with the dome -- so these three states are produced
+// by code that was rewritten rather than merely moved, and x/sky's fixed-hour
+// path calls into it. A rule dropped here is a rule missing from both.
 //
-// Verified to fail. Reassociating one multiply in DayNight.MoonDiscColor --
-// `0.85 * (fade * moonBoost)` rather than `0.85 * fade * moonBoost`, which is
-// the same number in real arithmetic -- fails five of the sweep's entries, e.g.
-//
-//	t=0.0416667: MoonDiscColor: got [1.275 1.32 1.4249999] want [1.2750001 1.3199999 1.425]
-//
-// and dropping the smoothstep from the shaft window, so LightShafts is cut at
-// the horizon the way it was before, fails t=0.245 and t=0.755 with
-// `LightShafts: got 0 want 0.24510969`.
-func TestDayCycleSourceIsUnchanged(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		pins []struct {
-			tod   float32
-			state EnvironmentState
-		}
-	}{
-		{"sweep", dayCyclePins},
-		{"edges", dayCycleEdgePins},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			for _, p := range tc.pins {
-				if got := dayCycleFixture(p.tod).State(); got != p.state {
-					t.Errorf("DayCycleSource at t=%g moved:\n  %s", p.tod, strings.Join(diffState(got, p.state), "\n  "))
-				}
-				env := DefaultEnvironment()
-				env.Cycle.TimeOfDay = p.tod
-				if got := env.State(); got != p.state {
-					t.Errorf("Environment at t=%g moved:\n  %s", p.tod, strings.Join(diffState(got, p.state), "\n  "))
-				}
-			}
-		})
-	}
-}
-
-// TestStaticSourceIsUnchanged is the same proof for the fixed-light path: the
-// configuration that survives into the engine once the cycle leaves.
-//
-// Verified to fail: giving staticState the cycle's `haveBodies` -- true rather
-// than false, so a fixed sky places discs it has no bodies for -- fails "fixed
-// sky day" and "sun+sky+fog" with `DrawSun: got true want false`.
+// Verified to fail: dropping the RealSunDir assignment, which is the one line
+// whose absence no capture of a fixed-light scene would show -- nothing in a
+// scene with no dome reads it -- reports `StaticSource "sun+ambient" moved:` and
+// `RealSunDir: got [0 0 0] want [0.4 0.8 0.3]`.
 func TestStaticSourceIsUnchanged(t *testing.T) {
 	if len(staticCases) != len(staticPins) {
 		t.Fatalf("%d static cases against %d pins", len(staticCases), len(staticPins))
@@ -245,38 +91,53 @@ func TestStaticSourceIsUnchanged(t *testing.T) {
 		if got := src.State(); got != p.state {
 			t.Errorf("StaticSource %q moved:\n  %s", c.name, strings.Join(diffState(got, p.state), "\n  "))
 		}
-		env := &Environment{Sun: c.src.Sun, Ambient: c.src.Ambient, Sky: c.src.Sky, Fog: c.src.Fog, ClearColor: c.src.ClearColor}
-		if got := env.State(); got != p.state {
-			t.Errorf("Environment %q moved:\n  %s", c.name, strings.Join(diffState(got, p.state), "\n  "))
+	}
+
+	// And it draws no dome, whatever else it says. That is the engine's half of
+	// the migration: with no sky package there is no sky, so a frame with nothing
+	// in it is the clear colour rather than a gradient.
+	for _, c := range staticCases {
+		src := c.src
+		st := src.State()
+		if st.DrawSky || st.DrawStars || st.DrawSun || st.DrawMoon || st.CloudSteps != 0 || st.LightShafts != 0 {
+			t.Errorf("StaticSource %q asked for something to be drawn in the sky: %+v", c.name, st)
 		}
 	}
 }
 
-// TestMoonDiscColorIsUnchanged pins the colour that moved out of the draw path,
-// and checks the draw still gets it.
+// TestCelestialDiscsAreColouredFromTheState is the half of the carve's
+// moon-colour test that belongs to the engine: whatever the source decided, the
+// billboard is drawn in it.
 //
-// The second half is the one that would fail silently: the arithmetic could be
-// perfect and buildMoonObject could still be colouring the disc from something
-// else, and a night capture is the only other thing that would say so.
+// It is the half that would fail silently. The arithmetic in a sky package could
+// be perfect and buildMoonObject could still be colouring the disc from
+// something of its own -- the three constants and the horizon fade it held until
+// the carve -- and a night capture is the only other thing that would say so.
 //
-// Verified to fail: changing moonBoost from 1.5 to 1.6 fails all nineteen
-// above-horizon entries, the first as
-// `t=0: MoonDiscColor [1.3600001 1.408 1.52], want [1.2750001 1.3199999 1.425]`.
-func TestMoonDiscColorIsUnchanged(t *testing.T) {
-	for _, p := range moonDiscPins {
-		dn := DayNight{TimeOfDay: p.tod}
-		if got := dn.MoonDiscColor(); got != p.color {
-			t.Errorf("t=%g: MoonDiscColor %v, want %v", p.tod, got, p.color)
-		}
-	}
-
+// The colours here are deliberately not a cycle's. The carve's version read them
+// off a pinned table of real moon colours and was weaker for it: a disc coloured
+// from a second copy of the same curve would have passed. Values no curve would
+// produce is what makes "it came from the state" the only way to get them.
+//
+// Verified to fail: colouring the moon {0.85, 0.88, 0.95} again, which is what
+// buildMoonObject did before the carve, reports `the moon was drawn
+// [0.85 0.88 0.95] with the state saying [0.31 0.32 0.33]` -- and takes
+// TestCustomSourceReachesEveryReader with it, which is the other half of the same
+// claim from the other direction.
+func TestCelestialDiscsAreColouredFromTheState(t *testing.T) {
 	// far and cameraEye are all the billboard needs; no renderer is involved.
 	e := &Engine{far: 500}
-	for _, p := range moonDiscPins {
-		st := dayCycleFixture(p.tod).State()
-		if got := e.buildMoonObject(mgl32.Ident4(), st).Color; got != st.MoonDiscColor {
-			t.Errorf("t=%g: the moon was drawn %v with the state saying %v", p.tod, got, st.MoonDiscColor)
-		}
+	st := EnvironmentState{
+		SunDiscDir:    [3]float32{0.1, 0.9, 0.2},
+		SunDiscColor:  [3]float32{4.1, 0.37, 2.9},
+		MoonDiscDir:   [3]float32{-0.1, -0.9, 0.2},
+		MoonDiscColor: [3]float32{0.31, 0.32, 0.33},
+	}
+	if got := e.buildSunObject(mgl32.Ident4(), st).Color; got != st.SunDiscColor {
+		t.Errorf("the sun was drawn %v with the state saying %v", got, st.SunDiscColor)
+	}
+	if got := e.buildMoonObject(mgl32.Ident4(), st).Color; got != st.MoonDiscColor {
+		t.Errorf("the moon was drawn %v with the state saying %v", got, st.MoonDiscColor)
 	}
 }
 
@@ -574,7 +435,8 @@ func TestEnvTraceCoversEveryField(t *testing.T) {
 // allocation in the draw path is paid by every frame of every game, and the two
 // pointer fields the lighting pack needs are Engine fields precisely to avoid
 // one. Nothing here may allocate, including the custom-source path, where the
-// state crosses an interface boundary.
+// state crosses an interface boundary. x/sky measures its own two sources,
+// which is where the day cycle's zero now lives.
 //
 // Verified to fail: handing the pack a fresh `&renderer.NightGrade{...}` rather
 // than the Engine field reports `1 allocations per frame resolving and applying
@@ -584,9 +446,7 @@ func TestEnvironmentResolvesWithoutAllocating(t *testing.T) {
 		name string
 		src  EnvironmentSource
 	}{
-		{"Environment", DefaultEnvironment()},
-		{"DayCycleSource", dayCycleFixture(0.3)},
-		{"StaticSource", &StaticSource{Sun: &DirectionalLight{Direction: [3]float32{0, 1, 0}, Color: [3]float32{1, 1, 1}}, Sky: DefaultSky(), Fog: &Fog{Density: 0.01}}},
+		{"StaticSource", &StaticSource{Sun: &DirectionalLight{Direction: [3]float32{0, 1, 0}, Color: [3]float32{1, 1, 1}}, Fog: &Fog{Density: 0.01}}},
 		{"a custom source", &fakeEnv{state: customState()}},
 	} {
 		s := NewScene()
@@ -602,93 +462,5 @@ func TestEnvironmentResolvesWithoutAllocating(t *testing.T) {
 		if n := testing.AllocsPerRun(200, func() { tc.src.Advance(1.0 / 60) }); n != 0 {
 			t.Errorf("%s: %v allocations per tick advancing", tc.name, n)
 		}
-	}
-}
-
-// TestSceneReachesABuiltInCycleEitherWay covers the convenience methods against
-// both shapes the built-in cycle now ships in. SetTimeOfDay writing into a copy
-// rather than into the source is the mistake this would catch: DayCycleSource
-// holds its clock by value, so Scene.DayNight has to hand out its address.
-//
-// Verified to fail: returning `&DayNight{...: env.Cycle}` -- a copy -- from
-// Scene.DayNight's DayCycleSource case leaves the time at 0.25 and reports
-// `a DayCycleSource ignored SetTimeOfDay: 0.25`.
-func TestSceneReachesABuiltInCycleEitherWay(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		src  EnvironmentSource
-	}{
-		{"an Environment", DefaultEnvironment()},
-		{"a DayCycleSource", dayCycleFixture(0.25)},
-	} {
-		s := NewScene()
-		s.Env = tc.src
-		if s.DayNight() == nil {
-			t.Fatalf("%s has no reachable cycle", tc.name)
-		}
-		s.SetTimeOfDay(0.6)
-		if got := s.TimeOfDay(); got != 0.6 {
-			t.Errorf("%s ignored SetTimeOfDay: %v", tc.name, got)
-		}
-		// The resolved frame has to follow the clock, not just the getter: a
-		// source whose Advance moved a copy would report the new time and light
-		// the scene with the old one.
-		before := s.Environment()
-		s.SetDayCycleSpeed(1.0 / 120)
-		s.Tick(30)
-		if got := s.TimeOfDay(); got == 0.6 {
-			t.Errorf("%s ignored SetDayCycleSpeed: the clock stayed at %v over thirty seconds", tc.name, got)
-		}
-		if after := s.Environment(); after == before {
-			t.Errorf("%s moved its clock without moving the light", tc.name)
-		}
-	}
-
-	// A StaticSource has no cycle, so the conveniences are no-ops rather than
-	// panics -- the same contract a custom source gets.
-	s := NewScene()
-	s.Env = &StaticSource{}
-	if s.DayNight() != nil {
-		t.Error("a StaticSource reported a cycle")
-	}
-	s.SetTimeOfDay(0.5)
-	s.SetDayCycleSpeed(1)
-	if got := s.TimeOfDay(); got != 0 {
-		t.Errorf("a StaticSource reported the time as %v", got)
-	}
-}
-
-// TestSetFogDensityReachesEveryBuiltIn: the shortcut has to reach all three
-// built-in shapes, and has to create a Fog where there is none rather than
-// silently doing nothing.
-//
-// Verified to fail: restoring the single `*Environment` type assertion reports
-// `a DayCycleSource ignored SetFogDensity: 0` and the same for a StaticSource.
-func TestSetFogDensityReachesEveryBuiltIn(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		src  EnvironmentSource
-	}{
-		{"an Environment with no Fog", &Environment{}},
-		{"a DayCycleSource with no Fog", &DayCycleSource{}},
-		{"a StaticSource with no Fog", &StaticSource{}},
-		{"an Environment with Fog", DefaultEnvironment()},
-	} {
-		s := NewScene()
-		s.Env = tc.src
-		e := &Engine{Scene: s}
-		e.SetFogDensity(0.042)
-		if got := s.Environment().FogDensity; got != 0.042 {
-			t.Errorf("%s ignored SetFogDensity: %v", tc.name, got)
-		}
-	}
-
-	// A custom source owns its own fog, and the shortcut must leave it there.
-	s := NewScene()
-	s.Env = &fakeEnv{state: EnvironmentState{FogDensity: 0.05}}
-	e := &Engine{Scene: s}
-	e.SetFogDensity(0.042)
-	if got := s.Environment().FogDensity; got != 0.05 {
-		t.Errorf("SetFogDensity reached into a custom source: %v", got)
 	}
 }

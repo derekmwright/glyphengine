@@ -25,7 +25,7 @@ func (g *game) Init(e *glyph.Engine) error {
 			return err
 		}
 	}
-	e.Env = &glyph.Environment{Sun: &glyph.DirectionalLight{Direction: [3]float32{0.8, 0.6, 0}, Color: [3]float32{1, 1, 1}}, Ambient: &glyph.AmbientLight{Color: [3]float32{0.05, 0.05, 0.05}}}
+	e.Env = &glyph.StaticSource{Sun: &glyph.DirectionalLight{Direction: [3]float32{0.8, 0.6, 0}, Color: [3]float32{1, 1, 1}}, Ambient: &glyph.AmbientLight{Color: [3]float32{0.05, 0.05, 0.05}}}
 	r := e.Renderer()
 	plane, err := r.CreatePlane(40, 40)
 	if err != nil {

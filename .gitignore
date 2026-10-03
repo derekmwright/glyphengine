@@ -41,5 +41,7 @@ examples/.skypalette/
 examples/.shafts/
 /.shadowcoverage/
 
+examples/.skymigration/
+
 # task clouds keeps its captures for visual review.
 examples/.clouds/

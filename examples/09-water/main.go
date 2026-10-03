@@ -86,6 +86,7 @@ import (
 	"github.com/derekmwright/glyphengine/ecs"
 	"github.com/derekmwright/glyphengine/input"
 	"github.com/derekmwright/glyphengine/renderer"
+	xsky "github.com/derekmwright/glyphengine/x/sky"
 	xwater "github.com/derekmwright/glyphengine/x/water"
 )
 
@@ -391,36 +392,33 @@ func (g *game) Init(e *glyph.Engine) error {
 		return err
 	}
 
-	e.SetDayCycleSpeed(1.0 / 300.0)
-	e.SetTimeOfDay(0.32)
+	env := xsky.DefaultEnvironment()
+	env.Cycle.TimeOfDay = 0.32
+	env.Cycle.Speed = 1.0 / 300.0
 	if g.tod >= 0 {
 		// Freeze the clock so a given time of day can be inspected, and
 		// screenshots of it are reproducible.
-		e.SetTimeOfDay(g.tod)
-		e.SetDayCycleSpeed(0)
+		env.Cycle.SetTimeOfDay(g.tod)
+		env.Cycle.Speed = 0
 	}
-	e.SetFogDensity(0.005)
-
-	if env, ok := e.Scene.Env.(*glyph.Environment); ok {
-		if env.Sky != nil {
-			env.Sky.CloudSteps = g.clouds
-			env.Sky.Cirrus = g.cirrus
-			env.Sky.StarDensity = float32(g.stars)
-			env.Sky.MilkyWay = float32(g.band)
-			// Zero fields keep the engine's defaults, so passing the struct
-			// through whole is the same as not touching it.
-			env.Sky.LightShaftShape = g.shaftShape
-			if g.shafts >= 0 {
-				env.Sky.LightShafts = g.shafts
-			}
-		}
-		if g.fogHeight > 0 && env.Fog != nil {
-			// Pool the mist on the water rather than spreading it evenly
-			// through the air above the island.
-			env.Fog.Height = g.fogHeight
-			env.Fog.BaseHeight = waterLevel
-		}
+	env.Fog.Density = 0.005
+	env.Sky.CloudSteps = g.clouds
+	env.Sky.Cirrus = g.cirrus
+	env.Sky.StarDensity = float32(g.stars)
+	env.Sky.MilkyWay = float32(g.band)
+	// Zero fields keep the engine's defaults, so passing the struct
+	// through whole is the same as not touching it.
+	env.Sky.LightShaftShape = g.shaftShape
+	if g.shafts >= 0 {
+		env.Sky.LightShafts = g.shafts
 	}
+	if g.fogHeight > 0 {
+		// Pool the mist on the water rather than spreading it evenly
+		// through the air above the island.
+		env.Fog.Height = g.fogHeight
+		env.Fog.BaseHeight = waterLevel
+	}
+	e.Scene.Env = env
 
 	// A colony on an alien moon, which is what issue #12 was written from.
 	// Opt-in, so every other capture of this scene is byte for byte what it
@@ -1059,7 +1057,7 @@ func main() {
 	pitch := flag.Float64("pitch", 0, "initial camera pitch in radians; positive looks down")
 	msaa := flag.Int("msaa", 4, "MSAA sample count (1 disables it)")
 	novsync := flag.Bool("novsync", false, "disable vsync, for measuring frame cost")
-	clouds := flag.Int("clouds", glyph.CloudsHigh, "volumetric cloud raymarch steps (0 disables)")
+	clouds := flag.Int("clouds", xsky.CloudsHigh, "volumetric cloud raymarch steps (0 disables)")
 	cirrus := flag.Float64("cirrus", 0, "high wispy cloud strength, 0 to 1; independent of -clouds")
 	stars := flag.Float64("stars", 1.0, "star density multiplier (0 = none)")
 	milkyway := flag.String("milkyway", "", "equirectangular sky panorama (PNG) to use as the galactic band")
@@ -1094,6 +1092,7 @@ func main() {
 	flag.Parse()
 
 	opts := []glyph.Option{
+		glyph.WithShaders(xsky.Shaders()),
 		glyph.WithTitle("GlyphEngine - 09 Water"),
 		glyph.WithDebugKeys(),
 		glyph.WithWindowSize(*width, *height),

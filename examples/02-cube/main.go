@@ -28,6 +28,7 @@ import (
 	glyph "github.com/derekmwright/glyphengine"
 	"github.com/derekmwright/glyphengine/ecs"
 	"github.com/derekmwright/glyphengine/input"
+	xsky "github.com/derekmwright/glyphengine/x/sky"
 )
 
 func init() {
@@ -68,8 +69,10 @@ func (g *game) Init(e *glyph.Engine) error {
 	g.cube = cubeEnt
 
 	// A two-minute day, starting mid-morning so the sun is up and casting.
-	e.SetDayCycleSpeed(1.0 / 120.0)
-	e.SetTimeOfDay(0.35)
+	env := xsky.DefaultEnvironment()
+	env.Cycle.TimeOfDay = 0.35
+	env.Cycle.Speed = 1.0 / 120.0
+	e.Scene.Env = env
 
 	g.camera = glyph.NewCamera(8)
 	g.camera.Target = mgl32.Vec3{0, 1, 0}
@@ -103,6 +106,7 @@ func main() {
 	flag.Parse()
 
 	opts := []glyph.Option{
+		glyph.WithShaders(xsky.Shaders()),
 		glyph.WithTitle("GlyphEngine - 02 Cube"),
 		glyph.WithWindowSize(*width, *height),
 		glyph.WithMSAA(4),

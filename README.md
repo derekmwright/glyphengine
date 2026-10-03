@@ -16,7 +16,8 @@ runtime that loads your game.
 *`task example:15-kitchen-sink` — a rigged glTF character with GPU skinning,
 running over a procedural heightmap that is both the collision surface and the
 geometry, through instanced grass scattered from that same heightmap, under
-cascaded shadow maps and a day/night sky, with MSDF text over the top. Every
+cascaded shadow maps and the day/night sky from `x/sky`, with MSDF text over the
+top. Every
 image in this README is captured by the engine itself with `-screenshot`, not
 taken by hand.*
 
@@ -78,6 +79,7 @@ import (
 	"github.com/go-gl/mathgl/mgl32"
 	glyph "github.com/derekmwright/glyphengine"
 	"github.com/derekmwright/glyphengine/input"
+	"github.com/derekmwright/glyphengine/x/sky"
 )
 
 func init() {
@@ -99,6 +101,12 @@ func (g *game) Init(e *glyph.Engine) error {
 	})
 	e.C.MeshRef.Set(ent, &glyph.MeshRef{Mesh: cube})
 
+	// A sky, a sun and some haze. The engine has no environment of its own
+	// beyond flat light and air, so a scene that wants one says which: x/sky is
+	// the day/night sky the engine used to ship. Leave this out and the frame
+	// is black with an unlit cube in it.
+	e.Scene.Env = sky.DefaultEnvironment()
+
 	g.camera = glyph.NewCamera(8)
 	g.camera.Target = mgl32.Vec3{0, 1, 0}
 	return nil
@@ -113,7 +121,13 @@ func (g *game) Update(e *glyph.Engine, dt float32) {
 }
 
 func main() {
-	e, err := glyph.New(&game{}, glyph.WithTitle("My Game"))
+	// WithShaders is the other half of the sky: the source above decides where
+	// the sun is, and these three shader stages are what draw a dome, stars and
+	// clouds from it. The engine embeds none of them.
+	e, err := glyph.New(&game{},
+		glyph.WithTitle("My Game"),
+		glyph.WithShaders(sky.Shaders()),
+	)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -182,6 +196,20 @@ bit-identical results at 60Hz and at 300Hz.
 | `glyphengine/ui/yamlui` | Declarative YAML UI with data bindings |
 | `glyphengine/shaders` | Embedded SPIR-V, overridable via `renderer.ShaderSet` |
 | `glyphengine/msdf` | MSDF font atlas generation in pure Go; CLI at `cmd/msdfatlas` |
+
+A **second published module**, `github.com/derekmwright/glyphengine/x`, holds the
+systems that have *a look* rather than a mechanism, one package per system. It
+depends on the engine and the engine depends on neither it nor the examples.
+
+| Package | What it does |
+|---|---|
+| `glyphengine/x/sky` | The day/night sky: the cycle and its palette curves, the dome, the sun and moon discs, the stars and the cloud layers |
+| `glyphengine/x/water` | The underwater volume: absorption, the water's own colour, sun shafts |
+| `glyphengine/x/terrainfield` | An island heightmap from value-noise fBm |
+
+See [`x/README.md`](x/README.md) and
+[ADR 0012](docs/adr/0012-an-x-module-for-opinionated-systems.md) for why there are
+two modules and what may go in the second.
 
 ## Examples
 

@@ -1,4 +1,4 @@
-package glyphengine
+package sky
 
 import (
 	"math"
@@ -285,5 +285,27 @@ func TestSunDiscExceedsOne(t *testing.T) {
 	}
 	if l := lum((&DayNight{TimeOfDay: 0.80}).SunDiscColor()); l > 0.01 {
 		t.Errorf("well-past-sunset disc luminance = %.4f, want ~0", l)
+	}
+}
+
+// TestDayNightAdvancesInSeconds moved here from the engine's scene_test.go with
+// the clock. It never needed a Scene: Advance takes simulation seconds, and that
+// the clock is driven in those is the property.
+func TestDayNightAdvancesInSeconds(t *testing.T) {
+	dn := DayNight{Speed: 1.0 / 120.0} // one full cycle every two minutes
+	for i := 0; i < 60; i++ {
+		dn.Advance(1.0 / 60.0) // one second total
+	}
+	want := float32(1.0 / 120.0)
+	if math.Abs(float64(dn.TimeOfDay-want)) > 1e-5 {
+		t.Errorf("after 1s TimeOfDay = %.6f, want %.6f", dn.TimeOfDay, want)
+	}
+
+	// It must wrap rather than run past 1.
+	dn.TimeOfDay = 0.99
+	dn.Speed = 1
+	dn.Advance(0.02)
+	if dn.TimeOfDay >= 1 || dn.TimeOfDay < 0 {
+		t.Errorf("TimeOfDay = %.6f, want it wrapped into [0,1)", dn.TimeOfDay)
 	}
 }

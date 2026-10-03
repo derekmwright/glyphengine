@@ -35,6 +35,7 @@ import (
 	"github.com/derekmwright/glyphengine/input"
 	"github.com/derekmwright/glyphengine/renderer"
 	"github.com/derekmwright/glyphengine/ui"
+	xsky "github.com/derekmwright/glyphengine/x/sky"
 )
 
 func init() {
@@ -158,8 +159,10 @@ func (g *game) Init(e *glyph.Engine) error {
 	g.camera.EyeHeight = 0.7
 	e.Input().SetCursorLocked(true)
 
-	e.SetDayCycleSpeed(1.0 / 240.0)
-	e.SetTimeOfDay(0.33)
+	env := xsky.DefaultEnvironment()
+	env.Cycle.TimeOfDay = 0.33
+	env.Cycle.Speed = 1.0 / 240.0
+	e.Scene.Env = env
 
 	log.Println("17-input running. WASD or left stick to move, Tab rebinds jump, Escape quits.")
 	g.logPad(e)
@@ -369,6 +372,7 @@ func main() {
 	flag.Parse()
 
 	opts := []glyph.Option{
+		glyph.WithShaders(xsky.Shaders()),
 		glyph.WithTitle("GlyphEngine - 17 Input"),
 		glyph.WithWindowSize(*width, *height),
 		glyph.WithMSAA(4),

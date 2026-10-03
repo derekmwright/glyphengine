@@ -94,6 +94,7 @@ import (
 	glyph "github.com/derekmwright/glyphengine"
 	"github.com/derekmwright/glyphengine/input"
 	"github.com/derekmwright/glyphengine/renderer"
+	xsky "github.com/derekmwright/glyphengine/x/sky"
 )
 
 //go:embed assets
@@ -200,13 +201,12 @@ func (g *game) Init(e *glyph.Engine) error {
 	// Night, so the lamps are the light -- the same setup 21-streetlights
 	// uses, for the same reason: a warm pool under each fixture reads
 	// clearly against a dim sky, where at midday it would not read at all.
-	env := glyph.DefaultEnvironment()
-	env.Sky.CloudSteps = glyph.CloudsOff
+	env := xsky.DefaultEnvironment()
+	env.Sky.CloudSteps = xsky.CloudsOff
 	env.Sky.MilkyWay = 0.5
 	env.Fog = &glyph.Fog{Density: 0.006, Height: 6}
+	env.Cycle.TimeOfDay = 0.03
 	e.Scene.Env = env
-	e.SetTimeOfDay(0.03)
-	e.SetDayCycleSpeed(0)
 
 	g.camera = glyph.NewCamera(g.camDist)
 	g.camera.Pitch = g.camPitch
@@ -861,6 +861,7 @@ func main() {
 	flag.Parse()
 
 	opts := []glyph.Option{
+		glyph.WithShaders(xsky.Shaders()),
 		glyph.WithTitle("GlyphEngine - 22 Level"),
 		glyph.WithWindowSize(*width, *height),
 		glyph.WithMSAA(4),
