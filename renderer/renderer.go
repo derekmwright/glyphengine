@@ -2208,7 +2208,7 @@ func (r *Renderer) traceStreamedBuffers(t *StateTrace) {
 // the clustered-light binning.
 //
 // Both are derived from the camera and the sun, which the engine already
-// hashes, so a divergence here with an identical cam= and sky= means the
+// hashes, so a divergence here with an identical cam= and env= means the
 // derivation itself moved -- a binner reading a different extent, a cascade
 // fit that saw a different centre. Worth a field of its own for that reason:
 // it is the difference between "the simulation moved" and "the same simulation

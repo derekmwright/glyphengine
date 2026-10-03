@@ -14,7 +14,9 @@ api:
   - glyphengine.DayNight.SunColor
   - glyphengine.DayNight.SunIntensity
   - glyphengine.DayNight.SunDiscColor
+  - glyphengine.DayNight.MoonDir
   - glyphengine.DayNight.MoonColor
+  - glyphengine.DayNight.MoonDiscColor
   - glyphengine.DayNight.MoonIntensity
   - glyphengine.DayNight.PrimaryLight
   - glyphengine.DayNight.Daylight
@@ -31,12 +33,13 @@ api:
   - glyphengine.Scene.SkyPalette
   - glyphengine.Engine.SetTimeOfDay
   - glyphengine.Engine.SetDayCycleSpeed
+  - glyphengine.DayCycleSource
 requires:
   - environment
 assets: none
 example: examples/09-water
 run: go run ./09-water -time 0.78
-verified: 2026-09-19
+verified: 2026-10-02 # the cycle is DayCycleSource, one implementation of the environment seam; MoonDiscColor moved here from the draw path; the grade and the palette are on EnvironmentState with the scene as the fallback (#161 step 3)
 ---
 
 # Day/night cycle
@@ -69,6 +72,15 @@ the input to all of it.
 | `SunIntensity()` | `smoothstep(-0.14, 0.06, sunY)` | Sun's contribution as a light |
 | `MoonIntensity()` | `smoothstep(0.14, 0.34, moonY)` | Moon's contribution as a light |
 | `StarVisibility()` | `1 - smoothstep(-0.30, -0.02, sunY)` | Star fade |
+| `MoonDiscColor()` | `{0.85, 0.88, 0.95} × 1.5 ×` the horizon fade at `moonY` | The moon billboard's colour |
+
+`MoonDiscColor` is the odd one out: it is driven by the *moon's* elevation, not
+the sun's, and it is a disc colour rather than a scattering term. It lives here
+because `EnvironmentState.MoonDiscColor` has to carry a finished colour -- the
+same way `SunDiscColor` does -- so that a replacement sky can place a moon *and*
+tint it. Until the environment contract was carved it was three constants and a
+fade inside the draw path, which left one colour the engine owned after a source
+was meant to own all of them.
 
 `shaders/include/atmosphere.inc` holds the shader half, driven by `pc.sunColor.w` — the
 sun's elevation, which rides there because `pc.sunDir` is whichever body is
@@ -163,9 +175,12 @@ that scene's moonlit ground, strength `0.8` gives `31/36/43`, `0.4` gives
 `30/38/42`, `0` gives `29/40/41` (the grass tint's own green) and a reversed
 tint at full strength gives `41/36/33`.
 
-It is on `Scene`, initialised by `NewScene`, rather than on `EnvironmentState`
-beside fog and ambient — see [environment](environment.md#convenience-methods)
-for why. The values ride to the shaders in the per-frame `ShadowData` uniform
+It is on `EnvironmentState` beside fog and ambient, *and* on `Scene`: a source
+that owns the look returns its own grade, a source that says nothing gets the
+scene's, and `Scene.SetNightGrade` is what sets that. See
+[environment](environment.md#the-palette-and-the-grade-have-two-homes-on-purpose)
+for the rule and why the zero value is the sentinel rather than an answer. The
+values ride to the shaders in the per-frame `ShadowData` uniform
 block, appended after the cascade matrices because the push constant block is
 full at its 256-byte guaranteed minimum; all seven lit fragment shaders declare
 that block and must agree with `renderer/shadow.go`'s `litUBOSize`.

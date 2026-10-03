@@ -11,6 +11,8 @@ api:
   - glyphengine.EnvironmentSource
   - glyphengine.EnvironmentState
   - glyphengine.Environment
+  - glyphengine.DayCycleSource
+  - glyphengine.StaticSource
   - glyphengine.DefaultEnvironment
   - glyphengine.Sky
   - glyphengine.DefaultSky
@@ -38,7 +40,7 @@ requires: []
 assets: none
 example: examples/09-water
 run: go run ./09-water -alien
-verified: 2026-09-23
+verified: 2026-10-02 # the seam carved: DayCycleSource and StaticSource are the two built-in implementations, MoonDiscColor, SkyPalette and NightGrade are on EnvironmentState, and env= in the state trace hashes all of it (#161 step 3)
 ---
 
 # Environment
@@ -66,6 +68,115 @@ scene.Env = nil
 
 A new `Scene` gets `DefaultEnvironment()`, so a game that says nothing still
 opens onto a lit world. Everything past that is a decision.
+
+## The seam: one source writes the frame's environment
+
+`EnvironmentSource` is the producer and `EnvironmentState` is what it produces.
+The engine asks for the state **once per frame**, before any renderer work, and
+every system that lights or scatters reads that copy. Nothing in the engine
+reaches past it into a day cycle, a palette curve or a keyframe table.
+
+```go
+type EnvironmentSource interface {
+    Advance(dt float32)      // on the fixed tick; this is where change belongs
+    State() EnvironmentState // once per rendered frame, no mutation
+}
+```
+
+That is the whole contract, and the rule that makes it worth having is:
+**a source writes every field, or leaves it at the zero value, and nothing else
+writes any of them.** Two fields have a documented exception, and it is a
+fallback rather than a second writer — see
+[below](#the-palette-and-the-grade-have-two-homes-on-purpose).
+
+### Every field, and who reads it
+
+`Scene.Environment()` returns the resolved state. These are its fields and the
+single place each one is consumed.
+
+| Field | What it is | Who reads it |
+|---|---|---|
+| `SunDir` | Direction toward whichever body lights the scene — the moon at night | `SceneLighting.SunDir`, and `ComputeCascadeVPsWithCoverage` for the cascades |
+| `SunColor` | That body's light colour, intensity already multiplied in. Black means no directional light | `SceneLighting.SunColor` |
+| `RealSunDir` | Direction toward the *real* sun | `SceneLighting.RealSunDir` |
+| `SunElevation` | `RealSunDir.y`. What the atmosphere derives its palette from | `SceneLighting.SunElevation` |
+| `Ambient` | Uniform fill light | `SceneLighting.Ambient` |
+| `FogDensity`, `FogHeight`, `FogBaseHeight` | The fog, and therefore also the medium a lamp's beam is made of | `SceneLighting.Fog*` |
+| `ClearColor` | What the frame clears to when `DrawSky` is false | `SceneLighting.SkyColor` |
+| `StarFade` | How far night has come, 0 to 1 | `SceneLighting.NightFactor` |
+| `MilkyWay`, `StarDensity` | The galactic band's strength and the star count scale | `SceneLighting.MilkyWay`, `.StarDensity` |
+| `DrawSky`, `DrawStars` | Whether the dome and the star field are drawn | `SceneLighting.DrawSky`, `.DrawStars` |
+| `DrawSun`, `DrawMoon` | Whether the billboards exist at all | `renderFrame`, which builds each celestial or does not |
+| `SunDiscDir`, `SunDiscColor` | Where the sun billboard goes and what colour it is | `buildSunObject`; the direction also anchors the light-shaft projection |
+| `MoonDiscDir`, `MoonDiscColor` | The same for the moon | `buildMoonObject` |
+| `CloudSteps`, `Cirrus` | The cumulus sample budget and the high layer's strength | `SceneLighting.CloudSteps`, `.Cirrus` |
+| `LightShafts` | Shaft strength, elevation fade already applied | `SceneLighting.LightShafts`, after `renderFrame`'s screen-edge fade |
+| `LightShaftShape` | Reach, decay and the source window | `SceneLighting.ShaftShape` |
+| `CastShadows` | Whether the directional shadow pass runs | `SceneLighting.ShadowEnabled`, if the cascade matrices could be built |
+| `SkyPalette` | The six colours the dome, the fog and the water's reflection blend between | `SceneLighting.SkyPalette` |
+| `NightGrade` | The scotopic grade lit surfaces take on as daylight goes | `SceneLighting.NightGrade` |
+
+Both disc colours arrive **finished** — horizon fade and brightness boost
+included — because how bright a body is at a given elevation is a look, and a
+source that places a moon has to be able to tint it.
+
+Three values the state deliberately does **not** carry, each because it needs
+something the environment does not have:
+
+- **The screen-space shaft strength and the sun's screen position.** They need
+  the camera; `LightShafts` is what the source asks for and the pass draws with
+  what is left after the edge fade.
+- **`Scene.Volumetrics`** — the scattering medium's anisotropy and march step
+  count. The *density* is the fog's and is on the state; these two are a graphics
+  setting and a phase function, and neither is the sky's to decide. See
+  `Scene.SetVolumetrics`.
+- **A moon phase.** There is none. `MoonDiscColor` is where one would land.
+
+`applyEnvironment` in `app.go` is the one function that copies the state into the
+lighting pack, and `TestEveryEnvironmentStateFieldHasAReader` fails if a field is
+added to the state without being routed anywhere. `renderer/commands_test.go` and
+`renderer/litubo_test.go` carry the pack the rest of the way into the push block
+and the uniform buffer.
+
+### Two built-in sources, and a composite over them
+
+| Source | What it is |
+|---|---|
+| `DayCycleSource` | The built-in day cycle: a clock places the sun and the moon, and the keyframe curves derive the light, the ambient, the disc colours and the star fade from where they are |
+| `StaticSource` | Fixed light and air: one direction, one colour, no clock. A `Sky` here is a sky frozen at `Sky.FixedSunElevation` |
+| `Environment` | The composite, and what `DefaultEnvironment()` returns. It delegates to the first when `Cycle` is set and to the second otherwise |
+
+`Environment` is why **a cycle overrides `Sun` and `Ambient`**: a cycle already
+knows where the sun is, so a fixed light beside it would be a second answer to
+the same question, and the composite picks one branch rather than mixing them.
+
+`Scene.DayNight()` reaches the clock in either an `Environment` or a
+`DayCycleSource`, so `SetTimeOfDay` and `SetDayCycleSpeed` work on both and are
+no-ops on a `StaticSource` or a custom source. `Engine.SetFogDensity` reaches the
+`Fog` of all three.
+
+### Proving a replacement produces the same values
+
+The state trace writes an `env=` field per frame, hashing **every** field of the
+state plus the volumetrics the fog doubles as. Two runs of one build must agree
+on it — `task determinism` checks that, with a control that must disagree — and
+it is also how a replacement source is checked against the built-in one: run the
+same scene both ways under `GLYPHENGINE_FIXED_FRAME_TIME` and diff the field.
+See [state-trace](state-trace.md).
+
+It replaced a `sky=` that hashed nine of the state's twenty-seven fields and the
+built-in cycle's `TimeOfDay`. A source that moved the cirrus, the Milky Way, a
+disc colour or the palette changed the frame and left that field agreeing, which
+is the one thing a trace field must not do.
+
+### What moves out next
+
+[ADR 0012](../adr/0012-an-x-module-for-opinionated-systems.md) step 4 moves
+`DayCycleSource`, the `Sky` dome and discs, the cloud layers and the palette
+curves to `x/sky`, gated on every committed capture staying byte-identical with
+`x/sky` plugged in where the built-in was. What stays in the engine is this page:
+`EnvironmentSource`, `EnvironmentState`, `StaticSource`, and the readers above.
+That is the whole reason the carve came first.
 
 ## The pieces are independent
 
@@ -399,6 +510,18 @@ func (w *weather) State() glyph.EnvironmentState {
 scene.Env = &weather{}
 ```
 
+Every field this leaves out is the zero value, and the zero value is the honest
+answer for all of them but two: `SkyPalette` and `NightGrade` read all-zero as
+"the scene's", so a source that says nothing about the colour of the air gets
+Earth's rather than black. That is the only sentinel in the state; everything
+else means what it says, and `SunElevation` left at 0 really is a permanent
+sunset. See [the field table](#every-field-and-who-reads-it) and
+[SunDir is not the sun](#sundir-is-not-the-sun).
+
+A replacement that wants to start from the built-in cycle's numbers rather than
+from nothing can embed a `DayCycleSource`, call its `State`, and change what it
+cares about. That is also the shape the `x/sky` migration takes.
+
 **Values and pixels are separate concerns.** `EnvironmentSource` decides the
 numbers. To change how the sky is *drawn*, replace `sky.frag` through
 `glyphengine.WithShaders` — or `renderer.WithShaders` if you drive the renderer
@@ -463,9 +586,10 @@ on its own, it left the other three boxes reading exactly what a correct build
 reads, over a frame with 23% of its pixels wrong.
 
 The palette works with `Sky` nil as well, because fog does not need a dome to
-fade into a horizon colour. That, and the upgrade argument under [convenience
-methods](#convenience-methods), is why it is `Scene` state rather than a field
-on `Sky`.
+fade into a horizon colour. That is why it is not a field on `Sky`; where it
+*does* live, and why it has two homes, is under [the palette and the
+grade](#the-palette-and-the-grade-have-two-homes-on-purpose). A custom source can
+return its own on `EnvironmentState` instead of calling this.
 
 **What it does not cover.** Rayleigh-versus-Mie behaviour, a different
 scattering model, a sky with two suns, and the cloud, star and sun-disc colours
@@ -490,32 +614,51 @@ that only sets `SunDir` gets `SunElevation` of 0 — permanent sunset. Set both.
 
 ## Convenience methods
 
-`Scene.SetTimeOfDay`, `SetDayCycleSpeed` and `Engine.SetFogDensity` reach
-through to the built-in `Environment`. They are **no-ops** under a custom
-`EnvironmentSource`, which owns its own state — `Scene.DayNight()` returns nil
-there, and that is the signal to configure your own type directly.
+`Scene.SetTimeOfDay` and `SetDayCycleSpeed` reach through to the clock of an
+`Environment` or a `DayCycleSource`; `Engine.SetFogDensity` reaches the `Fog` of
+either, or of a `StaticSource`, creating one if there is none. They are
+**no-ops** under a custom `EnvironmentSource`, and the clock ones are no-ops on a
+`StaticSource` too — `Scene.DayNight()` returns nil in both cases, and that is the
+signal to configure your own type directly.
 
-`Scene.SetNightGrade` and `Scene.SetSkyPalette` are deliberately **not** ones of
-those. Both are Scene state initialised by `NewScene`, so they work the same
-under a custom source as under the built-in one. Both would read more naturally
-as fields on `EnvironmentState` beside fog and ambient, and neither is one for
-the same reason: a source written before the field existed returns it as the
-zero value. For the night grade — see
-[day-night](day-night.md#night-is-desaturated-not-merely-dim--except-under-a-lamp)
-— zero strength means no night shift at all, and that game's nights change on a
-dependency bump with nobody choosing it. For the palette the zero value is six
-black colours, so the sky, the fog and the water reflections all go black.
+### The palette and the grade have two homes on purpose
 
-A sentinel would be more defensible for the palette than it was for the grade:
-all-zero is a palette nobody wants, so reading it as "engine default" costs
-nothing expressible. It is still not what was done, because it only covers the
-all-zero case — a source that sets `ZenithDay` and leaves the other five alone
-gets five black endpoints and no warning, which is the same trap one step
-along. A field `NewScene` owns cannot be zeroed by a source that has never
-heard of it.
+`Scene.SetNightGrade` and `Scene.SetSkyPalette` are **not** no-ops under a custom
+source, and they are not overrides either. Both values are on
+`EnvironmentState`, where a source that owns the look returns its own; both are
+also on `Scene`, where `NewScene` initialises them to the engine's defaults; and
+`Scene.Environment` resolves between them in exactly one place:
 
-Vary either per frame from `Update` if it should move with the moon phase or
-the weather.
+> An all-zero `SkyPalette` or `NightGrade` on the state means **the scene's**.
+
+Both halves earn their place. The state needs the fields because the colour of
+the air is part of what a replacement sky owns — without them an alien dome still
+hazes into Earth-blue, which is the bug `task skypalette` exists for. The scene
+needs to keep the values because `EnvironmentState` is produced wholesale, so a
+game that replaced the environment model returns a struct written before the
+fields existed: six black colours and `Strength: 0`. Without the sentinel that
+game's sky, haze and water reflections go black and its nights go flat on a
+dependency bump, with nobody choosing it.
+
+What the sentinel costs is two values that cannot be asked for on the state: a
+palette of six exact blacks, and a grade with `Strength: 0` *and* a zero `Tint`.
+For a night with no scotopic shift, set `Strength: 0` and any tint — the tint is
+unread at zero strength. For a black world, set `Sky: nil` and a black
+`ClearColor`, which is what an empty environment already means.
+
+What it does **not** cover is a half-filled palette. A source that sets
+`ZenithDay` and leaves the other five alone gets five black endpoints and no
+warning. That trap is real and it is why the scene keeps the values at all: a
+source either owns the palette or says nothing about it, and saying nothing is
+the zero value, not one field of six.
+
+`Scene.SkyPalette()` and `Scene.NightGrade()` return the **scene's**, which is not
+necessarily the frame's. Read `Scene.Environment().SkyPalette` for what was
+actually used.
+
+Either way, vary them per frame if they should move with the weather or the moon:
+return them from `State`, or call the setters from `Update` where
+`SetPointLights` is called from.
 
 ## Failure modes
 
@@ -529,9 +672,21 @@ the weather.
   zero. See above.
 - **Lighting flickers between frames.** A `State()` implementation is mutating.
   Move the change into `Advance`.
-- **A custom source's nights went flat after an upgrade.** Not this field —
-  `NightGrade` is on `Scene` precisely so that cannot happen. Look for a new
-  `EnvironmentState` field the source is returning as its zero value.
+- **A custom source's nights went flat, or its sky went black, after an
+  upgrade.** Not the grade or the palette — their zero value on the state means
+  "the scene's" precisely so that cannot happen. Look for a different new
+  `EnvironmentState` field the source is returning as its zero value, and check
+  it against the field table above.
+- **A custom source set one palette colour and got five black ones.** The
+  sentinel is all-or-nothing by design; see
+  [above](#the-palette-and-the-grade-have-two-homes-on-purpose). Start from
+  `DefaultSkyPalette()` and change what you want.
+- **A custom source places a moon and it is black.** `MoonDiscColor` is a field
+  now, and it carries the horizon fade and the brightness boost. `DrawMoon` with
+  a zero colour draws an invisible billboard.
+- **A field on `EnvironmentState` reaches nothing.** It is not routed in
+  `applyEnvironment`; `TestEveryEnvironmentStateFieldHasAReader` is the check,
+  and it would have failed.
 - **A custom sky shader gives a violet dome over Earth-blue haze.** The palette
   is shared with `applyFog` and the water's reflection, which the replaced
   shader does not touch. Use `SetSkyPalette` instead of replacing `sky.frag`.

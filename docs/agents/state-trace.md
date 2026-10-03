@@ -19,7 +19,7 @@ api:
   - renderer.Capabilities
 assets: none
 run: task determinism
-verified: 2026-10-02 # grassbake, grassatlas, grasspc, config and the prime provocation; the device half of config= is folded from Capabilities (#160)
+verified: 2026-10-02 # sky= replaced by env=, which hashes the whole EnvironmentState (#161 step 3); grassbake, grassatlas, grasspc, config and the prime provocation; the device half of config= is folded from Capabilities (#160)
 ---
 
 # Finding a render that differs run to run
@@ -88,7 +88,7 @@ recompiling it to add a flag is the step that does not happen.
 ## What a line says
 
 ```
-loop=1 ticks=1 clock=45c6c6… cam=9d2328… sky=e290ea… draws=1/947469… drawsset=947469…
+loop=1 ticks=1 clock=45c6c6… cam=9d2328… env=e290ea… draws=1/947469… drawsset=947469…
 overlays=0/cbf29c… celestials=1/4317ee… msdf=1/f08f16… uioverlays=0
 slot=0 w=1280 h=720 cloudframe=0 image=0 dynmesh=1/a6445a… dynmeshorder=e6dfaf…
 cascades=71e68c… lights=0/e79af2… grass=124/82b4a2… outcome=present rendered=1
@@ -101,7 +101,7 @@ cascades=71e68c… lights=0/e79af2… grass=124/82b4a2… outcome=present render
 | `ticks` | Fixed simulation ticks so far |
 | `clock` | `elapsed`, interpolation `alpha`, `timeScale`, the accumulator |
 | `cam` | Eye, centre, up, and the view / projection / view-projection matrices |
-| `sky` | Time of day, sun direction and elevation, ambient, fog, shadow enable, and the scattering medium (`Scene.Volumetrics`) the fog doubles as |
+| `env` | **Every** field of the frame's `EnvironmentState` -- both sun directions and the elevation, the light and ambient colours, the fog, the clear colour, the star, Milky Way and cloud terms, the four draw flags, both discs' direction and colour, the shaft strength and shape, the shadow enable, the sky palette and the night grade -- plus the scattering medium (`Scene.Volumetrics`) the fog doubles as |
 | `draws`, `overlays`, `celestials`, `msdf` | Count and **order-dependent** hash of each draw list |
 | `drawsset` etc. | The same per-draw hashes XORed, so order does not affect it |
 | `uioverlays` | Count of UI overlay draws |
@@ -152,7 +152,7 @@ talking to the same driver:
   may take a different path. It is hashed over the 8-bit readback, so the
   instrument's floor is 1/255 per channel, and it is only filled in when a
   trace is being written — the readback costs a device wait.
-- `grasspc` is what was pushed, not what went into it. `sky=`, `lights=` and
+- `grasspc` is what was pushed, not what went into it. `env=`, `lights=` and
   `grasslod=` each cover part of that block; none covers the block.
 - `config` is the one that can differ for reasons outside the program. MSAA is
   halved until the device supports it, and grass dissolves through

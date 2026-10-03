@@ -21,7 +21,7 @@ requires:
 assets: none
 example: examples/09-water
 run: task example:09-water -- -background -time 0.755 -pitch -0.55 -yaw 1.771 -cirrus 0.5
-verified: 2026-09-21
+verified: 2026-10-02 # the ambient fill reads the frame's EnvironmentState.SkyPalette, which a custom source can now supply (#161 step 3)
 ---
 
 # Clouds
@@ -67,8 +67,9 @@ requires visible brightness and contrast against the shaded core. Noon is
 byte-identical to the previous lighting with cirrus disabled.
 
 Night direct light remains `(0.030, 0.036, 0.055)`, deliberately boosted for
-legibility. Ambient fill comes from `Scene.SetSkyPalette`, shared with the
-dome, fog and water. Changing direct cloud-light colours requires replacing
+legibility. Ambient fill comes from the frame's `EnvironmentState.SkyPalette` --
+`Scene.SetSkyPalette` for a built-in source, the source's own otherwise -- shared
+with the dome, fog and water. Changing direct cloud-light colours requires replacing
 `ShaderSet.CloudsFrag` through `WithShaders`.
 
 ## Rendering and cost

@@ -96,10 +96,19 @@ type EnvironmentState struct {
 	DrawMoon  bool
 
 	// SunDiscDir and SunDiscColor place and colour the sun billboard;
-	// MoonDiscDir does the same for the moon. Ignored unless DrawSun/DrawMoon.
-	SunDiscDir   [3]float32
-	SunDiscColor [3]float32
-	MoonDiscDir  [3]float32
+	// MoonDiscDir and MoonDiscColor do the same for the moon. Ignored unless
+	// DrawSun/DrawMoon.
+	//
+	// Both colours arrive with their horizon fade and their brightness boost
+	// already applied, because a disc is a light source rather than a surface
+	// and how bright it is at a given elevation is a look. The moon's used to
+	// be three constants and a fade inside buildMoonObject, which left the
+	// engine owning a colour after the environment was meant to own all of
+	// them: a replacement sky could move the moon and not tint it.
+	SunDiscDir    [3]float32
+	SunDiscColor  [3]float32
+	MoonDiscDir   [3]float32
+	MoonDiscColor [3]float32
 
 	// CloudSteps is the volumetric cloud sample count; zero disables cumulus.
 	CloudSteps int
@@ -120,6 +129,29 @@ type EnvironmentState struct {
 	// CastShadows enables the shadow pass. Turning it off when the only light
 	// is a dim moon saves the cascades for shadows nobody can see.
 	CastShadows bool
+
+	// SkyPalette is the six colours the dome, the fog and the water's
+	// reflection all blend between; NightGrade is the scotopic grade lit
+	// surfaces take on as daylight goes. Both are here because the fog, the
+	// water and the clouds read them every frame, so a source that replaces the
+	// sky has to be able to say what colour the air is -- otherwise an alien
+	// sky still hazes into Earth-blue.
+	//
+	// An all-zero value means "the scene's", which Scene.SetSkyPalette and
+	// Scene.SetNightGrade write and NewScene initialises to the engine's
+	// defaults. That sentinel is what makes these safe to have here at all: a
+	// source written before the field existed returns the zero value and its
+	// sky, haze and water stay exactly as they were, instead of the six black
+	// endpoints a plain value field would have handed them. Scene.Environment
+	// is the one place it is resolved.
+	//
+	// The cost is two values that cannot be asked for: a palette of six exact
+	// blacks, and a grade with Strength 0 *and* a zero Tint. For a night with
+	// no scotopic shift set Strength 0 and any tint -- the tint is unread at
+	// zero strength -- and for a black world set Sky nil and ClearColor black,
+	// which is what an empty environment already means.
+	SkyPalette SkyPalette
+	NightGrade NightGrade
 }
 
 // Environment is the engine's own environment: composed from separate pieces,
@@ -382,91 +414,227 @@ func (env *Environment) Advance(dt float32) {
 // means no stars — is the point of resolving at all. They were previously
 // spread through the draw path, which is how the sky ended up impossible to
 // turn off.
+//
+// The two branches are DayCycleSource and StaticSource, which are those same
+// two resolutions as sources in their own right. Environment is the composite
+// that picks between them, and it picks on Cycle because a cycle already knows
+// where the sun is: a fixed light beside one would be a second answer to the
+// same question.
 func (env *Environment) State() EnvironmentState {
-	var s EnvironmentState
 	if env == nil {
-		return s
+		return EnvironmentState{}
+	}
+	air := envAir{sky: env.Sky, fog: env.Fog, clearColor: env.ClearColor}
+	if env.Cycle != nil {
+		return dayCycleState(env.Cycle, air)
+	}
+	return staticState(env.Sun, env.Ambient, air)
+}
+
+// DayCycleSource is the engine's built-in day cycle on its own: a clock places
+// the sun and the moon, and the keyframe curves in daynight.go derive the
+// directional light, the ambient, the disc colours and the star fade from where
+// they are.
+//
+// Every one of those is a look — hand-placed colour keys, a tuned handover
+// between sun and moon, a star curve that deliberately lags the sky — which is
+// why it is *an* implementation of the seam rather than the seam itself. ADR
+// 0012 moves it to x/sky; StaticSource and EnvironmentState are what stay.
+//
+//	scene.Env = &glyph.DayCycleSource{
+//	    Cycle: glyph.DayNight{TimeOfDay: 0.25, Speed: 1.0 / 300},
+//	    Sky:   glyph.DefaultSky(),
+//	    Fog:   &glyph.Fog{Density: glyph.DefaultFogDensity},
+//	}
+//
+// That is the same environment DefaultEnvironment builds, which every example
+// uses through Environment. Scene.DayNight reaches either one, so SetTimeOfDay
+// and SetDayCycleSpeed work on both.
+type DayCycleSource struct {
+	// Cycle is the clock. Advance moves it; Scene.SetTimeOfDay and
+	// Scene.SetDayCycleSpeed reach it through Scene.DayNight.
+	Cycle DayNight
+
+	// Sky draws the dome, the discs and the stars. Nil draws none of them and
+	// the frame clears to ClearColor instead.
+	Sky *Sky
+
+	// Fog blends distant geometry toward the horizon. Nil disables it.
+	Fog *Fog
+
+	// ClearColor is what the frame clears to when Sky is nil.
+	ClearColor [3]float32
+}
+
+// Advance steps the clock. It is the only thing here that moves.
+func (d *DayCycleSource) Advance(dt float32) { d.Cycle.Advance(dt) }
+
+// State resolves this frame's environment from the clock.
+func (d *DayCycleSource) State() EnvironmentState {
+	return dayCycleState(&d.Cycle, envAir{sky: d.Sky, fog: d.Fog, clearColor: d.ClearColor})
+}
+
+// StaticSource is light and air that do not move: one direction, one colour, no
+// clock. It is the environment the engine keeps once the day cycle moves out —
+// flat colours, a sun that stays where it is put, and fog.
+//
+//	scene.Env = &glyph.StaticSource{
+//	    Sun:     &glyph.DirectionalLight{Direction: [3]float32{0.4, 0.8, 0.3}, Color: [3]float32{0.7, 0.68, 0.62}},
+//	    Ambient: &glyph.AmbientLight{Color: [3]float32{0.18, 0.17, 0.20}},
+//	}
+//
+// A Sky here is a sky at a fixed hour: Sky.FixedSunElevation picks which one and
+// the star fade derives from it, so a sky frozen below the horizon gets a real
+// night rather than an empty one. The celestial discs are not drawn — only a
+// cycle places bodies — so the dome, the stars and the Milky Way are what a
+// fixed sky has.
+type StaticSource struct {
+	// Sun is the directional light. Nil means none: only ambient and the
+	// scene's own point and spot lights.
+	Sun *DirectionalLight
+
+	// Ambient is uniform fill light. Nil means none.
+	Ambient *AmbientLight
+
+	// Sky draws the dome and the stars at Sky.FixedSunElevation. Nil draws
+	// neither and the frame clears to ClearColor instead.
+	Sky *Sky
+
+	// Fog blends distant geometry toward the horizon. Nil disables it.
+	Fog *Fog
+
+	// ClearColor is what the frame clears to when Sky is nil.
+	ClearColor [3]float32
+}
+
+// Advance does nothing: nothing here moves. The method exists because the
+// interface needs it, and an empty one is the honest implementation.
+func (s *StaticSource) Advance(float32) {}
+
+// State resolves this frame's environment from the fixed pieces.
+func (s *StaticSource) State() EnvironmentState {
+	return staticState(s.Sun, s.Ambient, envAir{sky: s.Sky, fog: s.Fog, clearColor: s.ClearColor})
+}
+
+// envAir is the part of an environment that does not depend on where the light
+// comes from: the drawn sky, the fog and the clear colour. Both resolutions
+// below take one, so the rules that follow from Sky are written once.
+//
+// Unexported and passed by value: it is a grouping of three existing fields to
+// keep two function signatures readable, not a type a game configures.
+type envAir struct {
+	sky        *Sky
+	fog        *Fog
+	clearColor [3]float32
+}
+
+// fillAir writes the fields that do not depend on the light. It runs before
+// either light path, because resolveSky reads what those paths set.
+func (a envAir) fillAir(s *EnvironmentState) {
+	s.ClearColor = a.clearColor
+	if a.fog != nil {
+		s.FogDensity = a.fog.Density
+		s.FogHeight = a.fog.Height
+		s.FogBaseHeight = a.fog.BaseHeight
+	}
+}
+
+// resolveSky applies Sky to an already-lit state. haveBodies says whether
+// anything placed a sun and a moon, which is what decides the discs: a Sky on
+// its own has colours and stars but nothing in it to draw.
+func (a envAir) resolveSky(s *EnvironmentState, haveBodies bool) {
+	if a.sky == nil {
+		return
+	}
+	s.DrawSky = true
+	s.CloudSteps = a.sky.CloudSteps
+	s.Cirrus = a.sky.Cirrus
+	// Shafts come from the sun disc in the drawn sky, so they live and die
+	// with it rather than with the horizon.
+	//
+	// This used to be `if s.SunElevation > 0`, which deleted them in a
+	// single frame at the moment they look best. The disc does not go out
+	// at zero elevation -- DrawSun keeps drawing it to -0.15 and
+	// SunDiscColor keeps it at most of its boost the whole way down -- so
+	// the sky the shafts are built from is still in full sunset while they
+	// had already stopped. Measured, `09-water -yaw 1.771 -pitch -0.185
+	// -pillars`: at time 0.745, elevation +0.031, the pass added mean sRGB
+	// luma +1.83 across the frame and peaked at +74; at 0.755, elevation
+	// -0.031, it added exactly nothing. That is a blink, not a sunset.
+	//
+	// The window ends where DrawSun does, so the shafts are gone before
+	// their source stops being drawn. It is deliberately not SunDiscColor's
+	// own (-0.20, -0.02): that one is wider because the disc's COLOUR has
+	// to stay continuous as the cycle wraps past midnight, and a shaft
+	// radiating from a disc nobody is drawing is a different mistake.
+	s.LightShafts = a.sky.LightShafts * smoothstep(-0.15, -0.02, s.SunElevation)
+	s.LightShaftShape = a.sky.LightShaftShape
+	s.DrawStars = a.sky.Stars && s.StarFade > 0
+	s.StarDensity = a.sky.StarDensity
+	if s.StarDensity < 0 {
+		s.StarDensity = 0
+	}
+	s.MilkyWay = a.sky.MilkyWay
+	if s.MilkyWay < 0 {
+		s.MilkyWay = 0
+	} else if s.MilkyWay > 1 {
+		s.MilkyWay = 1
+	}
+	// The discs are the cycle's bodies; without one there is nothing to
+	// place them by.
+	s.DrawSun = a.sky.SunDisc && haveBodies && s.SunDiscDir[1] > -0.15
+	s.DrawMoon = a.sky.MoonDisc && haveBodies && s.MoonDiscDir[1] > -0.15
+}
+
+// dayCycleState is the day-cycle resolution: the clock supplies the light, the
+// ambient, the bodies and the star fade, and overrides any fixed light beside
+// it.
+func dayCycleState(dn *DayNight, air envAir) EnvironmentState {
+	var s EnvironmentState
+	air.fillAir(&s)
+
+	s.SunDir, s.SunColor = dn.PrimaryLight()
+	// Derived from RealSunDir rather than fetched again, so the elevation
+	// the palette uses and the direction the glow uses cannot disagree.
+	s.RealSunDir = dn.SunDir()
+	s.SunElevation = s.RealSunDir[1]
+	s.Ambient = dn.AmbientColor()
+	s.StarFade = dn.StarVisibility()
+	s.CastShadows = dn.SunAboveHorizon()
+	s.SunDiscDir = dn.SunDir()
+	s.SunDiscColor = dn.SunDiscColor()
+	s.MoonDiscDir = dn.MoonDir()
+	s.MoonDiscColor = dn.MoonDiscColor()
+
+	air.resolveSky(&s, true)
+	return s
+}
+
+// staticState is the fixed-light resolution: whatever was put there, plus a sky
+// frozen at Sky.FixedSunElevation.
+func staticState(sun *DirectionalLight, ambient *AmbientLight, air envAir) EnvironmentState {
+	var s EnvironmentState
+	air.fillAir(&s)
+
+	if sun != nil {
+		s.SunDir = sun.Direction
+		s.SunColor = sun.Color
+		// Without a cycle there is no sun/moon handover, so the light and
+		// the real sun are the same thing.
+		s.RealSunDir = sun.Direction
+		s.CastShadows = s.SunColor[0]+s.SunColor[1]+s.SunColor[2] > 0
+	}
+	if ambient != nil {
+		s.Ambient = ambient.Color
+	}
+	if air.sky != nil {
+		s.SunElevation = air.sky.FixedSunElevation
+		// The same curve the cycle uses. Without this a sky frozen below the
+		// horizon draws the night palette over an empty field, because
+		// StarFade stays at its zero value and DrawStars reads it.
+		s.StarFade = starVisibilityAt(s.SunElevation)
 	}
 
-	s.ClearColor = env.ClearColor
-	if env.Fog != nil {
-		s.FogDensity = env.Fog.Density
-		s.FogHeight = env.Fog.Height
-		s.FogBaseHeight = env.Fog.BaseHeight
-	}
-
-	if dn := env.Cycle; dn != nil {
-		s.SunDir, s.SunColor = dn.PrimaryLight()
-		// Derived from RealSunDir rather than fetched again, so the elevation
-		// the palette uses and the direction the glow uses cannot disagree.
-		s.RealSunDir = dn.SunDir()
-		s.SunElevation = s.RealSunDir[1]
-		s.Ambient = dn.AmbientColor()
-		s.StarFade = dn.StarVisibility()
-		s.CastShadows = dn.SunAboveHorizon()
-		s.SunDiscDir = dn.SunDir()
-		s.SunDiscColor = dn.SunDiscColor()
-		s.MoonDiscDir = dn.MoonDir()
-	} else {
-		if env.Sun != nil {
-			s.SunDir = env.Sun.Direction
-			s.SunColor = env.Sun.Color
-			// Without a cycle there is no sun/moon handover, so the light and
-			// the real sun are the same thing.
-			s.RealSunDir = env.Sun.Direction
-			s.CastShadows = s.SunColor[0]+s.SunColor[1]+s.SunColor[2] > 0
-		}
-		if env.Ambient != nil {
-			s.Ambient = env.Ambient.Color
-		}
-		if env.Sky != nil {
-			s.SunElevation = env.Sky.FixedSunElevation
-			// The same curve the cycle uses. Without this a sky frozen below the
-			// horizon draws the night palette over an empty field, because
-			// StarFade stays at its zero value and DrawStars reads it.
-			s.StarFade = starVisibilityAt(s.SunElevation)
-		}
-	}
-
-	if env.Sky != nil {
-		s.DrawSky = true
-		s.CloudSteps = env.Sky.CloudSteps
-		s.Cirrus = env.Sky.Cirrus
-		// Shafts come from the sun disc in the drawn sky, so they live and die
-		// with it rather than with the horizon.
-		//
-		// This used to be `if s.SunElevation > 0`, which deleted them in a
-		// single frame at the moment they look best. The disc does not go out
-		// at zero elevation -- DrawSun keeps drawing it to -0.15 and
-		// SunDiscColor keeps it at most of its boost the whole way down -- so
-		// the sky the shafts are built from is still in full sunset while they
-		// had already stopped. Measured, `09-water -yaw 1.771 -pitch -0.185
-		// -pillars`: at time 0.745, elevation +0.031, the pass added mean sRGB
-		// luma +1.83 across the frame and peaked at +74; at 0.755, elevation
-		// -0.031, it added exactly nothing. That is a blink, not a sunset.
-		//
-		// The window ends where DrawSun does, so the shafts are gone before
-		// their source stops being drawn. It is deliberately not SunDiscColor's
-		// own (-0.20, -0.02): that one is wider because the disc's COLOUR has
-		// to stay continuous as the cycle wraps past midnight, and a shaft
-		// radiating from a disc nobody is drawing is a different mistake.
-		s.LightShafts = env.Sky.LightShafts * smoothstep(-0.15, -0.02, s.SunElevation)
-		s.LightShaftShape = env.Sky.LightShaftShape
-		s.DrawStars = env.Sky.Stars && s.StarFade > 0
-		s.StarDensity = env.Sky.StarDensity
-		if s.StarDensity < 0 {
-			s.StarDensity = 0
-		}
-		s.MilkyWay = env.Sky.MilkyWay
-		if s.MilkyWay < 0 {
-			s.MilkyWay = 0
-		} else if s.MilkyWay > 1 {
-			s.MilkyWay = 1
-		}
-		// The discs are the cycle's bodies; without one there is nothing to
-		// place them by.
-		s.DrawSun = env.Sky.SunDisc && env.Cycle != nil && s.SunDiscDir[1] > -0.15
-		s.DrawMoon = env.Sky.MoonDisc && env.Cycle != nil && s.MoonDiscDir[1] > -0.15
-	}
+	air.resolveSky(&s, false)
 	return s
 }
