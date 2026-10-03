@@ -164,6 +164,7 @@ two.
 | Package | What it is | Page |
 |---|---|---|
 | [`sky`](sky/) | The Earth sky: the day cycle, the dome, the sun and moon discs, the stars and the cloud layers | [`sky.md`](sky/sky.md) |
+| [`sky/lut`](sky/lut/) | A second sky on the same slot, whose dome is a texture fetch: no clouds, no stars, no discs | [`lut.md`](sky/lut/lut.md) |
 | [`terrainfield`](terrainfield/) | An island heightmap from value-noise fBm | [`terrainfield.md`](terrainfield/terrainfield.md) |
 | [`water`](water/) | The underwater volume: absorption, the water's own colour and sun shafts | [`water.md`](water/water.md) |
 
@@ -175,7 +176,19 @@ why the engine kept a *slot* rather than handing the whole thing to an
 application pass set, and the one tuned constant the engine still has. `x/water` is step 2, and its page records which
 parts of the atmosphere it deliberately left to a sibling package — that
 boundary argument and `x/sky`'s are the two worth reading before adding another
-package. `x/sky/lut` is step 5.
+package.
+
+`x/sky/lut` is step 5, and it closes the sequence. It is the **second** filling of
+the sky slot, which is the only thing that turns ADR 0012's central claim from an
+assertion into a check: a slot that has only ever had one filling is
+indistinguishable from a hard-coded dependency. Its dome shares no Go identifier,
+no shader and no table with `x/sky`, and the engine's pass order, depth state,
+push-constant packing and alpha contract carry it without a line of change. Worth
+reading on its page: what a package pays for being a *second* implementation
+rather than a migration (nothing holds its pixels, so the checks have to be claims
+about the model), and the two kinds of number it carries — the ones sampled from a
+sibling package and held to it by a test, and the ones re-derived from the engine's
+GLSL and held to it by reading the engine's own exported include bytes.
 
 A package that supplies shader stages the engine deliberately embeds none of, as
 `x/sky` is the first to do, carries **two halves that have to arrive together**:
