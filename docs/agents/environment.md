@@ -561,7 +561,12 @@ sunset. See [the field table](#every-field-and-who-reads-it) and
 A replacement that wants to start from a day cycle's numbers rather than from
 nothing can embed a `sky.DayCycleSource`, call its `State`, and change what it
 cares about. `x/sky`'s own fixed-hour path is that shape in the other direction:
-it calls `StaticSource.State` for the light and the air and adds only the dome.
+it calls `StaticSource.State` for the light and the air and adds only the dome,
+and so does [`x/sky/lut`](../../x/sky/lut/lut.md), which is the smallest complete
+example of this seam being filled twice — a four-key day over `StaticSource`, one
+fragment stage, and `DrawStars`, `DrawSun`, `DrawMoon`, `CloudSteps`, `Cirrus` and
+`LightShafts` all deliberately left at zero so the engine records no draw it has
+no shader for.
 
 **Values and pixels are separate concerns.** `EnvironmentSource` decides the
 numbers. What *draws* a dome, a star field or a cloud layer from them is the sky

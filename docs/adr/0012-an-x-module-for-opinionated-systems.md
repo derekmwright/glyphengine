@@ -130,9 +130,11 @@ branches.
    Done; the addendum below records the seam it took and why.
 5. **`x/sky/lut`**: a second, cheap sky from a precomputed lookup table, proving
    the seam supports more than one implementation and giving low-end targets an
-   option.
+   option. Done; the second addendum below records what it proved and what it did
+   not.
 
-Clouds and grass follow the same path later if step 4 goes well.
+The sequence is complete. **Clouds and grass are the next candidates**, in that
+order, and the reasoning for the order is in the closing addendum.
 
 ## Alternatives
 
@@ -196,6 +198,11 @@ cheaper; a run-time check would be an addition to it, not a substitute.
   opinions. That is deliberate and sequenced, not an oversight. The sky and the
   clouds were paid down in step 4 (see the addendum), and the capture-identical
   gate on it is the control for the whole migration.
+- The slot the sky went behind has two fillings rather than one, which is the only
+  form the claim "the engine kept a mechanism" can be checked in. See the closing
+  addendum: a slot with one filling is indistinguishable from a renamed
+  dependency, and that is a thing to require of the next seam rather than a
+  pleasant extra.
 
 ## References and evidence
 
@@ -332,3 +339,116 @@ before the move. Recorded rather than left as an oversight.
   `examples/23-shadow-coverage` and `examples/01-triangle` import no sky package,
   so the renderer builds no dome, star or cloud pipeline at all in three of the
   scenes `task validate` and `task smoke` run.
+
+## Addendum: step 5, a second sky, and the sequence closed — 2026-10-03
+
+`x/sky/lut` fills the sky slot a second time: a dome whose per-pixel cost is a
+texture fetch, with no clouds, no stars, no sun or moon disc, no light shafts and
+no moon. Its page is [`x/sky/lut/lut.md`](../../x/sky/lut/lut.md). This records
+what the step was for, what it found, and where the sequence goes next.
+
+### What a second filling proves that the first could not
+
+Step 4's evidence was that every committed capture was unchanged. That is a strong
+claim about the *migration* and it says nothing at all about the *seam*: a slot
+that has only ever had one filling is indistinguishable from a hard-coded
+dependency with an indirection in front of it. The engine would behave exactly the
+same if `SkyFrag` were secretly required to be `x/sky`'s.
+
+So the check is structural, and it is the thing worth taking from this step. The
+second dome:
+
+- supplies ONE of the slot's three stages and leaves the other two nil, and the
+  engine builds no star or cloud pipeline and records no draw for either;
+- shares no Go identifier, no shader and no table with `x/sky` — the one
+  connection is a test that compares its four keyed states against `x/sky`'s
+  cycle, so the two agree about where the sun is without either depending on the
+  other;
+- writes an `EnvironmentState` whose `DrawStars`, `DrawSun`, `DrawMoon`,
+  `CloudSteps`, `Cirrus` and `LightShafts` are all deliberately zero, which is the
+  other half of the same contract: the engine draws nothing it has no shader for
+  *and* nothing the source did not ask for, and both halves have to hold or a
+  frame records a draw against a pipeline that is not there;
+- needed no engine change to exist.
+
+That last line is the one to be suspicious of, and it held: the package is built
+on `ShaderSet`, `EnvironmentSource`, `StaticSource`, `SkyPalette`,
+`CreateDataTexture`, `DestroyTexture` and `SetShaderTexture`, all of which are on
+an `api` list except the two noted under the gap below.
+
+### What it cost that step 4 did not
+
+A migration has a control: the pixels it has to reproduce. A second
+implementation has none, and that is the whole difference in how it is checked.
+Nothing says what a cheap sky's frame should look like, so the gate cannot compare
+and has to make claims instead — the horizon-to-zenith gradient runs in the
+direction the model says, the sun's half of the sky is brighter than the half
+opposite, the same scene with the slot empty is a different frame, and the cost is
+below the one being replaced. Each of those is a sentence someone had to choose,
+which is work the migration did not have. It is also why the package's unit checks
+read the baked table directly: with no reference image, the arithmetic is the only
+place the model can be pinned exactly.
+
+The second cost is a copy. The dome's model is GLSL, a CPU bake has to compute it
+again in Go, and this repository has already had that exact copy drift once
+(`DayNight.Twilight` against `atmTwilight`). The mitigation is worth reusing:
+the test reads the engine's **own exported include bytes** — the `embed.FS` this
+record added in step 1 — and fails if any of the thirteen expressions it copied
+have been reworded. The export was added so a package could compile against the
+right include version; it turns out to be just as useful for holding a
+reimplementation of one honest.
+
+### The engine gap
+
+**There is no public way to upload a texture wider than eight bits per channel.**
+`CreateTexture`, `CreateDataTexture`, `CreateTextureLinear` and
+`CreateTextureNearest` are all `R8G8B8A8`, and `CreateRenderTarget`, which does
+offer `TargetRGBA16F`, takes no CPU pixels. A radiance lookup table is the case
+that wants one. The package encodes `sqrt(v/3)` into eight bits instead and
+measures what that costs: 1.3 percent relative error at a tenth of full scale and
+6.5 percent at a hundredth, which is the square transfer and not a choice of
+curve.
+
+Filed as a rule-14 issue against the engine rather than patched from `x`, which is
+the loop this record describes. Two smaller documentation gaps went with it:
+`renderer.ShaderTextureSlots` is not on an `api` list although
+`renderer.SetShaderTexture` is, and neither `CreateTextureLinear` nor
+`CreateTextureNearest` is on one — which is why the package uses
+`CreateDataTexture`, the one that is.
+
+### Next: clouds, then grass
+
+Clouds first. They are already behind this slot — `CloudsFrag` is one of its three
+stages — so the engine-side carve is done and what is left is the half-resolution
+target, its two-buffer history and its barriers, all of which step 4 argued are
+mechanism and all of which stay. A second cloud layer is therefore the same shape
+as this step rather than the same shape as step 4: new code into an existing slot,
+with the existing one as the thing to beat.
+
+Grass is the harder one and it is last for the same reason the sky was fourth. It
+is a vertex stage, an impostor atlas bake, a tile and LOD system, a density mask
+read off the heightmap and a set of committed captures, and it has no slot — the
+engine creates the grass system, owns the instance buffers and records the draws.
+Naming the seam is the work, and the thing to learn from the sky is that the seam
+should be named so that a *second* implementation can be built on it on the day the
+first one moves, not later.
+
+### Evidence
+
+- `task ci` across all three modules.
+- 18 unit checks in `x/sky/lut`, every one broken and watched to fail, including
+  two breaks in the shader and one in the engine's own `atmosphere.inc`. Each
+  message is recorded in the comment above the check it belongs to.
+- `x/sky/lut/spirv_test.go`: the committed SPIR-V is what `glslc` produces from the
+  materialized include set, which is also the compile gate for `atmSunDirFrom`.
+- `task xskylut`: three hours under the fixed clock on a scene that is nothing but
+  sky, the gradient and the sun's side in pixels, an empty-slot control, a repeat
+  capture, and an interleaved three-trial cost comparison of the empty slot, this
+  dome, `x/sky`'s dome alone and `x/sky` whole. Its own break — one constant texel
+  bound over the table from outside the package, through the same
+  `SetShaderTexture` slot — needs no Vulkan SDK and is a flag on the gate.
+- `task xskylut:shaders` reproduces the committed `.spv` byte for byte.
+- `task smoke`, `task validate` and `task syncvalidate` with `07-terrain -sky lut`
+  added to the matrices, `task screenshots` with no changed image (the flag
+  defaults to `x/sky`, so no committed capture is reached by it), and
+  `task skymigration` unchanged.

@@ -140,6 +140,21 @@ tasks:
       # different glslc could move the pixels without changing a line of GLSL.
       - go test ./sky/ -run TestCommittedSPIRVMatchesGLSL -update -count=1 -v
 
+  xskylut:shaders:
+    desc: Recompile x/sky/lut's SPIR-V through the engine's exported include set (requires VULKAN_SDK)
+    dir: x
+    cmds:
+      # The same arrangement again: the generator and the check are one test, so
+      # two copies of a compile command cannot disagree about a flag.
+      #
+      # skylut.frag includes atmosphere.inc for one function, atmSunDirFrom, which
+      # is what makes this compile a gate on the include set whose curves
+      # x/sky/lut/bake.go reimplements in Go. The other half of that seam is
+      # TestAtmosphereIncStillSaysWhatWeCopied, which reads the engine's own
+      # exported bytes and fails if a curve has been reworded; neither covers it
+      # alone.
+      - go test ./sky/lut/ -run TestCommittedSPIRVMatchesGLSL -update -count=1 -v
+
   shaders:verify:
     desc: Assert the committed .spv match their GLSL (needs VULKAN_SDK)
     cmds:
@@ -277,6 +292,12 @@ tasks:
         # enough to commit alongside the .glb it was converted from; see
         # examples/07-terrain/assets/README.md.
         check 07-terrain -heightmap 07-terrain/assets/blender_terrain.heightmap
+        # The second sky on the engine's sky slot (issue #161 step 5): x/sky/lut
+        # fills SkyFrag and leaves StarsFrag and CloudsFrag nil, so this is the
+        # only run in the matrix with a dome and no star or cloud pipeline at all,
+        # and the only one that binds an application shader-texture slot from an
+        # x package. The stock 07-terrain run above is still x/sky.
+        check 07-terrain -sky lut
         check 09-water
         check 11-lights
         check 12-particles
@@ -353,6 +374,11 @@ tasks:
         done
         check 24-custom-passes
         check 24-custom-passes -passes off
+        # x/sky/lut: a dome with the star and cloud stages nil, plus a texture
+        # uploaded at startup and bound to a shader-texture slot for the whole
+        # run. The layer is the only thing that would notice a slot left pointing
+        # at a destroyed image across a swapchain rebuild.
+        check 07-terrain -sky lut
         check 25-lod-forest
         check 25-lod-forest -msaa 1
         check 25-lod-forest -replace
@@ -1791,6 +1817,90 @@ tasks:
       # Zero bytes and zero objects over 2000 Update calls with real passes
       # behind them, which is the half the unit test cannot see.
       - go run ./x/water/internal/watercheck -water on -allocs -depth 20 -frames 200
+
+  xskylut:
+    desc: "x/sky/lut's lookup-table sky has the gradient and the sun the model says, and costs less than x/sky (needs a GPU)"
+    env:
+      GLYPHENGINE_BACKGROUND: "1"
+      GLYPHENGINE_FIXED_FRAME_TIME: "16.667ms"
+    cmds:
+      # Needs a GPU, so it sits with smoke and validate rather than in `task ci`.
+      # The package's own unit tests run there, and they read the same two claims
+      # out of the baked bytes with no tonemap, no bloom and no camera in the way;
+      # this is what a frame actually does with them.
+      #
+      # The scene is this gate's own: a camera at the origin pitched up 0.6
+      # radians with nothing in the world, so every pixel of every capture is
+      # dome. 640x480, 60-degree vertical field of view, frame 120, MSAA off.
+      #
+      # NUMBERS, 640x480, frame 120, MSAA off, RX 7900 XTX, 2026-10-03, mean sRGB
+      # luma of the central half of each of 12 bands, bottom band first:
+      #
+      #   dawn    165.432 ... 82.926, drop 82.51; sun side 144.261 / away 101.361,
+      #           ratio 1.42
+      #   morning 198.471 ... 144.571, drop 53.90
+      #   dusk    104.028 ... 56.627, drop 47.40
+      #
+      # Every band of all three is darker than the one below it, and the worst
+      # rise in the 33 steps is exactly 0.000 -- the top three bands of each hour
+      # are bit-identical, because the gradient saturates above an elevation of
+      # 0.75 and the dome is then one colour. The floors in lutskycheck are set
+      # from these and carry the readings beside them.
+      #
+      # Three hours -- sunrise at 0.25, mid-morning at 0.35, the blue hour at 0.78
+      # -- and three claims:
+      #
+      #   the gradient   looking away from the sun, mean sRGB luma falls from the
+      #                  horizon band to the zenith band, every band of 12.
+      #   the sun        at dawn, the half of the sky the sun is in is brighter
+      #                  than the half opposite, in the same box of the frame.
+      #   the control    the same scene with the sky slot EMPTY is a different
+      #                  frame. Without it every number above could be coming
+      #                  from the clear colour.
+      #
+      # Noon is deliberately not one of the hours. The gradient is read on the
+      # side away from the sun, and with the sun at the zenith there is no such
+      # side -- its halo reaches the top of any frame containing the zenith, and
+      # the check would be measuring the halo.
+      #
+      # PROVED: the gate's own break is re-runnable and needs no SDK. `-flat`
+      # binds one constant texel over the table, from outside the package,
+      # through the same Renderer.SetShaderTexture slot the sky uses -- which is
+      # "sample a constant texel" without touching the shader. The gradient check
+      # then fails on the drop floor at exactly zero. Recorded in the report with
+      # the message.
+      - go run ./x/sky/lut/internal/lutskycheck -gradient -out .task/xskylut
+      # The cost, interleaved: all four configurations in each trial rather than
+      # three runs of one and then three of the next, because a warm card reads
+      # several percent faster than a cold one and grouping by configuration
+      # charges that to whichever went first. The sky pass has its own GPU
+      # bracket (renderer.PassSky), so the dome-to-dome comparison is bracket to
+      # bracket and only the whole-sky one is a frame total.
+      #
+      # COST, same machine and date, three interleaved trials per run and three runs
+      # of the whole comparison. Means of each run's trials, in milliseconds:
+      #
+      #   config     sky pass                  frame
+      #   none       0.0001  0.0001  0.0001    0.0504  0.0505  0.0494
+      #   lut        0.0082  0.0082  0.0083    0.0557  0.0554  0.0559
+      #   xskydome   0.0099  0.0101  0.0101    0.0571  0.0575  0.0575
+      #   xsky       0.0091  0.0090  0.0091    0.6235  0.6218  0.6218
+      #
+      # The LUT dome adds 10.5% / 9.6% / 13.0% to the frame over the empty slot
+      # (budget 20%), is 82.6% / 81.5% / 82.1% of x/sky's dome pass, and its whole
+      # frame is 8.9% / 8.9% / 9.0% of x/sky's. Nearly all of that last figure is
+      # the cloud march, 0.485 ms, which a nil CloudsFrag does not pay at all.
+      #
+      # Across all nine trials the sky-pass samples are 0.0081-0.0085 for lut and
+      # 0.0099-0.0102 for xskydome -- non-overlapping ranges, which is what makes
+      # 82% a reading rather than noise at eight microseconds.
+      #
+      # The camera faces the sun for the cost run, which is x/sky's worst case and
+      # deliberately so: its disc is on screen, so the shaft pass runs at full
+      # cost. The fair comparison is therefore the dome-to-dome one; the whole-sky
+      # frame totals are what a game looking at the sun would actually pay, and
+      # both are reported.
+      - go run ./x/sky/lut/internal/lutskycheck -cost -out .task/xskylut
 
   waterblend:
     desc: "Check that a blended effect in front of the water is not painted over by it"

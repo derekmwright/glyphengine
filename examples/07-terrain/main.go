@@ -21,6 +21,7 @@
 //	go run ./07-terrain -seed 7      # a different island
 //	go run ./07-terrain -heightmap assets/blender_terrain.heightmap
 //	                                  # load a .heightmap from disk instead
+//	go run ./07-terrain -sky lut     # the cheap lookup-table sky instead of x/sky
 //
 // WASD moves, mouse looks, Shift runs, Space jumps, Escape releases the
 // cursor (press again to quit).
@@ -38,6 +39,7 @@ import (
 	"github.com/derekmwright/glyphengine/ecs"
 	"github.com/derekmwright/glyphengine/input"
 	xsky "github.com/derekmwright/glyphengine/x/sky"
+	skylut "github.com/derekmwright/glyphengine/x/sky/lut"
 	"github.com/derekmwright/glyphengine/x/terrainfield"
 )
 
@@ -59,6 +61,12 @@ type game struct {
 	player        ecs.Entity
 	seed          int64
 	heightmapPath string
+
+	// skyMode picks which package fills the engine's sky slot: "xsky" is the
+	// Earth sky and the default, "lut" is the cheap lookup-table one. Both are
+	// x packages on the same seam, which is the thing worth looking at here --
+	// the engine itself has no sky either way.
+	skyMode string
 
 	// Sampled in Update, consumed in FixedUpdate. jumpQueued latches the
 	// edge-triggered jump across frames that run no tick.
@@ -121,10 +129,6 @@ func (g *game) Init(e *glyph.Engine) error {
 	cc := glyph.NewCharacterController()
 	e.C.CharacterController.Set(g.player, &cc)
 
-	env := xsky.DefaultEnvironment()
-	env.Cycle.TimeOfDay = 0.30
-	env.Cycle.Speed = 1.0 / 300.0
-	e.Scene.Env = env
 	// Terrain wants to fade into the sky rather than end in a hard edge.
 	// 0.006 is tuned for the procedural terrain's 200-unit world; a loaded
 	// heightmap can be any size (the Blender fixture is 10 units), so scale
@@ -134,7 +138,33 @@ func (g *game) Init(e *glyph.Engine) error {
 	if g.heightmapPath != "" {
 		fogDensity = 0.006 * hm.WorldW / worldSize
 	}
-	env.Fog.Density = fogDensity
+
+	// Two packages, one slot. The hour and the speed are the same on both sides
+	// so that switching -sky changes the sky and nothing else; the LUT sky's
+	// keys are x/sky's cycle sampled at four hours, so the sun is in the same
+	// place at 0.25, 0.50 and 0.75 and within four degrees of it in between.
+	//
+	// What is visibly missing with -sky lut is the clouds, the stars, the sun
+	// and moon discs and the light shafts: that package supplies the dome stage
+	// and leaves the other two nil, which is what makes it cheap.
+	switch g.skyMode {
+	case "lut":
+		opts := skylut.DefaultOptions()
+		opts.TimeOfDay = 0.30
+		opts.Speed = 1.0 / 300.0
+		opts.Fog = &glyph.Fog{Density: fogDensity}
+		sky, err := skylut.New(e.Renderer(), opts)
+		if err != nil {
+			return err
+		}
+		e.Scene.Env = sky
+	default:
+		env := xsky.DefaultEnvironment()
+		env.Cycle.TimeOfDay = 0.30
+		env.Cycle.Speed = 1.0 / 300.0
+		env.Fog.Density = fogDensity
+		e.Scene.Env = env
+	}
 
 	g.camera = glyph.NewFPCamera()
 	g.camera.EyeHeight = 0.7
@@ -256,10 +286,25 @@ func main() {
 	seed := flag.Int64("seed", 1, "terrain generation seed")
 	shot := flag.String("screenshot", "", "write a PNG of the last frame to this path")
 	heightmap := flag.String("heightmap", "", "load a .heightmap from disk instead of generating one procedurally")
+	skyMode := flag.String("sky", "xsky", "which x package fills the engine's sky slot: xsky (the Earth sky) or lut (the cheap lookup table)")
 	flag.Parse()
 
+	// The sky slot is filled before the engine exists, because the shader set is
+	// what renderer.New builds pipelines from; the matching EnvironmentSource is
+	// chosen in Init, where there is a renderer to upload a table through. Two
+	// halves that have to arrive together, and these are the two places they are
+	// chosen -- see x/README.md.
+	skyShaders := xsky.Shaders()
+	switch *skyMode {
+	case "xsky":
+	case "lut":
+		skyShaders = skylut.Shaders()
+	default:
+		log.Fatalf("-sky must be xsky or lut, not %q", *skyMode)
+	}
+
 	opts := []glyph.Option{
-		glyph.WithShaders(xsky.Shaders()),
+		glyph.WithShaders(skyShaders),
 		glyph.WithTitle("GlyphEngine - 07 Terrain"),
 		glyph.WithDebugKeys(),
 		glyph.WithWindowSize(*width, *height),
@@ -277,7 +322,7 @@ func main() {
 		opts = append(opts, glyph.WithScreenshot(*shot))
 	}
 
-	e, err := glyph.New(&game{seed: *seed, heightmapPath: *heightmap}, opts...)
+	e, err := glyph.New(&game{seed: *seed, heightmapPath: *heightmap, skyMode: *skyMode}, opts...)
 	if err != nil {
 		log.Fatalf("create engine: %v", err)
 	}
