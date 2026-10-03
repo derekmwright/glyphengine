@@ -42,6 +42,13 @@
 // block and LIGHT_SET; the layouts are in docs/agents/render-targets.md under
 // "Fixed shader layouts", and shaders/terrain.frag is a worked example of the
 // preamble. Getting it wrong is a compile error, which is the good case.
+//
+// Not all of them ask for anything. srgb.inc, atmosphere.inc, bloom.inc,
+// lod_coverage.inc and volumetric_common.inc compile behind nothing but a
+// #version line, and that group is where a helper with no binding dependency
+// belongs: volumetric_common.inc exists because volStartJitter and volPhase sat
+// inside volumetric.inc, so the only way to reach them was to declare the whole
+// clustered light set or copy them. The per-fragment table is on the same page.
 package include
 
 import (

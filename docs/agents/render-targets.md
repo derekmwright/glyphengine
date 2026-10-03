@@ -48,7 +48,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: procedural
-verified: 2026-10-02 # directional shadow sampling from compute; application submission counts per pass; storage buffers, sampler probes and explicit barriers; exported GLSL include set; Timed refused without device timestamps (#160)
+verified: 2026-10-03 # the include set listed per fragment, with the dependency-free group and volumetric_common.inc (#169); directional shadow sampling from compute; application submission counts per pass; storage buffers, sampler probes and explicit barriers; exported GLSL include set; Timed refused without device timestamps (#160)
 ---
 
 # Application render targets, graphics and compute passes
@@ -446,6 +446,29 @@ set to a directory and compile with `glslc -I` against it, naming the fragments
 bare (`#include "lighting.inc"`). That package's doc comment carries the build
 step. The layouts above are what the includes expect the including file to have
 declared already, and `lighting.inc` additionally needs `LIGHT_SET` `#define`d.
+
+The set, and what each fragment expects you to have declared first:
+
+| Fragment | Needs declared first |
+|---|---|
+| `srgb.inc`, `atmosphere.inc`, `bloom.inc`, `lod_coverage.inc`, `volumetric_common.inc` | nothing |
+| `lights.inc` | `LIGHT_SET` |
+| `volumetric.inc` | `LIGHT_SET`, `pc`, the `shadow` UBO |
+| `lighting.inc` | those, plus `shadowMap` and `pointShadowMap` |
+| `material_shading.inc`, `grass_fragment.inc` | everything `lighting.inc` wants, the material bindings and the vertex inputs — these are fragment bodies, not helpers |
+
+The first row is measured rather than read off the sources: each of those five
+compiles on its own behind nothing but a `#version` line and an output.
+
+**A helper that binds to nothing belongs in the first group, not buried in a
+fragment that does.** `volumetric_common.inc` is there because of what the
+second group costs: a pass that wanted only the volumetric march's start jitter
+had to declare the clustered light buffers, the shadow UBO and a push block with
+`cameraPos` to get at it, so `x/water` copied the function instead -- which is
+the vendored-copy failure this export exists to remove. `x/internal/shaderinclude`
+compiles `volumetric_common.inc` with nothing declared at all, with
+`volumetric.inc` as the control that must still fail, so the line stays where it
+is.
 
 Do this at test or generate time, never at startup: `glslc` is an authoring-only
 dependency, and compiling in a test is what makes a changed include fail at build
