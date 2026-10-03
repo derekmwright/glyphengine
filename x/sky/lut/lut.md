@@ -339,16 +339,6 @@ game that needs all four cannot use this sky.
 
 ## Cost
 
-> **These figures are PRE-MOVE and await re-measurement.** They were taken with
-> the RGBA8 `sqrt(v/3)` table and the squaring that went with it, before the move
-> to `R16G16B16A16_SFLOAT` (issue #178). What changed in the fetch is small and in
-> this package's favour — two vec3 multiplies gone from the fragment, no mip chain to
-> allocate — and against it the table is 512 KB instead of 256, so a sampler fetch
-> costs more bandwidth. Neither direction is a guess worth publishing: the numbers
-> below are the old build's, and `task xskylut -cost` has not been re-run because
-> a timing comparison taken while another process holds the GPU is not a
-> measurement. Treat the shape as indicative and the digits as stale.
-
 Measured by `task xskylut`, on a scene that is nothing but sky: a camera at the
 origin pitched up 0.6 radians with no geometry at all, so every pixel is a dome
 fragment and the sky pass's own GPU bracket (`renderer.PassSky`) is the cost of
@@ -356,44 +346,103 @@ shading a full frame of it. 640x480, MSAA off, 300 frames with the first 60
 discarded, three interleaved trials of four configurations.
 
 Three independent runs of the whole comparison, each figure the mean of that
-run's three interleaved trials, in milliseconds. RX 7900 XTX, 2026-10-03, **with
-the eight-bit table**.
+run's three interleaved trials, in milliseconds. RX 7900 XTX, 2026-10-03, with
+the `R16G16B16A16_SFLOAT` table.
 
 | | sky pass | cloud pass | frame |
 |---|---|---|---|
-| empty slot | 0.0001 · 0.0001 · 0.0001 | 0.0001 | 0.0504 · 0.0505 · 0.0494 |
-| **this package** | **0.0082 · 0.0082 · 0.0083** | 0.0001 | **0.0557 · 0.0554 · 0.0559** |
-| `x/sky`, dome only | 0.0099 · 0.0101 · 0.0101 | 0.0001 | 0.0571 · 0.0575 · 0.0575 |
-| `x/sky`, whole | 0.0091 · 0.0090 · 0.0091 | 0.4849 – 0.4853 | 0.6235 · 0.6218 · 0.6218 |
+| empty slot | 0.0001 · 0.0001 · 0.0001 | 0.0001 | 0.0490 · 0.0500 · 0.0494 |
+| **this package** | **0.0080 · 0.0081 · 0.0081** | 0.0001 | **0.0549 · 0.0554 · 0.0555** |
+| `x/sky`, dome only | 0.0098 · 0.0102 · 0.0100 | 0.0001 | 0.0563 · 0.0577 · 0.0571 |
+| `x/sky`, whole | 0.0089 · 0.0090 · 0.0090 | 0.4836 – 0.4972 | 0.6162 · 0.6250 · 0.6183 |
 
-- **Against the empty slot**: the dome adds **10.5 / 9.6 / 13.0 percent** to the
+- **Against the empty slot**: the dome adds **12.0 / 10.8 / 12.3 percent** to the
   frame. That is the worst case for it — every pixel is dome, with no geometry
   covering any of them.
-- **Against `x/sky`'s dome**, pass bracket to pass bracket, one draw each: **82.6 /
-  81.5 / 82.1 percent**. Across all nine trials the samples are 0.0081–0.0085 here
-  and 0.0099–0.0102 there, two ranges that do not overlap — which is what makes
-  18 percent a reading rather than noise at eight microseconds.
+- **Against `x/sky`'s dome**, pass bracket to pass bracket, one draw each: **81.6 /
+  79.4 / 81.0 percent**. Read this one PAIRED — within each interleaved trial —
+  because that is what the interleaving is for and because the unpaired ranges do
+  overlap: 0.0077–0.0099 here against 0.0095–0.0112 there across every trial on
+  record. Within a trial, with both configurations measured minutes apart at most,
+  **this dome's pass is cheaper in twelve of twelve trials, by 0.0013 to 0.0028 ms
+  (median 0.0019)**. That is what makes 19 percent a reading rather than noise at
+  eight microseconds; a range comparison across runs would not survive the card's
+  own drift, and the empty slot's frame moved 13.5 percent over those same twelve
+  trials.
 - **Against `x/sky` whole**: **8.9 / 8.9 / 9.0 percent** of the frame, eleven times
-  cheaper. Nearly all of the difference is the cloud march at 0.485 ms, which a nil
+  cheaper. Nearly all of the difference is the cloud march at 0.484 ms, which a nil
   `CloudsFrag` does not pay at all.
+
+### Did moving to a half-float table change the cost? Not measurably
+
+The table was RGBA8 with a `sqrt(v/3)` transfer until issue #178. Two things
+changed that could move this: the fragment lost `encoded * encoded * LUT_RANGE`
+(two vec3 multiplies), and the upload stopped building a mip chain — both in this
+package's favour — while the table doubled from 256 KB to 512 KB, which costs a
+sampler fetch more bandwidth, against it.
+
+**The answer is that the two are not distinguishable on this machine, and no
+direction is claimed.** The eight-bit build's nine trials put the dome's sky pass
+at 0.0081–0.0085 ms; this one's put it at 0.0077–0.0084. Those ranges overlap over
+most of their width.
+
+The reason to believe that is a null result rather than a measurement too crude to
+see a real change is the **control**: `x/sky`'s dome-only configuration is
+untouched code, measured in the same interleaved trials, and it moved too —
+0.0099–0.0102 before, and 0.0095–0.0112 across every trial taken since. Whatever
+moves that moves the LUT's figure as well, so a difference of the size the LUT
+shows cannot be attributed to the change. Read the numbers above as "the same
+cost, re-measured", not as an improvement or a regression.
+
+Two further readings make the point sharper, and widen it. Re-running the gate
+twice right after the three runs above gave LUT pass means of 0.0092 and 0.0095
+against `x/sky`'s 0.0111 both times, with the empty slot's frame at 0.0525 and
+0.0572 against 0.0490–0.0500 — everything up together, control included. Both
+passed, at 14.0 / 8.7 percent over the empty slot, 82.6 / 85.6 percent of `x/sky`'s
+dome and 9.5 / 9.9 percent of its frame.
+
+So the ratios are **stable within a band rather than to the digit**: across all
+five readings the dome share runs 79.4 to 85.6 percent and the over-empty figure
+8.7 to 14.0. The three-run figures in the table are a sample of that band, not its
+edges, and the gate's budgets (95 and 20 percent) are sized for the band rather
+than for the sample. Quote the band; treat any single millisecond figure as "this
+machine, that afternoon".
+
+What is unambiguous is the comparison the page is actually about, because both
+sides of it are measured inside the same trial: the LUT dome's pass is below
+`x/sky`'s dome's pass in **twelve trials out of twelve**, with the smallest margin
+(0.0013 ms) still larger than the drift between adjacent trials of either one.
 
 Two things in that table are worth knowing before quoting it.
 
-`x/sky`'s sky pass reads **0.0091, lower than its own dome-only 0.0101**, while
-drawing strictly more (the dome plus a sun billboard), and it does so in all three
-runs. The explanation that fits is clock state: that configuration's frame is 0.62
-ms of work against 0.057, so the card is in a higher clock state for the whole of
-it and every pass inside it is faster. It is recorded rather than explained away
-because it is exactly the trap a pass-bracket comparison across two different frame
-loads falls into — which is why the dome-to-dome comparison is made against the
-dome-only configuration, whose frame is the same size as this one's. The
-whole-frame comparison crosses the same boundary in the direction that
-*understates* this package's advantage.
+`x/sky`'s whole-sky pass reads **0.0089–0.0090, lower than its own dome-only
+0.0098–0.0102**, while drawing strictly more (the dome plus a sun billboard), and
+it does so in all three runs. The explanation that fits is clock state: that
+configuration's frame is 0.62 ms of work against 0.057, so the card is in a higher
+clock state for the whole of it and every pass inside it is faster. It is recorded
+rather than explained away because it is exactly the trap a pass-bracket comparison
+across two different frame loads falls into — which is why the dome-to-dome
+comparison is made against the dome-only configuration, whose frame is the same
+size as this one's. The whole-frame comparison crosses the same boundary in the
+direction that *understates* this package's advantage.
 
-And the ratio against the empty slot swings by 3.4 points between runs, because the
+And the ratio against the empty slot swings by 1.5 points between runs, because the
 frames being divided are 50 microseconds and the empty slot's own frame-to-frame
-spread reached 5.9 percent. The gate's budget is 20 percent for that reason rather
-than because 13 percent needed the room.
+spread reached 8.2 percent in one of these runs. The gate's budget is 20 percent
+for that reason rather than because 12 percent needed the room.
+
+**One run was discarded and re-taken, which is the third thing to know.** The first
+attempt at run three read a 0.1643 ms LUT frame against 0.0468 and 0.0568 in its
+own other two trials — a 251 percent spread — with `x/sky`'s cloud pass swinging
+0.3864 / 0.7775 / 0.5290 and even the empty slot's frame dropping 23 percent. A
+second application on this machine (`universebuild.exe`, taking 52 percent of the
+GPU's 3D engine) had started 13 seconds before that run finished. Everything moved,
+including configurations this change cannot touch, which is what identifies it as
+contention rather than a result. It was re-run once the card was quiet — checked by
+GPU engine utilisation, not by process name, because a process-name poll does not
+see another game — and the replacement is the tightest of the three (frame spreads
+2.0 to 3.2 percent). An averaged-in contaminated run would have produced a number
+with nothing wrong with it except that it was false.
 
 ## Gates
 

@@ -1854,9 +1854,10 @@ tasks:
       # The pixels moved, and the SHAPE of the move is the encoding coming out:
       # dusk's horizon band moved 1.60 counts and dawn's 0.07, because dusk is the
       # dim hour and a sqrt transfer over 255 levels is coarsest where the sky is
-      # darkest. Nothing moved by more than two counts, every claim this gate
-      # makes is unchanged, and `task screenshots` has one expected diff for the
-      # same reason.
+      # darkest. Nothing moved by more than two counts and every claim this gate
+      # makes is unchanged. `task screenshots` reported ZERO changed images, which
+      # is not evidence the dome held still: -sky lut is in no screenshot set, so
+      # this gate is the only place the dome's pixels are compared at all.
       #
       # Every band of all three is darker than the one below it, and the worst
       # rise in the 33 steps is exactly 0.000 -- the top three bands of each hour
@@ -1895,32 +1896,65 @@ tasks:
       # bracket (renderer.PassSky), so the dome-to-dome comparison is bracket to
       # bracket and only the whole-sky one is a frame total.
       #
-      # COST -- PRE-MOVE, AWAITING RE-MEASUREMENT. These were taken with the
-      # RGBA8 sqrt(v/3) table, before it moved to R16G16B16A16_SFLOAT (issue
-      # #178). The fetch lost two vec3 multiplies and the upload lost its mip chain,
-      # both in this package's favour; the table doubled to 512 KB, against it.
-      # Which wins is not worth guessing, and a timing comparison taken while
-      # another process holds the GPU is not a measurement -- so these are the old
-      # build's digits and the re-run is owed. See lut.md's Cost section, which
-      # carries the same warning.
-      #
-      # Same machine and date, three interleaved trials per run and three runs of
-      # the whole comparison. Means of each run's trials, in milliseconds:
+      # COST, same machine and date, taken with the R16G16B16A16_SFLOAT table.
+      # Three interleaved trials per run and three independent runs of the whole
+      # comparison. Means of each run's trials, in milliseconds:
       #
       #   config     sky pass                  frame
-      #   none       0.0001  0.0001  0.0001    0.0504  0.0505  0.0494
-      #   lut        0.0082  0.0082  0.0083    0.0557  0.0554  0.0559
-      #   xskydome   0.0099  0.0101  0.0101    0.0571  0.0575  0.0575
-      #   xsky       0.0091  0.0090  0.0091    0.6235  0.6218  0.6218
+      #   none       0.0001  0.0001  0.0001    0.0490  0.0500  0.0494
+      #   lut        0.0080  0.0081  0.0081    0.0549  0.0554  0.0555
+      #   xskydome   0.0098  0.0102  0.0100    0.0563  0.0577  0.0571
+      #   xsky       0.0089  0.0090  0.0090    0.6162  0.6250  0.6183
       #
-      # The LUT dome adds 10.5% / 9.6% / 13.0% to the frame over the empty slot
-      # (budget 20%), is 82.6% / 81.5% / 82.1% of x/sky's dome pass, and its whole
+      # The LUT dome adds 12.0% / 10.8% / 12.3% to the frame over the empty slot
+      # (budget 20%), is 81.6% / 79.4% / 81.0% of x/sky's dome pass, and its whole
       # frame is 8.9% / 8.9% / 9.0% of x/sky's. Nearly all of that last figure is
-      # the cloud march, 0.485 ms, which a nil CloudsFrag does not pay at all.
+      # the cloud march, 0.4836-0.4972 ms, which a nil CloudsFrag does not pay.
       #
-      # Across all nine trials the sky-pass samples are 0.0081-0.0085 for lut and
-      # 0.0099-0.0102 for xskydome -- non-overlapping ranges, which is what makes
-      # 82% a reading rather than noise at eight microseconds.
+      # Read the dome-to-dome comparison PAIRED, within each interleaved trial,
+      # because that is what the interleaving is for and because the unpaired
+      # ranges overlap: 0.0077-0.0099 for lut against 0.0095-0.0112 for xskydome
+      # across every trial on record. Within a trial, lut's pass is cheaper in
+      # TWELVE OF TWELVE trials by 0.0013 to 0.0028 ms, median 0.0019 -- and the
+      # empty slot's own frame drifted 13.5% over those same twelve, which is why
+      # a range comparison across runs would not have survived.
+      #
+      # Re-running the gate twice right after the three runs above gave lut 0.0092
+      # and 0.0095 against xskydome 0.0111 both times, empty slot 0.0525 and 0.0572:
+      # everything up together, control included. Both passed, at 14.0%/8.7% over
+      # the empty slot, 82.6%/85.6% of x/sky's dome, 9.5%/9.9% of its frame.
+      #
+      # So the ratios hold within a BAND, not to the digit: over five readings the
+      # dome share runs 79.4% to 85.6% and the over-empty figure 8.7% to 14.0%. The
+      # three-run table above is a sample of that band, not its edges, and the
+      # budgets below are sized for the band. Quote the band, not a single figure.
+      #
+      # MOVING TO THE HALF-FLOAT TABLE DID NOT MEASURABLY CHANGE THIS, and no
+      # direction is claimed. The eight-bit build read 0.0081-0.0085 for the lut
+      # sky pass over its own nine trials against 0.0077-0.0084 here: overlapping
+      # ranges. The reason to call that a null result rather than a measurement too
+      # crude to see a real change is the CONTROL -- xskydome is untouched code,
+      # measured in the same interleaved trials, and its range went from
+      # 0.0099-0.0102 to 0.0095-0.0105, three times wider. Whatever widened that
+      # widened the lut figure too. For the record, the change removed two vec3
+      # multiplies from the fragment and the mip chain from the upload, and doubled
+      # the table to 512 KB; the pre-move means were
+      #
+      #   none 0.0504 0.0505 0.0494 frame, lut sky 0.0082 0.0082 0.0083,
+      #   xskydome sky 0.0099 0.0101 0.0101, over-empty 10.5% 9.6% 13.0%,
+      #   dome share 82.6% 81.5% 82.1%, whole share 8.9% 8.9% 9.0%
+      #
+      # DISCARDED RUN, recorded because averaging it in would have produced a
+      # plausible false number: the first attempt at run three read a 0.1643 ms lut
+      # frame against 0.0468 and 0.0568 in its own other trials (251% spread), with
+      # xsky's cloud pass swinging 0.3864/0.7775/0.5290 and the empty slot's frame
+      # dropping 23%. Another application (universebuild.exe, 52% of the GPU's 3D
+      # engine) had started 13 seconds before that run finished. EVERY
+      # configuration moved, including ones this package cannot touch, which is
+      # what identifies contention rather than a result. Re-taken once the card was
+      # quiet -- verified by GPU engine utilisation, not by process name, because a
+      # process-name poll does not see another game -- and the replacement is the
+      # tightest of the three, frame spreads 2.0% to 3.2%.
       #
       # The camera faces the sun for the cost run, which is x/sky's worst case and
       # deliberately so: its disc is on screen, so the shaft pass runs at full

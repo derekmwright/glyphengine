@@ -500,48 +500,49 @@ func runGradient(dir string, flat bool) error {
 // ── the cost comparison ──
 
 // The cost thresholds. Measured 2026-10-03, RX 7900 XTX, 640x480, MSAA off, three
-// interleaved trials of 300 frames each with the first 60 discarded. THREE
-// independent runs of the whole comparison, each line the mean of that run's three
-// trials:
+// interleaved trials of 300 frames each with the first 60 discarded, with the
+// R16G16B16A16_SFLOAT table (issue #178). THREE independent runs of the whole
+// comparison, each line the mean of that run's three trials:
 //
-//	           sky pass                  frame                       frame spread
-//	none       0.0001  0.0001  0.0001    0.0504  0.0505  0.0494 ms   2.6%  5.9%  0.6%
-//	lut        0.0082  0.0082  0.0083    0.0557  0.0554  0.0559 ms   1.6%  0.4%  2.5%
-//	xskydome   0.0099  0.0101  0.0101    0.0571  0.0575  0.0575 ms   0.7%  0.7%  2.1%
-//	xsky       0.0091  0.0090  0.0091    0.6235  0.6218  0.6218 ms   0.4%  0.5%  1.1%
+//	           sky pass                  frame
+//	none       0.0001  0.0001  0.0001    0.0490  0.0500  0.0494 ms
+//	lut        0.0080  0.0081  0.0081    0.0549  0.0554  0.0555 ms
+//	xskydome   0.0098  0.0102  0.0100    0.0563  0.0577  0.0571 ms
+//	xsky       0.0089  0.0090  0.0090    0.6162  0.6250  0.6183 ms
 //
 // The cloud pass is 0.0001 ms for every configuration but xsky, where it is
-// 0.4849 to 0.4853: with CloudsFrag nil the engine builds no cloud pipeline and
+// 0.4836 to 0.4972: with CloudsFrag nil the engine builds no cloud pipeline and
 // recordClouds returns before the barrier, so that half-millisecond is the single
 // largest thing this package does not spend.
 //
-// The three ratios the checks below read, per run: 10.5% / 9.6% / 13.0% added to
-// the frame, 82.6% / 81.5% / 82.1% of x/sky's dome pass, 8.9% / 8.9% / 9.0% of
-// x/sky's whole frame.
+// The three ratios the checks below read, per run: 12.0% / 10.8% / 12.3% added to
+// the frame, 81.6% / 79.4% / 81.0% of x/sky's dome pass, 8.9% / 8.9% / 9.0% of
+// x/sky's whole frame. Routine gate runs since have read the dome share as high
+// as 85.6% and the over-empty ratio from 8.7% to 14.0%; the budgets are sized
+// for that band, not for the three runs above.
 //
-// Across all nine trials the sky-pass samples are 0.0081 to 0.0085 for lut and
-// 0.0099 to 0.0102 for xskydome: the two ranges do not overlap, which is what
-// makes 82% a reading rather than a coin toss at this scale.
+// Two things in those numbers are worth knowing before reading the checks.
 //
-// Two things in that table are worth knowing before reading the checks.
+// The dome brackets are 8 to 10 MICROseconds, and at that scale the unpaired
+// ranges across runs overlap (0.0077 to 0.0099 for lut, 0.0095 to 0.0112 for
+// xskydome over every trial on record) because the card drifts between runs by
+// more than the gap. What makes it a measurement rather than a coin toss is the
+// PAIRING: inside each interleaved trial the lut pass is cheaper than xskydome's
+// in twelve of twelve, by 0.0013 to 0.0028 ms, which is why the comparison is
+// made against xskydome -- a configuration whose FRAME is the same size as the
+// LUT's, measured minutes apart at most -- and not against xsky. The eight-bit
+// table before #178 read 0.0081 to 0.0085 here; the half-float one is not
+// distinguishable from it, and no direction is claimed (lut.md has the control
+// that says why that is a null result rather than a blunt instrument).
 //
-// The dome brackets are 8 to 10 MICROseconds, which is small enough that the
-// spread matters: the lut pass read 0.0082/0.0083/0.0081 and xskydome's
-// 0.0100/0.0099/0.0099, so the 0.0017 gap between them is about eight times
-// either one's own spread. That is what makes it a measurement rather than a
-// coin toss, and it is why the comparison is made against xskydome -- a
-// configuration whose FRAME is the same size as the LUT's -- and not against
-// xsky.
-//
-// Because xsky's sky pass reads 0.0091, LOWER than xskydome's 0.0099, while
-// drawing strictly more (the dome plus a sun billboard). Reproducibly: 0.0090,
-// 0.0090, 0.0093. The explanation that fits is clock state -- xsky's frame is
-// 0.62 ms of work against xskydome's 0.057, so the card is in a higher clock
-// state for the whole of it and every pass in that frame is faster. It is
-// recorded rather than explained away because it is exactly the trap a
-// pass-bracket comparison across two different frame loads falls into, and the
-// whole-frame comparison below crosses the same boundary in the direction that
-// UNDERSTATES this package's advantage.
+// Because xsky's sky pass reads 0.0089 to 0.0090, LOWER than xskydome's 0.0098 to
+// 0.0102, while drawing strictly more (the dome plus a sun billboard). The
+// explanation that fits is clock state -- xsky's frame is 0.62 ms of work against
+// xskydome's 0.057, so the card is in a higher clock state for the whole of it
+// and every pass in that frame is faster. It is recorded rather than explained
+// away because it is exactly the trap a pass-bracket comparison across two
+// different frame loads falls into, and the whole-frame comparison below crosses
+// the same boundary in the direction that UNDERSTATES this package's advantage.
 const (
 	// costBudget is how much of the empty slot's whole-frame cost the LUT dome is
 	// allowed to add. The frame is nothing but sky, so this is the worst case for
