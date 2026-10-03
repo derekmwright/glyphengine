@@ -31,7 +31,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: procedural
-verified: 2026-09-24 # CPU/GPU indirect path and ordered compaction
+verified: 2026-10-03 # a hierarchical-Z occlusion test was measured and removed by its rule; CPU/GPU indirect path and ordered compaction
 ---
 
 # Cull and select distance levels per placement
@@ -263,6 +263,162 @@ existing engine pass brackets. Those scenes keep GPU LOD disabled, so the
 small decreases are not attributed to this feature. Existing engine command
 stream hashes remain unchanged.
 
+## A hierarchical-Z occlusion test was measured and removed
+
+An opt-in hierarchical-Z occlusion test was built, measured against a rule
+written before the run, and removed. It is the third mechanism rejected on the
+same clause, after front-to-back opaque ordering and the depth prepass
+([game-loop](game-loop.md) has both), and the first one whose saving came from
+removing instances rather than fragments.
+
+It worked, and it worked well. On a dense LOD forest where a ridge hides the far
+flank and the near flank hides itself, it took the submitted instance count from
+6,333 to 66 and `gpu_total` down by 34 % at 1280x720 and 26 % at 3840x2160. What
+it could not do is be free on a scene with nothing hidden, where it still built
+a pyramid every frame and tested every surviving placement against it.
+
+### The rule, written before the run
+
+> Ship the option if, on a scene where most of the far side is hidden,
+> `gpu_total` falls by more than the within-mode scatter; the pyramid pass costs
+> less than it saves; and an open-field control with the same instance count and
+> nothing hidden moves by less than that scatter. Otherwise remove the option and
+> record the numbers that said no.
+
+`gpu_total` and not `gpu_opaque`, for the reason the depth prepass was judged on
+the total: the pyramid is a pass of its own, and a saving inside the opaque pass
+that the new pass more than spends reads as a win from `gpu_opaque` alone.
+
+### The numbers
+
+`examples/29-ridge`, 6,000 `InstanceSetLOD` placements over a
+`terrainfield.Ridge` -- half on the far flank, a third on the near one and a
+sixth straddling the crest -- with four LOD bands at 40/90/260 and MSAA 4. The
+ridge arm is an eye 2 m up looking along the field; the control is the same
+placements from 150 m straight up, where neither the ridge nor the forest hides
+anything. Three trials per cell, interleaved off/on inside each arm, every sample
+kept, 200 frames each under `GLYPHENGINE_FIXED_FRAME_TIME=16.667ms`, nothing else
+on the GPU. AMD Radeon RX 7900 XTX.
+
+`gpu_total`, in milliseconds:
+
+| resolution | arm | test off | test on | mean change | within-mode scatter |
+|---|---|---|---|---|---|
+| 1280x720 | ridge | 1.025 / 1.012 / 1.016 | 0.665 / 0.691 / 0.667 | **-0.343** | 0.013 / 0.026 |
+| 1280x720 | control | 0.522 / 0.519 / 0.519 | 0.577 / 0.575 / 0.574 | **+0.055** | 0.003 / 0.003 |
+| 3840x2160 | ridge | 5.224 / 5.224 / 5.147 | 3.867 / 3.798 / 3.847 | **-1.361** | 0.077 / 0.069 |
+| 3840x2160 | control | 2.651 / 2.682 / 2.634 | 2.865 / 2.841 / 2.824 | **+0.188** | 0.048 / 0.041 |
+
+Where the time went. `gpu_opaque` fell from 0.807 to 0.437 ms on the ridge arm at
+720p and from 4.358 to 2.788 at 4K -- 46 % and 36 % of the lit pass -- while on
+the control it did not move (0.3533 to 0.3530 at 720p, 1.914 to 1.866 at 4K,
+both inside the scatter). The pyramid itself cost 0.033 ms at 720p and 0.058 at
+4K, and selection rose 0.014 and 0.012 ms with the test in it. The submitted
+instance count fell from 6,333 to 66 on the ridge arm and stayed at 6,002 on the
+control. `n_lodoccluded` was 3,521 and 3,544 on the ridge arm and **0** on the
+control, at both resolutions, in every trial -- the control really had nothing to
+find. Draw counts were 7 in every cell, so no cell rendered less than another,
+and `cpu_total` sat at 16.4 to 16.5 ms everywhere, which is vsync.
+
+**The rule's verdict: do not ship.** Clause one passes by 13x the scatter at
+720p and 18x at 4K. Clause two passes: 0.047 ms of pyramid and selection against
+0.343 saved, and 0.070 against 1.361. Clause three fails at both resolutions --
+the control rises 0.055 ms against a 0.003 ms scatter and 0.188 against 0.048 --
+and pairing by trial settles it rather than softening it: +0.055, +0.056, +0.055
+and +0.214, +0.159, +0.190, every trial positive.
+
+That is the same clause and the same shape as the two mechanisms before it, with
+one difference worth recording: the cost is 0.055 to 0.188 ms, where
+front-to-back ordering cost about 1.0 ms and the prepass 0.555 to 0.925. An order
+of magnitude cheaper, and still a cost charged to every scene that turns it on
+and finds nothing -- which is what the clause is for. The option being off by
+default does not rescue it, for the reason the prepass page gives: what the
+control measures is whether the mechanism is worth having, not whether it is
+worth defaulting to.
+
+### What the evaluation found that outlived it
+
+Three findings cost more to rediscover than to read.
+
+**A nearest-depth pyramid is not a control.** The correctness claim is that a
+conservative test removes only invisible instances, so captures with and without
+it must be byte-identical -- and the obvious way to prove such a gate can fail is
+to build the pyramid out of the nearest depth in each region instead of the
+farthest. Measured: it changes **no pixel** and rejects 10 more placements of
+6,000. An instance's own depth from the previous frame sits in the texels it
+samples, so the nearest reduction still passes it, and any texel of sky pins the
+minimum of the four to the far plane. The control that does work is the
+comparison, not the reduction: testing each instance's FARTHEST point instead of
+its nearest changed 38,489 pixels of 921,600.
+
+**Density hides culling mistakes.** At the bench's 6,000 placements even the
+farthest-point mistake changed zero pixels, because the front rows of a forest
+two metres apart cover everything it got wrong. The gate had to run a sparser
+scene -- 1,200 placements -- before the image was sensitive to over-culling at
+all. A correctness gate and a performance bench want opposite densities.
+
+**The forest hides more than the ridge does, which killed two controls.** A
+camera at eye level on the same ground with the crest removed still had the test
+rejecting 3,133 placements -- the same number as the ridge arm -- because trees
+hide trees. A camera lifted 34 m over the crest was no better (a 28 m crest 46 m
+ahead still hides a 7 m tree 50 m beyond it). Only looking straight down removes
+both halves. `examples/29-ridge` carries all three numbers and its own arm checks,
+so the next candidate cannot be measured on a control that is not one.
+
+### To rebuild it
+
+The mechanism was about 700 lines. Five parts, and the last three are each a
+half-day if rediscovered rather than read.
+
+1. **The pyramid.** One R32F image with a real mip chain, base `ceil(extent/2)`
+   and floor-halved to 1x1 (10 levels at 720p, 11 at 4K, 1.17 and 10.55 MB),
+   owned by the renderer like the scene depth copy, cleared to the far plane at
+   creation and resting in `General`. One compute dispatch per level reducing the
+   scene depth copy, declared in the frame graph immediately after it and timed as
+   its own `Pass`. Reverse-Z makes the conservative reduction a **`min`**: the
+   farthest depth is the smallest value, so code that reads as "max depth" is the
+   broken one.
+2. **The lookup, in integer pixels.** The chain is addressed as screen pixel
+   `p >> (k+1)` clamped to the level's own width, not through normalized
+   coordinates -- a floor-halved chain is narrower than the screen at the right
+   and bottom edges, so `uv * size` names a texel that does not cover the pixel
+   it came from. The reduction widens the last texel of an odd level to the edge
+   (sample a third texel when `dst*2 < src`) so the clamp is safe. Four texels at
+   the level where the projected rect spans at most two of them, the instance's
+   bounding box rather than its sphere, its NEAREST point against the minimum of
+   the four, and no test at all when a corner has `w <= 0`.
+3. **A barrier that covers the chain.** See
+   [frame-graph](frame-graph.md#a-mip-chain-needs-a-barrier-that-covers-it). The
+   executor emits `LevelCount: 1`; a chain needs a `Mips` field threaded to it,
+   and mip chains have to be imported because nothing in a plan allocates one.
+   Levels declare `StorageReadWrite` on the one resource so consecutive nodes are
+   ordered pairwise, and the chain stays in `General` throughout -- declaring the
+   sampled read as `SampledRead` derives a barrier naming a layout the image is
+   never in.
+4. **Selection reads it a frame early, and that has to be declared.** Selection
+   runs at the head of the frame and the reduction after the scene, so the
+   dispatch that samples the pyramid is EARLIER in the plan than the nodes that
+   fill it: it reads the previous submission. Declaring that read is what makes
+   the compiler derive a barrier against those writes. It was silent under
+   `task syncvalidate` across every arm, including a panning camera.
+5. **Ensure the resources BEFORE compiling the plan.** The level count is part of
+   the declaration, so a graph compiled before the pyramid exists has no reduction
+   in it -- and `replaceAppGraph` clears `graphDirty` on the way out, so nothing
+   rebuilds and the feature silently does nothing, with identical captures and a
+   zero occluded count as its only symptom. This was found by review, not by a
+   gate, and the test that now would have caught it is the shape to write first.
+
+Also worth knowing: the option turned on the renderer's scene depth copy
+(`SceneDepth`) for the renderer's lifetime, which is part of the fixed cost
+measured above; the first frame, a camera cut (measured as the largest NDC
+displacement of the previous view's eight corners exceeding a full screen width)
+and every swapchain rebuild have to cull nothing; and a set without the option
+must record the byte-identical command stream, buffer sizes and scan strides it
+recorded before, which the GPU LOD pinned-stream test holds.
+
+Later extension to the arena batches of #96 was noted and never built: those
+draws do not go through `lodselect.comp`.
+
 ## Cost and checks
 
 For the default CPU path and a fixed number of levels, selection is linear in placement count. The
@@ -306,6 +462,6 @@ the retained benchmark JSON instead of running the four benchmarks again.
 GPU storage, excluding meshes/atlas: `80 × Capacity` shared placement bytes;
 per frame slot, `80 × Capacity × buckets` output bytes, approximately
 `24 × Capacity + 36 × ceil(Capacity/64)` scan bytes, `20 × buckets + 4`
-command bytes, the same number of readback bytes, and 64 uniform bytes.
+command bytes, the same number of readback bytes, and 128 uniform bytes.
 The current implementation also retains the CPU placement and bucket scratch
 allocated by the common constructor; this is a memory cost, not per-frame work.

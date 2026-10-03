@@ -29,7 +29,7 @@ requires:
   - VK_KHR_dynamic_rendering
   - vulkan-sdk
 assets: procedural
-verified: 2026-10-02 # the cascade declaration and compute shadow reads; dynamic rendering, attachment barriers and the streamed upload node
+verified: 2026-10-03 # the mip-chain barrier trap recorded after #154's evaluation; the cascade declaration and compute shadow reads; dynamic rendering, attachment barriers and the streamed upload node
 ---
 
 # Record the renderer's frame graph
@@ -187,6 +187,25 @@ to the hand-recorded shadow and scene passes. The prefix node also initializes
 counts, so no workgroup assumes another workgroup has already reset them.
 These nodes precede application nodes without moving application work across
 its existing shadow boundary. See [ADR 0008](../adr/0008-buffer-resources-and-gpu-draw-generation.md).
+
+## A mip chain needs a barrier that covers it
+
+`ImageDesc` has no `Mips`, and nothing in the engine declares a mip chain -- but
+the next thing that does has a trap waiting, so it is written down here rather
+than rediscovered. The executor emits image barriers with `LevelCount: 1`. On a
+chain that is a dependency covering the top level only: a reduction's writes to
+level three are ordered against nothing at all, which costs nothing on a driver
+that happens not to cache them and corrupts the image on one that does. Nothing
+sees it but synchronization validation.
+
+The hierarchical-Z pyramid of issue #154 added a `Mips` field for exactly that
+reason, and it was removed with the rest of that mechanism; the field, its
+validation (a chain must be `Imported`, as an image array must, because nothing
+in a plan allocates one) and the one-line executor change are in the recipe in
+[lod-instancing](lod-instancing.md). That mechanism also had a resource read a
+frame BEFORE it was written -- selection at the head of the frame sampling what
+the previous submission left -- which worked, was synchronization-clean, and is
+the other half of the same recipe.
 
 ## Layouts and optional work
 

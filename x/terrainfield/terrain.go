@@ -119,3 +119,65 @@ func fbm(x, y float64, seed int64) float64 {
 	}
 	return sum / norm
 }
+
+// Ridge generates a long ridge across the +Z axis: ground that hides what is on
+// the other side of it, for measuring occlusion.
+//
+// A second opinion in this package rather than a parameter on the first, because
+// it is a different shape and not a different setting of the same one. It exists
+// because an island cannot be the scene an occlusion test is judged on: nothing
+// on an island reliably hides anything else from a camera low on its flank, and a
+// measurement needs ground that definitely does. The crest runs along X at z = 0,
+// so a camera on one side sees a near slope, the crest, and nothing of the far
+// slope but its tops, while both flanks hold the same number of placements.
+//
+// What the opinion is: a 129x129 grid over 200x200 world units centred on the
+// origin, a crest 26 units high with a cosine profile 46 units wide, two octaves
+// of the same value noise as the island for texture, and the island's radial
+// falloff so the border samples still reach zero -- see the note on that in the
+// package page, it is load-bearing rather than aesthetic. Flatter and the far
+// flank is visible, which measures nothing; sharper and it hides more than real
+// ground would, which measures the ridge rather than the mechanism.
+//
+// The crest height is a parameter of the generator below rather than of this
+// function, so that terrain_test.go can take the ridge out and check that the
+// same ground then hides nothing -- which is what keeps the hiding property from
+// being a statement about the test's own arithmetic. A caller gets the shape.
+//
+// Deterministic for a given seed, by the same construction as the island.
+func Ridge(seed int64) (*glyph.Heightmap, error) {
+	return glyph.NewHeightmap(129, 129, 200, 200, -100, -100, ridgeHeights(129, 129, seed, ridgeCrest))
+}
+
+const (
+	ridgeCrest = 26.0
+	ridgeWidth = 46.0
+	ridgeNoise = 3.5
+)
+
+func ridgeHeights(gridW, gridH int, seed int64, crestHeight float64) []float32 {
+	heights := make([]float32, gridW*gridH)
+	for iz := 0; iz < gridH; iz++ {
+		for ix := 0; ix < gridW; ix++ {
+			u := float64(ix) / float64(gridW-1)
+			v := float64(iz) / float64(gridH-1)
+			// Distance from the crest line in world units, so the profile is
+			// written in the units the camera and the placements are in.
+			d := math.Abs((v - 0.5) * 200)
+			crest := 0.0
+			if d < ridgeWidth/2 {
+				crest = crestHeight * 0.5 * (1 + math.Cos(math.Pi*d/(ridgeWidth/2)))
+			}
+			// Two octaves, not the island's five: the ridge is a silhouette
+			// here, and detail on it only adds triangles to a terrain mesh the
+			// measurement is not about.
+			rough := (valueNoise(u*6, v*6, seed)-0.5)*ridgeNoise +
+				(valueNoise(u*12, v*12, seed+7)-0.5)*ridgeNoise*0.5
+			dx, dz := u-0.5, v-0.5
+			dist := math.Sqrt(dx*dx+dz*dz) * 2
+			falloff := 1 - smoothstep(clamp((dist-0.35)/0.5, 0, 1))
+			heights[iz*gridW+ix] = float32((crest + rough + 1) * falloff)
+		}
+	}
+	return heights
+}

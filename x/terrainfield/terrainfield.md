@@ -2,20 +2,22 @@
 id: x-terrainfield
 title: An island heightmap from value-noise fBm
 summary: >
-  Generate the island terrain 07-terrain and 25-lod-forest render, or load a
-  sculpted .heightmap in its place, for Scene.SetTerrain and CreateTerrainMesh.
+  Generate the island terrain 07-terrain and 25-lod-forest render, or the ridge
+  29-ridge measures occlusion against, or load a sculpted .heightmap in their
+  place, for Scene.SetTerrain and CreateTerrainMesh.
 capability: terrain
 status: stable
 since: v0.1.0
 api:
   - terrainfield.Load
+  - terrainfield.Ridge
 example: examples/07-terrain
 run: task example:07-terrain
 requires:
   - cgo
   - vulkan-runtime
 assets: procedural
-verified: 2026-10-02 # moved out of examples/internal; field digests pinned against the pre-move generator
+verified: 2026-10-02 # Ridge and its occlusion property; moved out of examples/internal; field digests pinned against the pre-move generator
 ---
 
 # An island heightmap from value-noise fBm
@@ -85,6 +87,25 @@ player walking to the edge of a terrain that is still high there falls through
 the world. The falloff brings the border samples to exactly zero, which keeps
 them away from it. `TestIslandEdgesDropToZero` pins that, with a centre sample as
 the control so it cannot pass on an empty field.
+
+## The other shape: Ridge
+
+`Ridge(seed)` is a second opinion in the same package: a crest 26 units high with
+a 46-unit cosine profile running along X at z = 0, two octaves of the same value
+noise for texture, and the island's radial falloff. Same grid, same world extent,
+same determinism.
+
+It is here rather than in the example that uses it because it is a terrain shape,
+which is what this package holds, and because what it is for outlives one
+example: ground that definitely hides what is behind it. `examples/29-ridge`
+measures the GPU LOD occlusion test on it, and an occlusion measurement is void
+on an island -- nothing on an island reliably hides anything from a camera low on
+its flank, so both arms of the comparison would be controls.
+
+`TestRidgeHidesItsFarFlank` is the property, checked as geometry rather than as a
+picture: from an eye 2 m over the near flank, the sight line to a point 6 m over
+a far-flank sample (a tree top, which is what the bench hides) must pass below
+the crest. Verified by breaking it three ways; the numbers are in the test.
 
 ## Determinism
 

@@ -11,6 +11,7 @@
 //	task bench -- -scene patches   # interleaved distinct-geometry submission
 //	task bench -- -scene stream    # interleaved streamed uploads
 //	task bench -- -scene overdraw  # the overdraw baseline and its no-overlap control
+//	task bench -- -scene ridge     # the occlusion baseline and its nothing-hidden control
 //	task bench -- -json out.json   # for diffing between commits
 //
 // What it does not do is compare against a stored baseline. Frame cost depends
@@ -184,6 +185,13 @@ func main() {
 		}
 		return
 	}
+	if *only == "ridge" {
+		if err := runRidge(*repeat, *jsonOut, *extra); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	if *extra != "" && *only == "" {
 		fmt.Fprintln(os.Stderr, "bench: -extra needs -scene: the arguments are not valid for every scene")
@@ -235,7 +243,7 @@ func run(sc scene) (*result, error) {
 		"GLYPHENGINE_BENCH_LABEL="+sc.name,
 	)
 
-	if strings.HasPrefix(sc.name, "lod") || strings.HasPrefix(sc.name, "patches") || strings.HasPrefix(sc.name, "stream") || strings.HasPrefix(sc.name, "overdraw") {
+	if strings.HasPrefix(sc.name, "lod") || strings.HasPrefix(sc.name, "patches") || strings.HasPrefix(sc.name, "stream") || strings.HasPrefix(sc.name, "overdraw") || strings.HasPrefix(sc.name, "ridge") {
 		cmd.Env = append(cmd.Env, "GLYPHENGINE_FIXED_FRAME_TIME=16.667ms")
 	}
 
@@ -263,10 +271,10 @@ func run(sc scene) (*result, error) {
 		}
 		r.Values[fields[i]] = v
 	}
-	// PATCHES, STREAM and OVERDRAW are the same shape: one tab-separated line of
-	// key/value pairs a scene prints for columns the BENCH line has no name
-	// for. They all fold into the same map.
-	for _, tag := range []string{"PATCHES", "STREAM", "OVERDRAW"} {
+	// PATCHES, STREAM, OVERDRAW and RIDGE are the same shape: one tab-separated
+	// line of key/value pairs a scene prints for columns the BENCH line has no
+	// name for. They all fold into the same map.
+	for _, tag := range []string{"PATCHES", "STREAM", "OVERDRAW", "RIDGE"} {
 		p := regexp.MustCompile(tag + `\t([^\r\n]+)`).FindSubmatch(out)
 		if p == nil {
 			continue
@@ -362,11 +370,12 @@ func runPatches(repeat int, jsonOut, extra string) error {
 // grazing field where the patches hide each other, and the overhead control
 // where none of them does.
 //
-// It is here to be a before-and-after for work that has not been done yet -- an
-// opt-in depth prepass, hierarchical-Z occlusion culling. Nothing in the engine
-// removes hidden opaque fragments today, so every such mechanism is a bet that
-// what it removes outweighs what it costs unconditionally, and that bet can only
-// be settled against a scene with hidden work AND a scene without it. The
+// It is here to be a before-and-after for work on hidden FRAGMENTS, as runRidge
+// below is for hidden instances. Nothing in the engine removes hidden opaque work
+// today -- an opt-in depth prepass and a hierarchical-Z occlusion test were both
+// built, measured against these baselines and removed -- so every such mechanism
+// is a bet that what it removes outweighs what it costs unconditionally, and that
+// bet can only be settled against a scene with hidden work AND a scene without it. The
 // control is not decoration: ordering opaque draws front to back inside their
 // state group saved 0.82 ms of a 7.06 ms opaque pass on the overlap arm and cost
 // 1.01 ms on the control, which is why that policy does not exist. See
@@ -414,6 +423,71 @@ func runOverdraw(repeat int, jsonOut, extra string) error {
 			fmt.Printf("%-24s gpu opaque %6.3f ms  gpu total %6.3f ms  cpu sort %6.3f ms  cpu total %7.3f ms  draws %4.0f  depth complexity %.2f\n",
 				r.Scene, r.Values["gpu_opaque"], r.Values["gpu_total"], r.Values["cpu_drawsort"],
 				r.Values["cpu_total"], r.Values["n_draws"], r.Values["overlap_ratio"])
+		}
+	}
+	if jsonOut != "" {
+		writeJSON(jsonOut, results)
+	}
+	return nil
+}
+
+// runRidge is the engine's occlusion baseline, in two arms: 29-ridge's dense LOD
+// forest with the far flank hidden behind a crest and most of the near flank
+// hiding behind itself, and the same 6,000 placements seen from overhead, where
+// nothing hides anything.
+//
+// It is here to be a before-and-after for work on hidden INSTANCES, the way
+// runOverdraw is for hidden fragments. The hierarchical-Z occlusion test of
+// issue #154 was measured on it and removed by its own rule: it took gpu_total
+// from 1.018 to 0.675 ms on the ridge arm at 1280x720 and from 5.198 to 3.837 at
+// 3840x2160 -- 34 and 26 % -- while costing 0.055 and 0.188 ms on the control,
+// where it rejected nothing at all. Clause three of the rule is what rejected it,
+// and it is the same clause that rejected front-to-back ordering and the depth
+// prepass before it. See docs/agents/lod-instancing.md and game-loop.md.
+//
+// Interleaved ridge / control / ridge / control with every sample retained, for
+// the reason runPatches is: the differences worth seeing are a fraction of a
+// pass, the machine's own drift over a run is the same size, and keeping the
+// fastest run of each arm would let the drift decide. Report each arm's mean and
+// its range, and compare a change against the range rather than a single pair.
+//
+// gpu_total is the column rather than gpu_opaque, because a mechanism measured
+// here is likely to be a pass of its own: a saving inside the opaque pass that a
+// new pass more than spends reads as a win from gpu_opaque alone, which is
+// exactly how the depth prepass would have looked. n_instances is beside it
+// because what this scene can remove is instances, and hidden_share says each arm
+// is still the arm it is named after.
+//
+// 1280x720 by default; -extra "-width 3840 -height 2160" is the other half of any
+// serious reading, because both what is hidden and what a full-screen pass costs
+// scale with the framebuffer.
+func runRidge(repeat int, jsonOut, extra string) error {
+	if repeat < 3 {
+		repeat = 3
+	}
+	var results []result
+	for trial := 0; trial < repeat; trial++ {
+		for _, arm := range []string{"ridge", "open"} {
+			if err := patchesGPUIdle(); err != nil {
+				return err
+			}
+			sc := scene{
+				name: fmt.Sprintf("ridge-%s-%d", arm, trial+1),
+				dir:  "29-ridge",
+				args: []string{"-frames", "200", "-arm", arm},
+			}
+			sc.args = append(sc.args, strings.Fields(extra)...)
+			r, err := run(sc)
+			if err != nil {
+				return err
+			}
+			if err := patchesGPUIdle(); err != nil {
+				return fmt.Errorf("discard %s: %w", sc.name, err)
+			}
+			results = append(results, *r)
+			fmt.Printf("%-18s gpu total %6.3f ms  opaque %6.3f ms  select %6.3f ms  cpu total %7.3f ms  instances %6.0f  draws %4.0f  hidden %.3f\n",
+				r.Scene, r.Values["gpu_total"], r.Values["gpu_opaque"], r.Values["gpu_lodselect"],
+				r.Values["cpu_total"], r.Values["n_instances"], r.Values["n_draws"], r.Values["hidden_share"])
 		}
 	}
 	if jsonOut != "" {

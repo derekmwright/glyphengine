@@ -58,7 +58,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-10-02 # the draw list's order and the rejected opaque policy; releasing mid-frame (#153); the capabilities report and who owns which fallback (#160); the depth prepass measured on both arms at both resolutions and removed by its own rule (#158)
+verified: 2026-10-03 # the hierarchical-Z follow-up this page predicted, measured and removed (#154); the draw list's order and the rejected opaque policy; releasing mid-frame (#153); the capabilities report and who owns which fallback (#160); the depth prepass measured on both arms at both resolutions and removed by its own rule (#158)
 ---
 
 # Run a game loop with Engine and Game
@@ -891,12 +891,25 @@ overlap arm's opaque pass came to 2.929 ms against the 5.95 ms that spawn order
 alone reaches, and a 4.350 ms total frame against 7.600. The win on a scene with
 hidden work is real and large. It is the control that says no.
 
-**Where the recovered time probably is, instead.** #154's hierarchical-Z
-occlusion test removes hidden draws without submitting a second geometry pass at
-all, so it has no fixed cost to charge the control — which is exactly the clause
-this failed. Measure it on these same four cells. A prepass gated on measured
-depth complexity is the other way out, and it would need a cheap online estimate
-of a number this scene computes offline from projected bounds.
+**Where the recovered time probably is, instead — and the answer, since.** This
+page guessed that #154's hierarchical-Z occlusion test would be the way out,
+because it removes hidden work without submitting a second geometry pass and so
+"has no fixed cost to charge the control". That guess was wrong in exactly one
+place, and it is the place that matters: a pyramid is a full-screen pass, so the
+test does have a fixed cost. It was built, measured on its own scene
+(`examples/29-ridge`, because this one has no instance sets to cull) and removed
+by the same clause — it saved 34 % of `gpu_total` at 1280x720 and 26 % at
+3840x2160 where work was hidden, and cost 0.055 and 0.188 ms where none was. See
+[lod-instancing](lod-instancing.md#a-hierarchical-z-occlusion-test-was-measured-and-removed)
+for the table, the verdict and the rebuild recipe.
+
+Three mechanisms have now failed the same clause, at about 1.0 ms, 0.6 to 0.9 ms
+and 0.055 to 0.19 ms of unconditional cost. The cost is falling by an order of
+magnitude each time, which is worth noticing before the fourth: a prepass or a
+cull gated on a cheap ONLINE estimate of depth complexity is the shape none of
+the three had, and the estimate is the part nobody has built. This scene computes
+that number offline from projected bounds; doing it per frame, cheaply enough that
+the control pays nothing, is the open problem.
 
 #### To rebuild it
 
