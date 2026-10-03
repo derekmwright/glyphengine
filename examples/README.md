@@ -35,8 +35,8 @@ Each is a complete, self-contained `main()` — copy one and start editing.
 | 25 | `25-lod-forest` | 3,600 trees over the terrain heightmap: per-instance culling, distance levels, dithered transitions, an eight-view impostor, and a single-level control | procedural |
 | 26 | `26-mesh-ranges` | 400 distinct procedural patches drawn three ways: one mesh each, ranges of one shared arena, and the same ranges through indirect batches; `-mode` and `-count` select, `-index32=false` stores uint16 indices | procedural |
 | 27 | `27-streaming` | 400 procedural patches published two per rendered frame while the scene draws, three ways: synchronous device-local meshes, host-visible dynamic meshes, and the batched asynchronous uploader; `-mode`, `-count` and `-per-frame` select | procedural |
-| 28 | `28-overdraw` | The overdraw baseline: 1,024 terrain patches sharing one five-map material under 196 clustered lights, laid out so a grazing view hides most of them behind each other, with `-overlap=false` as the no-overlap control; both arms measure their own screen-space depth complexity and fail if it has drifted. Nothing to look at -- it is what a depth prepass or occlusion culling gets measured against | procedural |
-| 29 | `29-ridge` | The occlusion baseline: 6,000 LOD trees on both flanks of a procedural ridge, camera low on one side so the far flank and most of the near one are hidden, with `-arm open` as the overhead nothing-hidden control; both arms measure the share of placements the terrain hides and fail if it has drifted. Nothing to look at -- it is what occlusion culling gets measured against, and what measured and rejected the hierarchical-Z test of #154 | procedural |
+| 28 | `28-overdraw` | The overdraw baseline: 1,024 terrain patches sharing one five-map material under 196 clustered lights, laid out so a grazing view hides most of them behind each other, with `-overlap=false` as the no-overlap control; both arms measure their own screen-space depth complexity and fail if it has drifted. `-density` subdivides the patches to a stated triangle count per covered pixel and asserts it was reached, `-sky=false` leaves the flat clear colour behind the field so the visible-pixel count is a covered-pixel count, and `-msaa` moves the sample count -- the three flags the quad-overshading measurement needs. Nothing to look at -- it is what a depth prepass or occlusion culling gets measured against | procedural |
+| 29 | `29-ridge` | The occlusion baseline: 6,000 LOD trees on both flanks of a procedural ridge, camera low on one side so the far flank and most of the near one are hidden, with `-arm open` as the overhead nothing-hidden control; both arms measure the share of placements the terrain hides and fail if it has drifted. `-sky=false` drops the dome so the visible-pixel count is geometry alone. Nothing to look at -- it is what occlusion culling gets measured against, and what measured and rejected the hierarchical-Z test of #154 | procedural |
 
 More land as the extraction proceeds — glTF loading, skinned animation,
 shadows, MSDF text, YAML UI, audio, and particles. Numbering has gaps on
@@ -45,6 +45,14 @@ stays in a sensible reading order as it fills in. See `docs/agents/` for
 capability-level documentation.
 
 ## Notes
+
+**Fragment-invocation counts.** `GLYPHENGINE_PIPELINE_STATS=1` makes any example
+record fragment-shader invocations and post-clip primitives per pass, which
+`GLYPHENGINE_TIMING=1` then prints beside the per-pass times. `28-overdraw` and
+`29-ridge` also print a `QUADS` line with the ratio against their own covered-pixel
+count; read both with `-sky=false`, and read
+[`docs/agents/profiling.md`](../docs/agents/profiling.md) on what the invocation
+counter includes before taking a ratio from it.
 
 **Start with `01-triangle`.** It loads nothing from disk, so if it runs your
 toolchain is correct. Debug there before anything else.

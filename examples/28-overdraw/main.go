@@ -60,12 +60,19 @@ func init() {
 	runtime.LockOSThread()
 }
 
+// patchGrid is vertices per patch side, so one patch is 2*(patchGrid-1)^2
+// triangles over patchSize metres -- at the default, 2048 triangles over 4
+// metres, which is the shape of a terrain tile rather than of a billboard,
+// because a billboard field would overlap for reasons terrain does not.
+//
+// A variable rather than a constant because -density subdivides it, to put this
+// field at a stated triangle density per covered pixel. It is written once in
+// main before anything reads it, and read-only afterwards; the alternative --
+// threading it through patchMesh and probeBounds -- would add a parameter to two
+// functions that already duplicate each other's layout for the GPU-free probe.
+var patchGrid = 33
+
 const (
-	// patchGrid is vertices per patch side and patchSize its world extent, so
-	// one patch is 2048 triangles over 4 metres -- the shape of a terrain tile
-	// rather than of a billboard, because a billboard field would overlap for
-	// reasons terrain does not.
-	patchGrid = 33
 	patchSize = 4.0
 
 	// mapSize is the edge of every generated material map. 256 rather than
@@ -111,6 +118,25 @@ type game struct {
 	eyeY    float32
 	pitch   float32
 	lamps   int
+
+	// sky draws the dome. Off makes the frame clear to a flat colour and nothing
+	// draw over it, which is what makes the captured frame's non-background pixel
+	// count an exact count of COVERED pixels -- the denominator of every ratio in
+	// the quad-overshading measurement. With the dome on, the horizon gradient
+	// differs from the corner reference by more than the visibility threshold and
+	// the count takes sky with it.
+	//
+	// Nothing else moves with it. The lighting, the fog and the palette come from
+	// the environment, which is unchanged; only the dome's own draw goes, and that
+	// is in PassSky, not in the pass being measured.
+	sky bool
+
+	// density is the target triangles after clipping per covered pixel, 0 when
+	// nothing asked. It is reached by subdividing the patches rather than by adding
+	// them, so the draw count, the layout and the depth complexity stay where they
+	// are and the only thing that moves is how finely each patch is diced.
+	density    float64
+	densityTol float64
 
 	// sweep turns the two arm assertions below into a report. The assertions
 	// exist because the arms' NAMES are the claim this example makes and a
@@ -163,8 +189,8 @@ func patchMesh(hm *glyph.Heightmap, seed int) ([]renderer.Vertex, []uint32, aabb
 	hi := mgl32.Vec3{-math.MaxFloat32, -math.MaxFloat32, -math.MaxFloat32}
 	for z := 0; z < patchGrid; z++ {
 		for x := 0; x < patchGrid; x++ {
-			fx := float32(x) / (patchGrid - 1)
-			fz := float32(z) / (patchGrid - 1)
+			fx := float32(x) / float32(patchGrid-1)
+			fz := float32(z) / float32(patchGrid-1)
 			h, _ := hm.HeightAt(ox+fx*patchSize*2, oz+fz*patchSize*2)
 			n := hm.NormalAt(ox+fx*patchSize*2, oz+fz*patchSize*2)
 
@@ -186,7 +212,7 @@ func patchMesh(hm *glyph.Heightmap, seed int) ([]renderer.Vertex, []uint32, aabb
 	for z := 0; z < patchGrid-1; z++ {
 		for x := 0; x < patchGrid-1; x++ {
 			a := uint32(z*patchGrid + x)
-			b := a + patchGrid
+			b := a + uint32(patchGrid)
 			// TerrainMesh's clockwise Vulkan winding, the same order
 			// 26-mesh-ranges uses. Reversed, the whole field is back-face
 			// culled and every timing in this example is a timing of nothing;
@@ -661,6 +687,95 @@ func onScreenRatio(bounds []aabb, vp mgl32.Mat4, cells int) float64 {
 	return float64(total) / float64(covered)
 }
 
+// onScreenCoverage is onScreenRatio's two raw counts rather than their ratio: how
+// many grid cells at least one bound reached, and how many bounds reached the
+// frame at all.
+//
+// It exists so -density can derive a tessellation without a GPU. The target is
+// triangles per COVERED pixel, so the solver needs the covered share of the
+// viewport and the number of patches sharing it, and both fall out of the same
+// walk onScreenRatio already does. A separate function rather than two more
+// return values on that one, because its number is quoted in several records and
+// a changed signature is where a quoted number quietly starts meaning something
+// else.
+func onScreenCoverage(bounds []aabb, vp mgl32.Mat4, cells int) (covered, visible int) {
+	hits := make([]int, cells*cells)
+	for _, b := range bounds {
+		lo := mgl32.Vec2{math.MaxFloat32, math.MaxFloat32}
+		hi := mgl32.Vec2{-math.MaxFloat32, -math.MaxFloat32}
+		behind := false
+		for c := 0; c < 8; c++ {
+			p := mgl32.Vec4{b.min[0], b.min[1], b.min[2], 1}
+			if c&1 != 0 {
+				p[0] = b.max[0]
+			}
+			if c&2 != 0 {
+				p[1] = b.max[1]
+			}
+			if c&4 != 0 {
+				p[2] = b.max[2]
+			}
+			q := vp.Mul4x1(p)
+			if q[3] <= 0 {
+				behind = true
+				break
+			}
+			lo[0], hi[0] = min(lo[0], q[0]/q[3]), max(hi[0], q[0]/q[3])
+			lo[1], hi[1] = min(lo[1], q[1]/q[3]), max(hi[1], q[1]/q[3])
+		}
+		if behind || hi[0] < -1 || lo[0] > 1 || hi[1] < -1 || lo[1] > 1 {
+			continue
+		}
+		visible++
+		x0, x1 := ndcSpan(max(lo[0], -1), min(hi[0], 1), cells)
+		y0, y1 := ndcSpan(max(lo[1], -1), min(hi[1], 1), cells)
+		for y := y0; y <= y1; y++ {
+			for x := x0; x <= x1; x++ {
+				hits[y*cells+x]++
+			}
+		}
+	}
+	for _, n := range hits {
+		if n > 0 {
+			covered++
+		}
+	}
+	return covered, visible
+}
+
+// solvePatchGrid is the vertices-per-side that puts this layout at `density`
+// triangles per covered pixel, from the projected bounds alone.
+//
+// An estimate, and deliberately a crude one: it counts every triangle of every
+// on-screen patch, where what the GPU reports after clipping leaves out the
+// patches and the parts of patches off the frame and keeps the back-facing
+// triangles that shade nothing. So the number it lands on is checked against the
+// MEASURED density after the run rather than trusted -- see the assertion in main,
+// which is what makes this a knob with a gate rather than a claim.
+//
+// MEASURED, and the gap is large enough to matter: on the overlap arm at 1024
+// patches and 1280x720 this estimates 207,019 covered pixels where the frame
+// covers 75,656, a factor of 2.7, because a patch's bound is a BOX and the 180-cell
+// grid rounds its coverage outward. The first solve therefore lands about 2.9x too
+// dense -- 0.500 triangles per covered pixel against the 0.170 asked for -- and
+// -grid converges it in one step: grid 4 measures 0.183 at 1280x720 and grid 10
+// measures 0.182 at 3840x2160, both within 8 % of the target. Correcting the
+// estimate by that factor was the alternative and it is not taken, because 2.7 is
+// one camera's number on one layout and a constant fitted to it would be wrong,
+// silently, on the next scene. A first guess with a gate is honest; a fitted
+// constant that looks exact is not.
+func solvePatchGrid(bounds []aabb, vp mgl32.Mat4, width, height int, density float64) (int, float64) {
+	covered, visible := onScreenCoverage(bounds, vp, 180)
+	if covered == 0 || visible == 0 || density <= 0 {
+		return patchGrid, 0
+	}
+	coveredPixels := float64(covered) / (180 * 180) * float64(width) * float64(height)
+	perPatch := density * coveredPixels / float64(visible)
+	// 2*(n-1)^2 triangles per patch.
+	n := 1 + int(math.Ceil(math.Sqrt(perPatch/2)))
+	return max(2, min(512, n)), coveredPixels
+}
+
 // fov is this arm's vertical field of view in degrees. See controlFOV.
 func (g *game) fov() float32 {
 	if g.overlap {
@@ -722,6 +837,11 @@ func main() {
 	shot := flag.String("screenshot", "", "write a PNG of the last frame to this path")
 	prepass := flag.String("prepass", "off", "depth prepass: off, on, auto, or empty -- auto decides per frame from the estimated depth complexity, and empty is on with the prepass's own draws withheld, which is `task prepass`'s control")
 	sweep := flag.Bool("sweep", false, "this is one cell of a depth-complexity sweep: report the measured complexity instead of asserting an arm's floor")
+	msaa := flag.Int("msaa", 0, "samples per pixel; 0 keeps the renderer default. Fragment shading is per pixel rather than per sample, so this moves the denominator of a per-covered-sample ratio and not the numerator")
+	sky := flag.Bool("sky", true, "draw the sky dome. False leaves the frame's flat clear colour behind the field, which is what makes the visible-pixel count an exact covered-pixel count; the lighting and the fog do not move with it")
+	density := flag.Float64("density", 0, "subdivide the patches to reach this many triangles (after clipping) per covered pixel; 0 leaves the tessellation alone. The achieved figure is measured and asserted, and it needs the pipeline statistics")
+	densityTol := flag.Float64("densitytol", 0.5, "how far the measured triangles per covered pixel may sit from -density, as a fraction of it")
+	grid := flag.Int("grid", 0, "vertices per patch side, overriding whatever -density derived; 0 leaves it to -density or to the default")
 	probe := flag.Bool("probe", false, "print this layout and camera's depth complexity and exit, without opening a window or touching the GPU")
 	flag.Parse()
 
@@ -744,7 +864,11 @@ func main() {
 	if !*overlap {
 		arm = "control"
 	}
-	g := &game{count: *count, cols: *cols, overlap: *overlap, spawn: *spawn, eyeY: float32(*eyeY), pitch: float32(*pitch), lamps: *lamps, sweep: *sweep}
+	if *density < 0 {
+		log.Fatal("28-overdraw: -density cannot be negative")
+	}
+	g := &game{count: *count, cols: *cols, overlap: *overlap, spawn: *spawn, eyeY: float32(*eyeY), pitch: float32(*pitch), lamps: *lamps, sweep: *sweep,
+		sky: *sky, density: *density, densityTol: *densityTol}
 
 	// -probe is the sweep's planning tool and it is deliberately GPU-free.
 	// Depth complexity here is a function of the patch bounds and the
@@ -778,12 +902,49 @@ func main() {
 		return
 	}
 
+	// The tessellation, before any mesh is built. Derived from the projected
+	// bounds at the DEFAULT grid: the bound is the patch's own box and a finer
+	// sampling of the same heightmap window moves it by a fraction of a metre, so
+	// solving once is enough and solving twice would only chase that fraction.
+	coveredEstimate := 0.0
+	switch {
+	case *grid > 0:
+		patchGrid = *grid
+	case *density > 0:
+		bounds, err := probeBounds(g)
+		if err != nil {
+			log.Fatal(err)
+		}
+		eye, center, up := g.view()
+		proj := mgl32.Perspective(mgl32.DegToRad(g.fov()), float32(*width)/float32(*height), near, g.far())
+		patchGrid, coveredEstimate = solvePatchGrid(bounds, proj.Mul4(mgl32.LookAtV(eye, center, up)), *width, *height, *density)
+	}
+	if *grid > 0 || *density > 0 {
+		log.Printf("28-overdraw: patch grid %d vertices per side, %d triangles per patch, %.0f covered pixels estimated",
+			patchGrid, 2*(patchGrid-1)*(patchGrid-1), coveredEstimate)
+	}
+
 	opts := []glyph.Option{
-		glyph.WithShaders(xsky.Shaders()),
 		glyph.WithTitle(fmt.Sprintf("GlyphEngine - 28 Overdraw (%s)", arm)),
 		glyph.WithWindowSize(*width, *height),
 		glyph.WithProjection(g.fov(), near, g.far()),
 		glyph.WithMaxFrames(*frames),
+	}
+	if *sky {
+		// The dome is a shader slot the engine leaves empty; without this option
+		// nothing draws a sky at all, which is exactly what -sky=false wants. The
+		// environment below is set either way, so the sun, the fog and the clear
+		// colour are the same in both.
+		opts = append(opts, glyph.WithShaders(xsky.Shaders()))
+	}
+	if *msaa != 0 {
+		opts = append(opts, glyph.WithMSAA(*msaa))
+	}
+	if *density > 0 {
+		// The density claim is measured on the GPU, so the counters have to exist.
+		// GLYPHENGINE_PIPELINE_STATS=1 turns them on for a run that only wants the
+		// report; -density needs them and says so by asking.
+		opts = append(opts, glyph.WithPipelineStatistics())
 	}
 	if *shot != "" {
 		opts = append(opts, glyph.WithScreenshot(*shot))
@@ -916,6 +1077,51 @@ func main() {
 	floor := img.Rect.Dx() * img.Rect.Dy() / 20
 	if visible < floor {
 		log.Fatalf("28-overdraw: %d pixels differ >=20/255 from background, need %d -- this frame is too empty to time", visible, floor)
+	}
+
+	// The quad-overshading measurement, when this run is recording the counters.
+	//
+	// visible is the denominator and it is a count of pixels that differ from the
+	// corner reference, so read it as the covered-pixel count only with
+	// -sky=false: with the dome on, the horizon gradient differs from the corner
+	// too and the count takes sky with it. Over-counting the denominator
+	// UNDERSTATES the ratio, which is the conservative direction for a threshold
+	// that reopens a decision, and the line says which way the run was taken so
+	// nobody has to guess.
+	//
+	// Fragment shading is per covered pixel rather than per covered sample,
+	// because this engine does not enable sample shading; cmd/quadcheck is what
+	// establishes that on this device, and whether the invocation count includes
+	// the helper lanes of a 2x2 quad at all.
+	if st, err := e.MeanPipelineStats(); err == nil && st.Valid {
+		inv := st.FragmentInvocations[renderer.PassOpaque]
+		clipped := st.ClippingPrimitives[renderer.PassOpaque]
+		perCovered := float64(inv) / float64(visible)
+		trisPerCovered := float64(clipped) / float64(visible)
+		gpu := e.MeanGPUTimings()
+		log.Printf("QUADS	arm	%s	prepass	%s	msaa	%d	sky	%v	width	%d	height	%d	covered_px	%d	invocations	%d	inv_per_covered	%.4f	clipped	%d	tri_per_covered	%.4f	gpu_opaque	%.4f	gpu_total	%.4f	depth_complexity	%.3f	patch_grid	%d	frames	%d",
+			arm, *prepass, e.Capabilities().MSAASamples, *sky, img.Rect.Dx(), img.Rect.Dy(), visible,
+			inv, perCovered, clipped, trisPerCovered,
+			gpu.Pass[renderer.PassOpaque], gpu.Total, ratio, patchGrid, st.Frames)
+		// A ratio below 1.0 is arithmetically impossible on a pass that shades
+		// every covered pixel at least once, so it does not mean "no overshading",
+		// it means the denominator is wrong -- a capture that is not this frame, or
+		// pixels in it that no opaque draw covered. Only asserted with the dome
+		// off, because with it on the sky IS such a pixel and the ratio is
+		// legitimately below 1 there; that is the same reason the measurement is
+		// taken with -sky=false.
+		if !*sky && perCovered < 1 {
+			log.Fatalf("28-overdraw: %.4f invocations per covered pixel is below 1.0, which is impossible; the covered-pixel count is wrong (sky=%v)", perCovered, *sky)
+		}
+		if g.density > 0 {
+			if d := math.Abs(trisPerCovered-g.density) / g.density; d > g.densityTol {
+				log.Fatalf("28-overdraw: -density %.3f asked for, %.3f triangles after clipping per covered pixel measured (%.0f%% off, limit %.0f%%) at patch grid %d -- the flag did not reach its stated density; -grid converges it",
+					g.density, trisPerCovered, d*100, g.densityTol*100, patchGrid)
+			}
+			log.Printf("28-overdraw: density %.3f asked for, %.3f measured at patch grid %d", g.density, trisPerCovered, patchGrid)
+		}
+	} else if g.density > 0 {
+		log.Fatalf("28-overdraw: -density needs the pipeline statistics and this device or build has none: %v", err)
 	}
 
 	// The arm labels, checked. The overlap arm has to be genuinely stacked and

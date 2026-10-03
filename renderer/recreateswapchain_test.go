@@ -77,6 +77,22 @@ func (d *resizeFakeDriver) shouldFail(name string) bool {
 	return name == d.failCall && d.calls[name] == d.failAt
 }
 
+// The query pools are the GPU timer's and the pipeline-statistics recorder's.
+// They are here rather than in a driver of their own because assertBalanced is
+// what every unwind test in this package uses, and a pool that leaked would
+// otherwise be invisible to all of them.
+func (d *resizeFakeDriver) CreateQueryPool(_ *loader.AllocationCallbacks, _ core1_0.QueryPoolCreateInfo) (core1_0.QueryPool, common.VkResult, error) {
+	if d.shouldFail("CreateQueryPool") {
+		return core1_0.QueryPool{}, core1_0.VKErrorUnknown, errInjected
+	}
+	d.created["QueryPool"]++
+	return core1_0.InternalQueryPool(0, loader.VkQueryPool(d.h.n()), 0), core1_0.VKSuccess, nil
+}
+
+func (d *resizeFakeDriver) DestroyQueryPool(core1_0.QueryPool, *loader.AllocationCallbacks) {
+	d.destroyed["QueryPool"]++
+}
+
 func (d *resizeFakeDriver) CreateImage(cb *loader.AllocationCallbacks, o core1_0.ImageCreateInfo) (core1_0.Image, common.VkResult, error) {
 	if d.shouldFail("CreateImage") {
 		return core1_0.Image{}, core1_0.VKErrorUnknown, errInjected
@@ -330,7 +346,7 @@ func newResizeFixture(d *resizeFakeDriver, count int) *Renderer {
 // without failing itself.
 func assertBalanced(t testing.TB, d *resizeFakeDriver) {
 	t.Helper()
-	for _, kind := range []string{"Image", "ImageView", "DeviceMemory", "Sampler", "DescriptorSet", "Framebuffer", "RenderPass"} {
+	for _, kind := range []string{"Image", "ImageView", "DeviceMemory", "Sampler", "DescriptorSet", "Framebuffer", "RenderPass", "QueryPool"} {
 		if d.created[kind] != d.destroyed[kind] {
 			t.Errorf("%s: created %d, destroyed %d (leaked or double-freed %d)",
 				kind, d.created[kind], d.destroyed[kind], d.created[kind]-d.destroyed[kind])

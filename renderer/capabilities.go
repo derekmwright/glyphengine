@@ -81,6 +81,20 @@ type Capabilities struct {
 	// ErrCapabilityUnavailable rather than silently never measured.
 	GPUTimestamps bool
 
+	// PipelineStatistics reports that the device supports
+	// pipelineStatisticsQuery, which is what WithPipelineStatistics needs to
+	// count fragment-shader invocations and post-clip primitives per pass.
+	//
+	// Reported whether or not this renderer asked for them, because it is a
+	// property of the device rather than of the build: a game deciding whether a
+	// diagnostic mode exists on this machine reads this, and the accessors say
+	// separately whether this build is recording (ErrStatisticsNotEnabled) or the
+	// device cannot (ErrCapabilityUnavailable). The feature is enabled on the
+	// logical device whenever the device has it, which costs nothing -- a feature
+	// bit is permission to create such a query pool, and the pool is what
+	// WithPipelineStatistics creates.
+	PipelineStatistics bool
+
 	// PortabilitySubset reports that the device implements a subset of Vulkan
 	// and VK_KHR_portability_subset was enabled for it -- MoltenVK, in
 	// practice. Nothing in the engine behaves differently; it is here because
@@ -295,6 +309,7 @@ func negotiateCapabilities(a deviceAnswers, requested core1_0.SampleCountFlags) 
 		DrawIndirectFirstInstance: a.features.DrawIndirectFirstInstance,
 		MSAASamples:               int(samples),
 		GPUTimestamps:             timestamps,
+		PipelineStatistics:        a.features.PipelineStatisticsQuery,
 		PortabilitySubset:         portabilitySubset(a.extensions),
 		GPUName:                   a.props.DriverName, // deviceName; see queryDevice
 		DriverName:                a.driverName,
@@ -366,6 +381,10 @@ func (c Capabilities) logCapabilities(requested core1_0.SampleCountFlags) {
 	}
 	if !c.MultiDrawIndirect || !c.DrawIndirectFirstInstance {
 		log.Println("Multi-draw indirect unavailable: batched mesh ranges will use one draw per range")
+	}
+	if !c.PipelineStatistics {
+		log.Println("Pipeline statistics unavailable: the device does not support pipelineStatisticsQuery, " +
+			"so WithPipelineStatistics has nothing to count with")
 	}
 	if c.DepthPrepass != DepthPrepassOff {
 		log.Printf("Depth prepass: %s", c.DepthPrepass)

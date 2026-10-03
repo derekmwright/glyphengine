@@ -67,7 +67,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-10-03 # the depth prepass returned as DepthPrepassAuto, gated on an online depth-complexity estimate (#158, ADR 0013) -- threshold 2.02 measured by the sweep at both resolutions, rule passed on all six clauses, and C/pixels refuted; the global block named as the game's, with AppPassDesc.Params as the per-pass alternative (#170); Engine.Renderer listed (#169); the hierarchical-Z follow-up measured and removed (#154); the draw list's order and the rejected opaque policy; releasing mid-frame (#153); the capabilities report and who owns which fallback (#160); the depth prepass measured and removed by its own rule (#158); the sky slot, the one ShaderSet stage group with no embedded fallback (#161 step 4)
+verified: 2026-10-03 # Capabilities.PipelineStatistics listed, the device feature WithPipelineStatistics needs (#182); the depth prepass returned as DepthPrepassAuto, gated on an online depth-complexity estimate (#158, ADR 0013) -- threshold 2.02 measured by the sweep at both resolutions, rule passed on all six clauses, and C/pixels refuted; the global block named as the game's, with AppPassDesc.Params as the per-pass alternative (#170); Engine.Renderer listed (#169); the hierarchical-Z follow-up measured and removed (#154); the draw list's order and the rejected opaque policy; releasing mid-frame (#153); the capabilities report and who owns which fallback (#160); the depth prepass measured and removed by its own rule (#158); the sky slot, the one ShaderSet stage group with no embedded fallback (#161 step 4)
 ---
 
 # Run a game loop with Engine and Game
@@ -159,6 +159,7 @@ log.Printf("%s (%s): %dx MSAA, %gx anisotropy, timestamps=%v",
 | `MaxAnisotropy` | The sampler anisotropy in use, or `0` when the device has no anisotropic filtering |
 | `MultiDrawIndirect`, `DrawIndirectFirstInstance` | Whether `SetMeshRangeBatching` collapses a group into one indirect draw or issues one draw per range |
 | `GPUTimestamps` | Whether `GPUTimings` can ever be valid, and whether a `Timed` application pass can be created |
+| `PipelineStatistics` | Whether `WithPipelineStatistics` can count fragment invocations and post-clip primitives per pass. Reported whether or not this build asked; the accessors say separately whether it did ([`profiling.md`](profiling.md)) |
 | `PortabilitySubset` | The device implements a subset of Vulkan — MoltenVK, in practice |
 | `RayQuery` | Whether this renderer can issue a ray query. `false` on every device today: the extensions are not enabled yet (#159) |
 | `GPUName`, `DriverName`, `DriverVersion`, `APIVersion`, `VendorID`, `DeviceID` | Who the device is. `DriverName` is empty on a device without `VK_KHR_driver_properties` |

@@ -282,6 +282,17 @@ type Renderer struct {
 	// Non-nil always, but inert when the device cannot timestamp graphics work.
 	gpuTimer *gpuTimer
 
+	// pipelineStats counts fragment-shader invocations and post-clip primitives
+	// per pass; see pipelinestats.go. Non-nil always, and inert unless
+	// WithPipelineStatistics asked for it AND the device granted the feature. It
+	// is driven through gpuTimer's brackets, which is why it is handed to the
+	// timer rather than to recordCommandBuffer.
+	pipelineStats *pipelineStats
+
+	// pipelineStatsRequested is WithPipelineStatistics, or
+	// GLYPHENGINE_PIPELINE_STATS in the environment.
+	pipelineStatsRequested bool
+
 	descriptorSetLayout core1_0.DescriptorSetLayout
 	descriptorPool      core1_0.DescriptorPool
 
@@ -600,6 +611,32 @@ func WithDepthPrepass(mode DepthPrepassMode) Option {
 	return func(r *Renderer) { r.depthPrepassMode = mode }
 }
 
+// WithPipelineStatistics records fragment-shader invocations and post-clip
+// primitives per pass, beside the timestamps GPUTimings already records, and
+// reports them through PipelineStats.
+//
+// Off by default and free when off: no query pool, no reset, no begin, no end,
+// no readback, and not one extra driver call in a recorded frame. It is an option
+// rather than a setter because the pool is sized for every frame slot at
+// construction, the same reason WithUIGlowLayer and WithDepthPrepass are.
+//
+// It needs the device's pipelineStatisticsQuery feature. Without it the renderer
+// still builds and PipelineStats returns a zero value wrapping
+// ErrCapabilityUnavailable, which is the Timed application pass's contract moved
+// to the accessor: there is no constructor here to refuse in.
+//
+// GLYPHENGINE_PIPELINE_STATS=1 turns it on for any build, the way
+// GLYPHENGINE_VALIDATION and GLYPHENGINE_TIMING do -- the point of all three is
+// getting numbers out of a binary you did not compile. Setting it to 0 forces it
+// off, overriding this option.
+//
+// What the fragment counter includes is implementation-defined in the one way
+// that matters: see PipelineStats and cmd/quadcheck before believing a ratio
+// taken from it.
+func WithPipelineStatistics() Option {
+	return func(r *Renderer) { r.pipelineStatsRequested = true }
+}
+
 // New initializes the full Vulkan rendering stack: instance, surface, device,
 // swapchain, pipelines, rendering bindings, command buffers, and sync
 // objects. Call Destroy on the result.
@@ -646,6 +683,10 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 
 	// Step 1: Vulkan instance
 	wantValidation := validationSetting(r.validation)
+	// Resolved here, beside validation's override and before the device is
+	// created, because the environment decides a measurement the device feature
+	// has to be enabled for. See WithPipelineStatistics.
+	r.pipelineStatsRequested = envSetting(pipelineStatsEnvVar, r.pipelineStatsRequested)
 	restoreValidation, syncValidation, err := configureSyncValidation(wantValidation)
 	if err != nil {
 		return nil, err
@@ -1349,6 +1390,16 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 		return nil, fmt.Errorf("renderer: create GPU timer: %w", err)
 	}
 	r.onInit(func() { r.gpuTimer.destroy(r.deviceDriver) })
+
+	r.pipelineStats, err = newPipelineStats(r.deviceDriver, r.caps, r.pipelineStatsRequested)
+	if err != nil {
+		return nil, fmt.Errorf("renderer: create pipeline statistics: %w", err)
+	}
+	r.onInit(func() { r.pipelineStats.destroy(r.deviceDriver) })
+	// The statistics ride the timer's brackets. Attached here rather than
+	// constructed inside newGPUTimer because the two instruments gate on
+	// different device features and a device can grant either without the other.
+	r.gpuTimer.stats = r.pipelineStats
 
 	// Step 9b: the cube shadow maps are sampled every frame but only rendered
 	// when a point light casts, so give them defined contents and a legal

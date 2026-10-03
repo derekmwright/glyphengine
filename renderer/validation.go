@@ -44,6 +44,30 @@ func configureSyncValidation(validation bool) (restore func(), enabled bool, err
 	}, true, nil
 }
 
+// pipelineStatsEnvVar force-enables the pipeline-statistics query pool without a
+// code change, so `GLYPHENGINE_PIPELINE_STATS=1 task example:28-overdraw` works
+// on any example. Setting it to 0 force-disables, overriding
+// WithPipelineStatistics.
+const pipelineStatsEnvVar = "GLYPHENGINE_PIPELINE_STATS"
+
+// envSetting is a boolean option with an environment override, which is the
+// shape validation has had since the beginning and which the statistics pool
+// needed a second copy of.
+//
+// One function rather than two, and it lives here rather than beside either
+// caller: an override that parses differently from validation's would be a
+// surprise exactly once, in a run where GLYPHENGINE_PIPELINE_STATS=true did
+// nothing and said nothing.
+func envSetting(name string, optValue bool) bool {
+	if raw, ok := os.LookupEnv(name); ok {
+		if v, err := strconv.ParseBool(raw); err == nil {
+			return v
+		}
+		log.Printf("%s=%q is not a boolean; ignoring", name, raw)
+	}
+	return optValue
+}
+
 // validationSetting resolves whether validation should be on, combining the
 // WithValidation option with the environment override.
 //
@@ -51,13 +75,7 @@ func configureSyncValidation(validation bool) (restore func(), enabled bool, err
 // a missing SDK would otherwise turn every shipped game into a warning at
 // startup.
 func validationSetting(optValue bool) bool {
-	if raw, ok := os.LookupEnv(validationEnvVar); ok {
-		if v, err := strconv.ParseBool(raw); err == nil {
-			return v
-		}
-		log.Printf("%s=%q is not a boolean; ignoring", validationEnvVar, raw)
-	}
-	return optValue
+	return envSetting(validationEnvVar, optValue)
 }
 
 // resolveValidation reports whether validation can actually be enabled, and

@@ -121,6 +121,14 @@ func createLogicalDevice(instanceDriver core1_0.CoreInstanceDriver, features2 kh
 			ShaderStorageImageExtendedFormats: supported.ShaderStorageImageExtendedFormats,
 			MultiDrawIndirect:                 supported.MultiDrawIndirect,
 			DrawIndirectFirstInstance:         supported.DrawIndirectFirstInstance,
+			// Enabled whenever the device has it, like multi-draw above and
+			// unlike the ray-query closure: a feature bit is permission to create
+			// a pipeline-statistics query pool, not a pool, so a renderer that
+			// never calls WithPipelineStatistics pays nothing for it. Enabling it
+			// conditionally on the option would make Capabilities.PipelineStatistics
+			// a report about the build rather than about the device, which is the
+			// one thing this struct is not.
+			PipelineStatisticsQuery: supported.PipelineStatisticsQuery,
 		},
 	})
 	if err != nil {
