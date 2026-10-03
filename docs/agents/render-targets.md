@@ -37,6 +37,7 @@ api:
   - renderer.Renderer.DestroyStorageBuffer
   - renderer.SetShaderTexture
   - renderer.SetShaderTarget
+  - renderer.ShaderTextureSlots
   - renderer.SceneColor
   - renderer.SceneDepth
   - renderer.GPUTimings
@@ -51,7 +52,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: procedural
-verified: 2026-10-03 # per-pass uniform blocks (AppPassDesc.Params/SetParams, set 2 binding 12, #170), proved on hardware by `apppasscheck -params`; the include set listed per fragment, with the dependency-free group and volumetric_common.inc (#169); directional shadow sampling from compute; application submission counts per pass; storage buffers, sampler probes and explicit barriers; exported GLSL include set; Timed refused without device timestamps (#160)
+verified: 2026-10-03 # renderer.ShaderTextureSlots listed, which SetShaderTexture's slot argument is bounded by and which nothing listed before (#178); per-pass uniform blocks (AppPassDesc.Params/SetParams, set 2 binding 12, #170), proved on hardware by `apppasscheck -params`; the include set listed per fragment, with the dependency-free group and volumetric_common.inc (#169); directional shadow sampling from compute; application submission counts per pass; storage buffers, sampler probes and explicit barriers; exported GLSL include set; Timed refused without device timestamps (#160)
 ---
 
 # Application render targets, graphics and compute passes

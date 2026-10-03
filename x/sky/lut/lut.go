@@ -324,8 +324,8 @@ type Sky struct {
 // passing is a different place in the same texture rather than a different
 // texture.
 //
-// It returns an error if the palette makes the model brighter than the table's
-// 8-bit encoding can hold; see lutRange, which says what to do about it.
+// It used to return an error for a palette brighter than the table's 8-bit
+// encoding could hold. There is no such ceiling now; see Bake.
 func New(r *renderer.Renderer, opts Options) (*Sky, error) {
 	if r == nil {
 		return nil, fmt.Errorf("x/sky/lut: nil renderer")
@@ -341,18 +341,19 @@ func New(r *renderer.Renderer, opts Options) (*Sky, error) {
 	if err != nil {
 		return nil, err
 	}
-	// CreateDataTexture rather than CreateTextureLinear: it is the constructor
-	// on an api list (docs/agents/material-maps.md), and it is the right one for
-	// the same reason -- the table holds numbers, so the sRGB decode a colour
-	// texture applies would corrupt every one of them.
+	// Linear filtering because the sampler is what interpolates two of the
+	// table's three axes -- the view elevation and the proximity to the sun; see
+	// skylut.frag, which filters only the third itself. Nearest would turn the
+	// gradient into 64 visible bands.
 	//
-	// What it brings that a lookup does not want is a mip chain and repeat
-	// addressing. Neither is reached: skylut.frag fetches with textureLod at
-	// level 0, and every axis is inset half a texel so no sample ever lands close
-	// enough to an edge for the addressing mode to matter. The chain is therefore
-	// 11 unused levels, about 85 KB on top of the table's 256 -- measured as
-	// unused rather than assumed, see the comment on the fetch in skylut.frag.
-	if s.tex, err = r.CreateDataTexture(pixels, w, h); err != nil {
+	// Clamp-to-edge and no mip chain because nothing reaches either. Every axis
+	// is inset half a texel, so no sample lands close enough to an edge for the
+	// addressing mode to matter, and skylut.frag fetches with textureLod at level
+	// 0. The eight-bit constructor this used -- CreateDataTexture -- built the
+	// chain anyway: 11 unused levels, about 85 KB on top of the table. The wide
+	// table is 512 KB where the eight-bit one was 256, and asking for no chain
+	// gives 85 of those 256 back.
+	if s.tex, err = r.CreateTextureRGBA16F(pixels, w, h, renderer.TextureOptions{Filter: renderer.FilterLinear}); err != nil {
 		return nil, fmt.Errorf("x/sky/lut: upload the table: %w", err)
 	}
 	if err := r.SetShaderTexture(ShaderTextureSlot, s.tex); err != nil {

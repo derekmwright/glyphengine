@@ -364,18 +364,41 @@ func (r *Renderer) endSingleTimeCommands(cmdBuf core1_0.CommandBuffer) error {
 	return nil
 }
 
+// textureFormat is the image's VkFormat together with how many bytes one texel
+// of the caller's pixel data occupies.
+//
+// The two travel together because createTexture needs both and they are one
+// decision: the staging buffer's size, the buffer-to-image copy and the length
+// check are all width*height*texel, and a format changed without its texel size
+// is a buffer the right shape for the wrong pixels — which copies, uploads and
+// samples without a word from the validation layer.
+type textureFormat struct {
+	vk    core1_0.Format
+	texel int
+}
+
+// rgba8 is the eight-bit pair every constructor that predates the wide formats
+// uploads into.
+//
+// srgb picks R8G8B8A8_SRGB over _UNORM. An sRGB image decodes to linear on
+// every read, which is what colour wants and what data must not have —
+// normals, roughness, occlusion, and distance fields are numbers, not light.
+// Getting this wrong is silent: the texture still samples, just with every
+// value bent through a gamma curve.
+func rgba8(srgb bool) textureFormat {
+	if srgb {
+		return textureFormat{vk: core1_0.FormatR8G8B8A8SRGB, texel: 4}
+	}
+	return textureFormat{vk: core1_0.FormatR8G8B8A8UnsignedNormalized, texel: 4}
+}
+
 // textureOptions describes how pixel data becomes a sampled image.
 //
 // The public constructors below differ only in these four fields. They were
 // three near-identical copies of the same 200-line upload, which is how
 // CreateTextureLinear came to be missing the mip chain CreateTexture has.
 type textureOptions struct {
-	// srgb picks R8G8B8A8_SRGB over _UNORM. An sRGB image decodes to linear on
-	// every read, which is what colour wants and what data must not have —
-	// normals, roughness, occlusion, and distance fields are numbers, not
-	// light. Getting this wrong is silent: the texture still samples, just
-	// with every value bent through a gamma curve.
-	srgb bool
+	format textureFormat
 
 	filter core1_0.Filter
 
@@ -402,7 +425,7 @@ type textureOptions struct {
 // colour: albedo, terrain detail, foliage cutouts.
 func (r *Renderer) CreateTexture(pixels []byte, width, height int) (*Texture, error) {
 	return r.createTexture(pixels, width, height, textureOptions{
-		srgb:     true,
+		format:   rgba8(true),
 		filter:   core1_0.FilterLinear,
 		addressU: core1_0.SamplerAddressModeRepeat,
 		addressV: core1_0.SamplerAddressModeRepeat,
@@ -538,7 +561,7 @@ func bilinearWrapU(pix []byte, w, h int, fx, fy float64) (byte, byte, byte) {
 // carries no mip chain because MSDF atlases need exact texel values.
 func (r *Renderer) CreateDataTexture(pixels []byte, width, height int) (*Texture, error) {
 	return r.createTexture(pixels, width, height, textureOptions{
-		srgb:     false,
+		format:   rgba8(false),
 		filter:   core1_0.FilterLinear,
 		addressU: core1_0.SamplerAddressModeRepeat,
 		addressV: core1_0.SamplerAddressModeRepeat,
@@ -550,7 +573,7 @@ func (r *Renderer) CreateDataTexture(pixels []byte, width, height int) (*Texture
 // clamp-to-edge sampling. Used for MSDF atlases where distance values must be read as-is.
 func (r *Renderer) CreateTextureLinear(pixels []byte, width, height int) (*Texture, error) {
 	return r.createTexture(pixels, width, height, textureOptions{
-		srgb:     false,
+		format:   rgba8(false),
 		filter:   core1_0.FilterLinear,
 		addressU: core1_0.SamplerAddressModeClampToEdge,
 		addressV: core1_0.SamplerAddressModeClampToEdge,
@@ -562,7 +585,7 @@ func (r *Renderer) CreateTextureLinear(pixels []byte, width, height int) (*Textu
 // nearest-neighbor filtering and clamp-to-edge sampling. Used for pixel art.
 func (r *Renderer) CreateTextureNearest(pixels []byte, width, height int) (*Texture, error) {
 	return r.createTexture(pixels, width, height, textureOptions{
-		srgb:     true,
+		format:   rgba8(true),
 		filter:   core1_0.FilterNearest,
 		addressU: core1_0.SamplerAddressModeClampToEdge,
 		addressV: core1_0.SamplerAddressModeClampToEdge,
@@ -570,14 +593,200 @@ func (r *Renderer) CreateTextureNearest(pixels []byte, width, height int) (*Text
 	})
 }
 
-// createTexture uploads RGBA pixel data to a device-local image and returns a
-// Texture with a ready-to-bind descriptor set at set=0, binding=0.
-func (r *Renderer) createTexture(pixels []byte, width, height int, opts textureOptions) (*Texture, error) {
-	imageSize := width * height * 4
+// TextureOptions is how a wide-format upload is sampled.
+//
+// The zero value is nearest filtering, clamp-to-edge addressing and no mip
+// chain, which is what a lookup table wants: the texel at the coordinate asked
+// for, and no level anything fetches.
+//
+// It is a parameter here where the eight-bit constructors have none, because
+// those four cover their four intents by NAME -- colour, material maps, MSDF
+// atlases, pixel art -- and the wide formats have no such short list. A radiance
+// table, a height field and a precomputed noise slab want different filters and
+// different addressing out of the same format, so there is nothing to name; two
+// formats times the four eight-bit combinations would be eight constructors
+// nobody could choose between.
+//
+// Filter and Wrap are the render targets' own TargetFilter and TargetWrap rather
+// than new enums, and not only for consistency: FilterLinear, FilterNearest,
+// WrapClampToEdge and WrapRepeat are package-level constant names those types
+// already hold, so a second pair could not reuse the spellings a caller would
+// reach for.
+type TextureOptions struct {
+	// Filter is minification and magnification together. FilterLinear on a
+	// format whose linear-filter support is optional is refused rather than
+	// demoted to nearest -- see CreateTextureR32F, which is the one where that
+	// can happen.
+	Filter TargetFilter
 
-	format := core1_0.FormatR8G8B8A8UnsignedNormalized
-	if opts.srgb {
-		format = core1_0.FormatR8G8B8A8SRGB
+	// Wrap is U and V together, as RenderTargetDesc.Wrap is. The eight-bit path
+	// carries the two axes separately because glTF's sampler does (issue #69);
+	// nothing uploads a wide-format glTF image, and a table that samples near an
+	// edge is a bug in its own axis arithmetic rather than a wrap mode.
+	Wrap TargetWrap
+
+	// Mipmap builds the full chain by successive linear blits and selects
+	// anisotropic filtering, exactly as CreateTexture does.
+	//
+	// A lookup table does not want it. Every level below 0 averages whatever the
+	// layout happens to put side by side, which for a 3D table packed into 2D is
+	// the next slice -- so a minified fetch would blend two unrelated parts of
+	// the function. It is here for the case the eight-bit path has: a wide
+	// texture that is an IMAGE, tiled across a surface and seen at a distance.
+	Mipmap bool
+}
+
+// internal translates the public options into the ones the upload path takes,
+// and rejects an out-of-range enum rather than treating it as its zero value --
+// the same choice validateTarget makes, for the same reason: a caller who passed
+// a filter from the wrong enum would otherwise silently get nearest.
+func (opts TextureOptions) internal(f textureFormat) (textureOptions, error) {
+	o := textureOptions{
+		format:   f,
+		filter:   core1_0.FilterNearest,
+		addressU: core1_0.SamplerAddressModeClampToEdge,
+		mipmap:   opts.Mipmap,
+	}
+	switch opts.Filter {
+	case FilterNearest:
+	case FilterLinear:
+		o.filter = core1_0.FilterLinear
+	default:
+		return textureOptions{}, fmt.Errorf("texture: Filter: unknown filter %d", opts.Filter)
+	}
+	switch opts.Wrap {
+	case WrapClampToEdge:
+	case WrapRepeat:
+		o.addressU = core1_0.SamplerAddressModeRepeat
+	default:
+		return textureOptions{}, fmt.Errorf("texture: Wrap: unknown wrap %d", opts.Wrap)
+	}
+	o.addressV = o.addressU
+	return o, nil
+}
+
+// The two formats the public constructors below upload into, named here so that
+// the VkFormat and the size of one texel of the caller's data are decided once.
+var (
+	formatRGBA16F = textureFormat{vk: core1_0.FormatR16G16B16A16SignedFloat, texel: 8}
+	formatR32F    = textureFormat{vk: core1_0.FormatR32SignedFloat, texel: 4}
+)
+
+// CreateTextureRGBA16F uploads four-channel half-float pixels as an
+// R16G16B16A16_SFLOAT texture, sampled the way opts asks.
+//
+// pixels holds IEEE binary16 BITS, four per texel in RGBA order, row by row with
+// no padding -- Float16 is what turns a float32 into one. Bits rather than
+// float32s so that nothing is converted behind the caller's back; the trap is
+// that a []uint16 of ordinary small integers compiles, uploads and samples as
+// values near zero, because 1 as half-float bits is 6e-8.
+//
+// This is the constructor for numbers a shader needs at more than eight bits of
+// precision: a radiance table baked on the CPU, a signed field, anything whose
+// useful range spans more than a couple of decades. Eight bits over a 0-to-3
+// range is 2 percent relative error at a tenth of full scale and 13 percent at
+// two thousandths however the levels are spread, and no transfer curve fixes
+// that -- see docs/agents/textures.md, which carries the measurement. Half-float
+// is 0.05 percent across the whole range, for twice the memory.
+//
+// Core Vulkan requires this format to be sampled and to filter linearly with
+// optimal tiling, so neither device check can fire on a conformant one.
+func (r *Renderer) CreateTextureRGBA16F(pixels []uint16, width, height int, opts TextureOptions) (*Texture, error) {
+	if err := wideExtent(len(pixels), width, height, 4, "RGBA16F", "half-floats"); err != nil {
+		return nil, err
+	}
+	// Reinterpreted rather than encoded byte by byte: the staging copy is a
+	// memcpy into host-visible memory and the device reads it back in host byte
+	// order, so the only platform this is wrong on is a big-endian one, which is
+	// not a platform this engine runs on (cgo, Vulkan, amd64/arm64). The backing
+	// array is alive for the whole call, which is what makes the slice legal.
+	raw := unsafe.Slice((*byte)(unsafe.Pointer(&pixels[0])), len(pixels)*2)
+	return r.createWideTexture(raw, width, height, formatRGBA16F, opts)
+}
+
+// CreateTextureR32F uploads single-channel float32 pixels as an R32_SFLOAT
+// texture, sampled the way opts asks. A nearest fetch at a texel centre returns
+// the float32 that was written, bit for bit.
+//
+// This is the constructor for one exact number per texel: a height field, a
+// distance field at full precision, the expected values something else is
+// measured against. Half the memory of RGBA16F for a scalar, and no rounding at
+// all.
+//
+// It is the one format here whose LINEAR filtering core Vulkan does not require
+// -- SAMPLED_IMAGE is mandatory for R32_SFLOAT with optimal tiling and
+// SAMPLED_IMAGE_FILTER_LINEAR is not -- so a TextureOptions.Filter of
+// FilterLinear is an error on a device that lacks it rather than a sampler
+// quietly demoted to nearest. CreateRenderTarget refuses the same thing for the
+// same format.
+func (r *Renderer) CreateTextureR32F(pixels []float32, width, height int, opts TextureOptions) (*Texture, error) {
+	if err := wideExtent(len(pixels), width, height, 1, "R32F", "float32s"); err != nil {
+		return nil, err
+	}
+	raw := unsafe.Slice((*byte)(unsafe.Pointer(&pixels[0])), len(pixels)*4)
+	return r.createWideTexture(raw, width, height, formatR32F, opts)
+}
+
+// wideExtent is the length check both constructors above make, reported in the
+// units the caller passed rather than in bytes: someone who got the extent wrong
+// should not have to divide a byte count by a texel size to see it.
+//
+// The dimensions are checked first so the count in the message is a real one --
+// width*height*perTexel for a negative dimension is a negative "want".
+func wideExtent(n, width, height, perTexel int, format, unit string) error {
+	if width <= 0 || height <= 0 {
+		return fmt.Errorf("texture: %dx%d has no texels", width, height)
+	}
+	if want := width * height * perTexel; n != want {
+		return fmt.Errorf("texture: %d %s for a %dx%d %s texture, want %d (%d per texel)",
+			n, unit, width, height, format, want, perTexel)
+	}
+	return nil
+}
+
+// createWideTexture checks the device can sample the format the way opts asks
+// and then hands the bytes to the one upload path.
+//
+// The query is on the DEVICE rather than reported through Capabilities, because
+// a report gains nothing here: both formats are mandatory for sampled images in
+// core Vulkan, so the flag would be a constant true that every game would still
+// have to branch on. The one query that can genuinely answer no is linear
+// filtering of R32_SFLOAT, and that is a property of this call's options rather
+// than of the renderer -- which is the shape CreateRenderTarget's own
+// format-feature checks already have.
+func (r *Renderer) createWideTexture(raw []byte, width, height int, f textureFormat, opts TextureOptions) (*Texture, error) {
+	o, err := opts.internal(f)
+	if err != nil {
+		return nil, err
+	}
+	props := r.instanceDriver.GetPhysicalDeviceFormatProperties(r.physicalDevice, f.vk)
+	if props.OptimalTilingFeatures&core1_0.FormatFeatureSampledImage == 0 {
+		return nil, fmt.Errorf("texture: format %v cannot be sampled on this device", f.vk)
+	}
+	if o.filter == core1_0.FilterLinear && props.OptimalTilingFeatures&core1_0.FormatFeatureSampledImageFilterLinear == 0 {
+		return nil, fmt.Errorf("texture: Filter: format %v does not support linear sampling on this device", f.vk)
+	}
+	return r.createTexture(raw, width, height, o)
+}
+
+// createTexture uploads tightly packed pixel data to a device-local image and
+// returns a Texture with a ready-to-bind descriptor set at set=0, binding=0.
+//
+// pixels must be exactly width*height*opts.format.texel bytes. It used to be
+// whatever the caller had: the copy below is a `copy`, so a short slice left the
+// rest of the image holding whatever the staging allocation came with and a long
+// one was silently truncated, and neither errors, neither trips the validation
+// layer, and both sample. The dimensions are in the message because the two
+// numbers a caller gets wrong together are the extent and the stride.
+func (r *Renderer) createTexture(pixels []byte, width, height int, opts textureOptions) (*Texture, error) {
+	if width <= 0 || height <= 0 {
+		return nil, fmt.Errorf("texture: %dx%d has no texels", width, height)
+	}
+	format := opts.format.vk
+	imageSize := width * height * opts.format.texel
+	if len(pixels) != imageSize {
+		return nil, fmt.Errorf("texture: %d bytes of pixels for %dx%d at %d bytes per texel, want %d",
+			len(pixels), width, height, opts.format.texel, imageSize)
 	}
 
 	// Full mip chain; fall back to a single level if the format can't be

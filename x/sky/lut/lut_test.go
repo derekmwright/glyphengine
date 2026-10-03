@@ -15,6 +15,10 @@ import (
 	xsky "github.com/derekmwright/glyphengine/x/sky"
 )
 
+// The table is uploaded through renderer.CreateTextureRGBA16F, so this package's
+// api dependency on the engine now includes the half-float transfer in both
+// directions; see lut.md's seam table.
+
 // luma is Rec. 709 relative luminance, which is what every brightness claim in
 // this file and in the GPU gate is measured in. One function so the unit tests
 // and the gate cannot disagree about what "brighter" means.
@@ -210,18 +214,29 @@ func sign(v float32) float64 {
 func abs(v float32) float64  { return math.Abs(float64(v)) }
 func sqrt(v float64) float64 { return math.Sqrt(v) }
 
-// TestShaderAndBakeAgreeOnTheGrid reads the four constants out of skylut.frag and
-// compares them with the ones bake.go bakes with.
+// TestShaderAndBakeAgreeOnTheGrid reads the three grid constants out of
+// skylut.frag and compares them with the ones bake.go bakes with.
 //
 // They are two copies because the shader's slice arithmetic is written out rather
 // than derived from textureSize, and the shader cannot see Go constants. A
 // disagreement of one on any axis is not a compile error and not a crash: it is
 // a sky sampled off by a fraction of a texel on one axis, which looks like a sky.
 //
+// There was a fourth, LUT_RANGE, and the check that it is GONE is now part of
+// this: the table holds radiance, so a shader that still squared its fetch would
+// render a dome that is dark everywhere and black at night, which is a plausible
+// enough sky to ship.
+//
 // Verified to fail: changing LUT_PROX in the shader to 31.0 reports
 // `skylut.frag has LUT_PROX = 31, bake.go has 32`. Replacing textureLod with
 // texture reports `skylut.frag does not fetch with textureLod; a lookup should ask
-// for level 0 rather than depend on the derivative`.
+// for level 0 rather than depend on the derivative`. Putting `const float
+// LUT_RANGE = 3.0;` and `encoded * encoded * LUT_RANGE` back reports both of the
+// last two assertions -- `skylut.frag still declares LUT_RANGE; the table holds
+// radiance and there is no transfer to undo` and `skylut.frag still squares its
+// fetch; the table holds radiance, so the dome would come out dark everywhere` --
+// and takes TestCommittedSPIRVMatchesGLSL with it at `skylut.frag.spv is stale
+// (4876 bytes committed, 5008 fresh)`.
 func TestShaderAndBakeAgreeOnTheGrid(t *testing.T) {
 	src, err := readFrag()
 	if err != nil {
@@ -234,7 +249,6 @@ func TestShaderAndBakeAgreeOnTheGrid(t *testing.T) {
 		{"LUT_VIEW", lutView},
 		{"LUT_SUN", lutSun},
 		{"LUT_PROX", lutProx},
-		{"LUT_RANGE", lutRange},
 	} {
 		re := regexp.MustCompile(`const float ` + c.name + `\s*=\s*([0-9.]+);`)
 		m := re.FindStringSubmatch(src)
@@ -259,6 +273,18 @@ func TestShaderAndBakeAgreeOnTheGrid(t *testing.T) {
 	// the level it means instead of depending on a mip chain it does not use.
 	if !regexp.MustCompile(`textureLod\(skyLUT`).MatchString(src) {
 		t.Error("skylut.frag does not fetch with textureLod; a lookup should ask for level 0 rather than depend on the derivative")
+	}
+
+	// And nothing decodes. The table is radiance; the only arithmetic between the
+	// fetch and outColor is the slice mix.
+	// The declaration, not the word: the comment above the constants names
+	// LUT_RANGE to say it is gone, and a check that could not tell those apart
+	// would be a check on the prose.
+	if regexp.MustCompile(`const\s+float\s+LUT_RANGE`).MatchString(src) {
+		t.Error("skylut.frag still declares LUT_RANGE; the table holds radiance and there is no transfer to undo")
+	}
+	if regexp.MustCompile(`encoded\s*\*\s*encoded`).MatchString(src) {
+		t.Error("skylut.frag still squares its fetch; the table holds radiance, so the dome would come out dark everywhere")
 	}
 }
 
@@ -322,7 +348,11 @@ func TestAtmosphereIncStillSaysWhatWeCopied(t *testing.T) {
 // ── the table ──
 
 // table decodes a baked default table into [row][slice][col] colours, so the
-// checks below read as claims about the sky rather than about byte offsets.
+// checks below read as claims about the sky rather than about half-float offsets.
+//
+// renderer.Float16Value rather than a decoder of this package's own: the engine
+// owns both directions of the transfer now, and a second copy out here would be
+// free to disagree with what Bake encoded with.
 func table(t *testing.T, opts Options) [lutView][lutSun][lutProx][3]float32 {
 	t.Helper()
 	pixels, w, h, err := Bake(opts)
@@ -333,16 +363,20 @@ func table(t *testing.T, opts Options) [lutView][lutSun][lutProx][3]float32 {
 		t.Fatalf("baked %dx%d, want %dx%d", w, h, lutSun*lutProx, lutView)
 	}
 	if len(pixels) != w*h*4 {
-		t.Fatalf("baked %d bytes for %dx%d RGBA", len(pixels), w, h)
+		t.Fatalf("baked %d half-floats for %dx%d RGBA, want %d", len(pixels), w, h, w*h*4)
 	}
 	var out [lutView][lutSun][lutProx][3]float32
 	for row := 0; row < lutView; row++ {
 		for slice := 0; slice < lutSun; slice++ {
 			for col := 0; col < lutProx; col++ {
 				at := (row*w + slice*lutProx + col) * 4
-				out[row][slice][col] = [3]float32{decode(pixels[at]), decode(pixels[at+1]), decode(pixels[at+2])}
-				if pixels[at+3] != 255 {
-					t.Fatalf("texel (%d,%d,%d) has alpha %d, want 255", row, slice, col, pixels[at+3])
+				out[row][slice][col] = [3]float32{
+					renderer.Float16Value(pixels[at]),
+					renderer.Float16Value(pixels[at+1]),
+					renderer.Float16Value(pixels[at+2]),
+				}
+				if a := renderer.Float16Value(pixels[at+3]); a != 1 {
+					t.Fatalf("texel (%d,%d,%d) has alpha %g, want 1", row, slice, col, a)
 				}
 			}
 		}
@@ -351,9 +385,13 @@ func table(t *testing.T, opts Options) [lutView][lutSun][lutProx][3]float32 {
 }
 
 // relLevels are the linear values the relative encoding error is reported above.
-// The error is 2*(0.5/255)/sqrt(v/lutRange), so it grows without bound as the
-// value falls and one figure would say more about the darkest texel in the table
-// than about the encoding.
+//
+// Three levels is what the eight-bit transfer needed: its error was
+// 2*(0.5/255)/sqrt(v/3), which grew without bound as the value fell, so one
+// figure would have said more about the darkest texel in the table than about the
+// encoding. Half-float's error is relative by construction and the three levels
+// now read the same, which is the whole point of the change -- they are kept
+// because reporting all three is what shows that.
 var relLevels = [3]float32{0.002, 0.01, 0.1}
 
 // awayFromTheSun is proximity column 0, dot(dir, sunDir) = -1: the one column
@@ -366,13 +404,12 @@ const awayFromTheSun = 0
 //
 // A ladder of elevations rather than every row, because the view axis is a
 // signed square: rows near the horizon are a thousandth of elevation apart, and
-// the colour difference across one of them is an order of magnitude below a
-// single step of the 8-bit encoding. Adjacent rows there therefore quantise to
-// the same bytes or wobble by one in whichever channel happens to be closest to
-// its next level, which is a fact about the encoding and not about the sky.
-// Measured: at a sun elevation of 0.051 the rows at view elevations 0.0105 and
-// 0.0165 decode to luminance 0.4673 and 0.4679 -- the second higher by 0.0006,
-// against one green step of 0.0059 at that brightness.
+// the colour difference across one of them is small enough that it was below a
+// single step of the eight-bit encoding this table used to carry. That is no
+// longer the reason -- half-float resolves a relative 0.05 percent everywhere, so
+// adjacent rows now differ in the direction the model says -- but the ladder is
+// kept: what it checks is the gradient over the sky, and 64 rows of which 30 sit
+// in the first tenth of the climb is a check on the axis spacing instead.
 //
 // In degrees, roughly: 1.1, 2.9, 5.7, 11.5, 20.5, 30, 44.4, 64.2.
 var gradientLadder = [...]float32{0.02, 0.05, 0.10, 0.20, 0.35, 0.50, 0.70, 0.90}
@@ -497,16 +534,26 @@ func TestTheSunSideIsBrighterAtDawn(t *testing.T) {
 // format the engine cannot upload (see lut.md), so the error is the price of the
 // package rather than a bug, and a price has to be known.
 //
-// Measured on the default palette: the worst absolute error is 0.0105, under half
-// of the 0.0235 one encoded step spans at the top of the range, and the worst
-// relative error is 1.3 percent at a tenth of full scale, 6.8 percent at a
-// hundredth and 15 percent at two thousandths. The relative figure is the one
-// that matters and the one that cannot be improved without a wider format: it is
-// 2*(0.5/255)/sqrt(v/lutRange), which is the square transfer and nothing else.
+// RGBA8 holding sqrt(v/3) measured a worst absolute error of 0.0105 and relative
+// errors of 1.3 percent above a tenth of full scale, 6.8 percent above a
+// hundredth and 15 percent above two thousandths -- the square transfer and
+// nothing else, 2*(0.5/255)/sqrt(v/3), unimprovable by any other curve over 255
+// levels. Half-float is 0.049 percent at every level, which is half a step of a
+// 10-bit significand (2^-11 = 0.000488) and therefore the format and nothing
+// else. The bounds below are those.
 //
-// Verified to fail: changing encode's square root to a cube root while the shader
-// still squares reports a worst absolute error of 0.4523 against the 0.012 bound
-// and a relative error of 5.79 against 0.08.
+// The absolute bound has to SCALE with the value now, which is the real
+// difference: the eight-bit table was worst in absolute terms at the top of its
+// range and worst in relative terms at the bottom, and half-float is relative
+// everywhere. 0.0013 is 0.049 percent of the brightest texel the default palette
+// reaches (2.505, logged below).
+//
+// Verified to fail: writing the radiance as renderer.Float16(c[ch]*0.99) -- a
+// one-percent scale error, which is the size of mistake a transfer change can
+// hide -- reports `worst absolute encoding error 0.025848, want at most 0.0013`
+// and `worst relative error 0.0105 above 0.002, want at most 0.0006` at all three
+// levels. The measured figures with it in place are 0.000488 relative at every
+// level and 0.000976 absolute.
 func TestTheTableIsTheModel(t *testing.T) {
 	opts := DefaultOptions()
 	pal := endpoints(glyph.DefaultSkyPalette())
@@ -544,39 +591,44 @@ func TestTheTableIsTheModel(t *testing.T) {
 		}
 	}
 	for i, level := range relLevels {
-		t.Logf("8-bit encoding: worst relative error %.4f above %g", worstRel[i], level)
+		t.Logf("half-float table: worst relative error %.6f above %g", worstRel[i], level)
 	}
-	t.Logf("8-bit encoding: worst absolute error %.4f", worst)
-	// One encoded step at the top of the range is 2*sqrt(1)*lutRange/255 =
-	// 0.0235, so half a step is 0.0118: this bound is the rounding and nothing
-	// else.
-	if worst > 0.012 {
-		t.Errorf("worst absolute encoding error %.4f, want at most 0.012", worst)
+	t.Logf("half-float table: worst absolute error %.6f", worst)
+	// Half a step of a 10-bit significand is 2^-11 = 0.000488, so the absolute
+	// error cannot exceed that fraction of the brightest texel. 0.0013 is that
+	// against the default palette's 2.505.
+	if worst > 0.0013 {
+		t.Errorf("worst absolute encoding error %.6f, want at most 0.0013", worst)
 	}
-	// 0.08 against a measured 0.068 at a hundredth of full scale. Only the middle
-	// level is asserted: below it a bound would be a bound on the transfer
-	// function, which is chosen rather than measured, and above it the error is a
-	// fifth of it.
-	if worstRel[1] > 0.08 {
-		t.Errorf("worst relative encoding error %.4f above %g, want at most 0.08", worstRel[1], relLevels[1])
+	// Every level, not just the middle one. With the transfer gone there is no
+	// level at which the error is a bound on a chosen curve rather than on the
+	// format, which is why all three are asserted now where only one used to be.
+	for i, level := range relLevels {
+		if worstRel[i] > 0.0006 {
+			t.Errorf("worst relative error %.4f above %g, want at most 0.0006", worstRel[i], level)
+		}
 	}
 }
 
-// TestBakeRefusesAPaletteItCannotEncode is the clipping guard. lutRange is a
-// compiled-in constant, so a palette bright enough to exceed it has to be
-// refused rather than clipped: a clipped table is a flat white patch where the
-// sun is, which reads as a shader bug and is an encoding limit.
+// TestABrightPaletteNeedsNoRefusing is the test that used to be its opposite.
 //
-// Verified to fail: disabling the peak check lets the bright palette bake, and
-// this reports `a palette five times Earth's baked without error; the table would
-// be clipped`. With the check in place the refusal reads `the baked sky reaches
-// 5.750 at sun elevation 0.026, view elevation -0.030, sun proximity 1.000, above
-// the 3.0 the 8-bit encoding spans`.
-func TestBakeRefusesAPaletteItCannotEncode(t *testing.T) {
-	if _, _, _, err := Bake(DefaultOptions()); err != nil {
-		t.Fatalf("the default palette must bake: %v", err)
-	}
-
+// Bake refused a palette whose brightest texel passed 3.0, because the table was
+// RGBA8 holding sqrt(v/3) and a clipped table is a flat white patch where the sun
+// is -- which reads as a shader bug rather than as an encoding limit. There is no
+// ceiling now: half-float reaches 65504, so a palette five times Earth's is a
+// bright sky and nothing else, and this is what says the refusal did not survive
+// as a leftover guard.
+//
+// The round trip is asserted at the SAME relative precision the default palette
+// gets, which is the claim that matters: a wider table is not useful if the error
+// grows with the values in it. It does not -- half-float's error is relative.
+//
+// Verified to fail: clamping the bake to 3.0 (`if c[ch] > 3 { c[ch] = 3 }` before
+// the encode), which is what the old ceiling looked like from the inside, reports
+// `five times Earth's palette: texel (22,11,26) red is 3.000, want 3.015` -- the
+// first texel over the line, which is the sun's halo starting to flatten into the
+// flat white patch the refusal existed to avoid.
+func TestABrightPaletteNeedsNoRefusing(t *testing.T) {
 	bright := glyph.DefaultSkyPalette()
 	bright.ZenithDay = bright.ZenithDay.Mul(5)
 	bright.HorizonDay = bright.HorizonDay.Mul(5)
@@ -586,18 +638,52 @@ func TestBakeRefusesAPaletteItCannotEncode(t *testing.T) {
 	bright.HorizonNight = bright.HorizonNight.Mul(5)
 	opts := DefaultOptions()
 	opts.Palette = bright
-	if _, _, _, err := Bake(opts); err == nil {
-		t.Error("a palette five times Earth's baked without error; the table would be clipped")
-	} else {
-		t.Logf("refused, as it must: %v", err)
+
+	pal := endpoints(bright)
+	tab := table(t, opts)
+	var peak, worstRel float32
+	for slice := 0; slice < lutSun; slice++ {
+		s := sunElevationAt(slice)
+		sunCol := glowColorAt(opts.Keys, s)
+		for row := 0; row < lutView; row++ {
+			e := viewElevationAt(row)
+			for col := 0; col < lutProx; col++ {
+				want := domeColor(pal, e, s, proxAt(col), sunCol)
+				got := tab[row][slice][col]
+				for ch := 0; ch < 3; ch++ {
+					if want[ch] > peak {
+						peak = want[ch]
+					}
+					if want[ch] > relLevels[0] {
+						if r := absf(got[ch]-want[ch]) / want[ch]; r > worstRel {
+							worstRel = r
+						}
+					}
+					if absf(got[ch]-want[ch]) > 0.0006*absf(want[ch])+1e-6 {
+						t.Fatalf("five times Earth's palette: texel (%d,%d,%d) %s is %.3f, want %.3f",
+							row, slice, col, [3]string{"red", "green", "blue"}[ch], got[ch], want[ch])
+					}
+				}
+			}
+		}
+	}
+	t.Logf("five times Earth's palette: brightest texel %.3f, worst relative error %.6f", peak, worstRel)
+	if peak < 3 {
+		t.Fatalf("the bright palette peaks at %.3f, under the 3.0 the old encoding refused; this case proves nothing", peak)
 	}
 }
 
-// TestTheDefaultPaletteHeadroom pins how much of the 8-bit range Earth's sky
-// actually uses, because the number is the whole justification for lutRange and
-// for the error budget above. A change to the model, the palette defaults or the
+// TestTheDefaultPaletteBrightestTexel pins how bright Earth's sky gets in this
+// model, because it is the number the absolute error bound above is set from and
+// the number lut.md quotes. A change to the model, the palette defaults or the
 // keys that moves it is a change that should be noticed here.
-func TestTheDefaultPaletteHeadroom(t *testing.T) {
+//
+// It used to be a HEADROOM test: the same peak against the 3.0 ceiling, with a
+// floor at 60 percent of it, because an eight-bit encoding that spent its levels
+// on range nothing reached was coarser than it needed to be. Half-float spends no
+// levels on range, so there is nothing to be economical about and the peak is
+// just a number to record.
+func TestTheDefaultPaletteBrightestTexel(t *testing.T) {
 	tab := table(t, DefaultOptions())
 	var peak float32
 	var atSun, atView, atProx float32
@@ -612,16 +698,13 @@ func TestTheDefaultPaletteHeadroom(t *testing.T) {
 			}
 		}
 	}
-	t.Logf("brightest texel %.3f of the %.1f range, at sun elevation %+.3f, view elevation %+.3f, proximity %+.3f",
-		peak, float32(lutRange), atSun, atView, atProx)
-	if peak > lutRange {
-		t.Errorf("brightest texel %.3f exceeds the %.1f range", peak, float32(lutRange))
-	}
-	// Headroom, not margin for its own sake: the encoding spends precision on
-	// range it never uses, so a peak far under the ceiling means the ceiling is
-	// set too high and the table is coarser than it needs to be.
-	if peak < 0.6*lutRange {
-		t.Errorf("brightest texel %.3f uses less than 60%% of the %.1f range; lutRange is too high", peak, float32(lutRange))
+	t.Logf("brightest texel %.3f, at sun elevation %+.3f, view elevation %+.3f, proximity %+.3f",
+		peak, atSun, atView, atProx)
+	// The bound the absolute error budget in TestTheTableIsTheModel is derived
+	// from. Wide on purpose: what would make that budget wrong is the peak moving
+	// by a factor, not by a hundredth.
+	if peak < 2 || peak > 3 {
+		t.Errorf("brightest texel %.3f; TestTheTableIsTheModel's absolute bound is derived from 2.505", peak)
 	}
 }
 

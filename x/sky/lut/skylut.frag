@@ -44,13 +44,20 @@ layout(location = 0) out vec4 outColor;
 #include "atmosphere.inc"
 
 // The table's shape, which has to match bake.go. TestShaderAndBakeAgreeOnTheGrid
-// reads these four lines out of this file and compares them with the constants
+// reads these three lines out of this file and compares them with the constants
 // in Go, because two copies of a grid are two things that can disagree about a
 // texel.
-const float LUT_VIEW  = 64.0;
-const float LUT_SUN   = 32.0;
-const float LUT_PROX  = 32.0;
-const float LUT_RANGE = 3.0;
+//
+// There used to be a fourth, LUT_RANGE = 3.0, because the table was RGBA8
+// holding sqrt(radiance/3) and this shader squared it back. The table is
+// R16G16B16A16_SFLOAT now and holds radiance, so there is no transfer here and
+// no range for a palette to exceed. One consequence worth knowing: every
+// interpolation below -- the sampler's within a texel pair, and the mix across
+// two sun slices -- now happens in LINEAR radiance rather than in an encoded
+// domain that bowed each blend toward its darker neighbour.
+const float LUT_VIEW = 64.0;
+const float LUT_SUN  = 32.0;
+const float LUT_PROX = 32.0;
 
 void main() {
     vec3 camPos = pc.model[0].xyz;
@@ -115,19 +122,20 @@ void main() {
     // The reason is the axis itself. It is scaled so that near the horizon one
     // screen pixel is about one texel: at 480 pixels over a 60-degree vertical
     // field of view, the first pixel above the horizon moves v by 1.05 texels,
-    // which is an LOD of 0.07. The chain was reachable -- CreateDataTexture builds
-    // 11 levels for this 1024x64 image and sets MaxLod to the count -- it is
-    // simply never reached.
+    // which is an LOD of 0.07. The chain was reachable at the time of that
+    // measurement -- CreateDataTexture built 11 levels for this 1024x64 image and
+    // set MaxLod to the count -- and simply never reached. The table is uploaded
+    // through CreateTextureRGBA16F now and asks for no chain at all, so there is
+    // no longer a level above 0 to pick; the measurement is what says that losing
+    // it changed nothing.
     //
     // So this stays because it is free and unconditional, not because it is
     // load-bearing today: a coarser axis or a smaller table would be relying on
     // that measurement instead of on this call.
     vec3 a = textureLod(skyLUT, vec2((s0 * LUT_PROX + px) / w, v), 0.0).rgb;
     vec3 b = textureLod(skyLUT, vec2(((s0 + 1.0) * LUT_PROX + px) / w, v), 0.0).rgb;
-    vec3 encoded = mix(a, b, sfrac);
 
-    // Square back out of the 8-bit transfer. Alpha is the transmittance the
-    // stars and the discs would blend against; this sky draws neither, and the
-    // dome is opaque.
-    outColor = vec4(encoded * encoded * LUT_RANGE, 1.0);
+    // The fetch is the radiance. Alpha is the transmittance the stars and the
+    // discs would blend against; this sky draws neither, and the dome is opaque.
+    outColor = vec4(mix(a, b, sfrac), 1.0);
 }

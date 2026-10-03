@@ -55,6 +55,7 @@ tasks:
       - for f in *.vert *.frag *.comp; do "${VULKAN_SDK}/bin/glslc{{.EXE}}" -Iinclude "$f" -o "$f.spv" || exit 1; done
       - for f in ../cmd/skyshadowcheck/*.frag; do "${VULKAN_SDK}/bin/glslc{{.EXE}}" -Iinclude "$f" -o "$f.spv"; done
       - for f in ../cmd/apppasscheck/*.vert ../cmd/apppasscheck/*.frag ../cmd/apppasscheck/*.comp; do "${VULKAN_SDK}/bin/glslc{{.EXE}}" -Iinclude "$f" -o "$f.spv"; done
+      - for f in ../cmd/widetexcheck/*.frag; do "${VULKAN_SDK}/bin/glslc{{.EXE}}" -Iinclude "$f" -o "$f.spv"; done
       - for f in ../examples/*/*.vert ../examples/*/*.frag ../examples/*/*.comp; do [ -f "$f" ] || continue; "${VULKAN_SDK}/bin/glslc{{.EXE}}" -Iinclude "$f" -o "$f.spv" || exit 1; done
     sources:
       - examples/*/*.vert
@@ -71,11 +72,13 @@ tasks:
       - shaders/include/*.inc
       - cmd/skyshadowcheck/*.frag
       - cmd/skyshadowcheck/*.inc
+      - cmd/widetexcheck/*.frag
     generates:
       - examples/*/*.spv
       - cmd/apppasscheck/*.spv
       - shaders/*.spv
       - cmd/skyshadowcheck/*.spv
+      - cmd/widetexcheck/*.spv
 
   skyshadows:
     desc: "Custom sky and lit shaders share directional shadows, through resize and disabling"
@@ -1834,18 +1837,34 @@ tasks:
       # dome. 640x480, 60-degree vertical field of view, frame 120, MSAA off.
       #
       # NUMBERS, 640x480, frame 120, MSAA off, RX 7900 XTX, 2026-10-03, mean sRGB
-      # luma of the central half of each of 12 bands, bottom band first:
+      # luma of the central half of each of 12 bands, bottom band first. Taken
+      # AFTER the table moved to R16G16B16A16_SFLOAT (issue #178):
       #
-      #   dawn    165.432 ... 82.926, drop 82.51; sun side 144.261 / away 101.361,
+      #   dawn    165.506 ... 82.714, drop 82.79; sun side 144.311 / away 101.485,
       #           ratio 1.42
+      #   morning 198.566 ... 144.571, drop 54.00
+      #   dusk    105.629 ... 57.699, drop 47.93
+      #
+      # With the RGBA8 sqrt(v/3) table the same captures read:
+      #
+      #   dawn    165.432 ... 82.926, drop 82.51; sun side 144.261 / away 101.361
       #   morning 198.471 ... 144.571, drop 53.90
       #   dusk    104.028 ... 56.627, drop 47.40
+      #
+      # The pixels moved, and the SHAPE of the move is the encoding coming out:
+      # dusk's horizon band moved 1.60 counts and dawn's 0.07, because dusk is the
+      # dim hour and a sqrt transfer over 255 levels is coarsest where the sky is
+      # darkest. Nothing moved by more than two counts and every claim this gate
+      # makes is unchanged. `task screenshots` reported ZERO changed images, which
+      # is not evidence the dome held still: -sky lut is in no screenshot set, so
+      # this gate is the only place the dome's pixels are compared at all.
       #
       # Every band of all three is darker than the one below it, and the worst
       # rise in the 33 steps is exactly 0.000 -- the top three bands of each hour
       # are bit-identical, because the gradient saturates above an elevation of
-      # 0.75 and the dome is then one colour. The floors in lutskycheck are set
-      # from these and carry the readings beside them.
+      # 0.75 and the dome is then one colour. That is still true of the wide
+      # table: 82.714 and 144.571 and 57.699 each repeat three times. The floors
+      # in lutskycheck are set from these and carry the readings beside them.
       #
       # Three hours -- sunrise at 0.25, mid-morning at 0.35, the blue hour at 0.78
       # -- and three claims:
@@ -1877,23 +1896,65 @@ tasks:
       # bracket (renderer.PassSky), so the dome-to-dome comparison is bracket to
       # bracket and only the whole-sky one is a frame total.
       #
-      # COST, same machine and date, three interleaved trials per run and three runs
-      # of the whole comparison. Means of each run's trials, in milliseconds:
+      # COST, same machine and date, taken with the R16G16B16A16_SFLOAT table.
+      # Three interleaved trials per run and three independent runs of the whole
+      # comparison. Means of each run's trials, in milliseconds:
       #
       #   config     sky pass                  frame
-      #   none       0.0001  0.0001  0.0001    0.0504  0.0505  0.0494
-      #   lut        0.0082  0.0082  0.0083    0.0557  0.0554  0.0559
-      #   xskydome   0.0099  0.0101  0.0101    0.0571  0.0575  0.0575
-      #   xsky       0.0091  0.0090  0.0091    0.6235  0.6218  0.6218
+      #   none       0.0001  0.0001  0.0001    0.0490  0.0500  0.0494
+      #   lut        0.0080  0.0081  0.0081    0.0549  0.0554  0.0555
+      #   xskydome   0.0098  0.0102  0.0100    0.0563  0.0577  0.0571
+      #   xsky       0.0089  0.0090  0.0090    0.6162  0.6250  0.6183
       #
-      # The LUT dome adds 10.5% / 9.6% / 13.0% to the frame over the empty slot
-      # (budget 20%), is 82.6% / 81.5% / 82.1% of x/sky's dome pass, and its whole
+      # The LUT dome adds 12.0% / 10.8% / 12.3% to the frame over the empty slot
+      # (budget 20%), is 81.6% / 79.4% / 81.0% of x/sky's dome pass, and its whole
       # frame is 8.9% / 8.9% / 9.0% of x/sky's. Nearly all of that last figure is
-      # the cloud march, 0.485 ms, which a nil CloudsFrag does not pay at all.
+      # the cloud march, 0.4836-0.4972 ms, which a nil CloudsFrag does not pay.
       #
-      # Across all nine trials the sky-pass samples are 0.0081-0.0085 for lut and
-      # 0.0099-0.0102 for xskydome -- non-overlapping ranges, which is what makes
-      # 82% a reading rather than noise at eight microseconds.
+      # Read the dome-to-dome comparison PAIRED, within each interleaved trial,
+      # because that is what the interleaving is for and because the unpaired
+      # ranges overlap: 0.0077-0.0099 for lut against 0.0095-0.0112 for xskydome
+      # across every trial on record. Within a trial, lut's pass is cheaper in
+      # TWELVE OF TWELVE trials by 0.0013 to 0.0028 ms, median 0.0019 -- and the
+      # empty slot's own frame drifted 13.5% over those same twelve, which is why
+      # a range comparison across runs would not have survived.
+      #
+      # Re-running the gate twice right after the three runs above gave lut 0.0092
+      # and 0.0095 against xskydome 0.0111 both times, empty slot 0.0525 and 0.0572:
+      # everything up together, control included. Both passed, at 14.0%/8.7% over
+      # the empty slot, 82.6%/85.6% of x/sky's dome, 9.5%/9.9% of its frame.
+      #
+      # So the ratios hold within a BAND, not to the digit: over five readings the
+      # dome share runs 79.4% to 85.6% and the over-empty figure 8.7% to 14.0%. The
+      # three-run table above is a sample of that band, not its edges, and the
+      # budgets below are sized for the band. Quote the band, not a single figure.
+      #
+      # MOVING TO THE HALF-FLOAT TABLE DID NOT MEASURABLY CHANGE THIS, and no
+      # direction is claimed. The eight-bit build read 0.0081-0.0085 for the lut
+      # sky pass over its own nine trials against 0.0077-0.0084 here: overlapping
+      # ranges. The reason to call that a null result rather than a measurement too
+      # crude to see a real change is the CONTROL -- xskydome is untouched code,
+      # measured in the same interleaved trials, and its range went from
+      # 0.0099-0.0102 to 0.0095-0.0105, three times wider. Whatever widened that
+      # widened the lut figure too. For the record, the change removed two vec3
+      # multiplies from the fragment and the mip chain from the upload, and doubled
+      # the table to 512 KB; the pre-move means were
+      #
+      #   none 0.0504 0.0505 0.0494 frame, lut sky 0.0082 0.0082 0.0083,
+      #   xskydome sky 0.0099 0.0101 0.0101, over-empty 10.5% 9.6% 13.0%,
+      #   dome share 82.6% 81.5% 82.1%, whole share 8.9% 8.9% 9.0%
+      #
+      # DISCARDED RUN, recorded because averaging it in would have produced a
+      # plausible false number: the first attempt at run three read a 0.1643 ms lut
+      # frame against 0.0468 and 0.0568 in its own other trials (251% spread), with
+      # xsky's cloud pass swinging 0.3864/0.7775/0.5290 and the empty slot's frame
+      # dropping 23%. Another application (universebuild.exe, 52% of the GPU's 3D
+      # engine) had started 13 seconds before that run finished. EVERY
+      # configuration moved, including ones this package cannot touch, which is
+      # what identifies contention rather than a result. Re-taken once the card was
+      # quiet -- verified by GPU engine utilisation, not by process name, because a
+      # process-name poll does not see another game -- and the replacement is the
+      # tightest of the three, frame spreads 2.0% to 3.2%.
       #
       # The camera faces the sun for the cost run, which is x/sky's worst case and
       # deliberately so: its disc is on screen, so the shaft pass runs at full
@@ -1901,6 +1962,52 @@ tasks:
       # frame totals are what a game looking at the sun would actually pay, and
       # both are reported.
       - go run ./x/sky/lut/internal/lutskycheck -cost -out .task/xskylut
+
+  widetex:
+    desc: "A half-float texture uploaded from the CPU keeps its values where an 8-bit one cannot (needs a GPU)"
+    env:
+      GLYPHENGINE_BACKGROUND: "1"
+      GLYPHENGINE_FIXED_FRAME_TIME: "16.667ms"
+      GLYPHENGINE_VALIDATION: "1"
+    cmds:
+      # Needs a GPU, so it sits with smoke and validate rather than in `task ci`.
+      # renderer/widetexture_test.go covers the same constructors with no device
+      # behind them: which VkFormat reached the driver and which bytes reached the
+      # staging map. What it cannot cover is what a SHADER reads back, and that is
+      # the whole claim -- a texture created with the right format and sampled
+      # through a view that disagreed with it would pass every unit check.
+      #
+      # A 256-entry ramp over 0.001 to 2.0, uploaded three ways and compared
+      # against the R32_SFLOAT copy of itself through one fullscreen pass. The
+      # frame is 8-bit, so the probe writes the relative error at three gains and
+      # the reader takes the finest unsaturated channel -- which resolves down to
+      # 4e-6, against the 1/255 (0.4 percent) a single channel would have given.
+      #
+      # NUMBERS, 512x256, frame 12, MSAA off, validation on, RX 7900 XTX,
+      # 2026-10-03. Worst relative error over the ramp, read through the sampler:
+      #
+      #   above      RGBA16F     RGBA8 sqrt(v/3)
+      #   0.001      0.000482    0.168627
+      #   0.01       0.000482    0.058431
+      #   0.1        0.000482    0.018431
+      #   1.0        0.000380    0.005882
+      #   anywhere   0.000482    0.168627
+      #
+      # 350x apart, and the shape is the point: the half-float column is flat
+      # because that format's error is relative, and the eight-bit one grows
+      # 29-fold from the top of the range to the bottom (0.005882 to 0.168627)
+      # because a transfer's is not. 0.000482 is 2^-11 (0.000488) minus what the
+      # ramp's values happen to land on, so it is the format and nothing else --
+      # the same figure the unit tests measure on the CPU, which is what says the
+      # sampler and the readout add nothing.
+      #
+      # PROVED: the break is re-runnable and needs no SDK. `-eightbit` makes the
+      # same assertion about the 8-bit control instead of the half-float texture,
+      # which is "route it through the 8-bit constructor" from outside the engine.
+      # It reports "FAIL RGBA8 sqrt(v/3): worst relative error 0.168627 at
+      # 0.0013880252, want under 0.001" and then exits 0, because a break that
+      # exited non-zero would look like a broken check.
+      - go run ./cmd/widetexcheck
 
   waterblend:
     desc: "Check that a blended effect in front of the water is not painted over by it"
