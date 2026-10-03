@@ -70,6 +70,26 @@ type Renderer struct {
 	instancedPipelineLayout            core1_0.PipelineLayout
 	instancedDoubleSidedPipeline       core1_0.Pipeline
 	instancedDoubleSidedPipelineLayout core1_0.PipelineLayout
+	// depthPrepassMode is WithDepthPrepass. Anything but DepthPrepassOff
+	// decides that the frame graph declares the prepass node, that the scene
+	// pass loads depth instead of clearing it, and that the five pipelines
+	// below exist -- a renderer left Off creates none of them and records
+	// exactly the stream it always did.
+	//
+	// Off versus On-or-Auto is a construction-time decision because it changes
+	// the compiled graph and the pipeline set. On versus Auto is a per-frame
+	// one, taken in depthPrepassPipelines.decide.
+	depthPrepassMode DepthPrepassMode
+	depthPrepass     depthPrepassPipelines
+	// depthComplexity is the estimate's coverage grid, owned here so the
+	// per-frame estimate allocates nothing. 4.5 KiB; see depthComplexityMask.
+	depthComplexity depthComplexityMask
+	// The equal-compare variants' own layouts, retained only so they can be
+	// given back: createLitVariantPipeline builds one per call, the same
+	// reason the lit and instanced pairs each carry theirs.
+	depthEqualLayout          core1_0.PipelineLayout
+	depthEqualMaterialLayout  core1_0.PipelineLayout
+	depthEqualInstancedLayout core1_0.PipelineLayout
 	// instanceSets is every set the renderer has handed out that has not been
 	// explicitly given back, so whatever remains can still be freed at
 	// teardown. DestroyInstanceSet removes an entry once its own deferred free
@@ -550,6 +570,36 @@ func WithUIGlowLayer() Option {
 	return func(r *Renderer) { r.uiGlowRequested = true }
 }
 
+// WithDepthPrepass renders depth only for the qualifying opaque draws before the
+// scene pass, and has the scene pass re-test them with a compare of EQUAL
+// instead of Greater, so a fragment hidden behind another never reaches the lit
+// or material fragment shader.
+//
+// DepthPrepassOff is the default and is free: no shader module, no pipeline, no
+// frame-graph node, and a frame records exactly the stream it records without
+// the option. DepthPrepassOn runs the prepass every frame. DepthPrepassAuto runs
+// it on the frames whose estimated depth complexity says it will pay.
+// Capabilities.DepthPrepass reports the mode in effect, and RenderStats carries
+// the estimate and the decision per frame.
+//
+// It is an option rather than a setter because the pipelines are built at
+// construction and the frame graph is compiled around the node once -- the same
+// reason WithUIGlowLayer is one. Off cannot be reached from On or Auto at
+// runtime, and does not need to be: Auto already is the frame-by-frame answer.
+//
+// On is a bet, not an improvement. A prepass removes hidden fragments and pays
+// for a second geometry submission over everything that qualifies, so whether it
+// wins depends entirely on how much of the scene is hidden -- which is what Auto
+// exists to decide, and why the unconditional option was removed once already.
+// What qualifies is in depthPrepassQualifies: static non-skinned,
+// non-double-sided meshes and plain instance sets, which excludes grass, LOD
+// fades, impostors and anything else a fragment shader can discard. ADR 0013 is
+// the decision, docs/agents/game-loop.md the measurements, and
+// examples/28-overdraw with `task bench -- -scene overdraw` how to repeat them.
+func WithDepthPrepass(mode DepthPrepassMode) Option {
+	return func(r *Renderer) { r.depthPrepassMode = mode }
+}
+
 // New initializes the full Vulkan rendering stack: instance, surface, device,
 // swapchain, pipelines, rendering bindings, command buffers, and sync
 // objects. Call Destroy on the result.
@@ -875,6 +925,16 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 		r.deviceDriver.DestroyPipelineLayout(r.instancedDoubleSidedPipelineLayout, nil)
 	})
 
+	// Only when asked for. Everything this creates -- two depth-only pipelines,
+	// three equal-compare variants and their layouts -- exists solely to serve
+	// WithDepthPrepass, so a renderer left Off pays nothing, not even a shader
+	// module. See depthprepass.go.
+	if r.depthPrepassMode != DepthPrepassOff {
+		if err = r.createDepthPrepassPipelines(); err != nil {
+			return nil, fmt.Errorf("renderer: create depth prepass pipelines: %w", err)
+		}
+	}
+
 	// Sets are created by the game after New returns, so this frees whatever
 	// the list holds at teardown rather than a fixed set. AGENTS.md rule 10:
 	// the teardown goes next to the thing that allocates. Only what the game
@@ -1114,13 +1174,13 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 		r.onInit(func() { r.uiLayer.destroy(r.deviceDriver) })
 	}
 
-	r.frameGraph, err = newFrameGraph(r.msaaSamples, r.depth.format, r.sc.imageFormat, len(r.sc.imageViews))
+	r.frameGraph, err = newFrameGraph(r.msaaSamples, r.depth.format, r.sc.imageFormat, len(r.sc.imageViews), r.depthPrepassMode != DepthPrepassOff)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: build frame graph: %w", err)
 	}
 	r.frameGraph.sizeScratch(&r.cmdScratch)
 	r.cmdScratch.dynamic = khr_dynamic_rendering.CreateExtensionDriverFromCoreDriver(r.deviceDriver)
-	r.waterFormats = r.frameGraph.pipelineFormats(graphWater)
+	r.waterFormats = r.frameGraph.engineFormats(graphWater)
 
 	r.waterPipeline, err = createWaterPipeline(r.deviceDriver, r.shaders, r.waterFormats, r.litPipelineLayout, r.sc.extent, r.msaaSamples)
 	if err != nil {
@@ -1149,9 +1209,9 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	// Step 9: Tail pipelines, targets and command buffers
 
 	// Pipelines use attachment formats from the compiled graph.
-	r.bloomDownFormats = r.frameGraph.pipelineFormats(graphBloom)
+	r.bloomDownFormats = r.frameGraph.engineFormats(graphBloom)
 
-	r.bloomUpFormats = r.frameGraph.pipelineFormats(graphBloom + bloomLevels)
+	r.bloomUpFormats = r.frameGraph.engineFormats(graphBloom + bloomLevels)
 
 	for _, p := range []struct {
 		dst      *core1_0.Pipeline
@@ -1185,7 +1245,7 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	// conditional on CloudsFrag would hand that dome a set with no palette in it.
 	// The cost of leaving it unconditional is the memory with an empty slot:
 	// 2 x half of 1280x720 x RGBA16F, 3.7 MB, and no GPU work at all.
-	r.cloudFormats = r.frameGraph.pipelineFormats(graphBloom)
+	r.cloudFormats = r.frameGraph.engineFormats(graphBloom)
 
 	r.clouds, err = createCloudTargets(r.instanceDriver, r.deviceDriver, r.physicalDevice,
 		r.descriptorPool, r.descriptorSetLayout, r.sc.extent, cloudBufferCount,
@@ -1209,7 +1269,7 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 		r.onInit(func() { r.deviceDriver.DestroyPipeline(r.cloudPipeline, nil) })
 	}
 
-	r.tonemapFormats = r.frameGraph.pipelineFormats(graphTonemap)
+	r.tonemapFormats = r.frameGraph.engineFormats(graphTonemap)
 
 	r.tonemapPipeline, err = createResolvePipeline(r.deviceDriver, r.shaders, r.shaders.TonemapFrag, "Tonemap",
 		r.tonemapFormats, r.tonemapPipelineLayout, r.sc.extent, false)
@@ -1257,7 +1317,7 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	// tonemap UI pipelines use the swapchain format. Both use one sample, but
 	// their attachment formats must match the destination at draw time.
 	if r.uiGlowRequested {
-		r.uiLayerFormats = r.frameGraph.pipelineFormats(graphUILayer)
+		r.uiLayerFormats = r.frameGraph.engineFormats(graphUILayer)
 
 		r.uiLayerUIPipeline, err = createUIPipeline(r.deviceDriver, r.shaders, r.uiLayerFormats, r.pipelineLayout, r.sc.extent, core1_0.Samples1, true)
 		if err != nil {
@@ -2083,10 +2143,22 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 	// recorded into exists and has been reset.
 	r.beginUploadBatch()
 	recordStart := time.Now()
+	// Inside the recordStart bracket on purpose: the estimate is CPU work this
+	// option added, and cpu_record is where the second geometry submission's
+	// CPU price already lands, so the two costs of the prepass are read from one
+	// number. Before the recorder because the recorder needs the answer -- the
+	// prepass node, the main pass's pipeline choice and the instanced
+	// recorder's all read depthPrepass.active, and they are handed a copy of
+	// the struct below.
+	//
+	// Skipped entirely when the mode is Off: no estimate, no decision, no cost.
+	if r.depthPrepassMode != DepthPrepassOff {
+		r.depthPrepass.decide(depthComplexityEstimate(draws, &lighting.VP, &r.depthComplexity))
+	}
 	err = recordCommandBuffer(r.deviceDriver, cmdBuf, r.sceneTargets[imageIndex], r.pipeline, r.litDoubleSidedPipeline, r.translucentPipeline, r.translucentDoubleSidedPipeline, r.skinnedTranslucentPipeline, r.instancedPipeline, r.instancedDoubleSidedPipeline, r.overlayPipeline, r.skyPipeline, r.skyVolumetricPipeline, r.starsPipeline, r.celestialPipeline, r.uiPipeline, r.msdfPipeline, r.skinnedPipeline, r.grassPipeline, r.waterPipeline, r.godRayPipeline, r.frameGraph, imageIndex, r.sceneColor,
 		func(cb core1_0.CommandBuffer) error { return r.recordClouds(cb, lighting, f) },
 		r.cloudSetFor(f),
-		r.bloomFor(imageIndex), r.tonemapFor(imageIndex), r.particlePipeline, r.terrainPipeline, r.materialPipelines(), &r.stats, r.pipelineLayout, r.skyPipelineLayout, r.litPipelineLayout, r.skinnedPipelineLayout, r.terrainPipelineLayout, r.sc.extent, draws, overlays, celestials, uiOverlays, msdfOverlays, lighting, split, r.fallbackTexture, r.milkyWayTex, r.shadow, r.grass, r.grassLOD, r.grassImpostor, r.grassImpostorPipeline, r.particles, f, r.msaa != nil, r.gpuTimer, r.trace, &r.cmdScratch)
+		r.bloomFor(imageIndex), r.tonemapFor(imageIndex), r.particlePipeline, r.terrainPipeline, r.materialPipelines(), r.depthPrepass, &r.stats, r.pipelineLayout, r.skyPipelineLayout, r.litPipelineLayout, r.skinnedPipelineLayout, r.terrainPipelineLayout, r.sc.extent, draws, overlays, celestials, uiOverlays, msdfOverlays, lighting, split, r.fallbackTexture, r.milkyWayTex, r.shadow, r.grass, r.grassLOD, r.grassImpostor, r.grassImpostorPipeline, r.particles, f, r.msaa != nil, r.gpuTimer, r.trace, &r.cmdScratch)
 	if err != nil {
 		r.trace.Str("outcome", "record-error")
 		return err

@@ -53,13 +53,21 @@ api:
   - renderer.Capabilities
   - renderer.Renderer.Capabilities
   - renderer.ErrCapabilityUnavailable
+  - glyphengine.WithDepthPrepass
+  - renderer.WithDepthPrepass
+  - renderer.DepthPrepassMode
+  - renderer.DepthPrepassThreshold
+  - renderer.Renderer.SetDepthPrepassDebug
+  - renderer.DepthPrepassDebug
+  - renderer.RenderStats.PrepassEstimate
+  - renderer.RenderStats.PrepassActive
 example: examples/02-cube
 run: task example:02-cube
 requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-10-03 # the global block named as the game's, with AppPassDesc.Params as the per-pass alternative (#170); Engine.Renderer listed (#169); the hierarchical-Z follow-up measured and removed (#154); the draw list's order and the rejected opaque policy; releasing mid-frame (#153); the capabilities report and who owns which fallback (#160); the depth prepass measured and removed by its own rule (#158); the sky slot, the one ShaderSet stage group with no embedded fallback (#161 step 4)
+verified: 2026-10-03 # the depth prepass returned as DepthPrepassAuto, gated on an online depth-complexity estimate (#158, ADR 0013) -- threshold 2.02 measured by the sweep at both resolutions, rule passed on all six clauses, and C/pixels refuted; the global block named as the game's, with AppPassDesc.Params as the per-pass alternative (#170); Engine.Renderer listed (#169); the hierarchical-Z follow-up measured and removed (#154); the draw list's order and the rejected opaque policy; releasing mid-frame (#153); the capabilities report and who owns which fallback (#160); the depth prepass measured and removed by its own rule (#158); the sky slot, the one ShaderSet stage group with no embedded fallback (#161 step 4)
 ---
 
 # Run a game loop with Engine and Game
@@ -957,6 +965,10 @@ the three had, and the estimate is the part nobody has built. This scene compute
 that number offline from projected bounds; doing it per frame, cheaply enough that
 the control pays nothing, is the open problem.
 
+That is the paragraph the section after next acts on. ADR 0013 takes the
+decision; the record above stays exactly as it is, because it is the evidence the
+decision rests on.
+
 #### To rebuild it
 
 The option was `WithDepthPrepass(bool)` on both `renderer` and `glyphengine`,
@@ -1025,6 +1037,243 @@ kept, the equal compare kept, and its draws withheld — every prepassed surface
 then fails the test against a cleared buffer, which fails loudly if the comparator
 is blind, if the depth tested is not the depth written, or if the main pass is
 still comparing `Greater`.
+
+### The prepass came back, gated on an online estimate
+
+The record above closes by naming the one shape none of the three rejected
+mechanisms had: a gate cheap enough that a scene with nothing hidden pays nothing,
+because the mechanism never runs there. That is what came back. ADR 0013 is the
+decision, and it rejects the visibility buffer of #155 in the same breath.
+
+```go
+glyph.WithDepthPrepass(renderer.DepthPrepassAuto)
+```
+
+Three modes. `DepthPrepassOff` is the default and is still free — no shader
+module, no pipeline, no frame-graph node, and the same driver calls with the same
+arguments a frame records without the option, which `goldenStreamHash` in
+`renderer` pins. `DepthPrepassOn` runs the prepass every frame, which is the
+mechanism the record above measured and is kept for measuring.
+`DepthPrepassAuto` decides per frame. `Capabilities.DepthPrepass` reports the
+mode; `RenderStats.PrepassEstimate`, `PrepassCovered` and `PrepassActive` report
+the number the decision was taken on and the decision.
+
+The mechanism itself is unchanged from the archive, including its four traps —
+read "To rebuild it" above before touching any of it. What is new is the estimate,
+the threshold and the per-frame decision.
+
+#### The estimate
+
+Per frame, over exactly the draws `depthPrepassQualifies` accepts: each draw's
+object-space bounding box projected through its `MVP`, the NDC bounding rectangle
+of the eight corners clipped to the viewport, the grid cells that rectangle covers
+counted, and the total divided by the number of cells at least one rectangle
+reached. That is the mean screen-space depth complexity of the geometry the
+prepass would touch, and it is the SAME QUANTITY `examples/28-overdraw` computes
+offline — the engine's grid is 192 cells per axis against that example's 180, and
+`28-overdraw -probe` measures the two 0.9 % apart on the grazing arm and 0.07 %
+apart on the control. The union is a bitmask, 192 rows of three `uint64`, owned by
+the renderer; the numerator is the product of two cell spans, so no per-cell work
+happens for it. 4.5 KiB, zero allocations, inside `cpu_record`.
+
+Four things about it that cost more to rediscover than to read.
+
+**Dividing by the viewport does not work, and it is the obvious thing to try.**
+Summed projected area over the VIEWPORT's area needs no grid at all and is O(1)
+per draw. Measured on the two arms this whole investigation is built around, with
+`28-overdraw -probe`: the overlap arm reads **0.742** and the control **0.576**.
+Those are the arm where the prepass saves 46 % of the frame at 4K and the arm
+where it costs 0.555 ms for nothing, and that normalisation puts them 29 % apart.
+The covered-area normalisation puts them 3.2x apart. The reason is that a grazing
+camera's field covers only 23 % of the screen, so dividing by the whole viewport
+divides out most of the signal. No threshold placed in a 29 % gap would survive a
+different scene.
+
+**A bounding SPHERE is the wrong bound for an area.** A mesh carried only a
+sphere before this change; `Mesh.BoundMin`/`BoundMax` are new, from the same
+single walk over the vertices. A 4 m square patch with 1.5 m of relief has a
+bounding sphere of radius 2.93 m whose box is 5.86 m on a side, and substituting
+it in the estimate reads **2.393 against 1.029** on the overhead camera of the
+unit fixture and **13.196 against 3.571** on the grazing one. Frustum culling does
+not care about a loose bound; a number that decides whether a pass runs does.
+
+**A bound that has left the frame contributes nothing.** The engine drops it; that
+example's `overlapRatio` clamps it onto an edge cell, which is why
+`onScreenRatio` exists beside it. The two differ by 5.8 % on the grazing arm
+(3.279 against 3.089) and not at all on the control. `overlapRatio` keeps its
+clamping because its number is the one every record on this page quotes and the
+one the arm floors are set against; `onScreenRatio` is what the engine is
+compared to.
+
+**What it does not see.** Hidden work inside one draw — a self-overlapping mesh
+reads 1.0, and a prepass would in fact reject the fragments it hides from itself.
+An instance set contributes its whole-set bound once, because a set keeps one
+sphere over every placement, so a thousand trees filling the screen read as one
+screenful; that under-counts, Auto declines, and the conservative direction is the
+right one to be wrong in. And the ratio says how STACKED the geometry is, not how
+much of it there is, so a frame of sky with one small self-occluding cluster reads
+as high as a frame full of the same cluster — `PrepassCovered` is reported beside
+the ratio so a caller can tell those apart.
+
+#### The threshold, and what it is calibrated against
+
+`renderer.DepthPrepassThreshold()` returns both constants. Auto runs the prepass
+when the estimate reaches the threshold and stops only when it falls a whole band
+BELOW it, so a scene hovering there keeps the mode it had. Without the band the
+mode would alternate, and because the mode decides which pipelines the main pass
+binds for every qualifying draw, alternating costs a pipeline switch per draw and
+makes two consecutive frames incomparable — worse than either answer. The stored
+decision is the only state Auto carries, it starts false, and the estimate is
+arithmetic over the draw list, so two runs of the same build over the same scene
+take the same decisions in the same frames. `task determinism` gates that with an
+Auto arm.
+
+The threshold is **2.02** and the band **0.18**, and both are measured.
+`task bench -- -scene prepasssweep` is the measurement: nine camera placements on
+the grazing layout between estimate 1.15 and 3.13, prepass off and on interleaved
+inside each cell, three trials, every sample kept, 200 frames under
+`GLYPHENGINE_FIXED_FRAME_TIME=16.667ms`, nothing else on the GPU, AMD Radeon
+RX 7900 XTX. The cells were chosen with `28-overdraw -probe`, which computes a
+cell's depth complexity from the patch bounds and the camera without opening a
+window, so picking a ladder that spans the range cost no GPU time at all.
+
+`gpu_total`, in milliseconds, at **1280x720**:
+
+| estimate | covered | prepass off | prepass on | net | scatter off/on | per-trial deltas |
+|---:|---:|---|---|---:|---|---|
+| 3.117 | 0.222 | 2.052 | 1.834 | **-0.218** | 0.127/0.210 | -0.218/-0.147/-0.289 |
+| 2.805 | 0.285 | 2.596 | 2.012 | **-0.584** | 0.096/0.100 | -0.641/-0.496/-0.614 |
+| 2.395 | 0.465 | 3.192 | 2.832 | **-0.360** | 0.223/0.100 | -0.513/-0.264/-0.303 |
+| 2.180 | 0.541 | 4.238 | 3.779 | **-0.459** | 0.152/0.095 | -0.397/-0.489/-0.492 |
+| 1.916 | 0.646 | 4.969 | 4.839 | **-0.130** | 0.314/0.153 | +0.043/-0.292/-0.141 |
+| 1.706 | 0.771 | 6.054 | 6.331 | **+0.277** | 0.331/0.185 | +0.326/+0.191/+0.314 |
+| 1.519 | 0.982 | 7.180 | 7.634 | **+0.454** | 0.524/0.414 | +0.388/+0.498/+0.476 |
+| 1.362 | 0.948 | 7.775 | 8.408 | **+0.633** | 0.637/0.325 | +0.300/+0.645/+0.954 |
+| 1.154 | 0.456 | 6.002 | 7.531 | **+1.529** | 0.544/0.398 | +1.748/+1.395/+1.444 |
+
+and at **3840x2160**:
+
+| estimate | covered | prepass off | prepass on | net | scatter off/on | per-trial deltas |
+|---:|---:|---|---|---:|---|---|
+| 3.129 | 0.221 | 7.969 | 4.271 | **-3.698** | 0.475/0.303 | -3.489/-3.769/-3.837 |
+| 2.809 | 0.285 | 8.856 | 5.212 | **-3.644** | 0.414/0.330 | -3.322/-3.545/-4.066 |
+| 2.398 | 0.465 | 9.676 | 8.660 | **-1.017** | 0.223/0.191 | -1.154/-1.019/-0.877 |
+| 2.184 | 0.541 | 9.980 | 9.477 | **-0.502** | 0.210/0.144 | -0.699/-0.358/-0.450 |
+| 1.922 | 0.645 | 10.399 | 9.953 | **-0.446** | 0.165/0.125 | -0.466/-0.373/-0.498 |
+| 1.710 | 0.769 | 11.570 | 10.336 | **-1.233** | 0.168/0.195 | -1.169/-1.168/-1.363 |
+| 1.518 | 0.980 | 11.943 | 10.780 | **-1.163** | 0.304/0.150 | -1.257/-1.124/-1.107 |
+| 1.359 | 0.943 | 11.556 | 11.028 | **-0.528** | 0.227/0.164 | -0.510/-0.619/-0.455 |
+| 1.158 | 0.450 | 9.487 | 9.630 | **+0.143** | 0.592/0.284 | +0.201/-0.017/+0.245 |
+
+**The crossings: estimate 1.849 at 720p and 1.201 at 3840x2160.** The threshold is
+the higher one plus the sweep's scatter at its bracketing cell -- 0.331 ms against
+a -1.938 ms slope per unit of estimate is 0.171 of estimate -- so 2.02. The band
+is one scatter, and one scatter is 0.171 of estimate at 720p and 0.177 at 4K,
+which is what makes a single 0.18 honest; it puts the off edge at 1.84, within a
+thousandth of the 720p break-even.
+
+**One threshold and not one per resolution, because the obvious model is wrong.**
+The saving is per fragment and the cost is a second geometry submission, so the
+excess over 1.0 ought to scale as `C/pixels`. The two crossings give
+C = 782,438 and C = 1,667,174, a factor of 2.13. The 4K-derived C predicts a 720p
+crossing of 2.809 against 1.849 measured, which is 5.6x that cell's scatter, and
+the geometric-mean compromise still misses 720p by 2.3x. Only the 720p-derived C
+predicts 4K correctly (1.094 against 1.201, 0.6x the scatter), and one direction
+is not a fit.
+
+The reason is in the coverage column, and it is the thing to know before anyone
+tries again: the hidden fragments are `covered x pixels x (complexity - 1)`, not
+`pixels x (complexity - 1)`. On this ladder coverage runs 0.22 to 0.98, because
+raising the camera both flattens the stacking and spreads the field over more of
+the frame. That is why the 4K nets are **not monotone** in the estimate -- the
+saving grows again at 1.710 and 1.518, where coverage is 0.77 and 0.98, after
+shrinking at 1.922 where it is 0.65. At 4K every cell above 1.2 pays, so no
+threshold on the estimate alone separates "pays" from "does not pay" there.
+`RenderStats.PrepassCovered` is reported for exactly that reason: a second gate on
+coverage is the measurable next step, and it is not guessed at here.
+
+**What one threshold costs.** The 4K break-even is 1.201 and the threshold is
+2.02, so between them Auto declines where the prepass would have won: the measured
+cells at 1.359, 1.518, 1.710 and 1.922 forgo 0.528, 1.163, 1.233 and 0.446 ms, up
+to 10.6 % of an 11.6 ms frame. That is the price of a threshold that cannot be
+wrong at 720p. The rule below has no clause about it, which is why it is written
+here and in ADR 0013 rather than left to be noticed.
+
+**What the estimate costs.** 94 ns per qualifying draw: 96 us over this field's
+1024 draws in the control's shape and 328 us in a deliberately pessimistic one
+where every bound spans most of the grid
+(`BenchmarkDepthComplexityEstimate`). It is inside clause two's scatter, but
+`cpu_record` rose on all six paired control trials, so it is a real cost and not
+noise -- the bench cannot separate it from the second submission's CPU price,
+which is why there is a benchmark.
+
+#### The rule Auto is judged by, written before the run
+
+> On `examples/28-overdraw` at 1280x720 and 3840x2160: `Auto` on the overlap arm
+> recovers at least 90 % of what `On` recovers in `gpu_total`; `Auto` on the
+> control arm changes `gpu_total`, `cpu_record` and `cpu_total` by less than that
+> cell's within-mode scatter, paired by trial; the estimate reads above the
+> threshold on every overlap frame and below it on every control frame;
+> `task determinism` captures with `Auto` on are byte-identical; the prepass-on
+> and prepass-off frames of the equivalence gate are identical to the pixel on
+> every example it covers; and the validation and synchronisation layers are
+> silent. Otherwise it is removed again and the numbers recorded.
+
+`task bench -- -scene overdraw` runs all six cells — overlap and control, prepass
+off, on and auto — three trials each, interleaved inside an arm so the machine's
+own drift cannot decide which way it goes, and
+`-extra "-width 3840 -height 2160"` is the other half of any serious reading.
+`task prepass` is the pixel half: the six examples the equivalence gate covers,
+plus an Auto arm on both of `28-overdraw`'s own cameras at the full 1024 patches
+— the count is load-bearing there, because the overlap arm measures 3.28 at 1024
+and 2.56 at 256, and a 256-patch field would have Auto decide no on both arms and
+compare the prepass-off path to itself twice.
+
+And the bar is still not 7.06 ms. Spawning the same field nearest row first takes
+the opaque pass to 5.95 ms at 3840x2160 with no engine change at all
+(`-spawn fronttoback`), and anything here has to beat 5.95. Auto's overlap arm
+comes to 4.274 ms of `gpu_total` with a 2.836 ms opaque pass, so it does.
+
+#### The rule's verdict: ship
+
+`gpu_total` on the six cells, three trials each, interleaved off/on/auto inside
+each arm, paired by trial:
+
+| resolution | arm | off | On | Auto | On recovers | Auto recovers |
+|---|---|---|---|---|---:|---:|
+| 1280x720 | overlap | 2.116 | 1.888 | 1.900 | +0.228 | **+0.216 (94.7 %)** |
+| 1280x720 | control | 7.375 | 8.804 | 7.160 | **-1.431** | **+0.215** |
+| 3840x2160 | overlap | 7.578 | 4.095 | 4.274 | +3.483 | **+3.304 (94.9 %)** |
+| 3840x2160 | control | 9.827 | 10.186 | 9.739 | **-0.360** | **+0.088** |
+
+Clause by clause:
+
+1. **Passes.** Auto recovers 94.7 % and 94.9 % of what On recovers, against a 90 %
+   bar, and the paired deltas agree trial for trial.
+2. **Passes, and this is the clause three mechanisms died on.** Auto moves the
+   control's `gpu_total` by -0.215 ms against a 0.689 ms scatter at 720p and
+   -0.088 against 0.311 at 4K; `cpu_total` by +0.093 against 0.111 and -0.013
+   against 0.066. The unconditional option moves the same arm by **+1.431 ms** and
+   **+0.360 ms**. `gpu_prepass` on the Auto control arm reads **0.006 ms**, which
+   is the declared-but-inactive node's depth clear and the whole of what Auto
+   charges a scene with nothing hidden.
+3. **Passes exactly.** 199 frames sampled per run with `PrepassEstimate` min equal
+   to max in every one: overlap 3.117 and 3.129, both above 2.02, active on
+   199/199 frames; control 1.022 and 1.014, both below the 1.84 off edge, active on
+   0/199. No frame toggled.
+4. **Passes.** `task determinism`: `08-grass -prepass on` and
+   `24-custom-passes -prepass on` capture pairs identical, `28-overdraw -prepass
+   auto` identical with its environment hash and draw sequence identical too, and
+   `19-instanced -prepass on`'s draw sequence identical. The gate's own controls
+   fired, so the comparator is proven rather than assumed.
+5. **Passes.** `task prepass`: all six examples byte-identical off and on, at 1, 6,
+   2, 1, 4 and 5 prepass draws -- the same counts the removal record above
+   reports, which is independent evidence the restored predicate reaches the same
+   set. The withheld-draws control moved pixels on all six. Both Auto arms of
+   `28-overdraw` identical to prepass-off.
+6. **Passes.** `task validate`, 102 runs including all eight prepass arms, and
+   `task syncvalidate`, both silent. `task screenshots` changes no image, which is
+   what says `Off` is still the default and still free.
 
 ## Headless and CI
 

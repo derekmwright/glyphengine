@@ -56,7 +56,10 @@ type frameGraph struct {
 	// cascade passes, and -1 until extendAppGraph appends it. Only a graph an
 	// owning Renderer extended has one; Renderer.New compiles a plan before any
 	// application node exists.
-	shadowCascades                         int
+	shadowCascades int
+	// prepass is the depth prepass declaration's node index, or -1 when the
+	// option is off -- which is every graph by default. See insertDepthPrepass.
+	prepass                                int
 	depthNode                              int
 	plan                                   *framegraph.Plan
 	nodes                                  []graphNode
@@ -85,14 +88,24 @@ type graphFrame struct {
 	draws, msdfOverlays                                     []RenderObject
 	uiOverlays                                              []UIRenderObject
 	lighting                                                SceneLighting
-	ow                                                      overWater
-	bloom                                                   bloomPass
-	tonemap                                                 tonemapPass
-	water, ui                                               bool
+	// prepass is the depth prepass's pipelines and its debug mode, zero unless
+	// the renderer was built with WithDepthPrepass. recordDepthPrepass is the
+	// only reader.
+	prepass   depthPrepassPipelines
+	ow        overWater
+	bloom     bloomPass
+	tonemap   tonemapPass
+	water, ui bool
 }
 
-func newFrameGraph(samples core1_0.SampleCountFlags, depthFormat, swapchainFormat core1_0.Format, instances int, owner ...*Renderer) (*frameGraph, error) {
-	f := &frameGraph{shadowCascades: -1}
+// prepass declares the optional depth prepass node (see WithDepthPrepass). It
+// is a parameter rather than something read off owner because Renderer.New
+// compiles a plan before any application node exists, with no owner at all, and
+// that plan is the live one for a scene that streams nothing -- so a graph that
+// learned about the option only through an owner would silently not have the
+// node on exactly the common path.
+func newFrameGraph(samples core1_0.SampleCountFlags, depthFormat, swapchainFormat core1_0.Format, instances int, prepass bool, owner ...*Renderer) (*frameGraph, error) {
+	f := &frameGraph{shadowCascades: -1, prepass: -1}
 	g := framegraph.New()
 	image := func(name string, scale float32) framegraph.ImageDesc {
 		return framegraph.ImageDesc{Name: name, Format: hdrFormat, Extent: framegraph.Extent{Scale: scale},
@@ -312,6 +325,9 @@ func newFrameGraph(samples core1_0.SampleCountFlags, depthFormat, swapchainForma
 		if err := owner[0].extendAppGraph(f, g); err != nil {
 			return nil, err
 		}
+	}
+	if prepass {
+		f.insertDepthPrepass()
 	}
 	for _, n := range f.declarations {
 		g.AddNode(n)

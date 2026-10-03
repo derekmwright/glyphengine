@@ -126,6 +126,7 @@ type config struct {
 	shaders        renderer.ShaderSet
 	hasShaders     bool
 	uiGlow         bool
+	depthPrepass   renderer.DepthPrepassMode
 }
 
 // rendererOptions translates the engine's config into the renderer's options.
@@ -152,6 +153,9 @@ func (c *config) rendererOptions() []renderer.Option {
 	}
 	if c.uiGlow {
 		opts = append(opts, renderer.WithUIGlowLayer())
+	}
+	if c.depthPrepass != renderer.DepthPrepassOff {
+		opts = append(opts, renderer.WithDepthPrepass(c.depthPrepass))
 	}
 	return opts
 }
@@ -183,6 +187,30 @@ func WithMSAA(n int) Option {
 // See docs/agents/overlay-composite.md.
 func WithUIGlow() Option {
 	return func(c *config) { c.uiGlow = true }
+}
+
+// WithDepthPrepass renders depth only for the qualifying opaque draws before the
+// scene pass, so a fragment hidden behind another never reaches the lit or
+// material fragment shader.
+//
+// renderer.DepthPrepassOff is the default and is free.
+// renderer.DepthPrepassAuto runs the prepass only on the frames whose estimated
+// depth complexity says it will pay, and is the mode a game that wants this at
+// all should want. renderer.DepthPrepassOn runs it unconditionally, which is
+// for measuring.
+//
+// A straight passthrough to renderer.WithDepthPrepass, and it exists for the
+// reason WithUIGlow does: the pipelines are built at construction and the frame
+// graph is compiled around the node once, so the seam is unreachable from a game
+// that only has an Engine.
+//
+// Whether it is worth turning on is a property of the scene, not of the engine.
+// Read renderer.WithDepthPrepass, ADR 0013 and the measurements in
+// docs/agents/game-loop.md before switching it on in a shipping game;
+// Renderer().Capabilities().DepthPrepass reports which mode the build went with
+// and Renderer().Stats() carries the per-frame estimate and decision.
+func WithDepthPrepass(mode renderer.DepthPrepassMode) Option {
+	return func(c *config) { c.depthPrepass = mode }
 }
 
 // WithShaders replaces the SPIR-V the renderer builds its pipelines from.

@@ -112,10 +112,33 @@ type game struct {
 	pitch   float32
 	lamps   int
 
+	// sweep turns the two arm assertions below into a report. The assertions
+	// exist because the arms' NAMES are the claim this example makes and a
+	// drifted arm would quietly approve or reject whatever was measured on it.
+	// A sweep is the one caller for which that argument does not hold: it does
+	// not assume a complexity, it READS the one this cell produced and plots
+	// against it, so a cell at 1.8 is a cell at 1.8 rather than a broken
+	// overlap arm. Everything else -- the visibility floor, the prepass-draw
+	// check, the estimate agreement -- still applies, because a sweep cell that
+	// rendered nothing or measured nothing is as useless as a drifted arm.
+	sweep bool
+
 	// bounds is each patch's world-space AABB, kept so the overlap measurement
 	// can be made on the geometry that was actually submitted rather than on
 	// what the layout intended.
 	bounds []aabb
+
+	// The engine's own per-frame estimate, sampled over the run rather than
+	// read once at the end. The decision rule asks whether the estimate is on
+	// the same side of the threshold on EVERY frame, and the last frame's
+	// number cannot answer that -- a mode that toggled would leave no trace in
+	// it. Sampled in LateUpdate, which runs once per frame, so these cover
+	// every frame but the first (whose stats do not exist yet).
+	estSamples        int
+	estMin, estMax    float32
+	estActive         int
+	estPrepassDrawMin int
+	estPrepassDrawMax int
 }
 
 type aabb struct{ min, max mgl32.Vec3 }
@@ -266,6 +289,37 @@ func buildMaps(r *renderer.Renderer) (renderer.MaterialOptions, error) {
 		Occlusion: occlusion, Emissive: emissive,
 		EmissiveFactor: [3]float32{0.30, 0.55, 0.85}, EmissiveStrength: 2,
 	}, nil
+}
+
+// probeBounds is the patch layout Init builds, without the engine.
+//
+// It duplicates Init's loop over -count, which is the cost of having a GPU-free
+// probe at all, and the duplication is bounded to the three lines that decide
+// WHERE a patch goes: the mesh, the material, the lamps and the sky play no part
+// in a bound. The spawn order is included even though a bound does not depend on
+// it, so that a future layout change that does depend on it cannot make the two
+// disagree silently.
+func probeBounds(g *game) ([]aabb, error) {
+	hm, err := terrainfield.Load("", 20261002)
+	if err != nil {
+		return nil, err
+	}
+	cols, rows := g.layout()
+	bounds := make([]aabb, 0, g.count)
+	for n := 0; n < g.count; n++ {
+		_, _, b := patchMesh(hm, n)
+		col, row := n%cols, n/cols
+		if g.spawn == "backtofront" {
+			row = rows - 1 - row
+		}
+		pos := mgl32.Vec3{
+			(float32(col) - float32(cols-1)/2) * patchSize,
+			0,
+			float32(row) * patchSize,
+		}
+		bounds = append(bounds, aabb{b.min.Add(pos), b.max.Add(pos)})
+	}
+	return bounds, nil
 }
 
 func (g *game) Init(e *glyph.Engine) error {
@@ -433,6 +487,31 @@ func (g *game) view() (eye, center, up mgl32.Vec3) {
 
 func (g *game) Update(*glyph.Engine, float32) {}
 
+// LateUpdate samples the previous frame's prepass estimate and decision.
+//
+// LateUpdate rather than Update because it runs once per frame rather than once
+// per fixed tick, and the question is about frames. It reads the frame BEFORE
+// this one, which is the only reading available from inside the loop -- the
+// current frame's stats do not exist until it has been recorded.
+func (g *game) LateUpdate(e *glyph.Engine, _ float32) {
+	if e.FrameCount() == 0 {
+		return
+	}
+	st := e.Renderer().Stats()
+	if g.estSamples == 0 {
+		g.estMin, g.estMax = st.PrepassEstimate, st.PrepassEstimate
+		g.estPrepassDrawMin, g.estPrepassDrawMax = st.PrepassDraws, st.PrepassDraws
+	}
+	g.estSamples++
+	g.estMin = min(g.estMin, st.PrepassEstimate)
+	g.estMax = max(g.estMax, st.PrepassEstimate)
+	g.estPrepassDrawMin = min(g.estPrepassDrawMin, st.PrepassDraws)
+	g.estPrepassDrawMax = max(g.estPrepassDrawMax, st.PrepassDraws)
+	if st.PrepassActive {
+		g.estActive++
+	}
+}
+
 // overlapRatio is the mean screen-space depth complexity of the field: the
 // summed screen area of every patch's projected bound over the area at least
 // one of them covers.
@@ -449,7 +528,17 @@ func (g *game) Update(*glyph.Engine, float32) {}
 // A bound's projected box is an over-estimate of the patch inside it, so this
 // is an upper bound on depth complexity. It is used as a floor and a ceiling on
 // the two arms, not as a number anything is divided by.
-func overlapRatio(bounds []aabb, vp mgl32.Mat4, cells int) float64 {
+//
+// The FIRST return is the quantity the engine's own online estimate computes
+// (renderer's depthComplexityEstimate, reported as RenderStats.PrepassEstimate),
+// by the same method at a coarser grid. The second is the same grid divided by
+// the whole viewport instead of by the covered part, and it is returned because
+// it is the estimate that was tried first and does not work: measured here, the
+// overlap arm reads 0.742 and the control 0.576, 29 % apart, where the covered
+// normalisation puts them 3.2x apart. A grazing camera's field covers 23 % of
+// the screen, so dividing by the whole viewport divides out most of the signal.
+// -probe prints both, which is how that was settled without a GPU.
+func overlapRatio(bounds []aabb, vp mgl32.Mat4, cells int) (overlap, sumOverViewport float64) {
 	hits := make([]int, cells*cells)
 	for _, b := range bounds {
 		// NDC bounding box of the eight corners. A corner behind the eye has
@@ -489,6 +578,76 @@ func overlapRatio(bounds []aabb, vp mgl32.Mat4, cells int) float64 {
 		}
 	}
 
+	covered, total := 0, 0
+	for _, n := range hits {
+		if n > 0 {
+			covered++
+			total += n
+		}
+	}
+	if covered == 0 {
+		return 0, 0
+	}
+	return float64(total) / float64(covered), float64(total) / float64(cells*cells)
+}
+
+// onScreenRatio is overlapRatio with one rule changed: a bound whose projected
+// rectangle lies entirely outside the viewport contributes nothing, rather than
+// being clamped onto an edge cell.
+//
+// It exists because that is the rule the ENGINE's online estimate uses, and
+// because the engine is right about it: a patch off the side of the screen
+// rasterises no fragments, so it is neither overdraw nor work a prepass could
+// remove. overlapRatio keeps the clamping it has always had, because its number
+// is the one every record of this scene quotes and the one the arm floors are
+// set against, and silently redefining it would make those records disagree with
+// a tree that had not changed.
+//
+// The two differ only where bounds leave the frame. Measured on this field with
+// -probe: 3.279 against 3.089 on the grazing arm, where the near rows are wider
+// than the screen, and 1.0222 against 1.0222 on the overhead control, where
+// nothing leaves it. So the gap is 5.8 % on one arm and nil on the other, which
+// is exactly the shape that would have turned the engine-against-example check
+// below into a coin toss against a 5 % tolerance.
+func onScreenRatio(bounds []aabb, vp mgl32.Mat4, cells int) float64 {
+	hits := make([]int, cells*cells)
+	for _, b := range bounds {
+		lo := mgl32.Vec2{math.MaxFloat32, math.MaxFloat32}
+		hi := mgl32.Vec2{-math.MaxFloat32, -math.MaxFloat32}
+		behind := false
+		for c := 0; c < 8; c++ {
+			p := mgl32.Vec4{b.min[0], b.min[1], b.min[2], 1}
+			if c&1 != 0 {
+				p[0] = b.max[0]
+			}
+			if c&2 != 0 {
+				p[1] = b.max[1]
+			}
+			if c&4 != 0 {
+				p[2] = b.max[2]
+			}
+			q := vp.Mul4x1(p)
+			if q[3] <= 0 {
+				behind = true
+				break
+			}
+			lo[0], hi[0] = min(lo[0], q[0]/q[3]), max(hi[0], q[0]/q[3])
+			lo[1], hi[1] = min(lo[1], q[1]/q[3]), max(hi[1], q[1]/q[3])
+		}
+		if behind {
+			continue
+		}
+		if hi[0] < -1 || lo[0] > 1 || hi[1] < -1 || lo[1] > 1 {
+			continue
+		}
+		x0, x1 := ndcSpan(max(lo[0], -1), min(hi[0], 1), cells)
+		y0, y1 := ndcSpan(max(lo[1], -1), min(hi[1], 1), cells)
+		for y := y0; y <= y1; y++ {
+			for x := x0; x <= x1; x++ {
+				hits[y*cells+x]++
+			}
+		}
+	}
 	covered, total := 0, 0
 	for _, n := range hits {
 		if n > 0 {
@@ -561,6 +720,9 @@ func main() {
 	pitch := flag.Float64("pitch", -0.005, "camera pitch in radians; near zero is the grazing view the overlap arm needs")
 	frames := flag.Int("frames", 200, "frames to render")
 	shot := flag.String("screenshot", "", "write a PNG of the last frame to this path")
+	prepass := flag.String("prepass", "off", "depth prepass: off, on, auto, or empty -- auto decides per frame from the estimated depth complexity, and empty is on with the prepass's own draws withheld, which is `task prepass`'s control")
+	sweep := flag.Bool("sweep", false, "this is one cell of a depth-complexity sweep: report the measured complexity instead of asserting an arm's floor")
+	probe := flag.Bool("probe", false, "print this layout and camera's depth complexity and exit, without opening a window or touching the GPU")
 	flag.Parse()
 
 	if *count <= 0 {
@@ -569,11 +731,53 @@ func main() {
 	if *spawn != "backtofront" && *spawn != "fronttoback" {
 		log.Fatalf("28-overdraw: -spawn %q is not backtofront or fronttoback", *spawn)
 	}
+	// The third dimension of the measurement. The patches go through the
+	// material pipeline and are neither skinned nor double-sided, so every one
+	// of them qualifies for the prepass -- which is what makes this scene a
+	// reading of the mechanism rather than of how much of the field it happened
+	// to cover. `task bench -- -scene overdraw` runs off and on against both
+	// arms; see renderer.WithDepthPrepass and docs/agents/game-loop.md.
+	if *prepass != "off" && *prepass != "on" && *prepass != "auto" && *prepass != "empty" {
+		log.Fatalf("28-overdraw: -prepass %q is not off, on, auto or empty", *prepass)
+	}
 	arm := "overlap"
 	if !*overlap {
 		arm = "control"
 	}
-	g := &game{count: *count, cols: *cols, overlap: *overlap, spawn: *spawn, eyeY: float32(*eyeY), pitch: float32(*pitch), lamps: *lamps}
+	g := &game{count: *count, cols: *cols, overlap: *overlap, spawn: *spawn, eyeY: float32(*eyeY), pitch: float32(*pitch), lamps: *lamps, sweep: *sweep}
+
+	// -probe is the sweep's planning tool and it is deliberately GPU-free.
+	// Depth complexity here is a function of the patch bounds and the
+	// view-projection, both of which are plain arithmetic, so choosing which
+	// (eye, pitch) cells span 1.0 to 3.5 does not need a window, a device or an
+	// idle card -- and a sweep that spent GPU time discovering it was sampling
+	// the same complexity five times over would be worse than no sweep.
+	if *probe {
+		bounds, err := probeBounds(g)
+		if err != nil {
+			log.Fatal(err)
+		}
+		g.bounds = bounds
+		eye, center, up := g.view()
+		proj := mgl32.Perspective(mgl32.DegToRad(g.fov()), float32(*width)/float32(*height), near, g.far())
+		vp := proj.Mul4(mgl32.LookAtV(eye, center, up))
+		ratio, sumOverViewport := overlapRatio(g.bounds, vp, 180)
+		// The engine's grid is 192 cells per axis, not this measurement's 180,
+		// and the 192-cell column is what says the difference costs nothing
+		// worth caring about. Printed rather than asserted: it is a property of
+		// the grid, not of the scene, and renderer.depthComplexityCells is
+		// where the numbers are recorded. This figure does NOT converge quickly
+		// in the cell count -- a sliver counts as one cell whatever the
+		// resolution -- so a grid chosen for the convenience of a bitmask has to
+		// be checked against the one the records quote rather than assumed close
+		// to it.
+		coarse, _ := overlapRatio(g.bounds, vp, 192)
+		log.Printf("PROBE\tdepth_complexity\t%.3f\tdepth_complexity_192\t%.3f\ton_screen\t%.3f\ton_screen_192\t%.3f\tsum_over_viewport\t%.3f\tn_patches\t%d\teye\t%.2f\tpitch\t%.4f\tcols\t%d\tcount\t%d",
+			ratio, coarse, onScreenRatio(g.bounds, vp, 180), onScreenRatio(g.bounds, vp, 192),
+			sumOverViewport, len(g.bounds), g.eyeY, g.pitch, *cols, g.count)
+		return
+	}
+
 	opts := []glyph.Option{
 		glyph.WithShaders(xsky.Shaders()),
 		glyph.WithTitle(fmt.Sprintf("GlyphEngine - 28 Overdraw (%s)", arm)),
@@ -584,12 +788,21 @@ func main() {
 	if *shot != "" {
 		opts = append(opts, glyph.WithScreenshot(*shot))
 	}
+	switch *prepass {
+	case "on", "empty":
+		opts = append(opts, glyph.WithDepthPrepass(renderer.DepthPrepassOn))
+	case "auto":
+		opts = append(opts, glyph.WithDepthPrepass(renderer.DepthPrepassAuto))
+	}
 
 	e, err := glyph.New(g, opts...)
 	if err != nil {
 		log.Fatalf("create engine: %v", err)
 	}
 	defer e.Destroy()
+	if *prepass == "empty" {
+		e.Renderer().SetDepthPrepassDebug(renderer.DepthPrepassDebugEmpty)
+	}
 
 	e.Run()
 
@@ -598,8 +811,89 @@ func main() {
 	eye, center, up := g.view()
 	proj := mgl32.Perspective(mgl32.DegToRad(g.fov()), float32(*width)/float32(*height), near, g.far())
 	vp := proj.Mul4(mgl32.LookAtV(eye, center, up))
-	ratio := overlapRatio(g.bounds, vp, 180)
-	log.Printf("OVERDRAW\toverlap_ratio\t%.3f\tn_patches\t%d", ratio, len(g.bounds))
+	ratio, sumOverViewport := overlapRatio(g.bounds, vp, 180)
+	onScreen := onScreenRatio(g.bounds, vp, 180)
+	// prepass_draws is in the line for the reason overlap_ratio is: the arm has
+	// to be checkable from the sample rather than from the label on it. A
+	// prepass arm that recorded zero prepass draws would otherwise read as a
+	// prepass that cost nothing and saved nothing, which is indistinguishable
+	// from a well-behaved one on the timings alone.
+	st := e.Renderer().Stats()
+	log.Printf("OVERDRAW\toverlap_ratio\t%.3f\tdepth_complexity\t%.3f\ton_screen\t%.3f\tsum_over_viewport\t%.3f\tn_patches\t%d\tprepass_draws\t%d\tprepass_estimate\t%.3f\tprepass_estimate_min\t%.3f\tprepass_estimate_max\t%.3f\tprepass_covered\t%.3f\tprepass_active_frames\t%d\tframes_sampled\t%d",
+		ratio, ratio, onScreen, sumOverViewport, len(g.bounds), st.PrepassDraws, st.PrepassEstimate, g.estMin, g.estMax, st.PrepassCovered, g.estActive, g.estSamples)
+	if *prepass == "on" && st.PrepassDraws == 0 {
+		log.Fatal("28-overdraw: -prepass on recorded no prepass draws -- this sample measures the prepass not at all")
+	}
+	if *prepass == "off" && st.PrepassDraws != 0 {
+		log.Fatalf("28-overdraw: -prepass off recorded %d prepass draws", st.PrepassDraws)
+	}
+	// The engine's online estimate against this example's offline grid, on the
+	// same bounds and the same view-projection. They are the same quantity by
+	// construction -- a sum of projected bound areas over the viewport's area --
+	// computed two different ways: the engine in closed form from each mesh's
+	// object-space box through its MVP, this grid by stamping NDC rectangles
+	// into 180x180 cells. So a disagreement is a bug in one of them, not a
+	// difference of definition, and this is the check that says so on a real
+	// scene rather than on synthetic bounds.
+	//
+	// onScreenRatio and not overlapRatio: see that function for why the engine
+	// is right to drop a bound that left the frame, and for the 5.8 % the two
+	// differ by on this arm.
+	//
+	// What is left for the tolerance is the two grids' resolutions, 180 here
+	// against the engine's 192, which -probe measures directly on these same
+	// bounds: 0.9 % apart on the grazing arm and 0.07 % on the control. 3 % is
+	// comfortably above that and far below the factor a real mistake in either
+	// would produce. Both of those were measured rather than guessed: swapping the
+	// mesh's box for its bounding SPHERE's box is a factor of 2.3 on an overhead
+	// camera over this geometry and 3.7 on a grazing one (renderer's
+	// TestDepthComplexityEstimateAgreesWithTheOfflineMeasurement reports both),
+	// and normalising by the viewport instead of the covered area is 4.4x here --
+	// 3.279 against 0.742, which -probe prints side by side.
+	//
+	// The engine's number also comes from a FRUSTUM-CULLED draw list, where this
+	// one walks every patch. The two agree because the engine's own off-screen
+	// rule already drops what the cull would have: a patch the cull keeps and the
+	// rect test rejects contributes nothing either way. A disagreement here that
+	// is not a grid difference is most likely that stopping to be true.
+	if *prepass != "off" {
+		if g.estSamples == 0 {
+			log.Fatal("28-overdraw: no frames sampled the prepass estimate -- LateUpdate did not run")
+		}
+		const tol = 0.03
+		if d := math.Abs(float64(st.PrepassEstimate) - onScreen); d > tol*onScreen {
+			log.Fatalf("28-overdraw: the engine's prepass estimate %.3f and this example's grid %.3f differ by %.3f, more than %.0f%% -- one of the two is wrong",
+				st.PrepassEstimate, onScreen, d, tol*100)
+		}
+		// Every frame on the same side of the threshold, or Auto was toggling
+		// and the timings of this run are the timings of two different modes
+		// averaged together.
+		if g.estActive != 0 && g.estActive != g.estSamples {
+			log.Fatalf("28-overdraw: the prepass was active on %d of %d sampled frames -- the mode toggled mid-run and these timings mix both",
+				g.estActive, g.estSamples)
+		}
+		if g.estPrepassDrawMin != g.estPrepassDrawMax {
+			log.Fatalf("28-overdraw: prepass draws ranged %d..%d over the run, so the frames being timed are not the same frame",
+				g.estPrepassDrawMin, g.estPrepassDrawMax)
+		}
+	}
+	// Auto's decision against the threshold it is supposed to be taken on,
+	// rather than against this arm's name. The arm names are the right thing to
+	// assert about the SCENE and the wrong thing to assert about the decision:
+	// the overlap arm measures 3.28 at the default count and 2.56 at the 256 the
+	// check matrices use, so a gate that said "auto must be on for the overlap
+	// arm" would be a gate on -count, and it would have to be rewritten every
+	// time the sweep moved the threshold.
+	if *prepass == "auto" && !g.sweep {
+		threshold, hysteresis := renderer.DepthPrepassThreshold()
+		switch {
+		case float32(onScreen) >= threshold && st.PrepassDraws == 0:
+			log.Fatalf("28-overdraw: -prepass auto left the prepass off at on-screen depth complexity %.3f (estimate %.3f), at or above the threshold %.3f", onScreen, st.PrepassEstimate, threshold)
+		case float32(onScreen) < threshold-hysteresis && st.PrepassDraws != 0:
+			log.Fatalf("28-overdraw: -prepass auto ran the prepass at on-screen depth complexity %.3f (estimate %.3f), below the threshold %.3f less its band %.3f", onScreen, st.PrepassEstimate, threshold, hysteresis)
+		}
+		log.Printf("28-overdraw: auto decided %v at on-screen depth complexity %.3f against threshold %.3f (band %.3f)", st.PrepassActive, onScreen, threshold, hysteresis)
+	}
 
 	// A draw count alone accepted a completely back-face-culled field during
 	// 26-mesh-ranges' development, and it would accept one here too: a field that
@@ -639,6 +933,8 @@ func main() {
 	// the control needs them to, so all the overlap has to come from the grazing
 	// view, and the near row is wide on screen while the far rows are narrow.
 	switch {
+	case g.sweep:
+		log.Printf("28-overdraw: sweep cell, measured depth complexity %.2f -- arm floors not applied", ratio)
 	case g.overlap && ratio < 2.5:
 		log.Fatalf("28-overdraw: the overlap arm measures depth complexity %.2f, need 2.5 -- nothing is hiding behind anything", ratio)
 	case !g.overlap && ratio > 1.05:

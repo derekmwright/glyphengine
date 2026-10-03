@@ -63,6 +63,18 @@ type Capabilities struct {
 	// does not support anisotropic filtering at all.
 	MaxAnisotropy float32
 
+	// DepthPrepass reports the mode WithDepthPrepass left this renderer in.
+	// Unlike every other field here it is not a negotiation with the device --
+	// it is a plain report of a choice the program made, and it is here because
+	// the frame it produces is not the frame another mode produces in cost, only
+	// in pixels: a game comparing captures or timings across builds wants to read
+	// which one it got rather than assume its option arrived.
+	//
+	// DepthPrepassAuto reports as Auto whatever any individual frame decided.
+	// The per-frame decision is RenderStats.PrepassActive, beside the estimate
+	// it was taken from; this field is the build.
+	DepthPrepass DepthPrepassMode
+
 	// GPUTimestamps reports that the device can timestamp graphics work on the
 	// queue this renderer submits to. Without it GPUTimings never becomes
 	// valid, and an application pass asking to be Timed is refused with
@@ -320,7 +332,14 @@ func portabilitySubset(extensions map[string]*core1_0.ExtensionProperties) bool 
 // sites pass to pipeline creation, and deviceIdent is folded once here rather
 // than per frame; both are derived from the report, so Capabilities cannot
 // describe a device the pipelines were not built for.
+// DepthPrepass is filled in here rather than in negotiateCapabilities, which is
+// pure over the device's own answers: the prepass is a choice the program made
+// before New ran, not something the device granted, and folding it into that
+// function would make a report about the device partly a report about an option.
+// It is deliberately outside identHash for the same reason DriverName is -- it
+// is not part of the GPU's identity.
 func (r *Renderer) adopt(c Capabilities) {
+	c.DepthPrepass = r.depthPrepassMode
 	r.caps = c
 	r.msaaSamples = core1_0.SampleCountFlags(c.MSAASamples)
 	r.deviceIdent = c.identHash()
@@ -347,6 +366,9 @@ func (c Capabilities) logCapabilities(requested core1_0.SampleCountFlags) {
 	}
 	if !c.MultiDrawIndirect || !c.DrawIndirectFirstInstance {
 		log.Println("Multi-draw indirect unavailable: batched mesh ranges will use one draw per range")
+	}
+	if c.DepthPrepass != DepthPrepassOff {
+		log.Printf("Depth prepass: %s", c.DepthPrepass)
 	}
 	if c.DriverName != "" {
 		log.Printf("Driver: %s", c.DriverName)

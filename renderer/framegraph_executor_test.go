@@ -9,7 +9,7 @@ import (
 
 func (fx *frame) initGraph() {
 	var err error
-	fx.graph, err = newFrameGraph(core1_0.Samples4, core1_0.FormatD32SignedFloat, core1_0.FormatB8G8R8A8SRGB, 1)
+	fx.graph, err = newFrameGraph(core1_0.Samples4, core1_0.FormatD32SignedFloat, core1_0.FormatB8G8R8A8SRGB, 1, false)
 	if err != nil {
 		panic(err)
 	}
@@ -31,7 +31,10 @@ func (fx *frame) initGraphBindings() {
 			continue
 		}
 		n := &f.nodes[i]
-		if len(n.targets) > 0 && len(n.targets[0].info.ColorAttachments) > 0 {
+		// A depth-only node (the prepass) has no colour attachment, so the
+		// colour test alone rebuilt its target on every record and showed up as
+		// three constant allocations per frame in the recorder's own alloc test.
+		if len(n.targets) > 0 && (len(n.targets[0].info.ColorAttachments) > 0 || n.targets[0].info.DepthAttachment != nil) {
 			continue
 		}
 		n.extent = fx.extent
@@ -39,6 +42,13 @@ func (fx *frame) initGraphBindings() {
 	}
 	if fx.target == nil {
 		r := &Renderer{sc: &swapchainDetails{extent: fx.extent}, hdr: &hdrTarget{images: []core1_0.Image{fx.sceneImage}, views: f.images[f.hdr].views}, depth: &depthResources{images: f.images[f.depth].images, views: f.images[f.depth].views}, msaa: &msaaResources{images: f.images[f.color].images, views: f.images[f.color].views}}
+		// Keyed off the graph rather than set by the caller: a prepass node in
+		// the plan and a scene target that still CLEARS depth is the exact
+		// combination that throws the prepass away, so the fixture must not be
+		// able to pin a stream the real renderer cannot produce.
+		if f.prepass >= 0 {
+			r.depthPrepassMode = DepthPrepassOn
+		}
 		r.bindSceneTargets()
 		fx.target = r.sceneTargets[0]
 		fx.target.info.ColorAttachments[0].ClearValue = &fx.scratch.colorClear
@@ -53,14 +63,65 @@ func (fx *frame) bindGraph() {
 	}
 }
 
+// Water and the scene have to agree on their attachment formats, because they
+// share pipelines.
+//
+// Run with the depth prepass off and on, and the second half is not decoration.
+// The graph* constants are DECLARATION indices while the plan's steps are indexed
+// by node, and the prepass is the first thing the engine inserts ahead of its own
+// tail in the graph Renderer.New compiles -- so a lookup by the raw constant
+// stops naming the node it means. Verified: with engineFormats reverted to
+// pipelineFormats(graphWater), prepass=true panics here on a nil RenderPass,
+// which is what it did in New on real hardware.
 func TestFrameGraphWaterFormatsMatchScene(t *testing.T) {
-	for _, samples := range []core1_0.SampleCountFlags{core1_0.Samples1, core1_0.Samples4} {
-		f, err := newFrameGraph(samples, core1_0.FormatD32SignedFloat, core1_0.FormatB8G8R8A8SRGB, 3)
-		if err != nil {
-			t.Fatal(err)
+	for _, prepass := range []bool{false, true} {
+		for _, samples := range []core1_0.SampleCountFlags{core1_0.Samples1, core1_0.Samples4} {
+			f, err := newFrameGraph(samples, core1_0.FormatD32SignedFloat, core1_0.FormatB8G8R8A8SRGB, 3, prepass)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(f.engineFormats(graphWater), colorDepthFormats(hdrFormat, core1_0.FormatD32SignedFloat)) {
+				t.Fatalf("prepass=%v: water and scene attachment formats differ", prepass)
+			}
 		}
-		if !reflect.DeepEqual(f.pipelineFormats(graphWater), colorDepthFormats(hdrFormat, core1_0.FormatD32SignedFloat)) {
-			t.Fatal("water and scene attachment formats differ")
+	}
+}
+
+// Every engine tail node New builds a pipeline against, by the declaration index
+// it is named by, with the prepass inserted ahead of them.
+//
+// The panic this catches is not subtle once it happens -- New dereferences a nil
+// RenderPass -- but nothing in the package reached it before, because the only
+// graph whose declaration and node indices coincided was the one New compiles,
+// and the prepass is what stopped them coinciding.
+func TestEngineFormatsSurviveTheDepthPrepass(t *testing.T) {
+	f, err := newFrameGraph(core1_0.Samples4, core1_0.FormatD32SignedFloat, core1_0.FormatB8G8R8A8SRGB, 3, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.prepass < 0 {
+		t.Fatal("no prepass node, so this test says nothing")
+	}
+	for _, c := range []struct {
+		name string
+		decl int
+	}{
+		{"water", graphWater},
+		{"bloom down", graphBloom},
+		{"bloom up", graphBloom + bloomLevels},
+		{"UI layer", graphUILayer},
+		{"tonemap", graphTonemap},
+	} {
+		node := f.engine[c.decl]
+		if node <= f.prepass {
+			t.Errorf("%s: node %d is not past the prepass at %d", c.name, node, f.prepass)
+		}
+		if f.plan.Steps[node].RenderPass == nil {
+			t.Fatalf("%s: declaration %d maps to node %d, which has no rendering instance", c.name, c.decl, node)
+		}
+		got := f.engineFormats(c.decl)
+		if len(got.ColorAttachmentFormats) == 0 {
+			t.Errorf("%s: no colour attachment format", c.name)
 		}
 	}
 }
@@ -87,7 +148,7 @@ func TestResizeCreatesNoRenderPassesOrFramebuffers(t *testing.T) {
 }
 func TestFrameGraphTailLayouts(t *testing.T) {
 	for _, samples := range []core1_0.SampleCountFlags{core1_0.Samples1, core1_0.Samples4} {
-		f, err := newFrameGraph(samples, core1_0.FormatD32SignedFloat, core1_0.FormatB8G8R8A8SRGB, 3)
+		f, err := newFrameGraph(samples, core1_0.FormatD32SignedFloat, core1_0.FormatB8G8R8A8SRGB, 3, false)
 		if err != nil {
 			t.Fatal(err)
 		}

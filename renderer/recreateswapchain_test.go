@@ -312,7 +312,7 @@ func newResizeFixture(d *resizeFakeDriver, count int) *Renderer {
 		graphicsQueue:       h.queue(),
 	}
 	var err error
-	r.frameGraph, err = newFrameGraph(r.msaaSamples, core1_0.FormatD32SignedFloat, core1_0.FormatB8G8R8A8SRGB, count)
+	r.frameGraph, err = newFrameGraph(r.msaaSamples, core1_0.FormatD32SignedFloat, core1_0.FormatB8G8R8A8SRGB, count, false)
 	if err != nil {
 		panic(err)
 	}

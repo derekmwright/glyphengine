@@ -21,12 +21,17 @@ api:
   - renderer.Renderer.ResetGPUTimings
   - renderer.Renderer.Stats
   - renderer.RenderStats
+  - renderer.RenderStats.PrepassDraws
+  - renderer.RenderStats.PrepassEstimate
+  - renderer.RenderStats.PrepassCovered
+  - renderer.RenderStats.PrepassActive
+  - renderer.PassDepthPrepass
   - renderer.AppStats
   - renderer.AppStats.Pass
   - renderer.AppPassStats
 assets: none
 run: task bench
-verified: 2026-10-02 # cpu drawsort split out of cpu drawlist; App beside the GPU timings
+verified: 2026-10-03 # cpu drawsort split out of cpu drawlist; App beside the GPU timings; the depth prepass bracket and the shadow bracket's new end; the prepass estimate and decision in the stats block, and the threshold sweep scene
 ---
 
 # Measuring frame cost
@@ -72,14 +77,32 @@ drift over a run: `-scene patches` and `-scene stream` for submission and upload
 paths, and `-scene overdraw` for hidden fragment work. That last one is a grazing
 field of terrain patches under a five-map material where the measured screen-space
 depth complexity is 3.28, against a control where the same field is seen from
-overhead and it is 1.02. It exists because nothing in the engine removes hidden
-opaque fragments today and anything that would — an opt-in depth prepass,
-hierarchical-Z occlusion culling — costs something unconditionally: the overlap
-arm says how much there is to win and the control says what a scene with nothing
-hidden is charged for it. Read `gpu_opaque` first, `gpu_total` to check the cost
-has not moved to another pass, and the reported depth complexity to confirm each
-arm is still what it is named after. `docs/agents/game-loop.md` has the one
-measurement already made on it, which the control rejected.
+overhead and it is 1.02. It exists because a mechanism that removes hidden
+opaque fragments — the opt-in depth prepass, hierarchical-Z occlusion culling —
+costs something unconditionally: the overlap arm says how much there is to win and
+the control says what a scene with nothing hidden is charged for it. Each arm runs
+with the prepass off, on and auto, interleaved within the arm, so six cells in
+all. Read `gpu_total` first, because the prepass is a pass of its own, then
+`gpu_prepass` against the fall in `gpu_opaque`, `prepass_estimate` to see what
+auto decided on, and the reported depth complexity to confirm each arm is still
+what it is named after.
+
+`-scene prepasssweep` is the same example at nine camera placements between
+estimate 1.15 and 3.13, prepass off and on interleaved inside each cell: it
+measures where the prepass's net change in `gpu_total` crosses zero, which is what
+set `DepthPrepassAuto`'s threshold of 2.02. Both bench resolutions have to be run
+and they do not agree — the crossing is 1.849 at 1280x720 and 1.201 at 3840x2160,
+and the ratio is not the pixel ratio, because the saving scales with the COVERED
+pixels and not with the viewport's. `-cells eye:pitch:complexity,...` replaces the
+ladder, which is how a crossing that falls outside it gets bracketed without
+re-running the other eight. Each cell
+checks its own measured complexity against the label it was launched with, so a
+sweep whose layout has drifted fails rather than plotting the right numbers
+against the wrong x. `28-overdraw -probe` prints a cell's complexity without
+opening a window or touching the GPU, which is how the nine were chosen.
+
+`docs/agents/game-loop.md` carries the measurements made on this scene and the
+rules they were judged by.
 
 ## Read the two tables together
 
@@ -167,6 +190,36 @@ happens inside the grass, terrain and lit fragment shaders, so it lands in those
 passes. A cheap `shadow` number does not mean shadows are cheap: switching the
 5×5 PCF for four taps took 0.89 ms off a 6.50 ms frame, almost none of it from
 the pass called `shadow`.
+
+`shadow` is now exactly that, and it used to be slightly more. Its bracket closed
+after the scene pass had already begun, which charged it for the frame-graph steps
+between the shadow maps and the scene — application passes at `StageBeforeScene`,
+and now the depth prepass. Those carry brackets of their own, so counting them
+again here made the passes sum to more than the frame total, which is the one
+arithmetic check this instrument has. The bracket now closes when the last cube
+face does. On a scene with no pre-scene work the number does not move; on
+`24-custom-passes` it drops by whatever its application passes cost.
+
+`prepass` is the optional depth prepass (`WithDepthPrepass`), and it is zero on
+every frame without it. Read it against the fall in `opaque`, and read `gpu_total`
+rather than either, because the prepass is a second pass and a saving inside
+`opaque` that it more than spends would look like a win from `opaque` alone.
+`st.PrepassDraws` is how many draws it submitted; they are in `DrawCalls` as well,
+the way the shadow cascades' draws are, so `DrawCalls` roughly doubling with the
+option on is the second geometry submission and not a regression.
+
+Three more counters come with `DepthPrepassAuto`. `PrepassEstimate` is the mean
+screen-space depth complexity of the qualifying geometry, which is the number the
+per-frame decision was taken on; `PrepassActive` is that decision;
+`PrepassCovered` is the share of the viewport the qualifying bounds cover between
+them, which is what distinguishes a high estimate belonging to a frame full of
+stacked geometry from one belonging to a frame of sky with a small cluster in it.
+All three are zero on a `DepthPrepassOff` renderer, which computes no estimate at
+all — zero there means not measured, not measured as zero, and
+`Capabilities.DepthPrepass` is what says which. The estimate's own CPU cost is
+inside `cpu_record`, deliberately, beside the second submission's: the two costs
+of the prepass are then one number. See `game-loop.md` for what the estimate sees
+and what it does not.
 
 ## Counters say why
 

@@ -94,16 +94,20 @@ func createSkyPipelineLayout(deviceDriver core1_0.DeviceDriver, texSetLayout, sh
 // function that had to agree on reverse-Z, culling, and the push constant range.
 // They are one pipeline with a different material concept plugged into set 0, and
 // a fourth copy is how one of them quietly ends up with the wrong compare op.
-func createLitVariantPipeline(deviceDriver core1_0.DeviceDriver, vertSpv, fragSpv []byte, label string, formats renderingFormats, extent core1_0.Extent2D, set0Layout, shadowSetLayout core1_0.DescriptorSetLayout, samples core1_0.SampleCountFlags, cull core1_0.CullModeFlags, blend bool) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
+func createLitVariantPipeline(deviceDriver core1_0.DeviceDriver, vertSpv, fragSpv []byte, label string, formats renderingFormats, extent core1_0.Extent2D, set0Layout, shadowSetLayout core1_0.DescriptorSetLayout, samples core1_0.SampleCountFlags, cull core1_0.CullModeFlags, blend bool, depth *core1_0.PipelineDepthStencilStateCreateInfo) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
 	return createLitVariantPipelineWithInput(deviceDriver, vertSpv, fragSpv, label, formats, extent,
-		set0Layout, shadowSetLayout, samples, cull, blend,
+		set0Layout, shadowSetLayout, samples, cull, blend, depth,
 		[]core1_0.VertexInputBindingDescription{vertexBindingDescription()}, vertexAttributeDescriptions())
 }
 
 // createLitVariantPipelineWithInput is createLitVariantPipeline with the vertex
 // input state supplied, which is what the instanced variant needs: a second
 // per-instance binding carrying the model matrix the ordinary path pushes.
-func createLitVariantPipelineWithInput(deviceDriver core1_0.DeviceDriver, vertSpv, fragSpv []byte, label string, formats renderingFormats, extent core1_0.Extent2D, set0Layout, shadowSetLayout core1_0.DescriptorSetLayout, samples core1_0.SampleCountFlags, cull core1_0.CullModeFlags, blend bool, bindings []core1_0.VertexInputBindingDescription, attrs []core1_0.VertexInputAttributeDescription, coverage ...bool) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
+// depth overrides the opaque/blended depth state below. Nil is the ordinary
+// choice; the one caller that supplies it is the depth prepass's equal-compare
+// twin, which has to differ in that state and in nothing else (see
+// depthEqualState).
+func createLitVariantPipelineWithInput(deviceDriver core1_0.DeviceDriver, vertSpv, fragSpv []byte, label string, formats renderingFormats, extent core1_0.Extent2D, set0Layout, shadowSetLayout core1_0.DescriptorSetLayout, samples core1_0.SampleCountFlags, cull core1_0.CullModeFlags, blend bool, depth *core1_0.PipelineDepthStencilStateCreateInfo, bindings []core1_0.VertexInputBindingDescription, attrs []core1_0.VertexInputAttributeDescription, coverage ...bool) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
 		Code: bytesToUint32Slice(vertSpv),
 	})
@@ -144,6 +148,9 @@ func createLitVariantPipelineWithInput(deviceDriver core1_0.DeviceDriver, vertSp
 		DepthTestEnable:  true,
 		DepthWriteEnable: !blend,
 		DepthCompareOp:   core1_0.CompareOpGreater,
+	}
+	if depth != nil {
+		depthState = depth
 	}
 	const writeAll = core1_0.ColorComponentRed | core1_0.ColorComponentGreen | core1_0.ColorComponentBlue | core1_0.ColorComponentAlpha
 	attachment := core1_0.PipelineColorBlendAttachmentState{ColorWriteMask: writeAll}
@@ -227,7 +234,7 @@ func createGraphicsPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, for
 		cull = cullMode[0]
 	}
 	return createLitVariantPipeline(deviceDriver, sh.LitVert, sh.LitFrag, "Graphics",
-		formats, extent, texSetLayout, shadowSetLayout, samples, cull, false)
+		formats, extent, texSetLayout, shadowSetLayout, samples, cull, false, nil)
 }
 
 // createTerrainPipeline creates the terrain splat pipeline: same vertex stage,
@@ -236,7 +243,7 @@ func createGraphicsPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, for
 // material (4 samplers), set 1 = shadow.
 func createTerrainPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, formats renderingFormats, extent core1_0.Extent2D, terrainSetLayout core1_0.DescriptorSetLayout, shadowSetLayout core1_0.DescriptorSetLayout, samples core1_0.SampleCountFlags) (core1_0.Pipeline, core1_0.PipelineLayout, error) {
 	return createLitVariantPipeline(deviceDriver, sh.LitVert, sh.TerrainFrag, "Terrain",
-		formats, extent, terrainSetLayout, shadowSetLayout, samples, core1_0.CullModeBack, false)
+		formats, extent, terrainSetLayout, shadowSetLayout, samples, core1_0.CullModeBack, false, nil)
 }
 
 // createMaterialPipeline creates the material pipeline: the lit path with normal,
@@ -248,7 +255,7 @@ func createMaterialPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, for
 		cull = cullMode[0]
 	}
 	return createLitVariantPipeline(deviceDriver, sh.LitVert, sh.LitMaterialFrag, "Material",
-		formats, extent, materialSetLayout, shadowSetLayout, samples, cull, false)
+		formats, extent, materialSetLayout, shadowSetLayout, samples, cull, false, nil)
 }
 
 // createTranslucentPipeline is the lit pipeline with the water pipeline's depth
@@ -271,7 +278,7 @@ func createTranslucentPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, 
 		label = "Translucent double-sided"
 	}
 	return createLitVariantPipeline(deviceDriver, sh.LitVert, sh.LitFrag, label,
-		formats, extent, texSetLayout, shadowSetLayout, samples, cull, true)
+		formats, extent, texSetLayout, shadowSetLayout, samples, cull, true, nil)
 }
 
 // createInstancedPipeline is the lit pipeline for InstanceSets: the same
@@ -291,7 +298,7 @@ func createInstancedPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, fo
 		label = "Instanced double-sided"
 	}
 	return createLitVariantPipelineWithInput(deviceDriver, sh.LitInstancedVert, sh.LitFrag, label,
-		formats, extent, texSetLayout, shadowSetLayout, samples, cull, false,
+		formats, extent, texSetLayout, shadowSetLayout, samples, cull, false, nil,
 		[]core1_0.VertexInputBindingDescription{vertexBindingDescription(), instanceBindingDescription()},
 		instanceAttributeDescriptions())
 }

@@ -17,6 +17,7 @@ type Pass int
 
 const (
 	PassShadow       Pass = iota // both sun cascades plus the point-light cube
+	PassDepthPrepass             // the optional depth-only pass before the scene
 	PassTerrain                  // the splat pipeline
 	PassOpaque                   // lit and skinned geometry
 	PassGrass                    // instanced flora
@@ -38,6 +39,19 @@ const (
 
 	passCount
 )
+
+// PassDepthPrepass is empty unless a game asked for the depth prepass (see
+// WithDepthPrepass). Like PassUILayer and PassUIGlow it still writes both of its
+// timestamps when the pass does not exist, for the reason recordCommandBuffer
+// gives at the water arm: a query that is reset and never written makes the
+// WHOLE frame's readback come back NotReady, so every pass loses its number
+// rather than the absent one reading zero.
+//
+// It sits next to PassShadow rather than inside PassOpaque on purpose. The
+// prepass is a second geometry submission, not part of the lit one, and the only
+// honest way to say whether it pays is to read its own cost against the fall in
+// PassOpaque -- which is also why PassShadow now closes before the pre-scene
+// graph steps rather than after them.
 
 // PassSceneResolve and PassWaterResolve bracket vkCmdEndRendering and nothing
 // else. Ending a multisampled pass is where its colour resolves, which is real
@@ -82,6 +96,8 @@ func (p Pass) String() string {
 	switch p {
 	case PassShadow:
 		return "shadow"
+	case PassDepthPrepass:
+		return "prepass"
 	case PassTerrain:
 		return "terrain"
 	case PassOpaque:

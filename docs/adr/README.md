@@ -20,6 +20,7 @@ Start with the index below; use [the template](template.md) for a new record.
 | [0010](0010-shared-mesh-storage-and-range-submission.md) | Shared mesh storage and range submission | Accepted | 2026-09-24 |
 | [0011](0011-one-runtime-safe-resource-release-contract.md) | One runtime-safe resource release contract | Accepted | 2026-10-02 |
 | [0012](0012-an-x-module-for-opinionated-systems.md) | An x module for opinionated systems | Accepted | 2026-10-02 |
+| [0013](0013-adaptive-depth-prepass-not-a-visibility-buffer.md) | Shade once per pixel through an adaptive depth prepass, not a visibility buffer | Accepted | 2026-10-03 |
 
 Records 0002–0004 document existing decisions retrospectively. Their recorded
 date is when the ADR was written, not an assertion about when the original

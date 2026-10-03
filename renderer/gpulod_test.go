@@ -57,7 +57,7 @@ func gpuFrame(t *testing.T, n int) (*frame, *Renderer, []RenderObject) {
 	}
 	g.copy[0] = core1_0.BufferCopy{Size: 84}
 	var err error
-	fx.graph, err = newFrameGraph(core1_0.Samples4, core1_0.FormatD32SignedFloat, core1_0.FormatB8G8R8A8SRGB, 1, r)
+	fx.graph, err = newFrameGraph(core1_0.Samples4, core1_0.FormatD32SignedFloat, core1_0.FormatB8G8R8A8SRGB, 1, false, r)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -229,9 +229,18 @@ func main() {
 	shot := flag.String("screenshot", "", "write the last frame as PNG")
 	passes := flag.String("passes", "on", "application passes: on or off")
 	timings := flag.Bool("timings", false, "print application GPU timings after 30 warm-up frames")
+	prepass := flag.String("prepass", "off", "depth prepass: off, on, auto, or empty -- auto decides per frame from the estimated depth complexity, and empty is on with the prepass's own draws withheld, which is `task prepass`'s control")
 	flag.Parse()
 	if *passes != "on" && *passes != "off" {
 		log.Fatal("-passes must be on or off")
+	}
+	// The depth prepass, off by default, so `task prepass` can render this
+	// scene three ways and compare the bytes. It belongs in THIS example in
+	// particular: an application pass reading scene depth is what makes the
+	// depth image rest in the sampled layout, which is the case the prepass's
+	// declared exit layout exists for. See renderer.WithDepthPrepass.
+	if *prepass != "off" && *prepass != "on" && *prepass != "auto" && *prepass != "empty" {
+		log.Fatalf("-prepass %q is not off, on, auto or empty", *prepass)
 	}
 	// The sky slot and this example's own lit shader in one set. Fill leaves
 	// every stage it is not responsible for alone, so the override below still
@@ -243,13 +252,27 @@ func main() {
 	e, err := glyph.New(&game{passes: *passes == "on", timings: *timings},
 		glyph.WithTitle("GlyphEngine - 24 Custom passes"), glyph.WithWindowSize(960, 540),
 		glyph.WithProjection(50, 0.1, 300), glyph.WithMSAA(4), glyph.WithShaders(sh),
-		glyph.WithMaxFrames(*frames), glyph.WithScreenshot(*shot))
+		glyph.WithMaxFrames(*frames), glyph.WithScreenshot(*shot),
+		glyph.WithDepthPrepass(depthPrepassMode(*prepass)))
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer e.Destroy()
+	if *prepass == "empty" {
+		e.Renderer().SetDepthPrepassDebug(renderer.DepthPrepassDebugEmpty)
+	}
 	e.Run()
 	log.Printf("rendered %d frames", e.FrameCount())
+	// What the prepass actually covered in this scene, so `task prepass` can
+	// tell a byte-identical pair that proves something from one that proves
+	// nothing because no draw qualified. Zero here with -prepass on is not a
+	// failure -- it is a scene the mechanism does not reach -- but a gate that
+	// could not see the difference would read it as a pass.
+	if *prepass != "off" {
+		st := e.Renderer().Stats()
+		log.Printf("PREPASS\tmode\t%s\tdraws\t%d\testimate\t%.3f\tactive\t%t",
+			e.Renderer().Capabilities().DepthPrepass, st.PrepassDraws, st.PrepassEstimate, st.PrepassActive)
+	}
 	if *timings && e.FrameCount() > 30 {
 		timing := e.MeanGPUTimings()
 		fmt.Printf("GPU mean after warmup: valid=%v total=%.5fms\n", timing.Valid, timing.Total)
@@ -257,4 +280,16 @@ func main() {
 			fmt.Printf("  %s: %.5fms\n", pass.Name, pass.Ms)
 		}
 	}
+}
+
+// depthPrepassMode maps this example's -prepass flag onto the renderer's mode.
+// "empty" is On plus SetDepthPrepassDebug, which main applies after New.
+func depthPrepassMode(flag string) renderer.DepthPrepassMode {
+	switch flag {
+	case "on", "empty":
+		return renderer.DepthPrepassOn
+	case "auto":
+		return renderer.DepthPrepassAuto
+	}
+	return renderer.DepthPrepassOff
 }

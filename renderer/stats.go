@@ -28,6 +28,40 @@ type RenderStats struct {
 	// cascades, so it can exceed the number of objects in the scene.
 	ShadowCasters int
 
+	// PrepassEstimate is this frame's depthComplexityEstimate: the qualifying
+	// draws' projected bound areas summed over the area at least one of them
+	// covers, which is the mean depth complexity of the geometry the prepass
+	// would touch. It is the number DepthPrepassAuto decided on, and
+	// PrepassActive is the decision.
+	//
+	// Both are zero on a renderer built DepthPrepassOff, which computes no
+	// estimate at all -- a frame reading 0 there has not been measured, it has
+	// been skipped. Capabilities.DepthPrepass says which.
+	//
+	// Reported so the decision can be judged from outside: a game can see why
+	// its frame changed mode, and `task bench -- -scene overdraw` reads them to
+	// show that the arm with hidden work is the arm Auto turned the prepass on
+	// for. See depthComplexityEstimate for what the number does and does not
+	// see.
+	// PrepassCovered is the share of the viewport the qualifying draws' bounds
+	// cover between them, which is the denominator PrepassEstimate divided by.
+	// It is what says whether a high estimate belongs to a frame full of
+	// stacked geometry or to a frame of sky with one small cluster in it; see
+	// the scale note on depthComplexityEstimate.
+	PrepassEstimate float32
+	PrepassCovered  float32
+	PrepassActive   bool
+
+	// PrepassDraws is how many of DrawCalls the optional depth prepass
+	// submitted (WithDepthPrepass); zero on every frame without it.
+	//
+	// They are counted in DrawCalls too, the same way the shadow cascades'
+	// draws are, because that is what the counter means: work submitted. This
+	// field is the split, so a game can see what the second geometry pass cost
+	// it in calls rather than inferring it from a doubled total -- and so a test
+	// can say which draws qualified without reading the command stream.
+	PrepassDraws int
+
 	// UploadsSkipped is how many draws this frame named a mesh whose streamed
 	// upload had not completed yet, and so were not recorded at all. Steady
 	// nonzero means geometry is being published faster than it can land; a

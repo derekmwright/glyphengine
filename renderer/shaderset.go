@@ -58,6 +58,13 @@ type ShaderSet struct {
 	ShadowVert, ShadowFrag     []byte // depth-only shadow pass
 	ShadowSkinnedVert          []byte // depth-only, skinned
 	ShadowInstancedVert        []byte // depth-only, model matrix per instance
+	// PrepassVert and PrepassInstancedVert are the optional depth prepass's
+	// vertex stages (WithDepthPrepass), paired with ShadowFrag as the null
+	// fragment. They are separate from the Shadow* pair because the main pass
+	// re-tests what they wrote with a compare of EQUAL, so their gl_Position has
+	// to be bit-identical to LitVert's and LitInstancedVert's -- see
+	// shaders/prepass_instanced.vert for the associativity that is not.
+	PrepassVert, PrepassInstancedVert []byte
 	// SkyVert is the fullscreen triangle at the reverse-Z far plane, shared by
 	// eight passes (see shaders.SkyVertSpv). SkyFrag is the dome, and it is one
 	// of the three stages of the SKY SLOT below.
@@ -112,6 +119,8 @@ func DefaultShaders() ShaderSet {
 		ShadowFrag:             shaders.ShadowFragSpv,
 		ShadowSkinnedVert:      shaders.ShadowSkinnedVertSpv,
 		ShadowInstancedVert:    shaders.ShadowInstancedVertSpv,
+		PrepassVert:            shaders.PrepassVertSpv,
+		PrepassInstancedVert:   shaders.PrepassInstancedVertSpv,
 		SkyVert:                shaders.SkyVertSpv,
 		SkyVolumetricFrag:      shaders.SkyVolumetricFragSpv,
 		StarsVert:              shaders.StarsVertSpv,
@@ -163,6 +172,7 @@ func (s ShaderSet) withDefaults() ShaderSet {
 		{&s.ShadowVert, d.ShadowVert}, {&s.ShadowFrag, d.ShadowFrag},
 		{&s.ShadowSkinnedVert, d.ShadowSkinnedVert},
 		{&s.ShadowInstancedVert, d.ShadowInstancedVert},
+		{&s.PrepassVert, d.PrepassVert}, {&s.PrepassInstancedVert, d.PrepassInstancedVert},
 		{&s.SkyVert, d.SkyVert},
 		{&s.SkyVolumetricFrag, d.SkyVolumetricFrag},
 		{&s.StarsVert, d.StarsVert},

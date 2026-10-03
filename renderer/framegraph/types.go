@@ -88,9 +88,22 @@ const (
 )
 
 type Use struct {
-	// FinalLayout declares a Legacy attachment's actual exit layout instead of
-	// its resting layout. The hand-recorded scene leaves depth in attachment
-	// layout even when later nodes sample it. Undefined keeps the resting layout.
+	// FinalLayout declares the layout an attachment pass leaves instead of the
+	// resource's resting layout. Undefined keeps the resting layout.
+	//
+	// On a Legacy node it describes what a hand-recorded pass really does: the
+	// scene leaves depth in attachment layout even when later nodes sample it.
+	//
+	// On a Graphics node it REPLACES the exit transition the compiler would
+	// otherwise derive, so naming the attachment's own layout means "leave it an
+	// attachment and do not restore resting". That is what the depth prepass
+	// needs: its depth rests in the sampled layout whenever an application pass
+	// reads scene depth, and bouncing it out to that layout and straight back in
+	// for the scene pass is two barriers that do nothing, the second of which is
+	// a write-after-write against the prepass's own depth writes with no stage in
+	// its source scope that covers them.
+	//
+	// Requires an attachment access.
 	FinalLayout core1_0.ImageLayout
 	Resource    ResourceID
 	Access      Access

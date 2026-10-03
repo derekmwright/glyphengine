@@ -45,6 +45,7 @@ type game struct {
 
 	count     int
 	instanced bool
+	hud       bool
 
 	// Both representations of the same field are built up front and one of them
 	// is hidden, so toggling costs nothing and neither mode is paying a
@@ -171,13 +172,24 @@ func (g *game) Update(e *glyph.Engine, dt float32) {
 		log.Printf("instanced=%v", g.instanced)
 	}
 
-	st := e.Renderer().Stats()
-	mode := "individual"
-	if g.instanced {
-		mode = "instanced"
+	// The on-screen counters are a convenience for a person watching the
+	// window, and they make this frame unusable as a byte comparison: the
+	// draw-call number is ON SCREEN, so any option that changes how many
+	// draws the frame submits -- the depth prepass submits the qualifying ones
+	// twice -- rewrites those glyphs and the capture differs for a reason that
+	// has nothing to do with the picture. Measured: with the prepass on and the
+	// HUD up, 1674 of 921600 pixels differ, all of them inside the text, and
+	// the scene itself is identical to the last bit. -hud=false is what lets
+	// `task prepass` compare the scene instead of a report about it.
+	if g.hud {
+		st := e.Renderer().Stats()
+		mode := "individual"
+		if g.instanced {
+			mode = "instanced"
+		}
+		e.Debugf("%s: %d domes", mode, g.count)
+		e.Debugf("draw calls %d  instances %d", st.DrawCalls, st.Instances)
 	}
-	e.Debugf("%s: %d domes", mode, g.count)
-	e.Debugf("draw calls %d  instances %d", st.DrawCalls, st.Instances)
 
 	g.camera.Update(in)
 	g.camera.ResolveCollision(e.Scene, 0, dt)
@@ -191,8 +203,10 @@ func main() {
 	frames := flag.Int("frames", 0, "render N frames then exit (0 = run until closed)")
 	count := flag.Int("count", 900, "number of domes in the field")
 	instanced := flag.Bool("instanced", true, "draw the field as one InstancedMesh rather than one entity each")
+	hud := flag.Bool("hud", true, "draw the on-screen dome and draw-call counters; false for byte comparisons")
 	novsync := flag.Bool("novsync", false, "disable vsync, for measuring frame cost")
 	shot := flag.String("screenshot", "", "write a PNG of the last frame to this path")
+	prepass := flag.String("prepass", "off", "depth prepass: off, on, auto, or empty -- auto decides per frame from the estimated depth complexity, and empty is on with the prepass's own draws withheld, which is `task prepass`'s control")
 	flag.Parse()
 
 	opts := []glyph.Option{
@@ -214,13 +228,39 @@ func main() {
 	if *shot != "" {
 		opts = append(opts, glyph.WithScreenshot(*shot))
 	}
+	// The depth prepass, off by default, so `task prepass` can render this scene
+	// both ways and compare the bytes. The option itself is a bet whose
+	// measurement lives in docs/agents/game-loop.md; see
+	// renderer.WithDepthPrepass.
+	switch *prepass {
+	case "off":
+	case "on", "empty":
+		opts = append(opts, glyph.WithDepthPrepass(renderer.DepthPrepassOn))
+	case "auto":
+		opts = append(opts, glyph.WithDepthPrepass(renderer.DepthPrepassAuto))
+	default:
+		log.Fatalf("-prepass %q is not off, on, auto or empty", *prepass)
+	}
 
-	e, err := glyph.New(&game{count: *count, instanced: *instanced}, opts...)
+	e, err := glyph.New(&game{count: *count, instanced: *instanced, hud: *hud}, opts...)
 	if err != nil {
 		log.Fatalf("create engine: %v", err)
 	}
 	defer e.Destroy()
+	if *prepass == "empty" {
+		e.Renderer().SetDepthPrepassDebug(renderer.DepthPrepassDebugEmpty)
+	}
 
 	e.Run()
 	log.Printf("rendered %d frames", e.FrameCount())
+	// What the prepass actually covered in this scene, so `task prepass` can
+	// tell a byte-identical pair that proves something from one that proves
+	// nothing because no draw qualified. Zero here with -prepass on is not a
+	// failure -- it is a scene the mechanism does not reach -- but a gate that
+	// could not see the difference would read it as a pass.
+	if *prepass != "off" {
+		st := e.Renderer().Stats()
+		log.Printf("PREPASS\tmode\t%s\tdraws\t%d\testimate\t%.3f\tactive\t%t",
+			e.Renderer().Capabilities().DepthPrepass, st.PrepassDraws, st.PrepassEstimate, st.PrepassActive)
+	}
 }

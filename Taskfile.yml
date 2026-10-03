@@ -332,6 +332,12 @@ tasks:
         # silently approving whatever is next measured on it.
         check 28-overdraw -count 256
         check 28-overdraw -count 256 -overlap=false
+        # The depth prepass, which nothing else in this matrix reaches: with the
+        # option off there is no node and no pipeline at all. Two arms here are
+        # enough to say both modes start and render frames; `task validate`
+        # covers the variants and `task prepass` the pixels.
+        check 28-overdraw -count 256 -prepass on
+        check 28-overdraw -count 256 -prepass auto
         # Both arms of the occlusion baseline, at 1200 placements rather than its
         # own 6000 so startup stays short. Nothing in the engine removes hidden
         # instances, so this renders no feature -- but both arms assert about the
@@ -399,6 +405,38 @@ tasks:
         # before it reaches a picture.
         check 28-overdraw -count 256
         check 28-overdraw -count 256 -overlap=false
+        # The optional depth prepass, which the rest of this matrix never reaches:
+        # with the option off there is no node, no pipeline and nothing for the
+        # layer to object to. These arms are the whole of its core-validation
+        # coverage.
+        #
+        # 28-overdraw because every one of its patches qualifies, 07-terrain and
+        # 19-instanced for the two vertex stages (the second has its own pipeline
+        # and its own vertex input state), 08-grass because most of its frame is
+        # EXCLUDED from the prepass and still has to depth-test against what the
+        # prepass wrote, and 24-custom-passes because an application pass reading
+        # scene depth is what makes the depth image rest in the SAMPLED layout --
+        # the case the node's declared exit layout exists for, and a barrier
+        # naming a layout an image is not in is a core validation error rather
+        # than a hazard. The -prepass empty arm is the same graph with the draws
+        # withheld, which is what `task prepass` compares against.
+        #
+        # The two auto arms are deliberately on opposite sides of the threshold,
+        # which is what makes them two arms rather than one run twice. At 256
+        # patches the overlap arm's estimate is about 2.4, above the measured
+        # threshold of 2.02, so that arm validates the ACTIVE path under auto;
+        # the control arm is about 1.02 and validates the path the rest of this
+        # matrix cannot reach at all -- a declared prepass node that clears depth
+        # and submits nothing, with a scene pass that still loads what it
+        # cleared.
+        check 28-overdraw -count 256 -prepass on
+        check 28-overdraw -count 256 -prepass auto
+        check 28-overdraw -count 256 -overlap=false -prepass auto
+        check 07-terrain -prepass on
+        check 19-instanced -prepass on
+        check 08-grass -prepass on
+        check 24-custom-passes -prepass on
+        check 24-custom-passes -prepass empty
         # Both arms of the occlusion baseline, plus the panning one. 6,000 GPU
         # LOD placements over terrain is a shape no other entry here has, and
         # the arms assert about the scene they rendered rather than only running.
@@ -956,7 +994,20 @@ tasks:
         # run to run, which no other entry here would notice because no other
         # entry turns the march on. -skylamp is in it because the sky's march
         # is a second copy of the jitter in a second shader.
-        for ex in "08-grass" "08-grass -timeofday 0.0" "08-grass -timeofday 0.03" "09-water" "12-particles" "06-skinned -demo" "15-kitchen-sink -demo" "09-water -plume -ghost -marker -submerged" "09-water -time 0.72 -yaw 1.771 -pitch -0.185 -pillars" "13-ui -glow on" "21-streetlights -volumetric 1 -lampvolumetric 1 -skylamp" "24-custom-passes" "25-lod-forest" "25-lod-forest -gpu" "29-ridge -pan"; do
+        #
+        # The last three entries are the only ones with the depth prepass on, and
+        # they are the determinism half of the rule that option is judged by. They
+        # are not redundant with the entries above them: the prepass writes depth
+        # in a separate submission and the main pass tests it with a compare of
+        # EQUAL, so a depth value that moved by one bit between two runs of the
+        # same build takes a whole SURFACE out of one of them rather than shading
+        # it differently. 08-grass is the scene where most of the frame is
+        # excluded from the prepass and the rest is not; 24-custom-passes is the
+        # one where an application pass reads scene depth; and the auto arm on
+        # 28-overdraw is the mode a game would run, where the per-frame decision
+        # is itself a thing two runs have to agree on -- a decision that differed
+        # on one frame would change which pipelines that frame bound.
+        for ex in "08-grass" "08-grass -timeofday 0.0" "08-grass -timeofday 0.03" "09-water" "12-particles" "06-skinned -demo" "15-kitchen-sink -demo" "09-water -plume -ghost -marker -submerged" "09-water -time 0.72 -yaw 1.771 -pitch -0.185 -pillars" "13-ui -glow on" "21-streetlights -volumetric 1 -lampvolumetric 1 -skylamp" "24-custom-passes" "25-lod-forest" "25-lod-forest -gpu" "29-ridge -pan" "08-grass -prepass on" "24-custom-passes -prepass on" "28-overdraw -prepass auto"; do
           set -- $ex
           name=$1; shift
           shot 16.667ms $name a "$*"
@@ -1177,7 +1228,7 @@ tasks:
             status=1
           fi
         }
-        for ex in "08-grass" "08-grass -timeofday 0.0" "08-grass -timeofday 0.03" "09-water" "12-particles" "06-skinned -demo" "15-kitchen-sink -demo" "09-water -plume -ghost -marker -submerged" "18-translucent" "13-ui" "10-text" "19-instanced" "21-streetlights" "24-custom-passes" "25-lod-forest" "25-lod-forest -gpu" "29-ridge -pan"; do
+        for ex in "08-grass" "08-grass -timeofday 0.0" "08-grass -timeofday 0.03" "09-water" "12-particles" "06-skinned -demo" "15-kitchen-sink -demo" "09-water -plume -ghost -marker -submerged" "18-translucent" "13-ui" "10-text" "19-instanced" "21-streetlights" "24-custom-passes" "25-lod-forest" "25-lod-forest -gpu" "29-ridge -pan" "19-instanced -prepass on" "28-overdraw -prepass auto"; do
           drawseq "$ex"
         done
 
@@ -1534,6 +1585,207 @@ tasks:
         # untouched.
         both bloom -pitch 0.45 -bloom 0.7 -bloomthreshold 0.5
         rm -rf $d
+        exit $status
+
+  prepass:
+    desc: "The depth prepass renders byte-identical frames to the pass without it"
+    dir: examples
+    cmds:
+      # Needs a GPU, so it sits with smoke, validate and determinism rather than
+      # in `task ci`.
+      #
+      # Why exact equality is the right bar. The prepass writes depth for the
+      # qualifying opaque draws and the main pass then re-tests exactly those
+      # draws with a compare of EQUAL against the values it wrote. Every fragment
+      # the prepass kept passes that test; every fragment it rejected was going to
+      # be overwritten by a nearer one anyway. So the image cannot move -- unless
+      # the two passes disagree about a depth value or about which draws are in
+      # the set, and then what goes missing is a whole SURFACE, not a shade. A
+      # tolerance would be the wrong instrument twice over: it would admit a
+      # genuinely wrong depth value, and it would have nothing to admit when the
+      # mechanism is right.
+      #
+      # The failure this is built to catch is bit-exactness in the vertex stage.
+      # prepass.vert and prepass_instanced.vert have to reach gl_Position by the
+      # same arithmetic lit.vert and lit_instanced.vert do; the second of those
+      # pairs differs from shadow_instanced.vert only in where the parentheses go,
+      # and that difference is enough to lose surfaces.
+      # shaders.TestPrepassStagesMatchTheirLitTwins pins the source and this pins
+      # the pixels.
+      #
+      # The control is -prepass empty: the node runs, the depth clear runs, the
+      # main pass still compares EQUAL, and the prepass submits none of its draws.
+      # Every prepassed surface then fails the test against a cleared buffer and
+      # the sky shows through where it was. That has to move pixels, and it is a
+      # stronger control than a comparator self-check because it fails in three
+      # separate ways: if the comparator is blind, if the depth the main pass tests
+      # is not the depth the prepass wrote, and if the main pass is still comparing
+      # Greater rather than EQUAL. A build that never bound the equal-compare
+      # variants would render this control identically to the shipping path.
+      #
+      # An example whose scene has no qualifying draw contributes nothing to
+      # either half, and says so rather than counting as a pass -- which is why
+      # every arm logs how many prepass draws it recorded.
+      - |
+        status=0
+        d=.prepass
+        rm -rf $d && mkdir -p $d
+        shot() {
+          name=$1; mode=$2; frames=$3; shift 3
+          GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./$name -frames $frames \
+            -prepass $mode "$@" -screenshot $d/$name-$mode.png >$d/$name-$mode.log 2>&1
+        }
+        # Prove the comparator before trusting a word it says, the same way
+        # `task determinism` and `task lights` do: diff rather than sha256sum,
+        # which the shell task runs on Windows does not have -- both hashes came
+        # back empty there, every pair compared equal, and a gate printed a column
+        # of "identical" while comparing nothing. A missing capture returns 2 so
+        # "the run died" cannot be read as "the images match".
+        same() {
+          [ -s "$d/$1" ] && [ -s "$d/$2" ] || return 2
+          diff -q "$d/$1" "$d/$2" >/dev/null 2>&1
+        }
+        printf a > $d/selfa.png; printf a > $d/selfb.png
+        same selfa.png selfb.png || { echo "SELF-CHECK: two identical files compared unequal -- this gate proves nothing"; exit 1; }
+        printf b > $d/selfb.png
+        if same selfa.png selfb.png; then
+          echo "SELF-CHECK: two different files compared equal -- this gate proves nothing"
+          exit 1
+        fi
+        rm -f $d/selfa.png $d/selfb.png
+        # How many draws the prepass actually covered, from the run's own log.
+        #
+        # awk rather than sed, and that is not a preference. The shell this task
+        # runs under on Windows is Task's own, not the Git Bash one an
+        # interactive check uses, and a sed CAPTURE GROUP does not survive it:
+        # 's/.*\(PREPASS\).*/\1/p' matches nothing there while
+        # 's/.*draws.*/HIT/p' matches fine, so the backslashes are being eaten
+        # somewhere between the YAML and sed. Measured, after this gate reported
+        # "no PREPASS line" for all six examples whose captures were sitting on
+        # disk ALREADY IDENTICAL -- a false failure this time, and the same shape
+        # as the sha256sum trap `task determinism` records, which was a false
+        # pass. awk needs no backslashes and $NF is the count.
+        # The field looked up BY NAME, not by position. $NF was right when the
+        # PREPASS line ended with the draw count and stopped being right the
+        # moment that line gained the mode, the estimate and the decision after
+        # it -- at which point this returned "true", every `[ "$n" = "0" ]` was
+        # false, and the no-draw-qualified check could never fire again. A
+        # silently weakened gate, which is the failure this file keeps finding.
+        # awk still, for the reason below.
+        covered() {
+          awk '/PREPASS/{for(i=1;i<=NF;i++) if($i=="draws") print $(i+1)}' "$d/$1-$2.log" | tail -1
+        }
+        check() {
+          name=$1; frames=$2; shift 2
+          shot $name off   $frames "$@"
+          shot $name on    $frames "$@"
+          shot $name empty $frames "$@"
+          n=$(covered $name on)
+          if [ -z "$n" ]; then
+            echo "$name: no PREPASS line -- the run failed or the flag did not arrive; see $d/$name-on.log"
+            status=1
+            return
+          fi
+          if same $name-off.png $name-on.png; then
+            echo "$name: identical with the prepass off and on ($n prepass draws)"
+          elif [ $? -eq 1 ]; then
+            echo "$name: THE PREPASS CHANGED THE IMAGE ($n prepass draws)"
+            status=1
+          else
+            echo "$name: MISSING CAPTURE -- this gate proves nothing"
+            status=1
+            return
+          fi
+          if [ "$n" = "0" ]; then
+            echo "$name: NO DRAW QUALIFIED -- this example says nothing about the prepass"
+            status=1
+            return
+          fi
+          if same $name-on.png $name-empty.png; then
+            echo "$name: CONTROL FAILED -- withholding every prepass draw changed nothing, so the equal compare is not being used"
+            status=1
+          elif [ $? -ne 1 ]; then
+            echo "$name: MISSING CONTROL CAPTURE -- this gate proves nothing"
+            status=1
+          fi
+        }
+        # 07-terrain is the plain lit path over one large mesh, 16-materials the
+        # five-map material path, 19-instanced the instanced path with its own
+        # vertex stage, 08-grass the scene where most of the frame is EXCLUDED
+        # from the prepass and must still come out identical, 24-custom-passes the
+        # one with an application pass reading scene depth -- which is what makes
+        # the depth image rest in the sampled layout and exercises the prepass's
+        # declared exit layout -- and 18-translucent the blended tail, which
+        # writes no depth and must not be prepassed.
+        check 07-terrain      150
+        check 16-materials    150
+        # -hud=false because 19-instanced puts the draw-call COUNT on screen, and
+        # the prepass legitimately changes it: the qualifying draws are submitted
+        # twice. With the HUD up, 1674 of 921600 pixels differ and every one of
+        # them is inside the text. Comparing the scene means not comparing a
+        # report about the scene.
+        check 19-instanced     60 -hud=false
+        check 08-grass        150
+        check 24-custom-passes 120
+        check 18-translucent  120
+        # DepthPrepassAuto, on the scene built to make it decide, both ways.
+        #
+        # The pixel bar is the same one and for the same reason: whichever answer
+        # auto gives, the frame has to be the frame. What this adds over the arms
+        # above is that the DECISION has to be right -- the example itself fails
+        # if auto leaves the prepass off on the overlap arm or turns it on for the
+        # control -- and that the mode it chose has to be stable across the run,
+        # which it also checks. So the two lines below are the gate on the
+        # threshold being on the right side of this scene, and the comparison
+        # here is the gate on auto rendering what off renders.
+        #
+        # The full 1024 patches rather than the 256 the check matrices use. Both
+        # sit above the measured threshold of 2.02 -- the overlap arm's estimate
+        # is 3.12 at 1024 and about 2.4 at 256 -- so either would exercise the
+        # active path, and 1024 is chosen because it is the field the bench
+        # measures and the records quote. Worth knowing if the threshold ever
+        # rises above 2.4: this gate would then compare the prepass-off path to
+        # itself twice at 256 and report two passes, and the example's own auto
+        # assertion is what would catch it.
+        autocheck() {
+          arm=$1; shift
+          shot 28-overdraw off  120 -count 1024 "$@"
+          mv $d/28-overdraw-off.png $d/28-overdraw-$arm-off.png 2>/dev/null
+          mv $d/28-overdraw-off.log $d/28-overdraw-$arm-off.log 2>/dev/null
+          shot 28-overdraw auto 120 -count 1024 "$@"
+          mv $d/28-overdraw-auto.png $d/28-overdraw-$arm-auto.png 2>/dev/null
+          mv $d/28-overdraw-auto.log $d/28-overdraw-$arm-auto.log 2>/dev/null
+          # 28-overdraw reports on an OVERDRAW line and not a PREPASS one --
+          # it carries the arm's own measurements too -- so this reads that
+          # line, by field name. Checked against a real run's output before
+          # being trusted: parsing the PREPASS line here found nothing at all
+          # and this gate reported "the run failed" for a run that had
+          # succeeded.
+          n=$(awk '/OVERDRAW/{for(i=1;i<=NF;i++) if($i=="prepass_draws") print $(i+1)}' "$d/28-overdraw-$arm-auto.log" | tail -1)
+          if [ -z "$n" ]; then
+            echo "28-overdraw $arm: no OVERDRAW line -- the run failed; see $d/28-overdraw-$arm-auto.log"
+            status=1
+            return
+          fi
+          if same 28-overdraw-$arm-off.png 28-overdraw-$arm-auto.png; then
+            echo "28-overdraw $arm: identical with the prepass off and auto ($n prepass draws under auto)"
+          elif [ $? -eq 1 ]; then
+            echo "28-overdraw $arm: AUTO CHANGED THE IMAGE ($n prepass draws)"
+            status=1
+          else
+            echo "28-overdraw $arm: MISSING CAPTURE -- this gate proves nothing"
+            status=1
+          fi
+        }
+        autocheck overlap
+        autocheck control -overlap=false
+        # Kept on failure, the way `task lights` keeps its pair: what failed is a
+        # picture, and the useful next step is to look at the two of them.
+        if [ $status -eq 0 ]; then
+          rm -rf $d
+        else
+          echo "captures kept in examples/$d"
+        fi
         exit $status
 
   lights:

@@ -120,6 +120,12 @@ var ShadowSkinnedVertSpv []byte
 //go:embed shadow.frag.spv
 var ShadowFragSpv []byte
 
+//go:embed prepass.vert.spv
+var PrepassVertSpv []byte
+
+//go:embed prepass_instanced.vert.spv
+var PrepassInstancedVertSpv []byte
+
 //go:embed water.vert.spv
 var WaterVertSpv []byte
 
