@@ -51,6 +51,7 @@ import (
 
 	glyph "github.com/derekmwright/glyphengine"
 	"github.com/derekmwright/glyphengine/renderer"
+	xsky "github.com/derekmwright/glyphengine/x/sky"
 	"github.com/derekmwright/glyphengine/x/terrainfield"
 )
 
@@ -371,15 +372,14 @@ func (g *game) Init(e *glyph.Engine) error {
 	// this example exists to move: a confounder the same size as the signal, in
 	// a pass the policy cannot touch, buys nothing but noise. Fog stays on,
 	// because the fragment shader's fog is part of what the patches pay.
-	env := glyph.DefaultEnvironment()
-	env.Sky.CloudSteps = glyph.CloudsOff
+	env := xsky.DefaultEnvironment()
+	env.Sky.CloudSteps = xsky.CloudsOff
 	e.Scene.Env = env
 
 	// A fixed low sun and no day cycle: two runs of the same arm have to be
 	// comparable, and a moving sun makes the shadow cascades and the fog
 	// different work on every frame.
-	e.SetTimeOfDay(0.32)
-	e.SetDayCycleSpeed(0)
+	env.Cycle.TimeOfDay = 0.32
 
 	e.SetCamera(g.view())
 
@@ -575,6 +575,7 @@ func main() {
 	}
 	g := &game{count: *count, cols: *cols, overlap: *overlap, spawn: *spawn, eyeY: float32(*eyeY), pitch: float32(*pitch), lamps: *lamps}
 	opts := []glyph.Option{
+		glyph.WithShaders(xsky.Shaders()),
 		glyph.WithTitle(fmt.Sprintf("GlyphEngine - 28 Overdraw (%s)", arm)),
 		glyph.WithWindowSize(*width, *height),
 		glyph.WithProjection(g.fov(), near, g.far()),

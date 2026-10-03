@@ -24,6 +24,17 @@ import (
 //
 // It skips when there is no SDK, because glslc is an authoring-only
 // dependency and most people building this will not have one.
+//
+// The globs below cover this directory, not the repository. The dome, star and
+// cloud fragment shaders are in x/sky now, with their own copy of this test
+// (x/sky/spirv_test.go) compiling them through the exported include set -- which
+// `task ci` runs, and which is where a stale one of those three is caught.
+//
+// The count assertion below is what stops a glob that stopped matching from
+// passing here by having nothing left to check. 68 sources today; the floor is
+// 60, low enough not to need editing for a new shader and high enough that losing
+// a whole glob trips it -- verified by narrowing the *.frag glob to sky*.frag,
+// which leaves 44 and fails.
 func TestCommittedSPIRVMatchesGLSL(t *testing.T) {
 	sdk := os.Getenv("VULKAN_SDK")
 	if sdk == "" {
@@ -73,8 +84,8 @@ func TestCommittedSPIRVMatchesGLSL(t *testing.T) {
 		}
 		sources = append(sources, app...)
 	}
-	if len(sources) == 0 {
-		t.Fatal("no shader sources found")
+	if len(sources) < 60 {
+		t.Fatalf("%d shader sources found, and there were 68; the globs are not matching what this test thinks they are", len(sources))
 	}
 
 	out := t.TempDir()

@@ -33,6 +33,7 @@ import (
 	glyph "github.com/derekmwright/glyphengine"
 	"github.com/derekmwright/glyphengine/input"
 	"github.com/derekmwright/glyphengine/renderer"
+	xsky "github.com/derekmwright/glyphengine/x/sky"
 )
 
 //go:embed assets
@@ -209,8 +210,10 @@ func (g *game) Init(e *glyph.Engine) error {
 	log.Printf("clips: idle=%d walk=%d sprint=%d jump=%d (of %d)",
 		g.clipIdle, g.clipWalk, g.clipSprint, g.clipJump, len(model.Animations))
 
-	e.SetDayCycleSpeed(1.0 / 300.0)
-	e.SetTimeOfDay(0.30)
+	env := xsky.DefaultEnvironment()
+	env.Cycle.TimeOfDay = 0.30
+	env.Cycle.Speed = 1.0 / 300.0
+	e.Scene.Env = env
 
 	// Third person, deliberately: this example exists to show the character
 	// deform, and a first-person camera sits inside it.
@@ -357,6 +360,7 @@ func main() {
 	flag.Parse()
 
 	opts := []glyph.Option{
+		glyph.WithShaders(xsky.Shaders()),
 		glyph.WithTitle("GlyphEngine - 06 Skinned"),
 		glyph.WithWindowSize(*width, *height),
 		glyph.WithMSAA(4),

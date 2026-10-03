@@ -134,18 +134,24 @@ jobs:
         run: xvfb-run -a task test:race
 
   # What a `go get` user actually receives, which is not what a local build
-  # sees. The engine embeds 37 .spv files with go:embed and export-ignores
+  # sees. The engine embeds 46 .spv files with go:embed and export-ignores
   # docs/images, so the module is only usable if every embedded file is
   # committed AND survives the archive. Both are invisible to an in-repo build,
   # which reads the working tree including anything uncommitted or ignored.
+  #
+  # x/sky embeds three more of its own -- the dome, the stars and the cloud
+  # march, which left the engine in ADR 0012 step 4 -- so the x step below asks
+  # for those blobs rather than only compiling against the module.
   #
   # cmd/go builds module zips with `git archive`, so archiving HEAD reproduces
   # the consumer's tree exactly -- offline and without needing the commit to be
   # fetchable by the module proxy.
   #
-  # Verified by breaking it: deleting shaders/clouds.frag.spv from the archive
-  # fails this job with "pattern clouds.frag.spv: no matching files found"
-  # while task ci stays green, which is the whole point.
+  # Verified by breaking it: deleting an embedded .spv from the archive fails
+  # this job with "pattern <name>.spv: no matching files found" while task ci
+  # stays green, which is the whole point. (It was shaders/clouds.frag.spv when
+  # that was recorded; that file is x/sky/clouds.frag.spv now, and the x step
+  # below is what catches it there.)
   #
   # There are two consumers here now (ADR 0012). The second is the x module,
   # built against the archived engine with GOWORK=off, and it is not a
@@ -239,6 +245,7 @@ jobs:
           	"log"
 
           	"github.com/derekmwright/glyphengine/shaders/include"
+          	"github.com/derekmwright/glyphengine/x/sky"
           	"github.com/derekmwright/glyphengine/x/terrainfield"
           )
 
@@ -260,8 +267,22 @@ jobs:
           	if !haveLighting {
           		log.Fatalf("lighting.inc missing from the published include set: %v", names)
           	}
+          	// x/sky's own embedded SPIR-V. The engine embeds no dome, no stars
+          	// and no cloud march, so these three blobs ARE the sky for a
+          	// consumer: an export-ignore or an uncommitted .spv here would leave
+          	// every other job green and leave a game with no sky and no error.
+          	sh := sky.Shaders()
+          	for _, stage := range []struct {
+          		name string
+          		spv  []byte
+          	}{{"SkyFrag", sh.SkyFrag}, {"StarsFrag", sh.StarsFrag}, {"CloudsFrag", sh.CloudsFrag}} {
+          		if len(stage.spv) == 0 {
+          			log.Fatalf("x/sky %s is empty in the published module", stage.name)
+          		}
+          	}
           	minX, minZ, maxX, maxZ := hm.Bounds()
-          	fmt.Printf("terrain %g,%g..%g,%g with %d GLSL includes\n", minX, minZ, maxX, maxZ, len(names))
+          	fmt.Printf("terrain %g,%g..%g,%g with %d GLSL includes and %d+%d+%d bytes of sky\n",
+          		minX, minZ, maxX, maxZ, len(names), len(sh.SkyFrag), len(sh.StarsFrag), len(sh.CloudsFrag))
           }
           EOF
 

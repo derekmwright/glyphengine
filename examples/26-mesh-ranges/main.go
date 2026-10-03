@@ -13,6 +13,7 @@ import (
 
 	glyph "github.com/derekmwright/glyphengine"
 	"github.com/derekmwright/glyphengine/renderer"
+	xsky "github.com/derekmwright/glyphengine/x/sky"
 	"github.com/go-gl/mathgl/mgl32"
 )
 
@@ -97,9 +98,12 @@ func (g *game) Init(e *glyph.Engine) error {
 		e.C.NoCastShadow.Set(ent, &glyph.NoCastShadow{})
 		e.C.Static.Set(ent, &glyph.Static{})
 	}
-	e.SetDayCycleSpeed(0)
-	e.SetTimeOfDay(0.3)
-	e.SetFogDensity(0)
+	// A sun that does not move and no fog: this example counts draws and
+	// bytes, and both of those would otherwise vary with the hour.
+	env := xsky.DefaultEnvironment()
+	env.Cycle.TimeOfDay = 0.3
+	env.Fog.Density = 0
+	e.Scene.Env = env
 	e.SetCamera(mgl32.Vec3{0, float32(side) * 3, 0}, mgl32.Vec3{0, 0, 0}, mgl32.Vec3{0, 0, -1})
 	width := 2
 	if g.index32 {
@@ -123,7 +127,7 @@ func main() {
 	if *n <= 0 || (*mode != "separate" && *mode != "ranges" && *mode != "indirect") {
 		log.Fatal("invalid count or mode")
 	}
-	opts := []glyph.Option{glyph.WithTitle(fmt.Sprintf("GlyphEngine mesh ranges: %s", *mode)), glyph.WithWindowSize(1280, 720), glyph.WithMSAA(4), glyph.WithProjection(50, 0.1, 2000), glyph.WithMaxFrames(*frames)}
+	opts := []glyph.Option{glyph.WithShaders(xsky.Shaders()), glyph.WithTitle(fmt.Sprintf("GlyphEngine mesh ranges: %s", *mode)), glyph.WithWindowSize(1280, 720), glyph.WithMSAA(4), glyph.WithProjection(50, 0.1, 2000), glyph.WithMaxFrames(*frames)}
 	if *shot != "" {
 		opts = append(opts, glyph.WithScreenshot(*shot))
 	}

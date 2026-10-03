@@ -37,6 +37,7 @@ import (
 	glyph "github.com/derekmwright/glyphengine"
 	"github.com/derekmwright/glyphengine/ecs"
 	"github.com/derekmwright/glyphengine/input"
+	xsky "github.com/derekmwright/glyphengine/x/sky"
 	"github.com/derekmwright/glyphengine/x/terrainfield"
 )
 
@@ -120,8 +121,10 @@ func (g *game) Init(e *glyph.Engine) error {
 	cc := glyph.NewCharacterController()
 	e.C.CharacterController.Set(g.player, &cc)
 
-	e.SetDayCycleSpeed(1.0 / 300.0)
-	e.SetTimeOfDay(0.30)
+	env := xsky.DefaultEnvironment()
+	env.Cycle.TimeOfDay = 0.30
+	env.Cycle.Speed = 1.0 / 300.0
+	e.Scene.Env = env
 	// Terrain wants to fade into the sky rather than end in a hard edge.
 	// 0.006 is tuned for the procedural terrain's 200-unit world; a loaded
 	// heightmap can be any size (the Blender fixture is 10 units), so scale
@@ -131,7 +134,7 @@ func (g *game) Init(e *glyph.Engine) error {
 	if g.heightmapPath != "" {
 		fogDensity = 0.006 * hm.WorldW / worldSize
 	}
-	e.SetFogDensity(fogDensity)
+	env.Fog.Density = fogDensity
 
 	g.camera = glyph.NewFPCamera()
 	g.camera.EyeHeight = 0.7
@@ -256,6 +259,7 @@ func main() {
 	flag.Parse()
 
 	opts := []glyph.Option{
+		glyph.WithShaders(xsky.Shaders()),
 		glyph.WithTitle("GlyphEngine - 07 Terrain"),
 		glyph.WithDebugKeys(),
 		glyph.WithWindowSize(*width, *height),

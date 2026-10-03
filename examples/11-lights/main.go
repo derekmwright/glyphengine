@@ -108,7 +108,11 @@ func (g *game) Init(e *glyph.Engine) error {
 
 	// Night, with no sky and no cycle: the only light in this scene is the
 	// light this example places. A day/night cycle would drown it in sun.
-	e.Scene.Env = &glyph.Environment{
+	//
+	// StaticSource is the engine's own environment and all of it, so this
+	// example imports no sky package and the renderer builds no dome, star or
+	// cloud pipeline at all. It and 23-shadow-coverage are what exercise that.
+	e.Scene.Env = &glyph.StaticSource{
 		Ambient:    &glyph.AmbientLight{Color: [3]float32{0.035, 0.038, 0.055}},
 		ClearColor: [3]float32{0.02, 0.02, 0.035},
 	}

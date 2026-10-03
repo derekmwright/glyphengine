@@ -36,6 +36,7 @@ import (
 	glyph "github.com/derekmwright/glyphengine"
 	"github.com/derekmwright/glyphengine/ecs"
 	"github.com/derekmwright/glyphengine/input"
+	xsky "github.com/derekmwright/glyphengine/x/sky"
 )
 
 func init() {
@@ -129,8 +130,10 @@ func (g *game) Init(e *glyph.Engine) error {
 		g.panes = append(g.panes, ent)
 	}
 
-	e.SetDayCycleSpeed(1.0 / 120.0)
-	e.SetTimeOfDay(0.32)
+	env := xsky.DefaultEnvironment()
+	env.Cycle.TimeOfDay = 0.32
+	env.Cycle.Speed = 1.0 / 120.0
+	e.Scene.Env = env
 
 	g.camera = glyph.NewCamera(17)
 	g.camera.Target = mgl32.Vec3{-1.5, 1.4, 1}
@@ -200,6 +203,7 @@ func main() {
 	flag.Parse()
 
 	opts := []glyph.Option{
+		glyph.WithShaders(xsky.Shaders()),
 		glyph.WithTitle("GlyphEngine - 18 Translucent"),
 		glyph.WithWindowSize(*width, *height),
 		glyph.WithMSAA(4),

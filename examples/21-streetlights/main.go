@@ -53,6 +53,7 @@ import (
 	glyph "github.com/derekmwright/glyphengine"
 	"github.com/derekmwright/glyphengine/input"
 	"github.com/derekmwright/glyphengine/renderer"
+	xsky "github.com/derekmwright/glyphengine/x/sky"
 )
 
 func init() {
@@ -314,13 +315,12 @@ func (g *game) Init(e *glyph.Engine) error {
 	// attention. Clouds off -- a night sky with a modest star field reads
 	// better here than a raymarched cloud layer, and it is the cheaper
 	// choice besides.
-	env := glyph.DefaultEnvironment()
-	env.Sky.CloudSteps = glyph.CloudsOff
+	env := xsky.DefaultEnvironment()
+	env.Sky.CloudSteps = xsky.CloudsOff
 	env.Sky.MilkyWay = 0.5
 	env.Fog = &glyph.Fog{Density: 0.006, Height: 6}
+	env.Cycle.TimeOfDay = 0.03
 	e.Scene.Env = env
-	e.SetTimeOfDay(0.03)
-	e.SetDayCycleSpeed(0)
 
 	// The night grade is the engine's default unless asked otherwise, so the
 	// stock frame of this example is what it always was. -nightshift and
@@ -733,6 +733,7 @@ func main() {
 	flag.Parse()
 
 	opts := []glyph.Option{
+		glyph.WithShaders(xsky.Shaders()),
 		glyph.WithTitle("GlyphEngine - 21 Streetlights"),
 		glyph.WithWindowSize(*width, *height),
 		glyph.WithMSAA(4),

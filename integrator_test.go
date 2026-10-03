@@ -205,8 +205,10 @@ func TestTickDefaultIntegratorPathIsBitIdenticalToOldTick(t *testing.T) {
 		bodies = append(bodies, spawnBody(s, mgl32.Vec3{2, 9, -1}))
 		ch := spawnCharacter(s, mgl32.Vec3{5, 5, 5})
 		bodies = append(bodies, ch)
-		s.SetTimeOfDay(0.2)
-		s.SetDayCycleSpeed(1.0 / 60.0)
+		// An environment, so Env.Advance is in the tick sequence this compares.
+		// It was a day cycle until the cycle moved to x/sky, which the engine
+		// cannot import; what the ordering needs is any source, not a clock.
+		s.Env = &fakeEnv{}
 		// Order-sensitive system: see the comment above for why this is what
 		// makes a swap of Tick's step order detectable through Transform.
 		s.AddSystem(func(sc *Scene, dt float32) {

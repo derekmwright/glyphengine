@@ -94,6 +94,7 @@ import (
 	"github.com/derekmwright/glyphengine/renderer"
 	"github.com/derekmwright/glyphengine/ui"
 	"github.com/derekmwright/glyphengine/ui/yamlui"
+	xsky "github.com/derekmwright/glyphengine/x/sky"
 )
 
 //go:embed assets
@@ -287,8 +288,9 @@ func (g *game) Init(e *glyph.Engine) error {
 		}
 	}
 
-	e.SetTimeOfDay(g.timeOfDay)
-	e.SetDayCycleSpeed(0)
+	env := xsky.DefaultEnvironment()
+	env.Cycle.SetTimeOfDay(g.timeOfDay)
+	e.Scene.Env = env
 	if g.sceneBloom > 0 {
 		// The SCENE's bloom, which the UI must never feed and must never be fed
 		// by. The threshold is a flag because the default 1.2 selects nothing in
@@ -556,6 +558,7 @@ func main() {
 	}
 
 	opts := []glyph.Option{
+		glyph.WithShaders(xsky.Shaders()),
 		glyph.WithTitle("GlyphEngine - 13 UI"),
 		glyph.WithWindowSize(*width, *height),
 		glyph.WithMSAA(4),

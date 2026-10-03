@@ -69,6 +69,7 @@ import (
 
 	glyph "github.com/derekmwright/glyphengine"
 	"github.com/derekmwright/glyphengine/renderer"
+	xsky "github.com/derekmwright/glyphengine/x/sky"
 	"github.com/derekmwright/glyphengine/x/terrainfield"
 )
 
@@ -263,12 +264,12 @@ func (g *game) Init(e *glyph.Engine) error {
 	// Clouds off and a fixed low sun, for 28-overdraw's reasons: the cloud march
 	// costs about as much as the pass being measured, and a moving sun makes the
 	// cascades and the fog different work on every frame.
-	env := glyph.DefaultEnvironment()
-	env.Sky.CloudSteps = glyph.CloudsOff
+	env := xsky.DefaultEnvironment()
+	env.Sky.CloudSteps = xsky.CloudsOff
+	env.Cycle.TimeOfDay = 0.34
+	env.Cycle.Speed = 0
+	env.Fog.Density = 0
 	e.Scene.Env = env
-	e.SetTimeOfDay(0.34)
-	e.SetDayCycleSpeed(0)
-	e.SetFogDensity(0)
 	e.SetCamera(g.view(0))
 	log.Printf("29-ridge: arm=%s %d placements, half of them on the far flank", g.arm, len(g.placements))
 	return nil
@@ -367,6 +368,7 @@ func main() {
 		glyph.WithTitle(fmt.Sprintf("GlyphEngine - 29 Ridge (%s)", *arm)),
 		glyph.WithWindowSize(*width, *height),
 		glyph.WithMSAA(*msaa),
+		glyph.WithShaders(xsky.Shaders()),
 		glyph.WithProjection(fov, near, 600),
 		glyph.WithMaxFrames(*frames),
 	}

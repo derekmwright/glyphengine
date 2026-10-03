@@ -1,4 +1,4 @@
-package glyphengine
+package sky
 
 import "math"
 
@@ -17,6 +17,18 @@ func (dn *DayNight) Advance(dt float32) {
 	dn.TimeOfDay += dn.Speed * dt
 	// Wrap to [0,1)
 	dn.TimeOfDay -= float32(math.Floor(float64(dn.TimeOfDay)))
+}
+
+// SetTimeOfDay sets the clock, wrapping values outside [0,1) the way Advance
+// does.
+//
+// It exists because the wrap rule has to live in one place. Scene.SetTimeOfDay
+// used to apply it on the engine's side of the seam, and a game assigning
+// TimeOfDay directly -- which is what it has to do now that the cycle is here
+// -- would have silently got the unwrapped value and, at 1.2 or -0.1, a clamped
+// palette endpoint instead of the hour it asked for.
+func (dn *DayNight) SetTimeOfDay(t float32) {
+	dn.TimeOfDay = t - float32(math.Floor(float64(t)))
 }
 
 // SunDir returns the direction toward the sun. The sun orbits in the XY plane

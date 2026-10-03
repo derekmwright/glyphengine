@@ -282,6 +282,21 @@ func (t *cloudTarget) destroy(deviceDriver core1_0.DeviceDriver) {
 // Recorded before scene rendering. Explicit entry and exit barriers order the
 // cloud color writes and subsequent sky sampling.
 func (r *Renderer) recordClouds(cmdBuf core1_0.CommandBuffer, lighting SceneLighting, frame int) error {
+	// Nothing to march with: the sky slot has no cloud shader. This costs
+	// nothing at all then -- no barrier, no pass, no draw.
+	//
+	// The target is still there and still sampled by a dome, if one was supplied
+	// without a cloud stage (ShaderSet's slot allows it; Fill advertises it). It
+	// is correct rather than undefined because primeSampledImages already clears
+	// it to {0, 0, 0, 1} and leaves it SHADER_READ_ONLY_OPTIMAL: alpha is
+	// transmittance, so one is "nothing in the way", and the dome's composite
+	// `skyColor * a + rgb` is the identity. That is the same no-op the march
+	// itself wrote when CloudSteps was zero, which is why skipping it changes no
+	// pixel -- and the prime is what makes it a guarantee rather than a
+	// coincidence about fresh memory.
+	if r.cloudPipeline.Handle() == 0 {
+		return nil
+	}
 	t := r.clouds
 	// Indexed by a frame counter rather than the swapchain image index: the
 	// presentation engine is free to hand back indices in any order, and the

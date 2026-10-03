@@ -12,6 +12,7 @@ import (
 	"github.com/derekmwright/glyphengine/ecs"
 	"github.com/derekmwright/glyphengine/input"
 	"github.com/derekmwright/glyphengine/renderer"
+	xsky "github.com/derekmwright/glyphengine/x/sky"
 	"github.com/derekmwright/glyphengine/x/terrainfield"
 	"github.com/go-gl/mathgl/mgl32"
 )
@@ -89,6 +90,21 @@ func tree(r *renderer.Renderer, segments, tiers int, indexed bool) (*renderer.Me
 	return m, err
 }
 
+// lodEnvironment is this example's sky: a sun that does not move and no fog.
+//
+// Both are measurement decisions rather than looks. A moving sun makes the
+// shadow cascades different work on every frame, and fog adds a per-fragment
+// cost to a scene whose whole point is counting what the LOD buckets cost. It
+// is a function because -swap builds a second Scene mid-run and the two have to
+// be rendered under the same environment, or the before/after captures differ
+// for a reason that is not the LOD.
+func lodEnvironment() *xsky.Environment {
+	env := xsky.DefaultEnvironment()
+	env.Cycle.TimeOfDay = 0.34
+	env.Fog.Density = 0
+	return env
+}
+
 func (g *game) Init(e *glyph.Engine) error {
 	r := e.Renderer()
 	hm, err := terrainfield.Load(g.heightmap, 1)
@@ -138,9 +154,7 @@ func (g *game) Init(e *glyph.Engine) error {
 	if err = g.makeSet(e); err != nil {
 		return err
 	}
-	e.SetDayCycleSpeed(0)
-	e.SetTimeOfDay(0.34)
-	e.SetFogDensity(0)
+	e.Scene.Env = lodEnvironment()
 	g.baseline = r.ResourceCounts()
 	return nil
 }
@@ -220,10 +234,8 @@ func (g *game) Update(e *glyph.Engine, dt float32) {
 			next.C.InstancedMesh.Set(g.entity, &glyph.InstancedMesh{LOD: g.set})
 			next.C.MeshRef.Set(g.entity, &glyph.MeshRef{Roughness: 1})
 			next.C.DoubleSided.Set(g.entity, &glyph.DoubleSided{})
-			next.SetDayCycleSpeed(0)
-			next.SetTimeOfDay(0.34)
+			next.Env = lodEnvironment()
 			e.Scene = next
-			e.SetFogDensity(0)
 			g.sceneSwaps++
 		}
 		before = e.Renderer().ResourceCounts()
@@ -271,7 +283,7 @@ func main() {
 	g := &game{fade: float32(*fade), levels: *levels, pose: *pose, counts: *counts, impostors: *impostors, replace: *replace, heightmap: *heightmap}
 	g.desc.GPU = *gpu
 	g.indexed = *indexed
-	opts := []glyph.Option{glyph.WithTitle("GlyphEngine - 25 LOD Forest"), glyph.WithWindowSize(*width, *height), glyph.WithMSAA(*msaa), glyph.WithProjection(50, 0.1, 800)}
+	opts := []glyph.Option{glyph.WithShaders(xsky.Shaders()), glyph.WithTitle("GlyphEngine - 25 LOD Forest"), glyph.WithWindowSize(*width, *height), glyph.WithMSAA(*msaa), glyph.WithProjection(50, 0.1, 800)}
 	if *frames > 0 {
 		opts = append(opts, glyph.WithMaxFrames(*frames))
 	}

@@ -1,8 +1,6 @@
 package glyphengine
 
 import (
-	"math"
-
 	"github.com/go-gl/mathgl/mgl32"
 
 	"github.com/derekmwright/glyphengine/ecs"
@@ -101,7 +99,21 @@ type Scene struct {
 
 	// Env is the sky, light and air around the scene. It is an interface so a
 	// game can replace the whole model; see EnvironmentSource. Nil means an
-	// empty world -- no sky, no directional light, no fog.
+	// empty world -- no sky, no directional light, no fog -- and nil is what
+	// NewScene leaves here.
+	//
+	// It used to be DefaultEnvironment(): a day cycle, a dome, clouds and
+	// stars, handed to every scene whether it asked or not. That environment is
+	// an opinion and it now lives in x/sky, so the engine has nothing to put
+	// here that would not be one. A scene that wants the sky the engine used to
+	// give it says so:
+	//
+	//	scene.Env = sky.DefaultEnvironment()
+	//
+	// and passes sky.Shaders() to WithShaders, which is the other half -- the
+	// source asks for a dome and the sky slot is what draws it. An interior or
+	// a diagnostic scene wants StaticSource instead, and a black world wants
+	// this left nil.
 	Env EnvironmentSource
 
 	// tickCount is the simulation clock; see TickCount.
@@ -218,12 +230,15 @@ type Scene struct {
 }
 
 // NewScene creates a Scene with an empty ECS world and default state.
+//
+// Env is nil: the engine has no environment of its own beyond StaticSource, so a
+// scene straight out of here is unlit and clears to black until something is put
+// in Scene.Env. See that field.
 func NewScene() *Scene {
 	w := ecs.NewWorld()
 	return &Scene{
 		world:       w,
 		C:           NewComponents(w),
-		Env:         DefaultEnvironment(),
 		Gravity:     DefaultGravity,
 		Integrator:  IntegrateBodies,
 		nightGrade:  DefaultNightGrade(),
@@ -321,56 +336,20 @@ func (s *Scene) Environment() EnvironmentState {
 	return st
 }
 
-// DayNight returns the scene's day/night cycle, or nil.
+// The day cycle's accessors -- DayNight, TimeOfDay, SetTimeOfDay and
+// SetDayCycleSpeed -- are gone with the cycle itself. They could only work by
+// knowing the concrete source type, which is the coupling the environment carve
+// removed and which `env=` had already dropped for the same reason: a field that
+// reaches past the seam changes meaning the moment a replacement source is
+// plugged in. A game holds its own source and sets the clock on it:
 //
-// It is nil whenever the environment does not have one: a custom
-// EnvironmentSource, an interior with fixed lighting, or no environment at
-// all. Callers that only want to set the time should use SetTimeOfDay, which
-// handles the nil case.
-func (s *Scene) DayNight() *DayNight {
-	switch env := s.Env.(type) {
-	case *Environment:
-		if env == nil {
-			return nil
-		}
-		return env.Cycle
-	case *DayCycleSource:
-		if env == nil {
-			return nil
-		}
-		// The cycle is a value on the source, so this hands out a pointer into
-		// it rather than a pointer the source holds. SetTimeOfDay writing
-		// through it is the point; a copy would silently do nothing.
-		return &env.Cycle
-	}
-	return nil
-}
-
-// TimeOfDay returns the current time of day (0=midnight, 0.5=noon), or 0 when
-// the environment has no cycle.
-func (s *Scene) TimeOfDay() float32 {
-	if dn := s.DayNight(); dn != nil {
-		return dn.TimeOfDay
-	}
-	return 0
-}
-
-// SetTimeOfDay sets the current time of day (0=midnight, 0.5=noon). Values
-// outside [0,1) wrap. It does nothing when the environment has no cycle.
-func (s *Scene) SetTimeOfDay(t float32) {
-	if dn := s.DayNight(); dn != nil {
-		dn.TimeOfDay = t - float32(math.Floor(float64(t)))
-	}
-}
-
-// SetDayCycleSpeed sets the cycle speed in full cycles per second (e.g.
-// 1.0/120 for a two-minute day). Zero freezes it. It does nothing when the
-// environment has no cycle.
-func (s *Scene) SetDayCycleSpeed(speed float32) {
-	if dn := s.DayNight(); dn != nil {
-		dn.Speed = speed
-	}
-}
+//	env := sky.DefaultEnvironment()
+//	env.Cycle.SetTimeOfDay(0.35)
+//	env.Cycle.Speed = 1.0 / 120
+//	scene.Env = env
+//
+// StarVisibility survives because it does not need the cycle. It reads the
+// resolved frame state, so it answers for any source.
 
 // StarVisibility returns a 0–1 factor for night visibility (0=day, 1=night).
 func (s *Scene) StarVisibility() float32 { return s.Environment().StarFade }

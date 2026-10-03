@@ -44,6 +44,7 @@ import (
 	glyph "github.com/derekmwright/glyphengine"
 	"github.com/derekmwright/glyphengine/input"
 	"github.com/derekmwright/glyphengine/renderer"
+	xsky "github.com/derekmwright/glyphengine/x/sky"
 )
 
 //go:embed assets
@@ -68,6 +69,10 @@ type game struct {
 	grassImp  float32
 	timeOfDay float32
 	stars     float64
+
+	// env is kept so the HUD can read the clock. The cycle is x/sky's, so
+	// there is nothing on Scene to ask -- which is the point of the seam.
+	env *xsky.Environment
 
 	font   *renderer.Font
 	hud    *renderer.MSDFText
@@ -180,15 +185,16 @@ func (g *game) Init(e *glyph.Engine) error {
 	cc := glyph.NewCharacterController()
 	e.C.CharacterController.Set(g.player, &cc)
 
-	e.SetDayCycleSpeed(1.0 / 300.0)
+	env := xsky.DefaultEnvironment()
+	env.Cycle.Speed = 1.0 / 300.0
 	// Default is a low sun for long shadows across the grass. It is a flag
 	// because half of what goes wrong in this scene only shows up at night,
 	// and waiting out the day cycle to see it is not a debugging loop.
-	e.SetTimeOfDay(g.timeOfDay)
-	if env, ok := e.Scene.Env.(*glyph.Environment); ok && env.Sky != nil {
-		env.Sky.StarDensity = float32(g.stars)
-	}
-	e.SetFogDensity(0.008)
+	env.Cycle.SetTimeOfDay(g.timeOfDay)
+	env.Sky.StarDensity = float32(g.stars)
+	env.Fog.Density = 0.008
+	e.Scene.Env = env
+	g.env = env
 
 	g.camera = glyph.NewFPCamera()
 	g.camera.EyeHeight = 0.7
@@ -266,7 +272,7 @@ func (g *game) LateUpdate(e *glyph.Engine, _ float32) {
 	case y > -0.18:
 		phase = "twilight"
 	}
-	e.Debugf("ToD  %.4f", e.Scene.TimeOfDay())
+	e.Debugf("ToD  %.4f", g.env.Cycle.TimeOfDay)
 	e.Debugf("sun  %+.4f  %s", env.SunElevation, phase)
 
 }
@@ -483,6 +489,7 @@ func main() {
 	flag.Parse()
 
 	opts := []glyph.Option{
+		glyph.WithShaders(xsky.Shaders()),
 		glyph.WithTitle("GlyphEngine - 08 Grass"),
 		glyph.WithDebugKeys(),
 		glyph.WithWindowSize(*width, *height),

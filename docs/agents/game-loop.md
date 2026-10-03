@@ -59,7 +59,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-10-03 # Engine.Renderer listed, with the rule that a package is handed a renderer rather than reaching through the engine for one (#169); the hierarchical-Z follow-up this page predicted, measured and removed (#154); the draw list's order and the rejected opaque policy; releasing mid-frame (#153); the capabilities report and who owns which fallback (#160); the depth prepass measured on both arms at both resolutions and removed by its own rule (#158)
+verified: 2026-10-03 # Engine.Renderer listed, with the rule that a package is handed a renderer rather than reaching through the engine (#169); the hierarchical-Z follow-up measured and removed (#154); the draw list's order and the rejected opaque policy; releasing mid-frame (#153); the capabilities report and who owns which fallback (#160); the depth prepass measured and removed by its own rule (#158); the sky slot, the one ShaderSet stage group with no embedded fallback (#161 step 4)
 ---
 
 # Run a game loop with Engine and Game
@@ -466,7 +466,7 @@ engine internals.
 
 `WithShaders` hands the renderer a `renderer.ShaderSet`. Fields left nil fall
 back to the embedded shader for that stage, so overriding one pipeline does not
-mean supplying all of them:
+mean supplying all of them — with one exception, the sky slot, below:
 
 ```go
 custom := renderer.DefaultShaders()
@@ -484,16 +484,38 @@ wanted its own shading had to call `renderer.New` directly and then reimplement
 the frame loop, the fixed timestep, interpolation, the draw-list build and the
 environment resolve that `Run` already provides.
 
-**Do not reach for it to recolour the sky.** The example above is the one thing
-`SkyFrag` is the wrong tool for: the sky's palette is shared with the fog
-distant geometry fades into and with the water's reflection of the dome, so
-replacing `sky.frag` alone gives a violet sky over an Earth-blue landscape, and
-getting the rest means vendoring `atmosphere.inc` and `lighting.inc` and every
-`.frag` that includes them — 430 lines of engine internals with no version
-handshake. Those colours are data: `Scene.SetSkyPalette`, see
-[environment](environment.md#a-sky-that-is-not-earths). `WithShaders` is for
-the sky's *behaviour* — a different scattering model, two suns — not its
-colours.
+### The sky slot
+
+`SkyFrag`, `StarsFrag` and `CloudsFrag` are the exception to the fallback above.
+`renderer.DefaultShaders()` leaves all three nil and `withDefaults` does not fill
+them: the engine embeds no dome, no star field and no cloud march, so nil means
+*absent*, no pipeline is built, and no draw is recorded. An engine with no shader
+option has no sky, and a frame with nothing in it is the clear colour.
+
+`x/sky` is the sky the engine used to ship, and it is both halves — the three
+stages and the `EnvironmentSource` that asks for them:
+
+```go
+e, err := glyph.New(&game{}, glyph.WithShaders(sky.Shaders()))
+...
+e.Scene.Env = sky.DefaultEnvironment()
+```
+
+`sky.Fill(existing)` adds the three stages to a set that already overrides others,
+leaving anything already set alone. Supplying a source and no shaders renders the
+clear colour with the right light on it and logs nothing, which is the first thing
+to check when a sky does not appear. See
+[`x/sky/sky.md`](../../x/sky/sky.md).
+
+**Do not reach for `SkyFrag` to recolour a sky.** It is the one thing the slot is
+the wrong tool for: the palette is shared with the fog distant geometry fades into
+and with the water's reflection of the dome, so replacing the dome's fragment
+shader alone gives a violet sky over an Earth-blue landscape, and getting the rest
+means vendoring `atmosphere.inc` and `lighting.inc` and every `.frag` that
+includes them — 430 lines of engine internals with no version handshake. Those
+colours are data: `Scene.SetSkyPalette`, see
+[environment](environment.md#a-sky-that-is-not-earths). The slot is for a sky's
+*behaviour* — a different scattering model, two suns — not its colours.
 
 `renderer.ShaderSet` documents what a replacement has to match: the vertex input
 layout, descriptor set layout and push-constant ranges the engine's pipelines
@@ -515,9 +537,9 @@ a harness that wants to check rather than assume.
 
 ### Shadow resources in custom sky shaders
 
-Regular `SkyFrag` now binds the same shadow/light set as `LitFrag` at **set 1**.
-No volumetric local light is required. Existing set 0 and push-constant offsets
-are unchanged, and stock sky shaders render as before.
+Regular `SkyFrag` binds the same shadow/light set as `LitFrag` at **set 1**. No
+volumetric local light is required. Set 0 and the push-constant offsets are the
+ones `x/sky`'s `sky.frag` declares, so a replacement can start from that file.
 
 | Set | Binding | Fragment resource |
 |---|---|---|
@@ -725,9 +747,9 @@ would make the world move on without the player.
   drives the highlight from both the keyboard and the pointer; `UpdateHover`
   recomputes it from the pointer alone, so the two fight and the arrow keys
   appear to do nothing.
-- **A scene keeps its own environment.** `SetTimeOfDay` on a menu scene does not
-  touch the world's, which is how `20-screens` gets a dusk menu over a midday
-  world.
+- **A scene keeps its own environment.** `Scene.Env` is per scene, so two scenes
+  hold two sources and setting the clock on one does not touch the other, which
+  is how `20-screens` gets a dusk menu over a midday world.
 
 ### What is genuinely missing
 

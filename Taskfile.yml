@@ -124,6 +124,22 @@ tasks:
       # command are two things that can disagree about a flag.
       - go test ./water/ -run TestCommittedSPIRVMatchesGLSL -update -count=1 -v
 
+  xsky:shaders:
+    desc: Recompile x/sky's SPIR-V through the engine's exported include set (requires VULKAN_SDK)
+    dir: x
+    cmds:
+      # Same arrangement as xwater:shaders: the generator and the check are one
+      # thing, because two copies of a compile command are two things that can
+      # disagree about a flag.
+      #
+      # These three .spv are load-bearing beyond staleness. They were produced
+      # by `glslc -Iinclude` from shaders/ before the sky moved out of the
+      # engine and by `glslc -I <materialized include set>` from x/sky after,
+      # and they are byte-identical -- which is why `task skymigration` and
+      # `task screenshots` have nothing to report. Regenerating them with a
+      # different glslc could move the pixels without changing a line of GLSL.
+      - go test ./sky/ -run TestCommittedSPIRVMatchesGLSL -update -count=1 -v
+
   shaders:verify:
     desc: Assert the committed .spv match their GLSL (needs VULKAN_SDK)
     cmds:
@@ -1281,6 +1297,110 @@ tasks:
           rm -rf $d
         fi
         exit $status
+
+  skymigration:
+    desc: "Three scenes render exactly what the built-in sky rendered before it moved to x/sky (needs a GPU)"
+    dir: examples
+    env:
+      # Renders are not comparable without it; see AGENTS.md rule 13.
+      GLYPHENGINE_FIXED_FRAME_TIME: "16.667ms"
+    cmds:
+      # The control for step 4 of issue #161 under ADR 0012: the sky left the
+      # engine, and the claim is that nothing about the picture changed.
+      #
+      # testdata/skymigration holds three captures and three per-frame `env=`
+      # traces taken from the BUILT-IN path, on the commit before the move, by
+      # exactly the commands below. They are the measurement; this task
+      # re-renders the same three scenes with x/sky plugged in and compares.
+      #
+      # The three cover the three resolutions the move had to preserve:
+      #
+      #   09-water          a full day cycle -- dome, cumulus, the sun disc, the
+      #                     water reflecting the palette, fog, shafts
+      #   08-grass -timeofday 0.0
+      #                     night -- stars, the Milky Way, the moon disc, the
+      #                     scotopic grade, the sun/moon light handover
+      #   24-custom-passes  a dome at a fixed hour with no cycle at all, which is
+      #                     the path the move REARRANGED rather than relocated:
+      #                     the light and air come from the engine's StaticSource
+      #                     and only the dome is x/sky's
+      #
+      # Re-recording the baselines makes this task say nothing about the
+      # migration. It is legitimate only for a deliberate change to the sky's
+      # look, landing after this one, and the commit that does it has to say so.
+      - |
+        set -eu
+        status=0
+        d=.skymigration
+        base=../testdata/skymigration
+        rm -rf "$d" && mkdir -p "$d"
+
+        # Pixels, not bytes. Go's PNG encoder emits different bytes for
+        # identical pixels across toolchain versions -- the 1.26-to-1.27 bump
+        # rewrote all 22 documentation images with zero pixel differences -- so
+        # `diff` on a .png is an oracle that fails for a reason that has nothing
+        # to do with the renderer. cmd/pngsame compares pixels and prints how
+        # many moved and by how much. (As it happens the bytes match today too,
+        # on the toolchain the baselines were taken with.)
+        same() {
+          [ -s "$1" ] && [ -s "$2" ] || { echo "MISSING CAPTURE $1 or $2 -- this gate proves nothing"; return 2; }
+          go run ../cmd/pngsame "$1" "$2"
+        }
+        shot() {
+          name=$1; shift
+          ex=$1; shift
+          rm -f "$d/$name.png" "$d/$name.trace" "$d/$name.env"
+          GLYPHENGINE_STATE_TRACE=$d/$name.trace go run "./$ex" -frames 90 "$@" \
+            -screenshot "$d/$name.png" >"$d/$name.log" 2>&1 || {
+              echo "RENDER FAILED: $name"; tail -5 "$d/$name.log"; return 1; }
+          go run ../cmd/tracefield -key env -in "$d/$name.trace" -out "$d/$name.env"
+        }
+
+        # Prove the two comparators before trusting a word they say. This gate's
+        # whole output is "identical", and a comparator that cannot say no would
+        # print it for a sky that had been rewritten.
+        shot control ./09-water -time 0.5
+        if same "$d/control.png" "$base/09-water.png" >/dev/null 2>&1; then
+          echo "SELF-CHECK: noon compared equal to the baseline's 0.32 -- the comparator proves nothing"
+          exit 1
+        fi
+        if diff -q "$d/control.env" "$base/09-water.env" >/dev/null 2>&1; then
+          echo "SELF-CHECK: noon hashed the same env= as the baseline -- the trace proves nothing"
+          exit 1
+        fi
+        echo "self-check: both comparators separate two different skies, as they must"
+
+        shot water ./09-water
+        shot night ./08-grass -timeofday 0.0
+        shot fixed ./24-custom-passes
+
+        check() {
+          name=$1; want=$2
+          if out=$(same "$d/$name.png" "$base/$want.png" 2>&1); then
+            echo "$name: pixels identical to the pre-move capture"
+          else
+            echo "$name: THE PICTURE MOVED since the sky left the engine"
+            echo "  $out"
+            echo "  capture: examples/$d/$name.png  baseline: testdata/skymigration/$want.png"
+            status=1
+          fi
+          if [ -s "$d/$name.env" ] && [ -s "$base/$want.env" ] && diff -q "$d/$name.env" "$base/$want.env" >/dev/null 2>&1; then
+            echo "$name: env= identical to the pre-move trace"
+          else
+            echo "$name: env= DIFFERS from the pre-move trace"
+            diff "$d/$name.env" "$base/$want.env" | head -6 || true
+            status=1
+          fi
+        }
+        check water 09-water
+        check night 08-grass-night
+        check fixed 24-custom-passes
+
+        if [ $status -ne 0 ]; then
+          echo "captures kept in examples/$d"
+          exit 1
+        fi
+        echo "the sky moved to x/sky and the frame did not"
 
   screenshots:
     desc: Regenerate the documentation images in docs/images

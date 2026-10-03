@@ -2,30 +2,26 @@
 id: environment
 title: Environment — sky, light, fog
 summary: >
-  Compose a scene's sky, directional light, ambient and fog from independent
-  optional pieces, or replace the whole model with your own implementation.
+  Read and replace the per-frame contract between a scene's environment and the
+  renderer: the light, the air, the palette, and the flags that say what gets
+  drawn in the sky.
 capability: environment
 status: stable
 since: v0.3.0
 api:
   - glyphengine.EnvironmentSource
   - glyphengine.EnvironmentState
-  - glyphengine.Environment
-  - glyphengine.DayCycleSource
   - glyphengine.StaticSource
-  - glyphengine.DefaultEnvironment
-  - glyphengine.Sky
-  - glyphengine.DefaultSky
   - glyphengine.LightShaftShape
   - glyphengine.DefaultLightShaftShape
   - glyphengine.DirectionalLight
   - glyphengine.AmbientLight
   - glyphengine.Fog
+  - glyphengine.DefaultFogDensity
   - glyphengine.Scene.Env
   - glyphengine.Scene.Environment
-  - glyphengine.Scene.SetTimeOfDay
-  - glyphengine.Scene.SetDayCycleSpeed
-  - glyphengine.Engine.SetFogDensity
+  - glyphengine.Scene.StarVisibility
+  - glyphengine.Engine.FogDensity
   - glyphengine.Scene.SetNightGrade
   - glyphengine.SkyPalette
   - glyphengine.DefaultSkyPalette
@@ -40,22 +36,20 @@ requires: []
 assets: none
 example: examples/09-water
 run: go run ./09-water -alien
-verified: 2026-10-02 # the seam carved: DayCycleSource and StaticSource are the two built-in implementations, MoonDiscColor, SkyPalette and NightGrade are on EnvironmentState, and env= in the state trace hashes all of it (#161 step 3)
+verified: 2026-10-02 # the sky moved to x/sky (#161 step 4): StaticSource is the only built-in source and has no Sky, Scene.DayNight/TimeOfDay/SetTimeOfDay/SetDayCycleSpeed and Engine.SetFogDensity are gone, NewScene leaves Scene.Env nil, and SkyFrag/StarsFrag/CloudsFrag are the sky slot
 ---
 
 # Environment
 
-`Scene.Env` holds the sky, the light and the air. It is an interface, so it can
-be composed from the engine's pieces or replaced entirely.
+`Scene.Env` holds the sky, the light and the air. It is an interface, so the
+whole model is replaceable.
 
 ```go
-// The default: full sky, a cycle frozen at sunrise, light haze.
-scene.Env = glyph.DefaultEnvironment()
-
-// An interior: no sky, no sun, no weather.
-scene.Env = &glyph.Environment{
-    Ambient:    &glyph.AmbientLight{Color: [3]float32{0.18, 0.17, 0.20}},
-    Sun:        &glyph.DirectionalLight{
+// An interior, or any scene with no sky: this is the engine's own environment
+// and the whole of it.
+scene.Env = &glyph.StaticSource{
+    Ambient: &glyph.AmbientLight{Color: [3]float32{0.18, 0.17, 0.20}},
+    Sun: &glyph.DirectionalLight{
         Direction: [3]float32{0.4, 0.8, 0.3},
         Color:     [3]float32{0.7, 0.68, 0.62},
     },
@@ -66,8 +60,23 @@ scene.Env = &glyph.Environment{
 scene.Env = nil
 ```
 
-A new `Scene` gets `DefaultEnvironment()`, so a game that says nothing still
-opens onto a lit world. Everything past that is a decision.
+**A new `Scene` gets nil.** It used to get a day cycle, a dome, clouds and stars,
+handed to every scene whether it asked or not. That environment is an opinion and
+it now lives in [`x/sky`](../../x/sky/sky.md), so a scene that wants it says so
+— in two places, because a source that asks for a dome and a renderer with no
+shader to draw one are both needed:
+
+```go
+e, err := glyph.New(&game{}, glyph.WithShaders(sky.Shaders()))
+...
+env := sky.DefaultEnvironment()
+env.Cycle.SetTimeOfDay(0.35)
+e.Scene.Env = env
+```
+
+Everything on this page is the engine's half: the contract, who reads each field,
+the fog, the shadow coverage, the palette and the shaft pass. What a dome, a star
+field or a cloud layer looks like is not here, and the engine ships none of them.
 
 ## The seam: one source writes the frame's environment
 
@@ -138,22 +147,29 @@ added to the state without being routed anywhere. `renderer/commands_test.go` an
 `renderer/litubo_test.go` carry the pack the rest of the way into the push block
 and the uniform buffer.
 
-### Two built-in sources, and a composite over them
+### The one built-in source
 
-| Source | What it is |
-|---|---|
-| `DayCycleSource` | The built-in day cycle: a clock places the sun and the moon, and the keyframe curves derive the light, the ambient, the disc colours and the star fade from where they are |
-| `StaticSource` | Fixed light and air: one direction, one colour, no clock. A `Sky` here is a sky frozen at `Sky.FixedSunElevation` |
-| `Environment` | The composite, and what `DefaultEnvironment()` returns. It delegates to the first when `Cycle` is set and to the second otherwise |
+`StaticSource` is the engine's whole environment: a `Sun`, an `Ambient`, a `Fog`
+and a `ClearColor`, none of them moving. It draws no sky — `DrawSky` stays
+false, so the frame keeps `ClearColor` — and it has no `Sky` field to give
+one.
 
-`Environment` is why **a cycle overrides `Sun` and `Ambient`**: a cycle already
-knows where the sun is, so a fixed light beside it would be a second answer to
-the same question, and the composite picks one branch rather than mixing them.
+Its rules are small but they are rules, and they are now in exactly one place for
+two packages: a sun with a black colour casts no shadows, and without a cycle
+there is no sun/moon handover so `RealSunDir` is the light's own direction.
+`x/sky`'s fixed-hour path *calls* `StaticSource` and adds only the dome, rather
+than repeating them across a module boundary where nothing would notice a drift.
 
-`Scene.DayNight()` reaches the clock in either an `Environment` or a
-`DayCycleSource`, so `SetTimeOfDay` and `SetDayCycleSpeed` work on both and are
-no-ops on a `StaticSource` or a custom source. `Engine.SetFogDensity` reaches the
-`Fog` of all three.
+| Source | Where | What it is |
+|---|---|---|
+| `glyphengine.StaticSource` | here | Fixed light and air, and no sky |
+| `sky.Environment` | [`x/sky`](../../x/sky/sky.md) | The composite: a cycle or a fixed light, with a dome over either |
+| `sky.DayCycleSource` | [`x/sky`](../../x/sky/sky.md) | The day cycle on its own |
+
+A cycle **overrides `Sun` and `Ambient`** in `sky.Environment`, because a cycle
+already knows where the sun is and a fixed light beside it would be a second
+answer to the same question. That rule is on `x/sky`'s page with the composite it
+belongs to.
 
 ### Proving a replacement produces the same values
 
@@ -169,39 +185,56 @@ built-in cycle's `TimeOfDay`. A source that moved the cirrus, the Milky Way, a
 disc colour or the palette changed the frame and left that field agreeing, which
 is the one thing a trace field must not do.
 
-### What moves out next
+`task skymigration` is that comparison, run and kept: three scenes rendered with
+the built-in sky before it moved to `x/sky`, captured along with their per-frame
+`env=`, and re-rendered afterwards. It compares pixels rather than PNG bytes —
+Go's encoder emits different bytes for identical pixels across toolchain
+versions — and it has a control that must disagree before it is believed.
 
-[ADR 0012](../adr/0012-an-x-module-for-opinionated-systems.md) step 4 moves
-`DayCycleSource`, the `Sky` dome and discs, the cloud layers and the palette
-curves to `x/sky`, gated on every committed capture staying byte-identical with
-`x/sky` plugged in where the built-in was. What stays in the engine is this page:
-`EnvironmentSource`, `EnvironmentState`, `StaticSource`, and the readers above.
-That is the whole reason the carve came first.
+### What moved out, and the slot it left behind
+
+[ADR 0012](../adr/0012-an-x-module-for-opinionated-systems.md) step 4 moved the
+day cycle, the dome, the discs, the stars, the cloud layers and the palette
+curves to [`x/sky`](../../x/sky/sky.md). What stayed is this page:
+`EnvironmentSource`, `EnvironmentState` unchanged field for field, `StaticSource`,
+and every reader in the table above. That is the whole reason the carve came
+first.
+
+The drawing is still the engine's. What left is **three fragment shaders**, which
+`renderer.ShaderSet` now treats as a slot:
+
+> `SkyFrag`, `StarsFrag` and `CloudsFrag` are the one exception to that type's
+> fallback rule. `renderer.DefaultShaders()` leaves all three nil, nil means
+> *absent* rather than "take the engine's", no pipeline is built for a nil stage,
+> and no draw is recorded where there is no pipeline.
+
+So the far-plane triangle, the `GreaterOrEqual` depth state, the pass order, the
+alpha the dome writes for the stars and the discs to blend against, the
+half-resolution cloud target with its history and barriers, the in-scattering
+march, the shaft pass and the billboard placement are all here. A game with an
+empty slot has no dome, no stars and no cloud march, and a frame with nothing in
+it is `ClearColor`. `examples/11-lights`, `examples/23-shadow-coverage` and
+`examples/01-triangle` are three such scenes, which is how the path stays
+exercised.
 
 ## The pieces are independent
 
+`StaticSource`'s three pieces are each optional:
+
 | Piece | Nil means |
 |---|---|
-| `Cycle` | Time does not pass. `Sun` and `Ambient` supply the light instead |
-| `Sky` | No dome, no discs, no stars ([stars](stars.md)). The frame clears to `ClearColor` |
-| `Sun` | No directional light (unless `Cycle` provides one) |
-| `Ambient` | No fill light (unless `Cycle` provides one) |
+| `Sun` | No directional light: only `Ambient` and the scene's own point and spot lights |
+| `Ambient` | No fill light |
 | `Fog` | No distance fog |
 
-They combine in the ways you would expect, with one rule worth stating: **a
-`Cycle` overrides `Sun` and `Ambient`.** A cycle already knows where the sun is
-and what colour the sky is casting; a fixed light alongside it would be a second
-answer to the same question.
+`ClearColor` is what the frame clears to, unconditionally, since this source never
+draws a dome over it.
 
-Useful combinations:
-
-- `Sky` without `Cycle` — a static sky at a fixed hour. Set
-  `Sky.FixedSunElevation` to pick which one; the star fade derives from it too,
-  so a fixed elevation below the horizon gets a real night sky rather than an
-  empty one. See [stars](stars.md).
-- `Cycle` without `Sky` — the engine's sun, moon and ambient driving *your*
-  skybox. The light works; nothing is drawn.
-- `Sky` with `SunDisc: false` — sky colour and light without a visible sun.
+`sky.Environment` adds a `Cycle` and a `Sky` to the same three, and its own page
+has that table: a cycle with no dome (the sun, moon and ambient driving *your*
+skybox), a dome with no cycle (a sky frozen at `Sky.FixedSunElevation`, with the
+star fade derived from it so a fixed midnight gets a real night), and a dome with
+the sun disc turned off.
 
 ## Directional shadow coverage
 
@@ -267,14 +300,18 @@ any descriptor layout.
 
 ## Clouds are a graphics setting
 
-`Sky.CloudSteps` controls volumetric cumulus. It sets a coarse sample budget:
-`CloudsOff` is 0, `CloudsLow` is 16, and `CloudsHigh` is 32. Occupied intervals
-use quarter-sized steps. Lower counts can change cloud shape because they also
-change which noise octaves resolve.
+`EnvironmentState.CloudSteps` is the cumulus sample budget and `.Cirrus` is the
+high layer's strength; those two fields are the engine's half, and the march they
+drive is in whatever shader filled `CloudsFrag`. `sky.Sky.CloudSteps` and
+`sky.Sky.Cirrus` are what a game sets, with `sky.CloudsOff` (0), `sky.CloudsLow`
+(16) and `sky.CloudsHigh` (32) as presets. Occupied intervals use quarter-sized
+steps. Lower counts can change cloud shape because they also change which noise
+octaves resolve.
 
-`Sky.Cirrus` independently adds a high, thin layer (0 disables, 1 is full
-strength; default 0). For clear sky, set both to zero. Both settings can change
-at runtime without rebuilding GPU resources.
+Cirrus is independent of the cumulus budget (0 disables, 1 is full strength;
+`sky.DefaultSky()` leaves it at 0). For clear sky, set both to zero. Both can
+change at runtime without rebuilding GPU resources. With an empty sky slot
+neither does anything, because there is no march to budget.
 
 The clouds render into a half-resolution target before the scene. The later
 sky composite is depth-tested against terrain; the cloud march itself is not.
@@ -285,10 +322,12 @@ measurement tools.
 
 ## Light shafts are on, and only near the sun
 
-`Sky.LightShafts` is the strength of screen-space light shafts — the smear of
-brightness radiating from the sun past whatever occludes it. `DefaultSky()` sets
-**0.25**, so a game that says nothing gets them in every frame with the sun
-above the horizon and in view.
+`EnvironmentState.LightShafts` is the strength of screen-space light shafts —
+the smear of brightness radiating from the sun past whatever occludes it. The
+pass, and its shape (`LightShaftShape`, whose defaults are measured below), are
+the engine's; what asks for them is a source. `sky.DefaultSky()` sets **0.25**,
+so a game using that sky and saying nothing else gets them in every frame with
+the sun above the horizon and in view.
 
 They are a **screen-space radial blur**, not volumetrics. The pass samples the
 copy of the scene the water pass already makes, keeps only what is bright enough
@@ -353,12 +392,13 @@ clouds contribute.
 
 ### Tuning the shape
 
-Strength is one number; how the shafts *look* is three more, on
-`Sky.LightShaftShape`. Each field's zero value keeps the engine's default for
-that field, so a game sets only the one it cares about:
+Strength is one number; how the shafts *look* is three more, in
+`LightShaftShape`, which a source hands through on
+`EnvironmentState.LightShaftShape`. Each field's zero value keeps the engine's
+default for that field, so a game sets only the one it cares about:
 
 ```go
-sky.LightShaftShape.Radius = 1.3 // reach further across the frame
+env.Sky.LightShaftShape.Radius = 1.3 // reach further across the frame
 ```
 
 | Field | Default | What it does |
@@ -518,14 +558,16 @@ else means what it says, and `SunElevation` left at 0 really is a permanent
 sunset. See [the field table](#every-field-and-who-reads-it) and
 [SunDir is not the sun](#sundir-is-not-the-sun).
 
-A replacement that wants to start from the built-in cycle's numbers rather than
-from nothing can embed a `DayCycleSource`, call its `State`, and change what it
-cares about. That is also the shape the `x/sky` migration takes.
+A replacement that wants to start from a day cycle's numbers rather than from
+nothing can embed a `sky.DayCycleSource`, call its `State`, and change what it
+cares about. `x/sky`'s own fixed-hour path is that shape in the other direction:
+it calls `StaticSource.State` for the light and the air and adds only the dome.
 
 **Values and pixels are separate concerns.** `EnvironmentSource` decides the
-numbers. To change how the sky is *drawn*, replace `sky.frag` through
-`glyphengine.WithShaders` — or `renderer.WithShaders` if you drive the renderer
-directly. Neither forces the other. See
+numbers. What *draws* a dome, a star field or a cloud layer from them is the sky
+slot in `renderer.ShaderSet`, supplied through `glyphengine.WithShaders` — or
+`renderer.WithShaders` if you drive the renderer directly. The engine embeds
+neither half. Neither forces the other. See
 [`game-loop.md`](game-loop.md#replacing-an-engine-shader).
 
 Custom sky shaders can read the directional shadow map at set 1 binding 1;
@@ -576,27 +618,31 @@ an alien sky — it gives a violet dome over a landscape still fading into
 Earth-blue haze, with a lake reflecting the wrong one of the two.
 
 They reach the shaders in the per-frame `ShadowData` uniform block, after the
-cascade matrices and the night grade. `sky.frag` and `clouds.frag` read the
-same buffer through binding 1 of the cloud descriptor set — the same buffer,
-not a copy, because a second copy is a second thing to get wrong. `task
+cascade matrices and the night grade. A dome and a cloud march read the same
+buffer through binding 1 of the cloud descriptor set — the same buffer, not a
+copy, because a second copy is a second thing to get wrong. The engine writes
+that binding (it is the only place that does) whether or not anything is drawing a
+dome, which is what lets a sky package supply only shaders. `task
 skypalette` is the gate on that, and it fails if the palette reaches the dome
 but not the fog, the water or the clouds. The clouds have their own box because
 `clouds.frag` is a separate caller in a separate pipeline: fed the old colours
 on its own, it left the other three boxes reading exactly what a correct build
 reads, over a frame with 23% of its pixels wrong.
 
-The palette works with `Sky` nil as well, because fog does not need a dome to
-fade into a horizon colour. That is why it is not a field on `Sky`; where it
-*does* live, and why it has two homes, is under [the palette and the
+The palette works with no sky at all, because fog does not need a dome to fade
+into a horizon colour. That is why it is the scene's and not a sky package's;
+where it lives, and why it has two homes, is under [the palette and the
 grade](#the-palette-and-the-grade-have-two-homes-on-purpose). A custom source can
-return its own on `EnvironmentState` instead of calling this.
+return its own on `EnvironmentState` instead of calling this; `x/sky` deliberately
+does not, so `Scene.SetSkyPalette` keeps working against it.
 
 **What it does not cover.** Rayleigh-versus-Mie behaviour, a different
 scattering model, a sky with two suns, and the cloud, star and sun-disc colours
 are all still shader work, and `WithShaders` is the right escape hatch for
 them. The sun's own glow keeps a fixed warm ember (`atmSunGlow` in
-`shaders/include/atmosphere.inc`) after the directional light fades, which is a seventh
-colour this does not reach. This is the case that is pure palette, which is
+`shaders/include/atmosphere.inc`, which stayed in the engine because the fog and
+the water call the same functions) after the directional light fades, which is a
+seventh colour this does not reach. This is the case that is pure palette, which is
 most of what "another planet" means in practice.
 
 ## SunDir is not the sun
@@ -612,14 +658,31 @@ Feeding the sky `SunDir.y` paints a noon sky at midnight, because the moon
 rides highest exactly when the sky should be darkest. A custom implementation
 that only sets `SunDir` gets `SunElevation` of 0 — permanent sunset. Set both.
 
-## Convenience methods
+## The convenience methods are gone
 
-`Scene.SetTimeOfDay` and `SetDayCycleSpeed` reach through to the clock of an
-`Environment` or a `DayCycleSource`; `Engine.SetFogDensity` reaches the `Fog` of
-either, or of a `StaticSource`, creating one if there is none. They are
-**no-ops** under a custom `EnvironmentSource`, and the clock ones are no-ops on a
-`StaticSource` too — `Scene.DayNight()` returns nil in both cases, and that is the
-signal to configure your own type directly.
+`Scene.DayNight`, `Scene.TimeOfDay`, `Scene.SetTimeOfDay`,
+`Scene.SetDayCycleSpeed` and `Engine.SetFogDensity` were removed when the sky
+moved out. Each could only work by type-switching on a concrete source, and two
+of the three sources it switched on left the engine — so after the move
+`e.SetFogDensity(0.008)` would have compiled, returned, and done nothing for
+every scene with a sky in it. A no-op that looks like a call is worse than a
+compile error, and `env=` had already dropped `TimeOfDay` for the same reason: a
+field that reaches past the seam changes meaning the moment a replacement source
+is plugged in.
+
+A game holds its own source and configures it:
+
+```go
+env := sky.DefaultEnvironment()
+env.Cycle.SetTimeOfDay(0.35) // wraps, the way Scene.SetTimeOfDay did
+env.Cycle.Speed = 1.0 / 120  // 0 freezes it
+env.Fog.Density = 0.008
+e.Scene.Env = env
+```
+
+Two survived, because they read the resolved state rather than reaching for a
+clock, so they answer for any source: `Scene.StarVisibility()` and
+`Engine.FogDensity()`.
 
 ### The palette and the grade have two homes on purpose
 
@@ -662,12 +725,19 @@ return them from `State`, or call the setters from `Update` where
 
 ## Failure modes
 
+- **No sky at all, and the light is right.** The sky slot is empty: the source
+  asked for a dome and no `SkyFrag` was supplied. Pass
+  `glyph.WithShaders(sky.Shaders())`. It is not an error, and nothing logs.
+- **A dome but no stars, or no clouds.** One stage of the slot is filled and
+  another is not. `sky.Shaders()` fills all three; `sky.Fill` leaves a stage the
+  caller already set, which is deliberate and easy to trip over.
 - **A sky appears in an interior scene.** Something is still using
-  `DefaultEnvironment()`. Set `Sky: nil`.
-- **Everything is black.** `Env` is nil, or has no `Cycle`, `Sun` or `Ambient`.
-  That is the documented meaning of an empty environment, not a bug.
-- **`SetTimeOfDay` does nothing.** The scene has a custom `EnvironmentSource`
-  or no `Cycle`.
+  `sky.DefaultEnvironment()`. `StaticSource` is the interior one.
+- **Everything is black.** `Env` is nil, which is what `NewScene` leaves, or it
+  has no `Sun` and no `Ambient`. That is the documented meaning of an empty
+  environment, not a bug.
+- **`SetTimeOfDay` or `SetFogDensity` does not compile.** They are gone; see
+  [above](#the-convenience-methods-are-gone).
 - **A custom source gives a permanent sunset sky.** `SunElevation` was left at
   zero. See above.
 - **Lighting flickers between frames.** A `State()` implementation is mutating.
@@ -689,7 +759,8 @@ return them from `State`, or call the setters from `Update` where
   and it would have failed.
 - **A custom sky shader gives a violet dome over Earth-blue haze.** The palette
   is shared with `applyFog` and the water's reflection, which the replaced
-  shader does not touch. Use `SetSkyPalette` instead of replacing `sky.frag`.
+  shader does not touch. Use `SetSkyPalette` instead of replacing the dome's
+  fragment shader.
 - **The sky changed colour but the distant hills, or the clouds, did not.**
   Something is handing `atmSkyPalette` its own six colours rather than
   `shadow.skyPalette`. `task skypalette` is the check for exactly that.

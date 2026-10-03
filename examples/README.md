@@ -56,14 +56,40 @@ a plain `git clone`; the root `go.work` covers the same thing for workspace
 users. If you copy an example into your own project, drop that `replace` and
 `go get github.com/derekmwright/glyphengine` instead.
 
-**Some examples import `x`.** `07-terrain` and `25-lod-forest` build their island
-with `github.com/derekmwright/glyphengine/x/terrainfield`, and `09-water -water`
-adds `github.com/derekmwright/glyphengine/x/water` -- the third module in
-this repository -- the one for systems that have *a look* rather than a mechanism,
-so the engine does not have to pick an island for you
-([ADR 0012](../docs/adr/0012-an-x-module-for-opinionated-systems.md),
-[`x/README.md`](../x/README.md)). It was `examples/internal/terrainfield`, which
-nothing outside here could reach. For a game an `x` package is a normal import:
+**Nearly every example imports `x/sky`.** The engine has no sky of its own: the
+day cycle, the dome, the discs, the stars and the clouds are
+`github.com/derekmwright/glyphengine/x/sky`, the module for systems that have *a
+look* rather than a mechanism ([ADR 0012](../docs/adr/0012-an-x-module-for-opinionated-systems.md),
+[`x/README.md`](../x/README.md), [`x/sky/sky.md`](../x/sky/sky.md)). It takes
+**two lines, and both are needed**, which is what every example here shows:
+
+```go
+// the shaders that draw a dome, stars and clouds
+e, err := glyph.New(&game{}, glyph.WithShaders(xsky.Shaders()))
+...
+// the source that decides where the sun is and what colour everything is
+env := xsky.DefaultEnvironment()
+env.Cycle.SetTimeOfDay(0.35)
+env.Cycle.Speed = 1.0 / 120 // 0 freezes it
+e.Scene.Env = env
+```
+
+Set the clock, the cloud budget and the fog on `env` rather than on the engine;
+there is no `Scene.SetTimeOfDay` or `Engine.SetFogDensity` any more, because
+neither could reach a source the engine does not know about.
+
+Three examples deliberately import no sky package, which is how the engine's
+no-sky path stays exercised: `01-triangle` drives the renderer directly,
+`11-lights` is a night scene whose only light is the one it places, and
+`23-shadow-coverage` is a shadow test. All three use `glyph.StaticSource` or no
+environment at all, and the renderer builds no dome, star or cloud pipeline for
+them.
+
+**Two other examples import `x`.** `07-terrain` and `25-lod-forest` build their
+island with `github.com/derekmwright/glyphengine/x/terrainfield`, and
+`09-water -water` adds `github.com/derekmwright/glyphengine/x/water`.
+`terrainfield` was `examples/internal/terrainfield`, which nothing outside here
+could reach. For a game an `x` package is a normal import:
 `go get github.com/derekmwright/glyphengine/x` alongside the engine. The
 dependency runs one way only -- the examples may import the engine and `x`, and
 neither may import the examples.

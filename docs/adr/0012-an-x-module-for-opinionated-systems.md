@@ -127,6 +127,7 @@ branches.
    layers and the day cycle move out of the engine, gated on every committed
    capture staying byte-identical with `x/sky` plugged in where the built-in was.
    The engine keeps no sky of its own beyond the environment's flat colours.
+   Done; the addendum below records the seam it took and why.
 5. **`x/sky/lut`**: a second, cheap sky from a precomputed lookup table, proving
    the seam supports more than one implementation and giving low-end targets an
    option.
@@ -191,10 +192,10 @@ cheaper; a run-time check would be an addition to it, not a substitute.
   mismatch, but it does not make it impossible; the compatibility policy above
   is the only thing that limits the damage, and it is a promise rather than a
   mechanism. Revisit if it is broken in practice.
-- The engine still has a sky, clouds, water and grass that this record's own
-  test says are opinions. That is deliberate and sequenced, not an oversight;
-  steps 3 to 5 are where it is paid down, and the capture-identical gate on step
-  4 is the control for the whole migration.
+- The engine still has water and grass that this record's own test says are
+  opinions. That is deliberate and sequenced, not an oversight. The sky and the
+  clouds were paid down in step 4 (see the addendum), and the capture-identical
+  gate on it is the control for the whole migration.
 
 ## References and evidence
 
@@ -222,3 +223,112 @@ cheaper; a run-time check would be an addition to it, not a substitute.
   `task lod` and `task ranges` for the examples that moved to `x/terrainfield`;
   and the `consumer` job reproduced locally against the archived index, broken
   by `export-ignore`ing the include set.
+
+## Addendum: step 4, the sky — 2026-10-02
+
+The sky moved to `x/sky`: the day cycle and its keyframe curves, the dome, the
+sun and moon discs, the star field with its galactic band, and the cloud layers.
+This records the shape it took, because the record above named the step and not
+the seam.
+
+### The seam is a slot, not a pass set
+
+Two shapes were available.
+
+**An application pass set.** `x/sky` creates the dome, star and cloud passes
+through `renderer.AppPass`, and the engine loses the sky passes entirely. This
+was rejected. The five draws are not five independent passes: the cloud march
+writes a half-resolution target the dome samples through a barrier, the dome
+writes an alpha the stars and both discs blend against, the in-scattering shares
+the dome's exact depth state so that it covers exactly the dome's pixels, and the
+discs are depth-tested against the scene but drawn after the dome so a cloud can
+pass in front of the sun. Moving the draws means moving the ordering, the blend
+factors, the depth states and the barriers — all five of which this record's own
+test calls mechanism — and it would leave the engine unable to draw an
+in-scattered beam without a sky package.
+
+**A slot.** `renderer.ShaderSet.SkyFrag`, `.StarsFrag` and `.CloudsFrag` become
+the one exception to that type's fallback rule: `DefaultShaders()` leaves all
+three nil, `withDefaults` does not fill them, a nil stage builds no pipeline, and
+no draw is recorded where there is no pipeline. The engine keeps every mechanism
+listed above and ships no dome, stars or clouds of its own; `x/sky` supplies the
+three stages and the `EnvironmentSource` that asks for them. This is what
+shipped.
+
+The slot is the smaller mechanism in the sense that matters: it moves the look
+and nothing else. It is also what made the migration provable. The three
+fragment shaders compile byte-identically from `x/sky` through the exported
+include set — 9568, 17760 and 35296 bytes, the same files, the only change being
+which `-I` resolved `atmosphere.inc` — so every committed capture being unchanged
+is a consequence rather than a hope. A pass set would have rebuilt the draws and
+left that claim to be re-established by eye.
+
+The cost is that a package now has **two halves that must arrive together**: the
+source and the shaders. Neither errors without the other — a source asking for a
+dome the renderer cannot draw renders the clear colour with the right light on
+it. That is the first failure mode on `x/sky`'s page and in `x/README.md`, and it
+is the price of not making `renderer.New` reject a configuration (`cmd/skyshadowcheck`
+is a legitimate custom dome with no cloud stage beside it).
+
+### What the engine kept
+
+`EnvironmentSource`, `EnvironmentState` unchanged field for field, `StaticSource`
+with its `Sky` field removed, `DirectionalLight`, `AmbientLight`, `Fog`,
+`DefaultFogDensity`, `LightShaftShape` and its measured defaults, `SkyPalette`,
+`NightGrade` and both defaults with the sentinel rule, the volumetric march, the
+fog, the light-shaft pass, `shaders/sky.vert` and `stars.vert`,
+`shaders/include/atmosphere.inc` untouched, the cloud target and its barriers,
+the celestial billboard placement, and `EquirectToSkyMap`.
+
+Removed, because each could only work by knowing a concrete source type that no
+longer exists in the engine: `Scene.DayNight`, `Scene.TimeOfDay`,
+`Scene.SetTimeOfDay`, `Scene.SetDayCycleSpeed` and `Engine.SetFogDensity`.
+Leaving the setters as no-ops was the alternative and is worse than removing
+them: `e.SetFogDensity(0.008)` would have compiled, returned, and done nothing
+for every example in the tree. `Scene.StarVisibility` and `Engine.FogDensity`
+stay, because they read the resolved state rather than reaching for a clock.
+
+`NewScene` leaves `Scene.Env` nil. It installed `DefaultEnvironment()` before, so
+every scene got a dome and a sunrise whether it asked or not; the engine has
+nothing left to put there that would not be an opinion.
+
+### The one tuned constant the engine kept
+
+`celestialScale` draws a body at the zenith 45 percent smaller than the same body
+at the horizon. That is a look, and it is still in `app.go`.
+
+The reason is the migration's own control. `env=` in the state trace hashes every
+field of `EnvironmentState`, and the capture gate compares that hash against
+traces taken from the built-in path before the move, so adding a field for a
+package to write the scale through would change the hash and destroy the only
+measurement that says the move was faithful. The honest order is this change
+first and the field afterwards — the same reason the environment carve came
+before the move. Recorded rather than left as an oversight.
+
+### Evidence
+
+- `task ci` across all three modules.
+- The carve's pinned tables moved with the code they pin and still pass
+  unmodified: 25 resolved states round the clock, 9 more at the curve edges, and
+  25 moon disc colours. They were generated from the engine as it stood *before*
+  the carve, so two migrations now rest on them. Broken and confirmed failing by
+  reassociating one multiply in `MoonDiscColor` and by dropping the shaft
+  window's smoothstep.
+- The fixed-hour path was rearranged rather than relocated — the light and air
+  come from the engine's `StaticSource` now — and its five pre-move pins hold it.
+- `x/sky/spirv_test.go`: the committed SPIR-V is what `glslc -I` produces from
+  the materialized include set, which is also the compile gate for
+  `atmosphere.inc`'s signatures.
+- `task skymigration`: three scenes (a full day cycle, a night, and a dome at a
+  fixed hour with no cycle) re-rendered with `x/sky` and compared against
+  captures and `env=` traces taken from the built-in path on the commit before
+  the move. Pixels rather than PNG bytes, because Go's encoder emits different
+  bytes for identical pixels across toolchain versions.
+- `task screenshots` with no changed image, `task determinism`,
+  `task shaders:verify`, `task sky`, `skypalette`, `clouds`, `shafts`,
+  `volumetric`, `nightlight`, `waterlight`, `xwater`, `validate`, `syncvalidate`
+  and `smoke`.
+- The empty slot is exercised rather than assumed: `examples/11-lights`,
+  `examples/23-shadow-coverage` and `examples/01-triangle` import no sky package,
+  so the renderer builds no dome, star or cloud pipeline at all in three of the
+  scenes `task validate` and `task smoke` run.
