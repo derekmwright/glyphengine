@@ -281,13 +281,18 @@ type Water struct {
 
 	enabled bool
 
-	// Retained so Update writes no garbage. SetPushConstants copies out of
-	// these and keeps nothing, and the engine's own copy allocates nothing on
-	// the success path, so a frame that only calls Update allocates zero bytes.
+	// Retained so Update writes no garbage. SetParams copies out of these and
+	// keeps nothing, and the engine's own copy allocates nothing on the success
+	// path, so a frame that only calls Update allocates zero bytes.
 	// TestUpdateAllocatesNothing pins the Go half; the gate's -allocs mode
 	// measures a real frame loop.
-	scatterPush   [128]byte
-	compositePush [128]byte
+	//
+	// 128 bytes each, which is what the fields below need -- not what the block
+	// can hold. AppPassDesc.Params allows up to renderer.AppParamBytes, and the
+	// reason these are not bigger is that the per-frame scalars are folded on
+	// the CPU; see pack.
+	scatterParams   [128]byte
+	compositeParams [128]byte
 }
 
 // New creates the targets and the passes. The passes start disabled, so a game
@@ -325,7 +330,7 @@ func New(r *renderer.Renderer, opts Options) (*Water, error) {
 	if w.scatter, err = r.CreateAppPass(renderer.AppPassDesc{
 		Name: "water scattering", Stage: renderer.StageBeforeBloom, Target: w.scatterTarget,
 		Fullscreen: true, Vert: shaders.DepthResolveVertSpv, Frag: scatterSPV,
-		Reads: []*renderer.Texture{depth}, Timed: true,
+		Reads: []*renderer.Texture{depth}, Timed: true, Params: len(w.scatterParams),
 	}); err != nil {
 		w.Destroy(r)
 		return nil, err
@@ -334,6 +339,7 @@ func New(r *renderer.Renderer, opts Options) (*Water, error) {
 		Name: "water composite", Stage: renderer.StageBeforeBloom, Target: w.composed,
 		Fullscreen: true, Vert: shaders.DepthResolveVertSpv, Frag: compositeSPV,
 		Reads: []*renderer.Texture{r.SceneColor(), depth, w.scatterTarget.Texture()}, Timed: true,
+		Params: len(w.compositeParams),
 	}); err != nil {
 		w.Destroy(r)
 		return nil, err
@@ -383,10 +389,10 @@ func (w *Water) Update(inverseVP mgl32.Mat4, eye mgl32.Vec3, sunDir, sunColor [3
 	if !active {
 		return nil
 	}
-	if err := w.scatter.SetPushConstants(w.scatterPush[:]); err != nil {
+	if err := w.scatter.SetParams(w.scatterParams[:]); err != nil {
 		return err
 	}
-	return w.composite.SetPushConstants(w.compositePush[:])
+	return w.composite.SetParams(w.compositeParams[:])
 }
 
 func (w *Water) apply(active bool) {
@@ -414,16 +420,19 @@ func (w *Water) Destroy(r *renderer.Renderer) {
 	}
 }
 
-// pack fills both push blocks and reports whether the water does anything this
-// frame. It is separate from Update so a test can read what the shaders will
-// see without a GPU, and so the allocation check has something to call.
+// pack fills both parameter blocks and reports whether the water does anything
+// this frame. It is separate from Update so a test can read what the shaders
+// will see without a GPU, and so the allocation check has something to call.
 //
 // Three kinds of work are done here rather than per pixel, and all three are
 // per-frame scalars: the daylight ramps, the camera-depth falloff, and the
-// refraction of the sun at the surface. Hoisting them is not only cheaper --
-// it is what fits the whole parameter set into the 128 application push bytes,
-// which is the only per-pass uniform storage the engine offers an application
-// pass. See water.md.
+// refraction of the sun at the surface. Hoisting them is cheaper than
+// evaluating them per fragment, and that is now the whole of the argument.
+// It used to also be what made the parameter set fit: an application pass had
+// 128 push bytes and no block of its own, and the inverse view-projection is
+// half of that. AppPassDesc.Params is the block (issue #170), so the ceiling
+// has moved from 128 to renderer.AppParamBytes and the folding is kept on its
+// own merits. See water.md.
 func (w *Water) pack(inverseVP mgl32.Mat4, eye mgl32.Vec3, sunDir, sunColor [3]float32, scatterWidth, scatterHeight float32) bool {
 	depth := w.opts.Level - eye.Y()
 	if !w.enabled || depth <= 0 {
@@ -489,29 +498,29 @@ func (w *Water) pack(inverseVP mgl32.Mat4, eye mgl32.Vec3, sunDir, sunColor [3]f
 		bodyRadiance[i] = w.opts.BodyColor[i] * reach
 	}
 
-	p := packer{buf: w.scatterPush[:]}
+	p := packer{buf: w.scatterParams[:]}
 	p.mat4(inverseVP)
 	p.vec4(waterSun.X(), waterSun.Y(), waterSun.Z(), sunPathScale)
 	p.vec4(shaftLight[0], shaftLight[1], shaftLight[2], w.opts.Level)
 	p.vec4(absorption[0], absorption[1], absorption[2], w.opts.ScatterPhase)
 	p.vec4(w.opts.ScatterSpan, float32(w.opts.ScatterSamples), scatterWidth, scatterHeight)
 
-	c := packer{buf: w.compositePush[:]}
+	c := packer{buf: w.compositeParams[:]}
 	c.mat4(inverseVP)
 	c.vec4(absorption[0], absorption[1], absorption[2], w.opts.Level)
 	c.vec4(bodyRadiance[0], bodyRadiance[1], bodyRadiance[2], w.opts.DepthTolerance)
 	// The composite reads 24 of the 128 bytes. The tail is written rather than
-	// left alone because SetPushConstants wants a multiple of 16 and because a
-	// shader that later grows a field should find zeros there, not whatever the
-	// scatter block happened to put in the same buffer.
+	// left alone because SetParams wants a multiple of 16 and because a shader
+	// that later grows a field should find zeros there -- SetParams zeroes the
+	// tail of the block itself, but only past what it was handed.
 	c.vec4(0, 0, 0, 0)
 	c.vec4(0, 0, 0, 0)
 	return true
 }
 
-// packer writes little-endian float32s into a fixed buffer. SetPushConstants
-// wants a multiple of 16 bytes, so both blocks are the full 128 and the tail is
-// zeroed by construction.
+// packer writes little-endian float32s into a fixed buffer. SetParams wants a
+// multiple of 16 bytes, so both blocks are the full 128 and the tail is zeroed
+// by construction.
 type packer struct {
 	buf []byte
 	at  int

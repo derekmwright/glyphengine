@@ -419,12 +419,10 @@ func (r *Renderer) destroyAppResources() {
 		}
 	}
 	r.appTargets, r.retiredTargets = nil, nil
-	if r.computeSetLayout.Handle() != 0 {
-		r.deviceDriver.DestroyDescriptorSetLayout(r.computeSetLayout, nil)
-		r.computeSetLayout = core1_0.DescriptorSetLayout{}
-	}
-	if r.appSetLayout.Handle() != 0 {
-		r.deviceDriver.DestroyDescriptorSetLayout(r.appSetLayout, nil)
-		r.appSetLayout = core1_0.DescriptorSetLayout{}
+	for _, l := range []*core1_0.DescriptorSetLayout{&r.computeSetLayout, &r.appSetLayout, &r.computeParamsSetLayout, &r.appParamsSetLayout} {
+		if l.Handle() != 0 {
+			r.deviceDriver.DestroyDescriptorSetLayout(*l, nil)
+			*l = core1_0.DescriptorSetLayout{}
+		}
 	}
 }

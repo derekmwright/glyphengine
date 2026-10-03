@@ -74,8 +74,8 @@ workspace, by building `x` against the archived engine with `GOWORK=off`.
 Packages here version independently of the engine, Go-style, and pin an engine
 version. If a package cannot reach what it needs through the engine's public
 seams, **file a rule-14 issue against the engine** rather than reaching inside
-it. That loop is what produced the application pass, storage buffer and mesh
-range seams these packages are built on.
+it. That loop is what produced the application pass, storage buffer, per-pass
+uniform block and mesh range seams these packages are built on.
 
 ## What you may rely on — the seam compatibility policy
 

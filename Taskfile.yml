@@ -942,9 +942,10 @@ tasks:
 
         # Application graphics passes, including previous-frame history.
         # Run from the repository root so every harness scratch file stays in .task.
-        for mode in "" "-history" "-compute" "-compute -history" "-shadowcompute"; do
+        for mode in "" "-history" "-compute" "-compute -history" "-shadowcompute" "-params"; do
           frames=90
           case "$mode" in *-compute*) frames=260;; esac
+          case "$mode" in *-params*) frames=12;; esac
           (cd .. && GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./cmd/apppasscheck -frames $frames $mode -screenshot .task/app-determinism-a.png) >/dev/null 2>&1 || status=1
           (cd .. && GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./cmd/apppasscheck -frames $frames $mode -screenshot .task/app-determinism-b.png) >/dev/null 2>&1 || status=1
           if samefile ../.task/app-determinism-a.png ../.task/app-determinism-b.png; then
@@ -1915,6 +1916,14 @@ tasks:
       - |
         cd ..
         GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./cmd/apppasscheck -shadowcompute -frames 24 -validate -provoke-recreate -screenshot .task/custompasses/shadowcompute.png
+      # A pass's own uniform block, read back out of the frame it was staged
+      # for. The last four frames each stage a new generation and each is
+      # checked against its own: a block copied into the slot the GPU is still
+      # reading publishes one generation late, which the check names rather than
+      # reporting as a wrong number.
+      - |
+        cd ..
+        GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./cmd/apppasscheck -params -frames 12 -validate -screenshot .task/custompasses/params.png
 
   shafts:
     desc: "Check that light shafts reach through the gaps between occluders"

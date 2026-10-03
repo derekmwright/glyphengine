@@ -54,7 +54,7 @@ func (r *Renderer) ensureSceneDepth() error {
 	if s == nil {
 		return nil
 	}
-	if err := r.ensureAppLayout(); err != nil {
+	if err := r.ensureAppLayout(false); err != nil {
 		return err
 	}
 	if s.color == nil {

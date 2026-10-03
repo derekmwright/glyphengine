@@ -23,7 +23,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: procedural
-verified: 2026-10-03 # new package; depth sweep, balance and allocation gates all broken and confirmed failing; the copied jitter replaced by the engine's volumetric_common.inc (#169)
+verified: 2026-10-03 # the parameter blocks moved from the 128 application push bytes to each pass's own uniform block at set 2 binding 12 (AppPassDesc.Params, #170), byte layout and recorded sweep unchanged; new package; depth sweep, balance and allocation gates all broken and confirmed failing; the copied jitter replaced by the engine's volumetric_common.inc (#169)
 ---
 
 # The underwater volume
@@ -282,10 +282,11 @@ compatibility surface `x/README.md` describes.
 
 - Targets and passes: `renderer.CreateRenderTarget`, `renderer.CreateAppPass`,
   `renderer.SceneColor`, `renderer.SceneDepth`, `AppPass.SetEnabled`,
-  `AppPass.SetPushConstants`, `DestroyAppPass`, `DestroyRenderTarget`,
-  `RenderTarget.Extent` — [`render-targets.md`](../../docs/agents/render-targets.md).
+  `AppPassDesc.Params`, `AppPass.SetParams`, `DestroyAppPass`,
+  `DestroyRenderTarget`, `RenderTarget.Extent` —
+  [`render-targets.md`](../../docs/agents/render-targets.md).
 - The fixed shader layouts in the same page: set 2 bindings 0–3 for pass inputs,
-  and the 128 application push bytes at offset 128.
+  and set 2 binding 12 for the pass's own uniform block.
 - `shaders.DepthResolveVertSpv` for the fullscreen triangle.
 - The caller supplies `glyphengine.Engine.ViewProjection` inverted, the camera
   eye, and `glyphengine.Scene.Environment`'s `SunDir` and `SunColor`. They are
@@ -293,33 +294,49 @@ compatibility surface `x/README.md` describes.
   window, and so a game with its own camera type is not forced through
   `Camera.ViewVectors`.
 
-### Everything fits in 128 push bytes, and that took doing
+### Each pass carries its own 128 bytes, in its own block
 
-An application pass gets 128 bytes of its own. The shared application uniform
-block at set 1 binding 6 is 4096 bytes, but it is one global the *game* owns
-through `SetShaderParameters`, which replaces the whole thing — an `x` package
-cannot claim a slice of it without the game hand-partitioning the bytes. So 128
-is the budget, and the inverse view-projection alone is half of it.
+Both parameter blocks are 128 bytes in a uniform block private to the pass, at
+set 2 binding 12, declared by `AppPassDesc.Params` and written by `SetParams`.
+The inverse view-projection alone is half of each one.
 
-The other half holds the whole option set because the per-frame scalars are
-folded on the CPU rather than evaluated per pixel: both daylight ramps collapse
-to one number each, the camera-depth falloff to one more, and the refraction of
-the sun at the surface to a direction and a reciprocal. That is cheaper as well
-as smaller. One more trick buys four floats: the camera position is recovered
-from the inverse view-projection in the shader rather than sent, because the eye
-is the one world point whose clip-space image has `w == 0`, so
+**That block did not exist when this package was written, and the first version
+of it was the evidence that it should.** An application pass had 128 push bytes
+and nothing else. The 4096-byte block at set 1 binding 6 is a single global the
+*game* owns through `SetShaderParameters`, which replaces the whole thing, so an
+`x` package cannot claim a slice of it without the game hand-partitioning bytes
+between its own shaders and every package it uses. So 128 was the ceiling, and
+this package fit inside it — which it was able to do, and the caustic field
+below would not have been: its atlas anchoring alone is eleven `vec4`s in the
+source, and the atmosphere's sun table and layer parameters are larger again.
+That was filed as a rule-14 issue with this package as the evidence that 128 is
+reachable but not generous, and the engine closed it (#170).
+
+The move cost nothing and changed no pixel. `std140` lays a `mat4` followed by a
+run of `vec4`s out at exactly the offsets the CPU was already packing, so the Go
+side is the same bytes in the same order, the shaders differ by one declaration,
+and `task xwater` reproduces its recorded sweep. The ceiling is now
+`renderer.AppParamBytes`, 4096 per pass, with no partitioning and no other
+owner.
+
+**The folding stayed, on its own merits.** The per-frame scalars are still
+collapsed on the CPU rather than evaluated per pixel: both daylight ramps to one
+number each, the camera-depth falloff to one more, and the refraction of the sun
+at the surface to a direction and a reciprocal. That was originally two
+arguments at once — cheaper *and* smaller — and only the first one is load
+bearing now. It is still the right call: a per-frame scalar evaluated per
+fragment is the same number computed a million times. The one trick that was
+purely about size is also kept, because it is still free: the camera position is
+recovered from the inverse view-projection in the shader rather than sent, since
+the eye is the one world point whose clip-space image has `w == 0`, so
 `inverseVP * vec4(0,0,1,0)` is the eye scaled by a constant the perspective
 divide cancels. The derivation is in `water-path.glsl`.
 
-**Noted for a later package, not needed here:** a system that wants more than
-128 bytes per pass has nowhere to put them. The 4096-byte block is a single
-global with no partitioning, so two `x` packages, or one `x` package and the
-game, cannot both use it without the game merging bytes by hand. The caustic
-field above will hit this, because its own atlas anchoring is eleven `vec4`s in
-the source. That is a rule-14 issue for whoever builds it, with this package as
-the evidence that 128 is reachable but not generous.
+## Two engine gaps found while building this, and closed
 
-## An engine gap found while building this, and closed
+The first is the per-pass uniform block above: 128 push bytes and a global block
+with one owner, reported as a rule-14 issue and closed as `AppPassDesc.Params`
+(#170), which this package now uses. The second is below.
 
 The scattering integral needs a stable screen-space jitter, and the engine
 already had exactly the right one with exactly the right reasoning attached:
@@ -419,7 +436,9 @@ failed is decoration. These were broken on purpose.
   found before a pixel was rendered.
 - **A stale `.spv`.** Editing `water-scatter.frag` without recompiling fails
   `TestCommittedSPIRVMatchesGLSL`; the message names the file and both byte
-  counts.
+  counts. Re-run on 2026-10-03 after the parameter block moved off push
+  constants: `water-scatter.frag.spv is stale (7532 bytes committed, 7552
+  fresh)`, against 7496/7516 on the push-constant version of the same shader.
 
 ## Failure modes
 

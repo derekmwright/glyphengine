@@ -118,6 +118,18 @@ func (r *Renderer) flushAppFrameBindings(frame, imageIndex int) error {
 		if err := r.flushAppInputs(p, p.sets[frame]); err != nil {
 			return err
 		}
+		if p.params != nil {
+			// Both halves of the block belong to the slot the fence has just
+			// released: the bytes the application staged, and the descriptor
+			// naming this slot's buffer. The descriptor is rewritten per frame
+			// rather than once at creation for the reason the samplers above
+			// are -- a resize frees and reallocates every pass's sets, and this
+			// is the one path that runs for every slot afterwards.
+			p.flushAppParams(frame)
+			if err := r.writeAppParams(p, p.sets[frame], frame); err != nil {
+				return err
+			}
+		}
 		if p.compute != nil {
 			if err := r.flushComputeOutputs(p.compute, p.sets[frame], frame); err != nil {
 				return err

@@ -48,7 +48,7 @@ type options struct {
 	frames                                                                 int
 	screenshot                                                             string
 	recreate, churn, validate, disabled, history, compute, buffers, filter bool
-	shadowCompute                                                          bool
+	shadowCompute, params                                                  bool
 	msaa                                                                   int
 }
 
@@ -67,6 +67,7 @@ func main() {
 	flag.BoolVar(&o.buffers, "buffers", false, "exercise four storage buffers with history, staged updates and churn")
 	flag.BoolVar(&o.filter, "filter", false, "probe target filtering and addressing before and after recreation")
 	flag.BoolVar(&o.shadowCompute, "shadowcompute", false, "compare a compute dispatch's directional shadow lookup against the fragment path's")
+	flag.BoolVar(&o.params, "params", false, "read a pass's own uniform block back out of a capture, and change it mid-run")
 	flag.Parse()
 	if o.buffers {
 		o.compute = true
@@ -93,6 +94,9 @@ func run(o options) error {
 	}
 	if o.shadowCompute {
 		return runShadowCompute(o)
+	}
+	if o.params {
+		return runParams(o)
 	}
 	w, err := window.New(640, 360, "Application render passes")
 	if err != nil {

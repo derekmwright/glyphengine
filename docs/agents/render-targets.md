@@ -18,6 +18,8 @@ api:
   - renderer.AppPass.SetEnabled
   - renderer.AppPass.SetDraws
   - renderer.AppPass.SetPushConstants
+  - renderer.AppPass.SetParams
+  - renderer.AppParamBytes
   - renderer.AppComputeDesc
   - renderer.AppComputeDesc.ReadsShadows
   - renderer.CreateAppCompute
@@ -25,6 +27,7 @@ api:
   - renderer.AppCompute.SetEnabled
   - renderer.AppCompute.SetDispatch
   - renderer.AppCompute.SetPushConstants
+  - renderer.AppCompute.SetParams
   - renderer.StorageBufferDesc
   - renderer.StorageBuffer
   - renderer.Capabilities
@@ -48,7 +51,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: procedural
-verified: 2026-10-03 # the include set listed per fragment, with the dependency-free group and volumetric_common.inc (#169); directional shadow sampling from compute; application submission counts per pass; storage buffers, sampler probes and explicit barriers; exported GLSL include set; Timed refused without device timestamps (#160)
+verified: 2026-10-03 # per-pass uniform blocks (AppPassDesc.Params/SetParams, set 2 binding 12, #170), proved on hardware by `apppasscheck -params`; the include set listed per fragment, with the dependency-free group and volumetric_common.inc (#169); directional shadow sampling from compute; application submission counts per pass; storage buffers, sampler probes and explicit barriers; exported GLSL include set; Timed refused without device timestamps (#160)
 ---
 
 # Application render targets, graphics and compute passes
@@ -172,11 +175,14 @@ skips the node and its barriers. After a relative target resizes, update the
 counts from `Extent()` and bounds-check the shader's global invocation IDs.
 `SetPushConstants` uses the same 128 application bytes at offset 128 as graphics;
 offsets 0–127 carry scene VP and an identity model. Compute's full push range
-is visible to the compute stage.
+is visible to the compute stage. `AppComputeDesc.Params` adds a private uniform
+block when 128 bytes is not enough; see
+[a pass's own uniform block](#a-passs-own-uniform-block).
 
 Compute set 0 binds the unused fallback texture set, set 1 binds the shared
-light set, and set 2 has four combined samplers at bindings 0–3 and four storage
-images at 4–7 in `General`. In set 1, the application bindings 6–10 and the
+light set, and set 2 has four combined samplers at bindings 0–3, four storage
+images at 4–7 in `General`, four storage buffers at 8–11, and the dispatch's own
+uniform block at 12 when `Params` declares one. In set 1, the application bindings 6–10 and the
 directional shadow bindings 0 and 1 are visible to compute; engine bindings 2–5
 (the point cube map and the clustered light buffers) remain fragment-only.
 Unused sampled inputs hold the white fallback. Declare only the storage bindings
@@ -185,6 +191,7 @@ provided in `Writes`.
 ```glsl
 layout(set=2, binding=0) uniform sampler2D input0;            // Reads[0..3]
 layout(set=2, binding=4, r32f) uniform image2D output0;       // Writes[0..3]; format qualifier must match the target's format
+layout(set=2, binding=12, std140) uniform Params { vec4 block[4]; } params; // only when Params > 0
 layout(push_constant) uniform ApplicationPush { layout(offset=128) vec4 data[8]; } pc;
 layout(local_size_x = 8, local_size_y = 8) in;
 ```
@@ -349,6 +356,79 @@ buffer destruction that retires its compute user. The resulting visible
 pattern must retain the existing contrast/blur checks. `task syncvalidate`
 runs this check after its full example matrix.
 
+## A pass's own uniform block
+
+```go
+pass, err := r.CreateAppPass(renderer.AppPassDesc{
+    Name: "caustic atlas", Stage: renderer.StageBeforeScene, Target: atlas,
+    Fullscreen: true, Vert: shaders.DepthResolveVertSpv, Frag: atlasSPV,
+    Params: 256, // bytes, a multiple of 16, at most renderer.AppParamBytes
+})
+if err != nil { return err }
+// Per frame, after the camera has moved:
+if err := pass.SetParams(block[:]); err != nil { return err }
+```
+
+```glsl
+layout(set = 2, binding = 12, std140) uniform Params {
+    mat4 inverseVP;
+    vec4 anchor[4];
+} params;
+```
+
+`Params` is a uniform block **private to one pass**, at **set 2, binding 12** --
+past the four pass-input samplers a graphics pass declares and past the storage
+images and buffers a dispatch declares, so one binding number serves both kinds.
+`AppComputeDesc.Params` is the same field with the same rules, visible to the
+compute stage. The declared size must be a multiple of 16 and at most
+`AppParamBytes` (4096); anything else is an error naming `Params`.
+
+**0 is not a small block, it is no block.** A pass that declares none allocates
+its descriptor set from a layout byte-identical to the one it always had, builds
+the same pipeline, and makes the same per-frame descriptor writes. Declaring one
+adds exactly two things: the uniform binding on a second layout, and one
+descriptor write per frame naming that frame's buffer. It adds **no command** to
+the recorded stream -- a declared block is a descriptor, not a draw.
+
+**Why this exists next to the game's block.** `SetShaderParameters` is 4096
+bytes at set 1 binding 6 and it is *the game's*: it replaces the whole block, so
+a package the game imports cannot claim a slice of it without the game
+hand-partitioning bytes between its own shaders and every package it uses. The
+two are independent -- a pass can read both -- and the global one is unchanged.
+See [application data for custom shaders](game-loop.md#application-data-for-custom-shaders).
+
+**The slot rule is the same rule the global block follows.** `SetParams` writes a
+staging copy on the CPU and nothing else. `DrawFrame` copies it into the frame
+slot's own host-visible buffer *after* waiting on that slot's fence, so the
+frame still in flight reads memory nothing has touched. The consequence worth
+knowing: a block staged now is read by the next frame submitted, and the other
+slot still holds what it was given -- which is why a block must be staged every
+frame it should take effect, exactly as the push constants are.
+
+Supply little-endian std140 bytes padded to a multiple of 16; the tail past what
+you hand it is zeroed, and `nil` clears the whole block. The caller owns field
+packing -- no Go struct layout or shader reflection is inferred. Oversized or
+unaligned input returns an error naming the pass and leaves the previous value
+intact. The block's buffers are allocated once at pass creation and mapped for
+the pass's lifetime, so a frame that only calls `SetParams` allocates nothing,
+on the CPU or on the device. Fixed sizes and contents survive swapchain resize.
+
+**Budget.** Per pass, up to 4096 bytes; there is no shared pool and no
+partitioning. 4096 is the size the renderer already proves every device it
+starts on can address through one uniform descriptor, since the global block
+requires the same range at startup. A pass that declares a block holds four
+uniform-buffer descriptors in each stage it runs -- the texture set's unused
+one, the light set's two, and this -- against Vulkan's guaranteed twelve.
+
+`cmd/apppasscheck -params -frames 12 -validate` is the hardware check: a
+fullscreen pass declaring a 64-byte block writes its own block out to a 16x1
+target, one float per column, a second pass stretches it over the frame with the
+sRGB encoding undone, and the capture is read back byte for byte. The last four
+frames each stage a different generation of values and each is checked against
+the generation that frame staged -- a block copied into the slot the GPU is
+still reading publishes one generation late, and the check says so by name
+rather than reporting a wrong number. `task custompasses` runs it.
+
 ## Fixed shader layouts
 
 As with `ShaderSet`, these are fixed layouts, not reflected material layouts.
@@ -368,6 +448,7 @@ layout(set=2, binding=0) uniform sampler2D input0; // Reads[0]
 layout(set=2, binding=1) uniform sampler2D input1; // Reads[1]
 layout(set=2, binding=2) uniform sampler2D input2; // Reads[2]
 layout(set=2, binding=3) uniform sampler2D input3; // Reads[3]
+layout(set=2, binding=12, std140) uniform Params { vec4 block[4]; } params; // only when Params > 0
 ```
 
 Set 1 is the shared shadow/light set. It is also set 1 for custom sky, static

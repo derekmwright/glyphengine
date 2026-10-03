@@ -7,13 +7,18 @@
 
 layout(set = 2, binding = 0) uniform sampler2D sceneDepth;
 
-layout(push_constant) uniform Push {
-    layout(offset = 128) mat4 inverseVP;
+// The pass's own uniform block, not push constants: 128 bytes of parameters
+// plus a mat4 does not fit the 128 application push bytes, and
+// AppPassDesc.Params is per-pass storage no other package or the game can
+// claim. std140 lays a mat4 and a run of vec4s out exactly as the CPU packs
+// them, so the Go side is unchanged -- see water.md.
+layout(set = 2, binding = 12, std140) uniform Params {
+    mat4 inverseVP;
     vec4 waterSun; // xyz unit vector TOWARD the refracted sun, w 1/cos to the surface
     vec4 light;    // rgb sunColor * ScatterColor * daylight, w surface world Y
     vec4 medium;   // rgb absorption per world unit, w phase asymmetry
     vec4 march;    // x span, y sample count, zw this target's extent in pixels
-} pc;
+} params;
 
 // volStartJitter: the engine's own interleaved-gradient jitter, through the
 // exported include set rather than copied. It is in volumetric_common.inc
@@ -34,27 +39,27 @@ void main() {
     // The extent comes from the CPU rather than from the scale, because the
     // renderer rounds a relative target's size and a reconstruction that is one
     // texel out shows up as a seam along every silhouette.
-    vec2 uv = gl_FragCoord.xy / pc.march.zw;
+    vec2 uv = gl_FragCoord.xy / params.march.zw;
     ivec2 full = textureSize(sceneDepth, 0);
     ivec2 source = clamp(ivec2(uv * vec2(full)), ivec2(0), full - 1);
     float depth = texelFetch(sceneDepth, source, 0).r;
 
-    vec3 eye = waterEye(pc.inverseVP);
-    vec3 scene = waterUnproject(pc.inverseVP, uv * 2.0 - 1.0, depth);
+    vec3 eye = waterEye(params.inverseVP);
+    vec3 scene = waterUnproject(params.inverseVP, uv * 2.0 - 1.0, depth);
     vec3 dir = normalize(scene - eye);
-    float travel = waterPath(eye, dir, length(scene - eye), pc.light.w);
+    float travel = waterPath(eye, dir, length(scene - eye), params.light.w);
 
     // Switched off by the CPU past the depth where there is no sunlight left,
     // and at night. The pass still runs and still clears, so the composite
     // never reconstructs last frame's shafts.
-    if (dot(pc.light.rgb, vec3(1.0)) <= 0.0) {
+    if (dot(params.light.rgb, vec3(1.0)) <= 0.0) {
         outColor = vec4(0.0, 0.0, 0.0, depth);
         return;
     }
 
-    float eyeDepth = pc.light.w - eye.y;
-    float span = min(travel, pc.march.x);
-    int samples = int(pc.march.y);
+    float eyeDepth = params.light.w - eye.y;
+    float span = min(travel, params.march.x);
+    int samples = int(params.march.y);
     float jitter = volStartJitter(gl_FragCoord.xy);
     vec3 sum = vec3(0.0);
     // Stratified rather than fixed-midpoint: midpoints align into visible
@@ -71,11 +76,11 @@ void main() {
         // travelled through water on the way down: depth over the cosine of the
         // refracted sun's descent, which the CPU already inverted and clamped.
         float sampleDepth = max(eyeDepth - dir.y * t, 0.0);
-        sum += exp(-pc.medium.rgb * (t + sampleDepth * pc.waterSun.w));
+        sum += exp(-params.medium.rgb * (t + sampleDepth * params.waterSun.w));
     }
 
-    float g = pc.medium.w;
-    float cosine = dot(dir, pc.waterSun.xyz);
+    float g = params.medium.w;
+    float cosine = dot(dir, params.waterSun.xyz);
     float d = max(1.0 + g * g - 2.0 * g * cosine, 1e-3);
     // Henyey-Greenstein, unnormalised, the same curve as the engine's volPhase
     // -- but written out here rather than called, because of the floor on d.
@@ -88,5 +93,5 @@ void main() {
     // and it costs nothing elsewhere: at the default asymmetry of 0.65 the
     // smallest d is 0.1225, 122 times it.
     float phase = (1.0 - g * g) / (d * sqrt(d));
-    outColor = vec4(pc.light.rgb * phase * sum * (span / float(samples)), depth);
+    outColor = vec4(params.light.rgb * phase * sum * (span / float(samples)), depth);
 }
