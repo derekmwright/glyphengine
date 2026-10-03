@@ -355,6 +355,7 @@ func main() {
 	counts := flag.Bool("counts", false, "print bucket counts and the occluded count each second")
 	shot := flag.String("screenshot", "", "write a PNG of the last frame to this path")
 	msaa := flag.Int("msaa", 4, "samples per pixel, 1 or 4")
+	sky := flag.Bool("sky", true, "draw the sky dome. False leaves the frame's flat clear colour behind the field, which is what makes the visible-pixel count a count of geometry rather than of geometry plus horizon")
 	flag.Parse()
 	if *arm != "ridge" && *arm != "open" {
 		log.Fatalf("29-ridge: -arm %q is not ridge or open", *arm)
@@ -368,9 +369,14 @@ func main() {
 		glyph.WithTitle(fmt.Sprintf("GlyphEngine - 29 Ridge (%s)", *arm)),
 		glyph.WithWindowSize(*width, *height),
 		glyph.WithMSAA(*msaa),
-		glyph.WithShaders(xsky.Shaders()),
 		glyph.WithProjection(fov, near, 600),
 		glyph.WithMaxFrames(*frames),
+	}
+	if *sky {
+		// The dome is a shader slot the engine leaves empty, so omitting this
+		// option draws no sky at all while the environment below -- the sun, the
+		// palette, the fog -- stays exactly as it was.
+		opts = append(opts, glyph.WithShaders(xsky.Shaders()))
 	}
 	if *shot != "" {
 		opts = append(opts, glyph.WithScreenshot(*shot))
@@ -415,6 +421,31 @@ func main() {
 	floor := img.Rect.Dx() * img.Rect.Dy() / 20
 	if visible < floor {
 		log.Fatalf("29-ridge: %d pixels differ >=20/255 from background, need %d -- this frame is too empty to time", visible, floor)
+	}
+
+	// The fragment-invocation counters, when a run asked for them
+	// (GLYPHENGINE_PIPELINE_STATS=1). Read with -sky=false, where every visible
+	// pixel is geometry.
+	//
+	// Both passes, summed, because this scene's geometry is split across them: the
+	// trees are an instanced LOD set in the opaque pass and the ground is the
+	// terrain pipeline in its own, and a ratio over one pass's invocations against
+	// a pixel count that includes the other's coverage is not a ratio of anything.
+	//
+	// What this scene CANNOT give is a quad factor. The depth prepass declines
+	// every draw in it -- an instance set with LOD buckets and a double-sided draw
+	// are both excluded by depthPrepassQualifies, and the terrain has its own
+	// pipeline -- so nothing here removes the hidden fragments, and the ratio is
+	// depth complexity times the quad factor rather than the quad factor alone.
+	// It is an upper bound, and it is in the record as one.
+	if st, err := e.MeanPipelineStats(); err == nil && st.Valid {
+		inv := st.FragmentInvocations[renderer.PassOpaque] + st.FragmentInvocations[renderer.PassTerrain]
+		clipped := st.ClippingPrimitives[renderer.PassOpaque] + st.ClippingPrimitives[renderer.PassTerrain]
+		gpu := e.MeanGPUTimings()
+		log.Printf("QUADS	scene	29-ridge	arm	%s	prepass	none	msaa	%d	sky	%v	width	%d	height	%d	covered_px	%d	invocations	%d	inv_per_covered	%.4f	clipped	%d	tri_per_covered	%.4f	gpu_opaque	%.4f	gpu_terrain	%.4f	gpu_total	%.4f	hidden_share	%.3f	frames	%d",
+			*arm, e.Capabilities().MSAASamples, *sky, img.Rect.Dx(), img.Rect.Dy(), visible,
+			inv, float64(inv)/float64(visible), clipped, float64(clipped)/float64(visible),
+			gpu.Pass[renderer.PassOpaque], gpu.Pass[renderer.PassTerrain], gpu.Total, share, st.Frames)
 	}
 
 	// The arm labels, checked, in the two ways this scene can be wrong.

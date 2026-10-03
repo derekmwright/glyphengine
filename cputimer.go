@@ -195,9 +195,13 @@ func (t *cpuTimer) reset() {
 // GPU-bound, or simply paced by vsync, which the three look identical without.
 func (e *Engine) CPUTimings() CPUTimings { return e.cpu.mean() }
 
-// ResetTimings discards both the CPU and GPU accumulated means, for measuring
-// one phase of a run without its startup frames.
+// ResetTimings discards the CPU, GPU and pipeline-statistics accumulated means,
+// for measuring one phase of a run without its startup frames.
+//
+// All three, because they are read together: a mean invocation count over frames
+// the mean gpu_opaque does not cover is a ratio of two different runs.
 func (e *Engine) ResetTimings() {
 	e.cpu.reset()
 	e.renderer.ResetGPUTimings()
+	e.renderer.ResetPipelineStats()
 }

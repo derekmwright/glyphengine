@@ -1,6 +1,7 @@
 package glyphengine
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -127,6 +128,7 @@ type config struct {
 	hasShaders     bool
 	uiGlow         bool
 	depthPrepass   renderer.DepthPrepassMode
+	pipelineStats  bool
 }
 
 // rendererOptions translates the engine's config into the renderer's options.
@@ -156,6 +158,9 @@ func (c *config) rendererOptions() []renderer.Option {
 	}
 	if c.depthPrepass != renderer.DepthPrepassOff {
 		opts = append(opts, renderer.WithDepthPrepass(c.depthPrepass))
+	}
+	if c.pipelineStats {
+		opts = append(opts, renderer.WithPipelineStatistics())
 	}
 	return opts
 }
@@ -211,6 +216,23 @@ func WithUIGlow() Option {
 // and Renderer().Stats() carries the per-frame estimate and decision.
 func WithDepthPrepass(mode renderer.DepthPrepassMode) Option {
 	return func(c *config) { c.depthPrepass = mode }
+}
+
+// WithPipelineStatistics counts fragment-shader invocations and post-clip
+// primitives per pass, beside the per-pass timestamps, and reports them through
+// Engine.MeanPipelineStats and the GLYPHENGINE_TIMING block.
+//
+// Off by default and free when off. A straight passthrough to
+// renderer.WithPipelineStatistics, which exists for the reason WithUIGlow does:
+// the query pool is sized for every frame slot at construction, so the seam is
+// unreachable from a game that only has an Engine.
+//
+// GLYPHENGINE_PIPELINE_STATS=1 turns it on for any build without this option.
+// Read renderer.PipelineStats on what the fragment counter does and does not
+// include before taking a ratio from it; docs/agents/profiling.md records what
+// it was measured to count.
+func WithPipelineStatistics() Option {
+	return func(c *config) { c.pipelineStats = true }
 }
 
 // WithShaders replaces the SPIR-V the renderer builds its pipelines from.
@@ -1085,6 +1107,21 @@ func (e *Engine) GPUTimings() renderer.GPUTimings { return e.renderer.GPUTimings
 // MeanGPUTimings averages every frame measured so far; see Renderer.MeanGPUTimings.
 func (e *Engine) MeanGPUTimings() renderer.GPUTimings { return e.renderer.MeanGPUTimings() }
 
+// PipelineStats returns the most recent per-pass fragment-invocation and
+// post-clip primitive counts; see renderer.PipelineStats for what the fragment
+// counter includes, which is implementation-defined and has to be established
+// before a ratio taken from it means anything.
+//
+// The error is renderer.ErrStatisticsNotEnabled without WithPipelineStatistics
+// and wraps renderer.ErrCapabilityUnavailable on a device without the feature.
+func (e *Engine) PipelineStats() (renderer.PipelineStats, error) { return e.renderer.PipelineStats() }
+
+// MeanPipelineStats averages every frame collected so far; see
+// Renderer.MeanPipelineStats. Prefer it over PipelineStats for any comparison.
+func (e *Engine) MeanPipelineStats() (renderer.PipelineStats, error) {
+	return e.renderer.MeanPipelineStats()
+}
+
 // LogTimings prints the CPU and GPU breakdowns together, which is the only way
 // to read either of them.
 //
@@ -1103,10 +1140,42 @@ func (e *Engine) LogTimings() {
 		log.Printf("cpu %-10s %6.3f ms  (phases sum to %.3f)", "FRAME", c.Total, sum)
 	}
 	e.LogGPUTimings()
+	e.LogPipelineStats()
 
 	st := e.renderer.Stats()
 	log.Printf("draw calls %d  instances %d  triangles %d  grass tiles %d drawn / %d culled",
 		st.DrawCalls, st.Instances, st.Triangles, st.GrassTilesDrawn, st.GrassTilesCulled)
+}
+
+// LogPipelineStats prints the fragment-shader invocations and post-clip
+// primitives per pass, averaged over every frame collected, and says nothing at
+// all on a build that is not recording them.
+//
+// Only the passes with something in them are printed, because sixteen rows of
+// zeroes buries the two that matter. The header says how many frames the mean
+// covers and names the counter's open question, so a number copied out of this
+// block carries the caveat with it rather than leaving it behind in a document.
+func (e *Engine) LogPipelineStats() {
+	st, err := e.renderer.MeanPipelineStats()
+	if err != nil {
+		if !errors.Is(err, renderer.ErrStatisticsNotEnabled) {
+			log.Printf("pipeline statistics: %v", err)
+		}
+		return
+	}
+	if !st.Valid {
+		log.Println("pipeline statistics: not ready yet")
+		return
+	}
+	log.Printf("pipeline statistics over %d frames (fragment invocations include helper lanes only if this device counts them -- see cmd/quadcheck)", st.Frames)
+	for p := range st.FragmentInvocations {
+		pass := renderer.Pass(p)
+		if st.FragmentInvocations[p] == 0 && st.ClippingPrimitives[p] == 0 {
+			continue
+		}
+		log.Printf("stat %-10s %12d fragment invocations  %10d primitives after clipping",
+			pass, st.FragmentInvocations[p], st.ClippingPrimitives[p])
+	}
 }
 
 // LogTimingsTSV prints one tab-separated line of every timing, for collecting
@@ -1139,6 +1208,24 @@ func (e *Engine) LogTimingsTSV(label string) {
 	st := e.renderer.Stats()
 	fmt.Fprintf(&b, "	n_draws	%d	n_instances	%d	n_triangles	%d	n_grasstiles	%d	n_grassculled	%d",
 		st.DrawCalls, st.Instances, st.Triangles, st.GrassTilesDrawn, st.GrassTilesCulled)
+	// The pipeline statistics, when a build is recording them. Columns appear
+	// only then, so every existing bench line is byte for byte what it was: the
+	// parser reads label/value pairs, so added columns cost nothing, but a run
+	// that gained forty zero-valued columns by default would make two bench
+	// tables from either side of this change awkward to diff by eye.
+	//
+	// Only the bracketed passes, because a pass that cannot carry a query would
+	// print a zero indistinguishable from a pass that shaded nothing; see
+	// renderer.StatisticsBracketed.
+	if ps, err := e.renderer.MeanPipelineStats(); err == nil && ps.Valid {
+		for p := range ps.FragmentInvocations {
+			pass := renderer.Pass(p)
+			if !renderer.StatisticsBracketed(pass) {
+				continue
+			}
+			fmt.Fprintf(&b, "	frag_%s	%d	clip_%s	%d", pass, ps.FragmentInvocations[p], pass, ps.ClippingPrimitives[p])
+		}
+	}
 	log.Println(b.String())
 }
 

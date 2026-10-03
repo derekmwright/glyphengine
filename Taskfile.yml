@@ -443,6 +443,35 @@ tasks:
         check 29-ridge -count 1200
         check 29-ridge -count 1200 -arm open
         check 29-ridge -count 1200 -pan
+        # The pipeline-statistics query pool, which nothing else in this matrix
+        # creates: one begin/end query per bracketed pass per frame slot, reset at
+        # the top of the command buffer. A query begun inside a render pass instance
+        # that ended outside it, or two active at once, is a core validation error
+        # rather than a wrong number -- and the GPU-free
+        # TestPipelineStatisticsQueriesAreLegalVulkan reasons about the SAME
+        # brackets, so these arms are what say the reasoning matches the device.
+        #
+        # Three arms because the pool has to be live in every shape that records
+        # it: with the prepass declining (the control), with it submitting, and with
+        # the geometry subdivided so -density's own assertion runs. The env var is
+        # the lever for the first two, because an example that always created the
+        # pool would make every other arm above a statistics arm too.
+        # Exported and unset around the group rather than prefixed onto each call:
+        # check is a shell function, and a variable assignment in front of a
+        # function call persists after it returns in bash, which would quietly
+        # make every arm below a statistics arm.
+        export GLYPHENGINE_PIPELINE_STATS=1
+        check 28-overdraw -count 256 -prepass on -sky=false
+        check 28-overdraw -count 256 -overlap=false
+        check 29-ridge -count 1200 -sky=false
+        unset GLYPHENGINE_PIPELINE_STATS
+        # -density asks for the pool itself, and its own assertion on the achieved
+        # triangles per covered pixel runs here. -grid 7 is the converged value for
+        # THIS cell (256 patches, 1280x720): it measures 0.205 against the 0.170
+        # asked for, where the solver's own first guess of 11 measures 0.559. The
+        # solver is a bound-based estimate and the assertion is what gates it; see
+        # solvePatchGrid.
+        check 28-overdraw -count 256 -prepass on -sky=false -density 0.17 -grid 7
         # The streamed uploader, against the two paths it replaces. 20
         # patches at two a frame fits inside CHECK_FRAMES with room for
         # the last one to land and its staging to retire.
@@ -2214,6 +2243,29 @@ tasks:
       # frame totals are what a game looking at the sun would actually pay, and
       # both are reported.
       - go run ./x/sky/lut/internal/lutskycheck -cost -out .task/xskylut
+
+  quads:
+    desc: "Establish what this device's fragment-invocation counter counts, and measure quad overshading (needs a GPU)"
+    cmds:
+      # Needs a GPU, so it sits with smoke and validate rather than in `task ci`.
+      # renderer/pipelinestats_test.go covers the pool, the brackets, the slot
+      # discipline and the unwind with no device behind them. What it cannot cover
+      # is what the counter COUNTS: whether FRAGMENT_SHADER_INVOCATIONS includes
+      # the helper lanes of a 2x2 quad is implementation-defined, and a counter
+      # that excludes them reads 1.0 on a field of pixel-sized triangles -- the
+      # same number a perfect per-pixel shading model would read. The ratio means
+      # nothing until the device has answered, which is what this runs.
+      #
+      # Two arms whose true quad factor is known from geometry: one triangle over
+      # the whole frame (no helper lanes, so 1.0 whatever the counter includes) and
+      # a field of one-pixel triangles spaced so each owns a quad (4.0 with helpers,
+      # 1.0 without). Each arm asserts its own covered-pixel count first, so a ratio
+      # is only reported for a frame that covered what it meant to, and the
+      # denominator comes from a readback rather than from the counter.
+      #
+      # MEASUREMENT PENDING: the numbers, the verdict and the break are recorded in
+      # docs/agents/profiling.md and ADR 0013 once this has run on hardware.
+      - go run ./cmd/quadcheck -validate
 
   widetex:
     desc: "A half-float texture uploaded from the CPU keeps its values where an 8-bit one cannot (needs a GPU)"

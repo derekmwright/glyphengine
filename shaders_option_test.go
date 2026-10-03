@@ -95,3 +95,33 @@ func TestWithShadersKeepsTheStagesItWasNotGiven(t *testing.T) {
 		t.Error("LitFrag is empty, so the comparison above proves nothing")
 	}
 }
+
+// WithPipelineStatistics has to reach renderer.New, and the only thing an option
+// can do before a device exists is set a flag -- so what is checked here is that
+// the option is APPENDED at all, which is the failure this file was written for.
+// What the flag then does is renderer's own
+// TestWithPipelineStatisticsRequestsThePool and
+// TestPipelineStatisticsPoolExistsOnlyWhenAskedAndGranted.
+//
+// Verified to fail: deleting the `if c.pipelineStats` branch from
+// config.rendererOptions reports "WithPipelineStatistics added 0 renderer options,
+// want 1".
+func TestWithPipelineStatisticsReachesTheRenderer(t *testing.T) {
+	var bare config
+	before := len(bare.rendererOptions())
+
+	var cfg config
+	WithPipelineStatistics()(&cfg)
+	if !cfg.pipelineStats {
+		t.Fatal("the engine option did not set the config flag")
+	}
+	after := cfg.rendererOptions()
+	if got := len(after) - before; got != 1 {
+		t.Fatalf("WithPipelineStatistics added %d renderer options, want 1", got)
+	}
+	// An option is a request, not a pool: nothing is created until New runs on a
+	// device that granted the feature.
+	if applyRendererOptions(after).PipelineStatsSupported() {
+		t.Error("applying the option alone reports statistics as supported, with no device behind it")
+	}
+}

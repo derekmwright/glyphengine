@@ -235,10 +235,17 @@ The reasons, in the order they weigh:
   that clears depth, submits nothing, and leaves the main pass on the ordinary
   `Greater` variants.
 - The reopen condition for the visibility buffer needs a measurement the
-  engine cannot take yet: shading invocations per covered sample. That is a
-  follow-up, either pipeline-statistics queries beside the timestamp queries
-  `GPUTimings` already records or a `gl_HelperInvocation` counter, and it
-  has to prove what it counts before its number is believed.
+  engine could not take when this record was written: shading invocations per
+  covered sample. The instrument now exists -- pipeline-statistics queries on
+  the same brackets `GPUTimings` records, behind `WithPipelineStatistics` and the
+  device's `pipelineStatisticsQuery` feature (#182, `docs/agents/profiling.md`) --
+  and it does not settle the question on its own, because whether the counter
+  includes a quad's helper lanes is implementation-defined. `cmd/quadcheck`
+  establishes that from geometry whose quad factor is known, and the measurement
+  below is not evidence until it has. If helpers turn out not to be counted on a
+  machine, the counter cannot see quad overshading at all and the
+  `gl_HelperInvocation` route is the only one left; that one needs a writable
+  storage buffer in a graphics pass, which `AppPassDesc` does not offer today.
 - #155 closes with this record; #158 reopens as the adaptive prepass; #154
   stays closed with its archive, referenced above.
 
@@ -256,8 +263,9 @@ The reasons, in the order they weigh:
 - Checks run for this change: the sweep, the threshold, and the decision rule's
   cells are recorded below when the measurement is made; nothing is recorded
   here before it is.
-- Validation still needed: the quad-overshading factor on the showcase-shaped
-  scene, which this record's reopen condition depends on.
+- Validation still needed: the HELPER-LANE half of the quad-overshading factor.
+  The rest is measured below, and the instrument cannot see that half on this
+  machine; see the verdict and the gap it names.
 
 ### Evidence recorded with the implementation
 
@@ -347,10 +355,13 @@ becomes one is the later decision this record already reserved.
   `cpu_record` rose on all six paired control trials, which these records treat as
   real rather than noise. The draft of this ADR said a CPU estimate "costs
   nothing"; it does not.
-- **The quad-overshading reopen condition is still unmeasured**, so the decision
-  against the visibility buffer rests where it did: on a prepass delivering the
-  shade-once guarantee without a second shading model, not on a measured
-  comparison.
+- **The quad-overshading reopen condition was unmeasured when this was written**,
+  and the section below is what came of measuring it: a lower bound of 1.335 to
+  1.351 on the showcase-shaped scene against a threshold of 1.5, and a counter that
+  cannot see the helper lanes the condition is actually about. The decision still
+  rests where it did -- on a prepass delivering the shade-once guarantee without a
+  second shading model, which that section now measures exactly at 1.0000 -- and
+  not on a comparison against a visibility buffer.
 
 #### Corrections this record made to its own draft
 
@@ -365,9 +376,154 @@ becomes one is the later decision this record already reserved.
 3. `excess = C / viewportPixels` is refuted, as above.
 4. A CPU estimate is cheap, not free.
 
+#### Quad overshading, against the reopen condition
+
+Measured on this machine: AMD Radeon RX 7900 XTX, 200 frames per sample under
+`GLYPHENGINE_FIXED_FRAME_TIME=16.667ms`, three trials per cell, arms interleaved
+inside each trial, nothing else on the GPU. Background GPU 3D utilisation was
+sampled before and after every trial: baseline 6.5 to 8.1 %, 6.5 to 7.1 % during
+the runs, discard limit 13.1 %. **No run was discarded.** The counters are exact
+rather than sampled, and all three trials of every cell below returned
+bit-identical counts, so the ratios carry no scatter at all; `gpu_opaque` does,
+and its spread is in the report.
+
+##### What the counter counts here, and what that costs
+
+`task quads` establishes it from geometry whose quad factor is known in advance,
+six arms, every one exact:
+
+| arm | MSAA | prepass | triangles | covered px | invocations | per covered px |
+|---|---:|---|---:|---:|---:|---:|
+| full-screen triangle | 1 | off | 1 | 307,200 | 307,200 | **1.0000** |
+| full-screen triangle | 4 | off | 1 | 307,200 | 307,200 | **1.0000** |
+| one-pixel triangles | 1 | off | 19,200 | 19,200 | 19,200 | **1.0000** |
+| full-screen triangle | 1 | on | 1 | 307,200 | 307,200 | 1.0000 |
+| full-screen triangle | 4 | on | 1 | 307,200 | 307,200 | 1.0000 |
+| one-pixel triangles | 1 | on | 19,200 | 19,200 | 19,200 | 1.0000 |
+
+A field of 19,200 triangles each covering one pixel reads exactly one invocation
+each, where a counter including helper lanes would read four.
+**`FRAGMENT_SHADER_INVOCATIONS` excludes helper invocations on this device.**
+Three consequences, and the third decides what this section can and cannot say:
+
+1. **The denominator is covered pixels, at every sample count.** The full-screen
+   arm reads 1.0000 at 4x as well as at 1x, so a fragment runs once per covered
+   pixel per primitive and not once per sample — the engine enables no sample
+   shading, and this is the measurement rather than the assumption.
+2. **The counter is exact.** 307,200 is 640x480 and 19,200 is the triangle count,
+   to the unit.
+3. **It cannot see quad overshading.** Helper lanes are precisely what clause 3 of
+   this decision is about, and they are not counted here. What is counted is the
+   non-helper multiplicity: a **lower bound** on invocations per covered sample,
+   and not the component a visibility-buffer resolve removes — under MSAA a
+   resolve shades once per distinct id per pixel too, up to four at edges, as this
+   record says above. So **the reopen condition is undecidable by this
+   instrument**, and the table below is a lower bound and a regime, not the
+   condition's number.
+
+The second route this record named — a `gl_HelperInvocation` counter — is not
+built here, and it is blocked on an engine gap rather than on effort:
+`AppPassDesc` has no `Buffers` field, so a graphics pass cannot write a storage
+buffer or a storage image at all; those are exposed to compute only
+(`docs/agents/render-targets.md`). That gap is the follow-up.
+
+##### The three scenes
+
+Invocations per covered pixel, and triangles after clipping per covered pixel,
+with the prepass off and on. `-sky=false` on every arm, so the frame keeps its
+flat clear colour and the pixel count is a count of geometry.
+
+| scene | res | MSAA | tri/covered px | inv/covered px, prepass off | prepass on | gpu_opaque off (ms) | on (ms) |
+|---|---|---:|---:|---:|---:|---:|---:|
+| 28-overdraw overlap | 1280x720 | 1 | 20.08 | 1.8588 | **1.0000** | 1.252 | 0.904 |
+| 28-overdraw overlap | 1280x720 | 4 | 18.88 | 5.6259 | **2.6215** | 3.112 | 1.450 |
+| 28-overdraw overlap | 3840x2160 | 1 | 2.28 | 1.8602 | **1.0000** | 4.566 | 1.964 |
+| 28-overdraw overlap | 3840x2160 | 4 | 2.23 | 4.4261 | **1.9429** | 8.441 | 3.822 |
+| 28-overdraw at showcase density | 1280x720 | 1 | 0.183 | 1.8629 | **1.0000** | 0.475 | 0.388 |
+| 28-overdraw at showcase density | 1280x720 | 4 | 0.173 | 2.8702 | **1.3353** | 0.597 | 0.416 |
+| 28-overdraw at showcase density | 3840x2160 | 1 | 0.182 | 1.8576 | **1.0000** | 2.240 | 1.223 |
+| 28-overdraw at showcase density | 3840x2160 | 4 | 0.178 | 2.9350 | **1.3507** | 3.700 | 1.488 |
+| 29-ridge (upper bound) | 1280x720 | 1 | 0.479 | 25.7309 | n/a | 0.661 | n/a |
+| 29-ridge (upper bound) | 1280x720 | 4 | 0.479 | 26.5186 | n/a | 0.766 | n/a |
+| 29-ridge (upper bound) | 3840x2160 | 1 | 0.055 | 21.1669 | n/a | 4.029 | n/a |
+| 29-ridge (upper bound) | 3840x2160 | 4 | 0.055 | 21.0886 | n/a | 4.066 | n/a |
+
+**29-ridge is an upper bound and nothing else.** The prepass declines every draw
+in it — an instanced LOD set and a double-sided draw are both excluded by
+`depthPrepassQualifies`, and the terrain has its own pipeline — so nothing removes
+its hidden fragments, and its 21 to 27 is shaded depth complexity rather than any
+kind of quad factor. The forest's LOD fade and impostors discard, which defeats
+early-Z, so every overlapping layer shades. It is in the table because the
+condition names the scene, and it bounds nothing from below.
+
+**The showcase-shaped arm is the one the condition is about.** UniverseBuild is
+1.33 M triangles over 3840x2054, which is 0.169 triangles per viewport pixel;
+`28-overdraw -density 0.17` reaches **0.173 to 0.183** per covered pixel, within
+8 % of it, at `-grid 4` (1280x720) and `-grid 10` (3840x2160). Reaching it meant
+**coarsening** the field, not subdividing it: the overdraw baseline's own
+tessellation is 20.08 triangles per covered pixel at 720p against this arm's 0.173
+on the same camera, **116 times** the density -- worth knowing about every number
+ever measured on that scene.
+
+##### What the numbers say
+
+- **At MSAA 1 with the prepass on, the ratio is exactly 1.0000 on every arm.**
+  77,740 invocations over 77,740 covered pixels; 682,247 over 682,247. The prepass
+  delivers the shade-once guarantee exactly, measured in fragments rather than
+  inferred from time. That is new evidence for this decision's first reason, and
+  it is the strongest form the claim can take.
+- **The prepass removes 46 % of shaded fragments at MSAA 1** (1.86 to 1.00) and
+  53 to 56 % at MSAA 4 (5.63 to 2.62, 4.43 to 1.94), against the 61 % of lit-pass
+  TIME the removal record measured. Two different quantities that agree in size.
+- **The measured excess over 1.0 is entirely an MSAA effect, and it scales with
+  triangle density.** At MSAA 1 it is exactly zero on every arm, because one
+  sample per pixel admits one primitive. At MSAA 4 a pixel straddling a primitive
+  edge is shaded once per covering primitive, and the excess runs 0.34 at 0.18
+  triangles per covered pixel, 0.94 at 2.2 and 1.62 at 18.9. It is not quad
+  overshading, and a visibility-buffer resolve under MSAA pays it too.
+- **The bound-area estimate over-states real depth complexity by about 1.8x.**
+  `PrepassEstimate` reads 3.28 on the overlap arm where the shaded fragments per
+  covered pixel are 1.86. Both numbers are right about their own quantity — one is
+  a ratio of projected bound areas, the other a count of fragments — and the
+  threshold is calibrated against the first. Worth knowing before anyone reads the
+  estimate as a fragment count.
+
+##### Verdict
+
+**Undecidable by this instrument, and not met by the lower bound.**
+
+- The lower bound on invocations per covered sample on the showcase-shaped scene,
+  with the prepass on and at the showcase's 4x MSAA, is **1.335 at 1280x720 and
+  1.351 at 3840x2160** — below the 1.5 the condition names. At MSAA 1 it is
+  exactly 1.000.
+- A literal reading of the condition — "measured shading invocations per covered
+  sample exceed 1.5" — is therefore **not** satisfied on the showcase-shaped
+  scene, and #155 does not reopen on this evidence.
+- The condition's intent is the helper-lane component, and **this instrument
+  cannot measure it on this device**. The lower bound leaves 0.165 of head-room
+  before 1.5, and at 5.6 covered pixels per triangle the unmeasured component is
+  not obviously smaller than that — a triangle of that size touches four to six
+  quads by arithmetic, which is an argument and not a measurement, and this record
+  does not treat it as one. So "not met" is a statement about the lower bound and
+  not a finding that quad overshading is small.
+- **The decision stands, and its evidence is not complete.** It rests where it
+  did: on a prepass that delivers the shade-once guarantee — now measured exactly,
+  at 1.0000 — without a second shading model. The condition is retired from
+  "unmeasured" to "unmeasurable with what the engine can read", and what it needs
+  is the storage-buffer gap above.
+- On the overdraw baseline's own tessellation the lower bound DOES exceed 1.5 at
+  MSAA 4 (2.62 at 720p, 1.94 at 4K). That scene is 12 to 116 times the showcase's
+  triangle density, so it is not the scene the condition names, and the excess
+  there is the MSAA edge multiplicity a resolve pass would also pay. It is in the
+  record because it is the shape the condition was worried about, measured.
+
 #### Validation still needed
 
-- The quad-overshading factor on the showcase-shaped scene, which this record's
-  reopen condition depends on.
+- The helper-lane component of quad overshading, which is the half of the reopen
+  condition this machine's counter cannot see. It needs a `gl_HelperInvocation`
+  atomic from a fragment stage, and that needs a storage buffer or storage image
+  bindable by a GRAPHICS application pass -- `AppPassDesc` has no `Buffers` field,
+  and both are exposed to compute only. Until then the condition has a measured
+  lower bound of 1.335 to 1.351 on the showcase-shaped scene and no upper one.
 - A coverage-aware threshold, against the non-monotone 4K column above.
 - Consumer measurements, before `Auto` could become the default.

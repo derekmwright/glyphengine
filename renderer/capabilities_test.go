@@ -92,6 +92,7 @@ func generousDevice() *capsTestInstance {
 		},
 		features: core1_0.PhysicalDeviceFeatures{
 			SamplerAnisotropy: true, MultiDrawIndirect: true, DrawIndirectFirstInstance: true,
+			PipelineStatisticsQuery: true,
 		},
 		families: []*core1_0.QueueFamilyProperties{
 			{TimestampValidBits: 0}, {TimestampValidBits: 64},
@@ -117,7 +118,7 @@ func TestCapabilitiesReportWhatTheDeviceGranted(t *testing.T) {
 	d := generousDevice()
 	c := negotiate(t, d, driverNameQuery{name: "test driver 1.2"}, 1, core1_0.Samples8)
 	if c.MSAASamples != 8 || c.MaxAnisotropy != 16 || !c.MultiDrawIndirect || !c.DrawIndirectFirstInstance ||
-		!c.GPUTimestamps || c.PortabilitySubset {
+		!c.GPUTimestamps || !c.PipelineStatistics || c.PortabilitySubset {
 		t.Fatalf("generous device: %+v", c)
 	}
 	if c.GPUName != "Test Discrete GPU" || c.DriverName != "test driver 1.2" ||
@@ -153,7 +154,7 @@ func TestCapabilitiesReportWhatTheDeviceGranted(t *testing.T) {
 	if c.MaxAnisotropy != 0 {
 		t.Errorf("MaxAnisotropy %g without samplerAnisotropy; 0 is how callers read 'unavailable'", c.MaxAnisotropy)
 	}
-	if c.MultiDrawIndirect || c.DrawIndirectFirstInstance || c.GPUTimestamps || c.RayQuery {
+	if c.MultiDrawIndirect || c.DrawIndirectFirstInstance || c.GPUTimestamps || c.RayQuery || c.PipelineStatistics {
 		t.Errorf("features granted that the device does not have: %+v", c)
 	}
 	if !c.PortabilitySubset {

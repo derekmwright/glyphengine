@@ -12,11 +12,24 @@ api:
   - glyphengine.Engine.LogTimings
   - glyphengine.Engine.LogTimingsTSV
   - glyphengine.Engine.MeanGPUTimings
+  - glyphengine.Engine.MeanPipelineStats
+  - glyphengine.Engine.PipelineStats
+  - glyphengine.Engine.LogPipelineStats
+  - glyphengine.WithPipelineStatistics
   - glyphengine.Engine.ResetTimings
   - glyphengine.CPUPhase
   - glyphengine.CPUTimings
   - renderer.GPUTimings
   - renderer.Pass
+  - renderer.PipelineStats
+  - renderer.StatisticsBracketed
+  - renderer.WithPipelineStatistics
+  - renderer.Renderer.PipelineStats
+  - renderer.Renderer.MeanPipelineStats
+  - renderer.Renderer.ResetPipelineStats
+  - renderer.Renderer.PipelineStatsSupported
+  - renderer.ErrStatisticsNotEnabled
+  - renderer.Capabilities.PipelineStatistics
   - renderer.Renderer.MeanGPUTimings
   - renderer.Renderer.ResetGPUTimings
   - renderer.Renderer.Stats
@@ -31,7 +44,7 @@ api:
   - renderer.AppPassStats
 assets: none
 run: task bench
-verified: 2026-10-03 # cpu drawsort split out of cpu drawlist; App beside the GPU timings; the depth prepass bracket and the shadow bracket's new end; the prepass estimate and decision in the stats block, and the threshold sweep scene
+verified: 2026-10-03 # pipeline statistics per pass behind WithPipelineStatistics and GLYPHENGINE_PIPELINE_STATS, with the four brackets that cannot carry a query; helper lanes measured NOT counted on an RX 7900 XTX, so the counter bounds quad overshading from below only (#182); cpu drawsort split out of cpu drawlist; App beside the GPU timings; the depth prepass bracket and the shadow bracket's new end; the prepass estimate and decision in the stats block, and the threshold sweep scene
 ---
 
 # Measuring frame cost
@@ -257,6 +270,145 @@ shader.
 
 Overdraw is deliberately absent. Measuring it needs a GPU query the engine does
 not run, and a guessed number would be worse than none.
+
+## Counting fragments, not just timing them
+
+```
+GLYPHENGINE_PIPELINE_STATS=1 GLYPHENGINE_TIMING=1   go run ./28-overdraw -count 1024 -sky=false -prepass on -msaa 1 -frames 200
+```
+
+```
+pipeline statistics over 198 frames (fragment invocations include helper lanes only if this device counts them -- see cmd/quadcheck)
+stat opaque               77740 fragment invocations     1560752 primitives after clipping
+```
+
+At 1280x720 on an RX 7900 XTX. A pass with nothing in either counter is not
+printed, and the prepass's own bracket is counted too -- it rasterises the same
+geometry through a null fragment stage, so it reads its own invocations. 77,740 invocations over
+a frame covering exactly 77,740 pixels is the depth prepass doing what it says:
+one shading invocation per covered pixel, measured rather than inferred.
+
+`WithPipelineStatistics` (or the environment variable, on a binary you did not
+build) adds a pipeline-statistics query to each of the timer's brackets and
+reports `FRAGMENT_SHADER_INVOCATIONS` and `CLIPPING_PRIMITIVES` per pass through
+`PipelineStats`. Off by default and free when off: no pool, no reset, no query,
+and not one extra driver call in a recorded frame.
+
+The two counters are the numerator and the denominator of a shading-cost ratio.
+Invocations over the samples the frame covers says how much of the fragment work
+is real; primitives after clipping over the same denominator says how finely the
+geometry is diced. `CLIPPING_PRIMITIVES` is **not** `RenderStats.Triangles` --
+that one is a CPU count of what the vertex stage was asked for, before clipping
+and before anything left the frustum, while this is what came out of the clipper.
+Face culling happens after clipping, so a back-facing triangle is in this number
+and shades nothing.
+
+### What the fragment counter counts has to be established first
+
+Forward shading runs in 2x2 quads: a triangle covering one pixel still occupies a
+quad, and the three lanes outside it run as **helper** invocations so that
+derivatives exist. Whether the counter includes them is implementation-defined,
+and the two answers are not a detail -- a counter that excludes helpers reads
+**1.0** on a field of pixel-sized triangles, which is exactly what a perfect
+per-pixel shading model would read. It cannot measure quad overshading at all.
+
+`cmd/quadcheck` (`task quads`) establishes it from geometry whose true quad factor
+is known: one triangle covering the whole frame, where every quad is fully covered
+and the ratio must be 1.0 whatever the counter includes, and a field of one-pixel
+triangles spaced four pixels apart, where the ratio is 4.0 with helpers and 1.0
+without. Each arm asserts its own covered-pixel count before reporting a ratio,
+and the denominator comes from a frame readback rather than from the counter, so
+the ratio is not a tautology.
+
+**On an AMD Radeon RX 7900 XTX (2026-10-03) helper lanes are NOT counted.** A
+field of 19,200 triangles each covering one pixel reads exactly 19,200 invocations
+where a counter including helpers would read 76,800, and the full-screen arm reads
+exactly 307,200 over a 640x480 frame. Both at 1x and 4x MSAA, both with the prepass
+off and on; six arms, every one exact to the unit.
+
+So on this device the counter measures **non-helper invocations: one per covered
+pixel per primitive**. Two things follow, and the second is a limit worth knowing
+before planning any work on it:
+
+- The denominator is covered **pixels** at every sample count. The full-screen arm
+  reads 1.0000 at 4x as well, so a fragment runs once per covered pixel per
+  primitive and not once per sample -- the engine enables no `sampleShading`, and
+  that arm is the measurement of it rather than this sentence.
+- **Quad overshading cannot be measured with this counter here.** The helper lanes
+  a near-pixel triangle shades are exactly what that question is about, and they
+  are not in the number. What a ratio from this counter gives is a LOWER BOUND on
+  invocations per covered sample. The route that would measure it is a
+  `gl_HelperInvocation` atomic from a fragment stage, and the engine cannot run one
+  today: a graphics application pass can bind no storage buffer and no storage
+  image, both of which are exposed to compute only (`render-targets.md`). ADR 0013
+  carries the measurement, the verdict and that gap.
+
+**Verified to fail**, both ways the proof can be wrong. Asserting the pixel field
+against 4.0 -- supposing helpers were counted -- reports `pixels: 1.0000
+invocations per covered sample, which is neither 1.0 (helpers not counted) nor 4.0
+(helpers counted)`. Submitting the full-screen triangle twice, so every pixel
+shades twice, reports `fullscreen: 2.0000 invocations per covered sample, want 1.0
++- 0.02`.
+
+The pixel field runs at **MSAA 1 only**, and that is measured rather than chosen:
+at 4x the samples are not at the pixel centre -- the standard pattern puts all four
+0.395 pixels away and the nearest sample of the next pixel at 0.605 -- so a
+triangle covering one of its own samples and none of its neighbour's needs a
+circumradius between 0.591 and 0.605, a 2.4 % window, and the arm would be
+measuring the sample pattern. At the default 0.9 it was measured covering two
+pixels per triangle, and the arm failed its own coverage assertion rather than
+reporting a ratio. The 4x question that matters -- per pixel or per sample -- is
+the full-screen arm's, and it answers it.
+
+### What a ratio from it is worth
+
+With the prepass on at MSAA 1 the ratio is **exactly 1.0000** on every scene
+measured: the prepass delivers one shading invocation per covered pixel, to the
+unit. With it off the same scenes read 1.86, so the prepass removes 46 % of the
+shaded fragments. At 4x MSAA the ratio rises above 1.0 -- 1.34 at 0.18 triangles
+per covered pixel, 1.94 at 2.2, 2.62 at 18.9 -- and that excess is **not** helper
+lanes but a pixel straddling a primitive edge being shaded once per covering
+primitive. It is zero at MSAA 1 on every arm, because one sample admits one
+primitive. ADR 0013 has the table.
+
+### Four brackets carry no statistics
+
+`StatisticsBracketed` says which passes have a number, and four do not. The reason
+is a Vulkan rule rather than a choice: a query is begun and ended by commands, and
+one begun inside a render pass instance must end inside the same one.
+`PassSceneResolve`, `PassWaterResolve` and `PassTonemap` each straddle a
+`vkCmdEndRendering` on purpose -- that is what those brackets are for -- and
+`PassWater` opens at the scene-copy node and closes inside the water pass. The
+whole-frame bracket is out for a second reason: it encloses every other query, and
+two queries of the same type cannot be active in one command buffer. So there is
+no whole-frame total to check the per-pass sum against, which is a real loss -- the
+timer's equivalent check is what caught its `TopOfPipe`/`BottomOfPipe` mismatch.
+
+A zero on a bracketed pass is a pass that shaded nothing. A zero on an unbracketed
+one is not measured, and `StatisticsBracketed` is the only thing that tells them
+apart.
+
+### Availability
+
+The device needs `pipelineStatisticsQuery`, which `Capabilities.PipelineStatistics`
+reports whether or not this build asked for statistics. The accessors distinguish
+the three cases, beside a zero value every time:
+
+```go
+st, err := e.MeanPipelineStats()
+switch {
+case errors.Is(err, renderer.ErrStatisticsNotEnabled):
+	// This build did not ask. A program bug, not a device one.
+case errors.Is(err, renderer.ErrCapabilityUnavailable):
+	// The device has no pipelineStatisticsQuery; measure on one that has.
+case !st.Valid:
+	// Asked, granted, and the first frames have not come back yet.
+}
+```
+
+Counts are read back a frame late through the same slot discipline as the
+timestamps -- after the slot's fence has signalled and before its queries are
+reset -- so nothing stalls to collect them.
 
 ## No committed baseline
 

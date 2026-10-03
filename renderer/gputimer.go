@@ -198,6 +198,18 @@ type gpuTimer struct {
 	period      float32 // nanoseconds per tick
 	supported   bool
 
+	// stats is the pipeline-statistics recorder, nil unless
+	// WithPipelineStatistics asked for one.
+	//
+	// It hangs off the timer rather than carrying call sites of its own so that
+	// its brackets ARE the timer's brackets, by construction rather than by
+	// agreement: the measurement it exists for is fragment invocations inside one
+	// pass read against that pass's gpu time, and two independent sets of
+	// bracket call sites is how an instrument's bracket drifts away from the one
+	// it is compared against. Every call below is nil-safe, so a renderer without
+	// statistics records exactly the stream it always did -- goldenStreamHash.
+	stats *pipelineStats
+
 	// scratch is reused for readback so a per-frame allocation does not show up
 	// in the CPU profile of the thing measuring cost.
 	scratch []byte
@@ -268,7 +280,17 @@ func (t *gpuTimer) base(frame int) int { return frame * queriesPerFrame }
 // timestamp read before its query is reset returns the previous frame's value,
 // and the resulting numbers look plausible while being one frame stale.
 func (t *gpuTimer) reset(deviceDriver core1_0.DeviceDriver, cmdBuf core1_0.CommandBuffer, frame int) {
-	if t == nil || !t.supported {
+	if t == nil {
+		return
+	}
+	// The statistics pool is reset here too and not only because it is
+	// convenient: vkCmdResetQueryPool has to run outside a render pass, and this
+	// is the one point in a recorded frame that is outside every one of them and
+	// still before the slot's first query. It is driven whether or not timestamps
+	// are supported, because a device can grant pipelineStatisticsQuery and no
+	// usable timestamp bits.
+	t.stats.reset(deviceDriver, cmdBuf, frame)
+	if !t.supported {
 		return
 	}
 	deviceDriver.CmdResetQueryPool(cmdBuf, t.pool, t.base(frame), queriesPerFrame)
@@ -298,7 +320,11 @@ func (t *gpuTimer) reset(deviceDriver core1_0.DeviceDriver, cmdBuf core1_0.Comma
 // bracket gave something to check the sum against. With both ends at
 // BottomOfPipe each interval is exactly the work issued between the two writes.
 func (t *gpuTimer) begin(deviceDriver core1_0.DeviceDriver, cmdBuf core1_0.CommandBuffer, frame int, p Pass) {
-	if t == nil || !t.supported {
+	if t == nil {
+		return
+	}
+	t.stats.begin(deviceDriver, cmdBuf, frame, p)
+	if !t.supported {
 		return
 	}
 	deviceDriver.CmdWriteTimestamp(cmdBuf, core1_0.PipelineStageBottomOfPipe, t.pool, t.base(frame)+int(p)*2)
@@ -306,11 +332,18 @@ func (t *gpuTimer) begin(deviceDriver core1_0.DeviceDriver, cmdBuf core1_0.Comma
 
 // end writes the closing timestamp for a pass, at BottomOfPipe so it waits for
 // the pass's work to have finished rather than merely been issued.
+// The statistics query closes AFTER the closing timestamp, as it opened before
+// the opening one, so the counted interval encloses the timed one rather than
+// cutting a corner off it. Neither write is work the counters can see, so this is
+// about the two instruments bracketing the same draws and nothing else.
 func (t *gpuTimer) end(deviceDriver core1_0.DeviceDriver, cmdBuf core1_0.CommandBuffer, frame int, p Pass) {
-	if t == nil || !t.supported {
+	if t == nil {
 		return
 	}
-	deviceDriver.CmdWriteTimestamp(cmdBuf, core1_0.PipelineStageBottomOfPipe, t.pool, t.base(frame)+int(p)*2+1)
+	if t.supported {
+		deviceDriver.CmdWriteTimestamp(cmdBuf, core1_0.PipelineStageBottomOfPipe, t.pool, t.base(frame)+int(p)*2+1)
+	}
+	t.stats.end(deviceDriver, cmdBuf, frame, p)
 }
 
 // collect reads back the timings for a frame slot whose fence has signalled.
@@ -319,7 +352,13 @@ func (t *gpuTimer) end(deviceDriver core1_0.DeviceDriver, cmdBuf core1_0.Command
 // reset, which is the one moment the results are both complete and not yet
 // overwritten.
 func (t *gpuTimer) collect(deviceDriver core1_0.DeviceDriver, frame int) {
-	if t == nil || !t.supported {
+	if t == nil {
+		return
+	}
+	// Same moment, same slot, same reason: the fence has signalled and the
+	// slot's queries have not been reset yet.
+	t.stats.collect(deviceDriver, frame)
+	if !t.supported {
 		return
 	}
 	// Nothing has ever reset this slot's queries, so there is nothing legal to
