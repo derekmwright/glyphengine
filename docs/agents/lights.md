@@ -47,7 +47,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-10-02 # plus the compute-stage visibility of bindings 0 and 1
+verified: 2026-10-03 # plus the compute-stage visibility of bindings 0 and 1; the march's leaf helpers split into volumetric_common.inc (#169)
 ---
 
 # Light a scene with hundreds of point and spot lights
@@ -320,6 +320,14 @@ number of samples. Stepping linearly in metres instead gives the far slices
 twenty samples each and the near ones a fraction of one, which is backwards —
 a lamp is usually in the near cells. The first segment reaches back to the eye
 and covers exactly the span the binner folds into slice 0.
+
+The two pieces of the march that are pure arithmetic -- the per-pixel start
+jitter and the Henyey-Greenstein phase function -- are in
+`shaders/include/volumetric_common.inc` rather than in `volumetric.inc` with the
+rest, because they bind to nothing and a scattering pass outside the engine can
+therefore include them without declaring the clustered light buffers. See
+[render-targets](render-targets.md#reaching-the-engines-shared-glsl); `x/water`
+is the pass that asked for it.
 
 ### Tuning the medium
 

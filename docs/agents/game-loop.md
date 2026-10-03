@@ -18,6 +18,7 @@ api:
   - glyphengine.Scene.TickCount
   - glyphengine.Engine.Run
   - glyphengine.Engine.Destroy
+  - glyphengine.Engine.Renderer
   - glyphengine.Engine.SetCamera
   - glyphengine.Engine.ViewProjection
   - glyphengine.Engine.Debugf
@@ -58,7 +59,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-10-03 # the hierarchical-Z follow-up this page predicted, measured and removed (#154); the draw list's order and the rejected opaque policy; releasing mid-frame (#153); the capabilities report and who owns which fallback (#160); the depth prepass measured on both arms at both resolutions and removed by its own rule (#158)
+verified: 2026-10-03 # Engine.Renderer listed, with the rule that a package is handed a renderer rather than reaching through the engine for one (#169); the hierarchical-Z follow-up this page predicted, measured and removed (#154); the draw list's order and the rejected opaque policy; releasing mid-frame (#153); the capabilities report and who owns which fallback (#160); the depth prepass measured on both arms at both resolutions and removed by its own rule (#158)
 ---
 
 # Run a game loop with Engine and Game
@@ -444,6 +445,22 @@ itself — `Camera.ResolveCollision`, or your own headless systems — pass
 
 That embedding is also the seam: `Scene` has no window or renderer dependency,
 so a server or a test can build one with `NewScene()` and never open a window.
+
+## Reaching the renderer
+
+`Engine.Renderer()` returns the `*renderer.Renderer` the engine built, which is
+how a game reaches everything on [render-targets](render-targets.md) — a render
+target, an application pass, a storage buffer, a texture — without constructing a
+renderer itself.
+
+**The game calls it; a package takes `*renderer.Renderer` as an argument
+instead.** `x/water.New(r *renderer.Renderer, opts Options)` is the shape, and
+the reason is the dependency it avoids: a package that accepted an `*Engine`
+would claim the whole game loop in order to use one renderer, and could not be
+driven from a headless test or from a game that calls `renderer.New` itself. It
+is on the `api` list so the game has something stable to hand over — before it
+was listed, a package reaching the renderer at all was formally relying on
+engine internals.
 
 ## Replacing an engine shader
 

@@ -70,6 +70,49 @@ void main() {
 }
 `
 
+// leafProbe is the dependency boundary volumetric_common.inc exists to draw: a
+// version line, the include, and the two functions called. No descriptor set, no
+// push-constant block, no LIGHT_SET -- because the whole claim about that file is
+// that a pass needs none of them to use the jitter or the phase function.
+//
+// x/water/water-scatter.frag is the real case this stands in for. It integrates a
+// medium from its own push constants and reads no light list, and before the
+// split it had to copy volStartJitter to get at it.
+const leafProbe = `#version 450
+#extension GL_GOOGLE_include_directive : require
+
+layout(location = 0) in vec2 fragPx;
+layout(location = 0) out vec4 outColor;
+
+#include "volumetric_common.inc"
+
+void main() {
+    float j = volStartJitter(fragPx);
+    outColor = vec4(j, volPhase(j, 0.65), 0.0, 1.0);
+}
+`
+
+// leafControl is leafProbe over volumetric.inc instead, and it must NOT compile.
+//
+// Without it the test above proves only that something compiled. The split is a
+// claim about where the binding dependency sits, so the control is the half that
+// says the dependency is still there on the other side of the line: volumetric.inc
+// reaches for pc, the shadow UBO and lights.inc's lb, and a bindingless shader
+// cannot have it.
+const leafControl = `#version 450
+#extension GL_GOOGLE_include_directive : require
+
+layout(location = 0) in vec2 fragPx;
+layout(location = 0) out vec4 outColor;
+
+#include "volumetric.inc"
+
+void main() {
+    float j = volStartJitter(fragPx);
+    outColor = vec4(j, volPhase(j, 0.65), 0.0, 1.0);
+}
+`
+
 // TestPackageShaderCompilesAgainstExportedIncludes walks the documented build
 // step end to end: write the embedded include set to a temp directory, point
 // glslc at it with -I, and compile a shader that names the fragments bare.
@@ -91,17 +134,7 @@ void main() {
 // `'srgbToLinear' : no matching overloaded function found`, while `go build ./...`
 // in both modules stays green -- which is the whole reason this exists.
 func TestPackageShaderCompilesAgainstExportedIncludes(t *testing.T) {
-	sdk := os.Getenv("VULKAN_SDK")
-	if sdk == "" {
-		t.Skip("VULKAN_SDK unset; glslc is authoring-only, nothing to compile with")
-	}
-	glslc := filepath.Join(sdk, "bin", "glslc")
-	if runtime.GOOS == "windows" {
-		glslc += ".exe"
-	}
-	if _, err := os.Stat(glslc); err != nil {
-		t.Skipf("glslc not found at %s", glslc)
-	}
+	glslc := findGlslc(t)
 
 	incDir := filepath.Join(t.TempDir(), "include")
 	if err := os.MkdirAll(incDir, 0o755); err != nil {
@@ -117,7 +150,7 @@ func TestPackageShaderCompilesAgainstExportedIncludes(t *testing.T) {
 	if len(names) == 0 {
 		t.Fatal("the exported include set is empty; this gate would prove nothing")
 	}
-	for _, want := range []string{"srgb.inc", "lighting.inc", "atmosphere.inc", "lights.inc", "volumetric.inc"} {
+	for _, want := range []string{"srgb.inc", "lighting.inc", "atmosphere.inc", "lights.inc", "volumetric.inc", "volumetric_common.inc"} {
 		if _, err := os.Stat(filepath.Join(incDir, want)); err != nil {
 			t.Fatalf("%s missing from the materialized set: %v", want, err)
 		}
@@ -154,4 +187,81 @@ func TestPackageShaderCompilesAgainstExportedIncludes(t *testing.T) {
 	if !strings.Contains(string(msg), "srgb.inc") {
 		t.Errorf("expected the no -I control to fail on a missing include, got:\n%s", msg)
 	}
+}
+
+// TestVolumetricCommonNeedsNoBindings compiles both halves of the split: the leaf
+// fragment alone with nothing declared, which must succeed, and volumetric.inc
+// alone with nothing declared, which must fail.
+//
+// Together they are the boundary, and neither alone is worth much. The pair is
+// what a package outside the engine actually depends on -- x/water includes the
+// leaf and declares no light set -- and it is what would catch the slow failure
+// mode here, which is a leaf helper quietly growing a reference to pc or lb and
+// taking the whole clustered light declaration with it.
+//
+// Verified by breaking it, 2026-10-03: moving volPhase back out of
+// volumetric_common.inc into volumetric.inc fails the leaf half with
+// "'volPhase' : no matching overloaded function found", and moving
+// volFogHeightExponent (which reads pc.fog.y) into the leaf fragment fails it with
+// "'pc' : undeclared identifier" -- the second being the drift this guards
+// against rather than a mistake anyone would make deliberately. Pointing
+// leafControl at volumetric_common.inc so it stops failing is caught too, with
+// "volumetric.inc compiled with no light set declared".
+func TestVolumetricCommonNeedsNoBindings(t *testing.T) {
+	glslc := findGlslc(t)
+
+	incDir := filepath.Join(t.TempDir(), "include")
+	if err := os.MkdirAll(incDir, 0o755); err != nil {
+		t.Fatalf("mkdir include dir: %v", err)
+	}
+	if err := include.WriteTo(incDir); err != nil {
+		t.Fatalf("materialize include set: %v", err)
+	}
+
+	work := t.TempDir()
+	leaf := filepath.Join(work, "leaf.frag")
+	if err := os.WriteFile(leaf, []byte(leafProbe), 0o644); err != nil {
+		t.Fatalf("write leaf probe: %v", err)
+	}
+	cmd := exec.Command(glslc, "-I", incDir, leaf, "-o", filepath.Join(work, "leaf.frag.spv"))
+	if msg, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("volumetric_common.inc did not compile with no bindings declared (%v):\n%s", err, msg)
+	}
+
+	control := filepath.Join(work, "control.frag")
+	if err := os.WriteFile(control, []byte(leafControl), 0o644); err != nil {
+		t.Fatalf("write control: %v", err)
+	}
+	plain := exec.Command(glslc, "-I", incDir, control, "-o", filepath.Join(work, "control.frag.spv"))
+	msg, err := plain.CombinedOutput()
+	if err == nil {
+		t.Fatal("volumetric.inc compiled with no light set declared, so the split is not the dependency boundary this test claims")
+	}
+	// Named rather than merely non-zero: the control has to fail on the light
+	// buffer it cannot have, not on a typo in the probe above it.
+	if !strings.Contains(string(msg), "'lb' : undeclared identifier") {
+		t.Errorf("expected the control to fail on lights.inc's lb, got:\n%s", msg)
+	}
+}
+
+// findGlslc locates the authoring-only compiler, or skips.
+//
+// It skips without a Vulkan SDK for exactly the reason shaders/verify_test.go
+// does: glslc is an authoring-only dependency, and most people building this will
+// not have one. CI has no SDK on the x path, so these gates run locally; that is
+// the same bargain `task shaders:verify` already makes.
+func findGlslc(t *testing.T) string {
+	t.Helper()
+	sdk := os.Getenv("VULKAN_SDK")
+	if sdk == "" {
+		t.Skip("VULKAN_SDK unset; glslc is authoring-only, nothing to compile with")
+	}
+	glslc := filepath.Join(sdk, "bin", "glslc")
+	if runtime.GOOS == "windows" {
+		glslc += ".exe"
+	}
+	if _, err := os.Stat(glslc); err != nil {
+		t.Skipf("glslc not found at %s", glslc)
+	}
+	return glslc
 }

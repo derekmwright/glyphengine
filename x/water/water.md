@@ -23,7 +23,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: procedural
-verified: 2026-10-02 # new package; depth sweep, balance and allocation gates all broken and confirmed failing
+verified: 2026-10-03 # new package; depth sweep, balance and allocation gates all broken and confirmed failing; the copied jitter replaced by the engine's volumetric_common.inc (#169)
 ---
 
 # The underwater volume
@@ -319,26 +319,39 @@ field above will hit this, because its own atlas anchoring is eleven `vec4`s in
 the source. That is a rule-14 issue for whoever builds it, with this package as
 the evidence that 128 is reachable but not generous.
 
-## An engine gap found while building this
+## An engine gap found while building this, and closed
 
 The scattering integral needs a stable screen-space jitter, and the engine
-already has exactly the right one with exactly the right reasoning attached:
-`volStartJitter` in `shaders/include/volumetric.inc`, whose comment explains
-that it must not be animated because there is no temporal filter and because
-renders under `GLYPHENGINE_FIXED_FRAME_TIME` have to repeat byte for byte. The
-Henyey–Greenstein `volPhase` is next to it.
+already had exactly the right one with exactly the right reasoning attached:
+`volStartJitter`, whose comment explains that it must not be animated because
+there is no temporal filter and because renders under
+`GLYPHENGINE_FIXED_FRAME_TIME` have to repeat byte for byte. The
+Henyey–Greenstein `volPhase` was next to it.
 
-Neither is reachable. `volumetric.inc` cannot be included without first
-declaring the clustered light buffers, the shadow UBO and a `pc` block with
-`cameraPos` and `fog` — a light set this package's shaders never read, declared
-only to get at two leaf functions. So `water-scatter.frag` carries its own copy
-of the jitter, which is precisely the vendored-copy failure the include export
-exists to remove.
+Neither was reachable. Both lived in `shaders/include/volumetric.inc`, which
+cannot be included without first declaring the clustered light buffers, the
+shadow UBO and a `pc` block with `cameraPos` and `fog` — a light set this
+package's shaders never read, declared only to get at two leaf functions. So
+`water-scatter.frag` carried its own copy of the jitter, which is precisely the
+vendored-copy failure the include export exists to remove.
 
-**Reported, not patched**: splitting the leaf helpers out of `volumetric.inc`
-into a dependency-free fragment is an engine change, and under rule 14 it is an
-issue to file rather than something to do from here. Until then the copy is
-marked as a copy, in both files.
+**Reported, not patched — then fixed in the engine** (#169), because splitting
+the leaf helpers out is an engine change and under rule 14 that is an issue to
+file rather than something to do from here. The two functions now live in
+`shaders/include/volumetric_common.inc`, which binds to nothing;
+`volumetric.inc` includes it, so nothing in the engine changed shape. This
+package's copy is gone: `water-scatter.frag` includes the leaf fragment and
+calls `volStartJitter`. Remove that one line and `go test ./water/` fails with
+`'volStartJitter' : no matching overloaded function found`, which is the gate
+that says the function really arrives from the engine's exported set rather than
+from anywhere local.
+
+`volPhase` is deliberately *not* taken the same way, and the shader says why:
+`ScatterPhase` is passed through unclamped, so `g == 1.0` is a value a game can
+set, and at `g == 1` looking down the refracted sun's direction the denominator
+is exactly 0. The engine's `volPhase` has no floor because `packLitUBO` clamps
+its own `|g|` to 0.99. The curve is the same; the floor is this package's, for
+an input the engine's version never sees.
 
 ## Gates
 
