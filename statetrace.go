@@ -64,26 +64,80 @@ func (e *Engine) traceSimulation(t *renderer.StateTrace, view, proj, vp mgl32.Ma
 	cam = hashMat4(cam, vp)
 	t.Hash("cam", cam)
 
-	sky := renderer.NewHash.
-		Float32(e.Scene.TimeOfDay()).
-		Vec3(env.SunDir).
-		Vec3(env.SunColor).
-		Vec3(env.SunDiscDir).
-		Float32(env.SunElevation).
-		Vec3(env.Ambient).
-		Float32(env.StarFade).
-		Float32(env.FogDensity).
-		Bool(env.CastShadows).
-		// The scattering medium rides with the fog because it IS the fog's:
-		// the density and height profile above are what a beam scatters off,
-		// and these two are the only part of the medium the fog does not
-		// already say. A game that animates either -- dust settling, a step
-		// count dropped under load -- moves every beam in the frame, and
-		// without this the trace would show a capture that changed with a
-		// `sky=` that did not.
+	// Everything the environment decided this frame, and nothing it did not.
+	//
+	// This replaced a `sky=` that hashed nine of the state's fields plus
+	// Scene.TimeOfDay, and both halves of that were wrong for what the field is
+	// for. The nine were a hand-picked subset, so a source that moved Cirrus,
+	// the Milky Way, a disc colour or the palette moved the capture and left the
+	// trace agreeing -- which is the one thing a trace field must not do. And
+	// TimeOfDay reached past the seam into the built-in cycle, so the field would
+	// have changed meaning the moment a replacement source was plugged in, which
+	// is exactly when the two are being compared. Nothing is lost by dropping
+	// it: every value the clock determines is derived below.
+	envHash := hashEnvironment(env).
+		// The scattering medium rides with the environment because it IS the
+		// fog's: the density and height profile above are what a beam scatters
+		// off, and these two are the only part of the medium the fog does not
+		// already say. They are Scene state rather than EnvironmentState (see
+		// Scene.SetVolumetrics), so they are folded in here rather than inside
+		// hashEnvironment. A game that animates either -- dust settling, a step
+		// count dropped under load -- moves every beam in the frame, and without
+		// this the trace would show a capture that changed with an `env=` that
+		// did not.
 		Float32(e.Scene.Volumetrics().Anisotropy).
 		Uint64(uint64(e.Scene.Volumetrics().Steps))
-	t.Hash("sky", sky)
+	t.Hash("env", envHash)
+}
+
+// hashEnvironment hashes every field of an EnvironmentState.
+//
+// Every field, with no judgement about which ones matter: a field in the state
+// is a field some shader reads, and the point of the carve is that one source
+// decides all of them. TestEnvTraceCoversEveryField walks the struct by
+// reflection and fails if any field can be changed without changing this hash,
+// so adding a field to EnvironmentState and forgetting this function is a test
+// failure rather than a quietly narrower trace.
+func hashEnvironment(env EnvironmentState) renderer.Hasher {
+	h := renderer.NewHash.
+		Vec3(env.SunDir).
+		Vec3(env.SunColor).
+		Vec3(env.RealSunDir).
+		Float32(env.SunElevation).
+		Vec3(env.Ambient).
+		Float32(env.FogDensity).
+		Float32(env.FogHeight).
+		Float32(env.FogBaseHeight).
+		Vec3(env.ClearColor).
+		Float32(env.StarFade).
+		Float32(env.MilkyWay).
+		Float32(env.StarDensity).
+		Bool(env.DrawSky).
+		Bool(env.DrawStars).
+		Bool(env.DrawSun).
+		Bool(env.DrawMoon).
+		Vec3(env.SunDiscDir).
+		Vec3(env.SunDiscColor).
+		Vec3(env.MoonDiscDir).
+		Vec3(env.MoonDiscColor).
+		Uint64(uint64(env.CloudSteps)).
+		Float32(env.Cirrus).
+		Float32(env.LightShafts).
+		Float32(env.LightShaftShape.Radius).
+		Float32(env.LightShaftShape.Decay).
+		Float32(env.LightShaftShape.Threshold[0]).
+		Float32(env.LightShaftShape.Threshold[1]).
+		Bool(env.CastShadows).
+		Float32(env.NightGrade.Strength)
+	h = hashVec3(h, env.NightGrade.Tint)
+	for _, c := range [...]mgl32.Vec3{
+		env.SkyPalette.ZenithDay, env.SkyPalette.HorizonDay,
+		env.SkyPalette.ZenithTwilight, env.SkyPalette.HorizonTwilight,
+		env.SkyPalette.ZenithNight, env.SkyPalette.HorizonNight,
+	} {
+		h = hashVec3(h, c)
+	}
+	return h
 }
 
 // traceDrawList records the draw list in the order it was handed to the

@@ -104,10 +104,6 @@ type Scene struct {
 	// empty world -- no sky, no directional light, no fog.
 	Env EnvironmentSource
 
-	// envState is Env resolved for the current frame, refreshed once per Tick
-	// and once before drawing, so a frame never sees it change under it.
-	envState EnvironmentState
-
 	// tickCount is the simulation clock; see TickCount.
 	tickCount uint64
 
@@ -179,9 +175,9 @@ type Scene struct {
 	pointLights []PointLight
 	spotLights  []SpotLight
 
-	// nightGrade is the scotopic grade; see SetNightGrade for why it is here
-	// and not on EnvironmentState. NewScene sets it to DefaultNightGrade, and
-	// that initialisation is the whole safety property -- a zero value here
+	// nightGrade is the scotopic grade a frame gets when the environment names
+	// none of its own; see SetNightGrade. NewScene sets it to DefaultNightGrade,
+	// and that initialisation is the whole safety property -- a zero value here
 	// would mean "no night shift" for anyone who never called the setter.
 	nightGrade NightGrade
 
@@ -302,11 +298,27 @@ func (s *Scene) Tick(dt float32) {
 // ─────────────────────────── day/night ───────────────────────────
 
 // Environment returns the scene's environment, resolved for this frame.
+//
+// This is the one place the state's two sentinel fields are filled in. A source
+// that leaves SkyPalette or NightGrade at its zero value -- which is every
+// source written before they existed, and every source that has no opinion about
+// the colour of the air -- gets the scene's, which NewScene initialises to the
+// engine's defaults and SetSkyPalette and SetNightGrade change. Resolving here
+// rather than at each reader is what keeps "a source writes it, or the scene
+// does" from becoming two answers in two places: by the time anything reads the
+// state, there is one answer in it.
 func (s *Scene) Environment() EnvironmentState {
-	if s.Env == nil {
-		return EnvironmentState{}
+	var st EnvironmentState
+	if s.Env != nil {
+		st = s.Env.State()
 	}
-	return s.Env.State()
+	if st.SkyPalette == (SkyPalette{}) {
+		st.SkyPalette = s.skyPalette
+	}
+	if st.NightGrade == (NightGrade{}) {
+		st.NightGrade = s.nightGrade
+	}
+	return st
 }
 
 // DayNight returns the scene's day/night cycle, or nil.
@@ -316,11 +328,22 @@ func (s *Scene) Environment() EnvironmentState {
 // all. Callers that only want to set the time should use SetTimeOfDay, which
 // handles the nil case.
 func (s *Scene) DayNight() *DayNight {
-	env, ok := s.Env.(*Environment)
-	if !ok || env == nil {
-		return nil
+	switch env := s.Env.(type) {
+	case *Environment:
+		if env == nil {
+			return nil
+		}
+		return env.Cycle
+	case *DayCycleSource:
+		if env == nil {
+			return nil
+		}
+		// The cycle is a value on the source, so this hands out a pointer into
+		// it rather than a pointer the source holds. SetTimeOfDay writing
+		// through it is the point; a copy would silently do nothing.
+		return &env.Cycle
 	}
-	return env.Cycle
+	return nil
 }
 
 // TimeOfDay returns the current time of day (0=midnight, 0.5=noon), or 0 when
@@ -408,25 +431,32 @@ func DefaultNightGrade() NightGrade {
 
 // SetNightGrade sets the scotopic grade for this scene.
 //
-// It lives on Scene, initialised by NewScene, rather than on EnvironmentState
-// beside fog and ambient — which is where it otherwise belongs. The reason is
-// upgrades. EnvironmentState is produced wholesale by EnvironmentSource.State,
-// so a game that has replaced the environment model returns a struct it wrote
-// before this field existed, and the field arrives as its zero value: Strength
-// 0, which means no night shift at all. That game's nights would change on a
-// dependency bump with nobody choosing it, and the only ways out are a
-// sentinel (0 meaning "default", so nothing could ever mean "off") or a
-// separate "did you set it" flag, both of which are the silent traps the
-// capability docs exist to warn about. A Scene field initialised at
-// construction, the way Gravity is, cannot be zeroed by a source that does not
-// know about it.
+// This is the scene's grade, and it is what a frame gets whenever the
+// environment does not name one of its own — which is every built-in source and
+// every source that has no opinion about it. EnvironmentState.NightGrade is where
+// a source that does have one puts it, and Scene.Environment is where the two
+// meet: an all-zero grade on the state means "the scene's".
 //
-// A source that legitimately wants the grade to move — moon phase, a storm —
-// still can: call this from Update, the same place SetPointLights is called
-// from. Varying it per frame never required it to be inside the environment.
+// Both halves are load-bearing. The state needs the field because the night
+// shift is part of the look a replacement sky owns, and the engine cannot read it
+// off a day cycle it no longer has. The scene needs to keep the value because
+// EnvironmentState is produced wholesale by EnvironmentSource.State, so a game
+// that replaced the environment model returns a struct written before the field
+// existed and the field arrives as Strength 0 — no night shift at all — and that
+// game's nights would change on a dependency bump with nobody choosing it.
+//
+// The cost of the sentinel is that Strength 0 with a zero Tint cannot be asked
+// for on the state. Strength 0 with any other tint is the way to turn the shift
+// off, and the tint is unread at zero strength, so nothing expressible is lost.
+//
+// A source that wants the grade to move — moon phase, a storm — can either return
+// it from State or call this from Update, the same place SetPointLights is called
+// from.
 func (s *Scene) SetNightGrade(g NightGrade) { s.nightGrade = g }
 
-// NightGrade returns the scene's scotopic grade.
+// NightGrade returns the scene's scotopic grade. It is not necessarily the one
+// this frame used: a source that returns its own on EnvironmentState wins. Read
+// Environment().NightGrade for the frame's.
 func (s *Scene) NightGrade() NightGrade { return s.nightGrade }
 
 // SkyPalette is the six colours the atmosphere blends between: zenith and
@@ -475,35 +505,38 @@ func DefaultSkyPalette() SkyPalette {
 
 // SetSkyPalette sets the atmosphere's colours for this scene.
 //
-// It lives on Scene, initialised by NewScene, rather than on Sky or
-// EnvironmentState — which is where the issue that asked for it proposed
-// putting it, and where it reads more naturally beside FixedSunElevation and
-// fog. Two reasons, and the first is the one SetNightGrade already records:
-// EnvironmentState is produced wholesale by EnvironmentSource.State, so a game
-// that has replaced the environment model returns a struct written before this
-// field existed and the field arrives as its zero value. For the night grade
-// that meant a flat night; here it means six black colours, so that game's sky
-// goes black on a dependency bump with nobody choosing it.
+// This is the scene's palette, and it is what a frame gets whenever the
+// environment does not name one of its own — which is every built-in source.
+// EnvironmentState.SkyPalette is where a source that owns the atmosphere puts its
+// own, and Scene.Environment is where the two meet: an all-zero palette on the
+// state means "the scene's". SetNightGrade records the same arrangement.
 //
-// A sentinel would be defensible here where it was not for the grade — all-zero
-// is a palette nobody wants, so reading it as "engine default" costs nothing
-// expressible. It is still not the shape chosen, because it only covers the
-// all-zero case: a source that sets ZenithDay and leaves the other five at
-// their zero value gets five black endpoints and no warning, which is the same
-// silent trap one step along. A Scene field initialised at construction cannot
-// be zeroed by a source that does not know about it at all.
+// It is deliberately not on Sky. `applyFog` blends distant geometry toward the
+// horizon colour whether or not a dome is drawn, and water reflects the dome, so
+// a scene with Sky nil still uses this. It is the whole atmosphere's palette, not
+// the dome's, which makes Sky the wrong home for it.
 //
-// The second reason is that the palette is not only the sky's. `applyFog`
-// blends distant geometry toward the horizon colour whether or not a dome is
-// drawn, so a scene with Sky nil still uses this — which makes Sky the wrong
-// home for it independently of upgrades.
+// The sentinel is what makes the state's field safe: a game that replaced the
+// environment model returns a struct written before the field existed, and the
+// field arrives as six black colours. Without the sentinel that game's sky, haze
+// and water reflections all go black on a dependency bump with nobody choosing
+// it. The one thing it costs is a palette of six exact blacks, which is not a
+// palette anybody wants — Sky nil and a black ClearColor is how to get a black
+// frame.
 //
-// A source that legitimately wants the palette to move — a storm, an eclipse,
-// a second moon — still can: call this from Update, where SetPointLights is
-// called from.
+// It does not cover a half-filled palette: a source that sets ZenithDay and
+// leaves the other five alone gets five black endpoints and no warning. That trap
+// is real and is the reason the scene keeps the value at all — a source either
+// owns the palette or says nothing about it, and saying nothing is the zero value.
+//
+// A source that wants the palette to move — a storm, an eclipse, a second moon —
+// can either return it from State or call this from Update, where SetPointLights
+// is called from.
 func (s *Scene) SetSkyPalette(p SkyPalette) { s.skyPalette = p }
 
-// SkyPalette returns the scene's atmosphere palette.
+// SkyPalette returns the scene's atmosphere palette. It is not necessarily the
+// one this frame used: a source that returns its own on EnvironmentState wins.
+// Read Environment().SkyPalette for the frame's.
 func (s *Scene) SkyPalette() SkyPalette { return s.skyPalette }
 
 // Volumetrics is the scattering medium a light's beam is made of: how

@@ -1072,6 +1072,27 @@ tasks:
           t1=$d/seq$seq.1.trace; t2=$d/seq$seq.2.trace
           GLYPHENGINE_FIXED_FRAME_TIME=16.667ms GLYPHENGINE_STATE_TRACE=$t1 go run ./$name -frames 90 $* >/dev/null 2>&1
           GLYPHENGINE_FIXED_FRAME_TIME=16.667ms GLYPHENGINE_STATE_TRACE=$t2 go run ./$name -frames 90 $* >/dev/null 2>&1
+          # env= is the whole EnvironmentState, hashed per frame. It is here
+          # rather than only in the unit tests because this is the field step 4
+          # of issue #161 compares: an x/sky plugged in where the built-in cycle
+          # was has to produce the same numbers, and a field that cannot repeat
+          # between two runs of ONE build cannot be used to compare two builds.
+          # It also fails earlier and more legibly than draws= does for a source
+          # that drifted -- a sun a thousandth of a degree out moves every MVP in
+          # the shadow cascades and nothing else.
+          #
+          # Verified by causing it: the control below runs a scene with a moving
+          # day cycle without the fixed clock, where it MUST differ.
+          go run ../cmd/tracefield -key env -in $t1 -out $d/s1.env || { status=1; return; }
+          go run ../cmd/tracefield -key env -in $t2 -out $d/s2.env || { status=1; return; }
+          if samefile $d/s1.env $d/s2.env; then
+            echo "$name $*: environment identical"
+          else
+            echo "$name $*: THE ENVIRONMENT DIFFERS between two runs"
+            diff $d/s1.env $d/s2.env | head -6
+            echo "  traces: examples/$t1 and examples/$t2"
+            status=1
+          fi
           go run ../cmd/tracefield -key draws -in $t1 -out $d/s1.draws || { status=1; return; }
           go run ../cmd/tracefield -key draws -in $t2 -out $d/s2.draws || { status=1; return; }
           if samefile $d/s1.draws $d/s2.draws; then
@@ -1148,6 +1169,67 @@ tasks:
           status=1
         else
           echo "control: the draw sequence differs without the fixed clock, as it must"
+        fi
+        # And the control for env=, which is NOT a fixed-clock control, unlike
+        # every other one in this gate.
+        #
+        # Removing the clock cannot move the environment, and the first version
+        # of this control -- two unfixed runs of 09-water, whose cycle runs at
+        # 1/300 -- reported "matched" for exactly that reason. The day cycle
+        # advances on the FIXED TICK with the fixed dt, so TimeOfDay is a
+        # function of the tick count and not of wall time; that is what
+        # EnvironmentSource.Advance running at the simulation rate is for. The
+        # evidence was in the traces it kept: at loop 2 the two runs had
+        # different clock= and different cam=, and identical env=. A control
+        # that passes only when the two runs happen to tick differently is a
+        # coin toss, and would have called this field proven on the runs where
+        # it came up heads.
+        #
+        # So the control moves the environment itself, under the fixed clock,
+        # the way `-key notafield` above checks that tracefield can say no:
+        # 09-water -time freezes the cycle at the hour given, so dawn and dusk
+        # are two different constant environments and env= MUST separate them.
+        # If it does not, the extraction or the comparison is broken and every
+        # "environment identical" line above means nothing.
+        GLYPHENGINE_FIXED_FRAME_TIME=16.667ms GLYPHENGINE_STATE_TRACE=$d/e1.trace go run ./09-water -frames 30 -time 0.3 >/dev/null 2>&1
+        GLYPHENGINE_FIXED_FRAME_TIME=16.667ms GLYPHENGINE_STATE_TRACE=$d/e2.trace go run ./09-water -frames 30 -time 0.7 >/dev/null 2>&1
+        go run ../cmd/tracefield -key env -in $d/e1.trace -out $d/e1.env || status=1
+        go run ../cmd/tracefield -key env -in $d/e2.trace -out $d/e2.env || status=1
+        if samefile $d/e1.env $d/e2.env; then
+          echo "control: dawn and dusk hashed the same env= -- the field or the comparison proves nothing"
+          status=1
+        else
+          echo "control: env= separates two different environments, as it must"
+        fi
+        # And the other half of what the field is for: the SAME environment under
+        # a camera that moved. A field that drifted with the camera would be
+        # re-reporting cam= under another name, and would make every "environment
+        # identical" line above a statement about the camera.
+        #
+        # -time freezes the cycle, so the environment is constant by
+        # construction, while the camera settles onto its authored pose off the
+        # real clock and so does not repeat between two unfixed runs. Measured on
+        # this pair: clock= differs on 59 of 60 lines, cam= on 4, env= on none.
+        #
+        # cam= differing is asserted rather than assumed. The first version of
+        # this gate's env= control passed or failed on whether two runs happened
+        # to tick the same number of times, and the lesson is that a control
+        # whose premise is not checked is not a control.
+        GLYPHENGINE_STATE_TRACE=$d/f1.trace go run ./09-water -frames 60 -time 0.3 >/dev/null 2>&1
+        GLYPHENGINE_STATE_TRACE=$d/f2.trace go run ./09-water -frames 60 -time 0.3 >/dev/null 2>&1
+        for key in env cam; do
+          go run ../cmd/tracefield -key $key -in $d/f1.trace -out $d/f1.$key || status=1
+          go run ../cmd/tracefield -key $key -in $d/f2.trace -out $d/f2.$key || status=1
+        done
+        if samefile $d/f1.cam $d/f2.cam; then
+          echo "control: the camera repeated WITHOUT a fixed clock -- nothing moved, so camera independence proves nothing"
+          status=1
+        elif samefile $d/f1.env $d/f2.env; then
+          echo "control: env= held still while cam= moved, as it must"
+        else
+          echo "control: env= MOVED with the camera -- it is hashing something that is not the environment"
+          diff $d/f1.env $d/f2.env | head -4
+          status=1
         fi
         # A paused world must be frozen, not merely slowed. 09-water is the
         # scene for it because the things that move there run off different

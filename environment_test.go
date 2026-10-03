@@ -19,9 +19,15 @@ func TestNilEnvironmentIsEmpty(t *testing.T) {
 	s := NewScene()
 	s.Env = nil
 
+	// The palette and the grade are the two fields a silent source does not get
+	// zeroed on: Scene.Environment resolves their sentinel to the scene's,
+	// because six black endpoints are what the haze and the water reflection
+	// would otherwise reach. No dome is drawn here to use them, but applyFog and
+	// the water still are, which is why they are filled in even on this path.
+	want := EnvironmentState{SkyPalette: DefaultSkyPalette(), NightGrade: DefaultNightGrade()}
 	got := s.Environment()
-	if got != (EnvironmentState{}) {
-		t.Errorf("nil environment resolved to %+v; want the zero state", got)
+	if got != want {
+		t.Errorf("nil environment resolved to %+v; want the zero state carrying the scene's palette and grade", got)
 	}
 	if got.DrawSky {
 		t.Error("nil environment still draws a sky")
@@ -172,19 +178,22 @@ func TestCustomEnvironmentSource(t *testing.T) {
 	s.SetDayCycleSpeed(1)
 }
 
-// TestSkyPaletteSurvivesACustomEnvironment is why the palette is Scene state
-// rather than a field on Sky or on EnvironmentState.
+// TestSkyPaletteSurvivesACustomEnvironment is the property that lets the palette
+// be a field on EnvironmentState at all.
 //
 // A game with its own EnvironmentSource returns a struct it wrote before the
-// palette existed. Had the palette been a field on EnvironmentState, that
-// struct would supply it as its zero value -- six black colours -- and the
-// game's sky, its fog and its water reflections would all go black on a
-// dependency bump with nobody choosing it. NewScene owns the value instead, so
-// a source that has never heard of it cannot reach it.
+// palette existed, so the field arrives as its zero value: six black colours,
+// which is what the sky, the fog and the water reflections would all reach on a
+// dependency bump with nobody choosing it. The sentinel is what stops that --
+// Scene.Environment reads an all-zero palette as "the scene's", which NewScene
+// initialises to Earth's -- and this is the test of it. The same goes for the
+// night grade, whose zero value is no scotopic shift at all.
 //
-// Verified to catch a real mistake: dropping skyPalette from NewScene's
-// literal, which is the whole safety property, fails both of the assertions
-// below that ask for the default, reporting six zero endpoints.
+// Verified to catch two real mistakes: dropping skyPalette from NewScene's
+// literal fails the assertions that ask for the default, reporting six zero
+// endpoints; and removing the sentinel from Scene.Environment reports `a silent
+// source resolved to the palette {ZenithDay:[0 0 0] ...}; want the scene's`,
+// which is the half that is new.
 func TestSkyPaletteSurvivesACustomEnvironment(t *testing.T) {
 	s := NewScene()
 	if got := s.SkyPalette(); got != DefaultSkyPalette() {
@@ -192,10 +201,15 @@ func TestSkyPaletteSurvivesACustomEnvironment(t *testing.T) {
 	}
 
 	// An environment written before the field existed: it cannot mention the
-	// palette, so resolving a frame through it must leave the scene's alone.
+	// palette, so resolving a frame through it must leave the scene's alone and
+	// hand the scene's on to the frame.
 	s.Env = &fakeEnv{state: EnvironmentState{SunDir: [3]float32{0, 1, 0}, DrawSky: true}}
 	s.Tick(1.0 / 60)
-	_ = s.Environment()
+	if st := s.Environment(); st.SkyPalette != DefaultSkyPalette() {
+		t.Errorf("a silent source resolved to the palette %+v; want the scene's", st.SkyPalette)
+	} else if st.NightGrade != DefaultNightGrade() {
+		t.Errorf("a silent source resolved to the grade %+v; want the scene's", st.NightGrade)
+	}
 	if got := s.SkyPalette(); got != DefaultSkyPalette() {
 		t.Errorf("a custom environment moved the palette to %+v; it cannot reach it", got)
 	}

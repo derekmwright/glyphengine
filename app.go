@@ -1279,17 +1279,34 @@ func (e *Engine) UnscaledElapsed() float32 { return e.unscaledElapsed }
 
 // SetFogDensity sets the environment's fog density (0 disables fog).
 //
-// A shortcut for the common case. It does nothing when the scene uses a custom
+// A shortcut for the common case: it reaches the Fog of any of the three
+// built-in sources. It does nothing when the scene uses a custom
 // EnvironmentSource, which owns its own fog — reach through Scene.Env instead.
 func (e *Engine) SetFogDensity(d float32) {
-	env, ok := e.Scene.Env.(*Environment)
-	if !ok || env == nil {
+	// Each case hands back the address of its own Fog field, so a scene with no
+	// Fog at all gets one rather than silently ignoring the call.
+	var fog **Fog
+	switch env := e.Scene.Env.(type) {
+	case *Environment:
+		if env != nil {
+			fog = &env.Fog
+		}
+	case *DayCycleSource:
+		if env != nil {
+			fog = &env.Fog
+		}
+	case *StaticSource:
+		if env != nil {
+			fog = &env.Fog
+		}
+	}
+	if fog == nil {
 		return
 	}
-	if env.Fog == nil {
-		env.Fog = &Fog{}
+	if *fog == nil {
+		*fog = &Fog{}
 	}
-	env.Fog.Density = d
+	(*fog).Density = d
 }
 
 // FogDensity returns the current fog density.
@@ -1640,64 +1657,31 @@ func (e *Engine) renderFrame() {
 
 	// Refreshed into an Engine field rather than allocated fresh each frame:
 	// SceneLighting takes a pointer because nil there has to mean "the
-	// default" (see renderer.NightGrade), and a per-frame &NightGrade{} would
+	// default" (see renderer.Volumetrics), and a per-frame &Volumetrics{} would
 	// be an allocation in the draw path for a value that almost never moves.
-	g := e.Scene.NightGrade()
-	e.nightGrade = renderer.NightGrade{
-		Strength: g.Strength,
-		Tint:     [3]float32{g.Tint.X(), g.Tint.Y(), g.Tint.Z()},
-	}
+	// NightGrade and SkyPalette are the same shape; applyEnvironment fills them.
 	v := e.Scene.Volumetrics()
 	e.volumetrics = renderer.Volumetrics{Anisotropy: v.Anisotropy, Steps: v.Steps}
-	p := e.Scene.SkyPalette()
-	e.skyPalette = renderer.SkyPalette{
-		ZenithDay:       p.ZenithDay,
-		HorizonDay:      p.HorizonDay,
-		ZenithTwilight:  p.ZenithTwilight,
-		HorizonTwilight: p.HorizonTwilight,
-		ZenithNight:     p.ZenithNight,
-		HorizonNight:    p.HorizonNight,
-	}
 
 	lighting := renderer.SceneLighting{
 		VP:            vp,
 		CameraRight:   [3]float32{camRight.X(), camRight.Y(), camRight.Z()},
 		CameraUp:      [3]float32{camUp.X(), camUp.Y(), camUp.Z()},
-		SunDir:        env.SunDir,
-		SunColor:      env.SunColor,
 		PointPos:      e.Scene.pointPos,
 		PointRange:    e.Scene.pointRange,
 		PointColor:    e.Scene.pointColor,
-		Ambient:       env.Ambient,
-		SkyColor:      [4]float32{env.ClearColor[0], env.ClearColor[1], env.ClearColor[2], 1},
 		InvVP:         vp.Inv(),
 		CameraPos:     [3]float32{e.cameraEye.X(), e.cameraEye.Y(), e.cameraEye.Z()},
 		Time:          e.elapsed,
-		NightFactor:   env.StarFade,
-		SunElevation:  env.SunElevation,
-		RealSunDir:    env.RealSunDir,
 		CascadeVPs:    cascadeVPs,
 		ShadowEnabled: shadowEnabled,
-		NightGrade:    &e.nightGrade,
-		SkyPalette:    &e.skyPalette,
 		Volumetrics:   &e.volumetrics,
-		FogDensity:    env.FogDensity,
-		FogHeight:     env.FogHeight,
-		FogBaseHeight: env.FogBaseHeight,
-		DrawSky:       env.DrawSky,
-		DrawStars:     env.DrawStars,
-		MilkyWay:      env.MilkyWay,
-		StarDensity:   env.StarDensity,
-		CloudSteps:    env.CloudSteps,
-		Cirrus:        env.Cirrus,
-		LightShafts:   shaftStrength,
-		SunScreenPos:  sunScreen,
-		ShaftShape: renderer.LightShaftShape{
-			Radius:    env.LightShaftShape.Radius,
-			Decay:     env.LightShaftShape.Decay,
-			Threshold: env.LightShaftShape.Threshold,
-		},
+		// The strength the pass will DRAW with, which is env.LightShafts after
+		// the edge fade above. applyEnvironment leaves both of these alone.
+		LightShafts:  shaftStrength,
+		SunScreenPos: sunScreen,
 	}
+	e.applyEnvironment(&lighting, env)
 
 	// Bin the lights for THIS frame's camera and framebuffer. proj came from
 	// Aspect() and the extent below comes from the same swapchain, which is
@@ -1737,6 +1721,71 @@ func (e *Engine) renderFrame() {
 	if err := e.renderer.DrawFrame(draws, e.overlays, celestials, e.uiOverlays, msdf, lighting); err != nil {
 		log.Printf("glyphengine: draw error: %v", err)
 	}
+}
+
+// applyEnvironment copies the frame's environment into the lighting pack: the
+// one place EnvironmentState becomes what the shaders read.
+//
+// A function rather than thirty inline struct fields because this list and
+// EnvironmentState's field list have to stay in step, and a list in one place
+// can be checked against one. The field that is read nowhere is the failure mode
+// this shape is for: a source sets Cirrus, the state carries it, and nothing
+// pushes it, which no capture of the built-in sky would show because the
+// built-in sky leaves Cirrus at zero.
+//
+// It deliberately does not touch three things the caller already resolved,
+// because each needs something the environment does not have:
+//
+//   - LightShafts and SunScreenPos need the camera, to fade the pass out as the
+//     sun leaves the frame.
+//   - ShadowEnabled needs to know whether the cascade matrices could be built,
+//     so env.CastShadows is only its first half.
+//   - Volumetrics is Scene state and not the environment's: the fog says what
+//     the medium is, and these two say how it scatters and how finely the march
+//     samples it. See Scene.SetVolumetrics.
+//
+// NightGrade and SkyPalette land in Engine fields because SceneLighting takes
+// them as pointers -- nil there has to mean "the renderer's default" (see
+// renderer.NightGrade) -- and a per-frame &NightGrade{} would be an allocation
+// in the draw path. Scene.Environment has already resolved the state's zero
+// value to the scene's, so neither can arrive here as six black colours.
+func (e *Engine) applyEnvironment(l *renderer.SceneLighting, env EnvironmentState) {
+	l.SunDir = env.SunDir
+	l.SunColor = env.SunColor
+	l.RealSunDir = env.RealSunDir
+	l.SunElevation = env.SunElevation
+	l.Ambient = env.Ambient
+	l.SkyColor = [4]float32{env.ClearColor[0], env.ClearColor[1], env.ClearColor[2], 1}
+	l.NightFactor = env.StarFade
+	l.FogDensity = env.FogDensity
+	l.FogHeight = env.FogHeight
+	l.FogBaseHeight = env.FogBaseHeight
+	l.DrawSky = env.DrawSky
+	l.DrawStars = env.DrawStars
+	l.MilkyWay = env.MilkyWay
+	l.StarDensity = env.StarDensity
+	l.CloudSteps = env.CloudSteps
+	l.Cirrus = env.Cirrus
+	l.ShaftShape = renderer.LightShaftShape{
+		Radius:    env.LightShaftShape.Radius,
+		Decay:     env.LightShaftShape.Decay,
+		Threshold: env.LightShaftShape.Threshold,
+	}
+
+	e.nightGrade = renderer.NightGrade{
+		Strength: env.NightGrade.Strength,
+		Tint:     [3]float32{env.NightGrade.Tint.X(), env.NightGrade.Tint.Y(), env.NightGrade.Tint.Z()},
+	}
+	e.skyPalette = renderer.SkyPalette{
+		ZenithDay:       env.SkyPalette.ZenithDay,
+		HorizonDay:      env.SkyPalette.HorizonDay,
+		ZenithTwilight:  env.SkyPalette.ZenithTwilight,
+		HorizonTwilight: env.SkyPalette.HorizonTwilight,
+		ZenithNight:     env.SkyPalette.ZenithNight,
+		HorizonNight:    env.SkyPalette.HorizonNight,
+	}
+	l.NightGrade = &e.nightGrade
+	l.SkyPalette = &e.skyPalette
 }
 
 // identityModel fills the Model slot of an instanced draw. Nothing reads it --
@@ -2165,19 +2214,6 @@ func (e *Engine) celestialModel(dir [3]float32) mgl32.Mat4 {
 	return e.buildBillboard(pos, celestialScale(dir)*dist/celestialTunedDistance)
 }
 
-// horizonFade returns a 0–1 multiplier that fades a celestial body as it dips
-// below the horizon.
-func horizonFade(dir [3]float32) float32 {
-	y := dir[1]
-	if y >= 0.1 {
-		return 1.0
-	}
-	if y <= -0.15 {
-		return 0.0
-	}
-	return (y + 0.15) / 0.25
-}
-
 func (e *Engine) buildSunObject(vp mgl32.Mat4, env EnvironmentState) renderer.RenderObject {
 	sd := env.SunDiscDir
 	model := e.celestialModel(sd)
@@ -2199,28 +2235,14 @@ func (e *Engine) buildMoonObject(vp mgl32.Mat4, env EnvironmentState) renderer.R
 	md := env.MoonDiscDir
 	model := e.celestialModel(md)
 
-	fade := horizonFade(md)
-
-	// Above 1 for the same reason the sun is: below it the moon cannot cross a
-	// bloom threshold at all, so it renders as a flat white disc pasted on the
-	// sky rather than as something giving off light.
-	//
-	// Well under the sun's 5, though. The moon is the brightest thing in a night
-	// sky but it is not a sun, and matching them would flatten the difference
-	// between the two halves of the cycle. Tuned down from 2.2 alongside the
-	// night sky and the cloud lighting: the three have to move together or the
-	// moon ends up a hole punched in a dark sky.
-	const moonBoost = 1.5
-
+	// MoonDiscColor already carries the horizon fade and the brightness boost,
+	// exactly as SunDiscColor does. Fading again here would take the moon out
+	// well before it reaches the horizon.
 	return renderer.RenderObject{
-		Mesh:  e.moonMesh,
-		MVP:   vp.Mul4(model),
-		Model: model,
-		Color: [3]float32{
-			0.85 * fade * moonBoost,
-			0.88 * fade * moonBoost,
-			0.95 * fade * moonBoost,
-		},
+		Mesh:     e.moonMesh,
+		MVP:      vp.Mul4(model),
+		Model:    model,
+		Color:    env.MoonDiscColor,
 		Emissive: true,
 	}
 }

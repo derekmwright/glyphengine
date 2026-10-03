@@ -138,6 +138,52 @@ func (dn *DayNight) MoonDir() [3]float32 {
 	return [3]float32{x / l, y / l, z / l}
 }
 
+// horizonFade returns a 0–1 multiplier that fades a celestial body as it dips
+// below the horizon.
+//
+// It sits with the rest of the cycle rather than in the draw path because how
+// bright a body is at a given elevation is the environment's decision, and
+// EnvironmentState carries the already-faded colour.
+func horizonFade(dir [3]float32) float32 {
+	y := dir[1]
+	if y >= 0.1 {
+		return 1.0
+	}
+	if y <= -0.15 {
+		return 0.0
+	}
+	return (y + 0.15) / 0.25
+}
+
+// MoonDiscColor returns the moon's visual colour for the billboard disc, faded
+// as it dips below the horizon.
+//
+// Above 1 for the same reason the sun is: below it the moon cannot cross a bloom
+// threshold at all, so it renders as a flat white disc pasted on the sky rather
+// than as something giving off light.
+//
+// Well under the sun's 5, though. The moon is the brightest thing in a night sky
+// but it is not a sun, and matching them would flatten the difference between
+// the two halves of the cycle. Tuned down from 2.2 alongside the night sky and
+// the cloud lighting: the three have to move together or the moon ends up a hole
+// punched in a dark sky.
+//
+// This was three constants and a fade inside buildMoonObject until the
+// environment contract was carved, which left the engine owning one colour after
+// a source was supposed to own all of them. The arithmetic is kept in the
+// original order -- tint, then fade, then boost -- because reassociating three
+// float32 multiplies moves the low bit and every committed capture of a night
+// sky has a moon in it.
+func (dn *DayNight) MoonDiscColor() [3]float32 {
+	fade := horizonFade(dn.MoonDir())
+	const moonBoost = 1.5
+	return [3]float32{
+		0.85 * fade * moonBoost,
+		0.88 * fade * moonBoost,
+		0.95 * fade * moonBoost,
+	}
+}
+
 // MoonVisible returns true when the moon is above the horizon
 // (TimeOfDay in [0.75,1.0) or [0.0,0.25]).
 func (dn *DayNight) MoonVisible() bool {

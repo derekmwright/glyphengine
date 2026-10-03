@@ -996,7 +996,7 @@ func recordCommandBuffer(
 		scratch.pushConstants(deviceDriver, cmdBuf, litPipelineLayout, core1_0.StageVertex|core1_0.StageFragment)
 		// The block every mesh draw in this pass runs against: the camera's VP,
 		// the whole lighting pack, the wind clock and the two LOD distances
-		// grass.vert culls and fades by. sky=, lights= and grasslod= each cover
+		// grass.vert culls and fades by. env=, lights= and grasslod= each cover
 		// a part of what goes into it, but none of them covers what was
 		// actually PUSHED -- and a 256-byte block written by one pass and read
 		// by the next, which is how pc is used, is exactly where those three
