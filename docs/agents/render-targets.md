@@ -38,6 +38,14 @@ api:
   - renderer.SetShaderTexture
   - renderer.SetShaderTarget
   - renderer.ShaderTextureSlots
+  - renderer.ShaderTextureFirstBinding
+  - renderer.WithShaderTextureSlots
+  - renderer.Renderer.ShaderTextureCapacity
+  - renderer.WithAppTimingCapacity
+  - renderer.Renderer.AppTimingCapacity
+  - renderer.MaxAppTimingCapacity
+  - glyphengine.WithShaderTextureSlots
+  - glyphengine.WithAppTimingCapacity
   - renderer.SceneColor
   - renderer.SceneDepth
   - renderer.GPUTimings
@@ -52,7 +60,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: procedural
-verified: 2026-10-03 # renderer.ShaderTextureSlots listed, which SetShaderTexture's slot argument is bounded by and which nothing listed before (#178); per-pass uniform blocks (AppPassDesc.Params/SetParams, set 2 binding 12, #170), proved on hardware by `apppasscheck -params`; the include set listed per fragment, with the dependency-free group and volumetric_common.inc (#169); directional shadow sampling from compute; application submission counts per pass; storage buffers, sampler probes and explicit barriers; exported GLSL include set; Timed refused without device timestamps (#160)
+verified: 2026-10-09 # opt-in shared sampler capacity (#191) and named timing capacity (#192); TestSharedResourcesGPU validates five distinct fields and 18 mixed timers through replacement, resize, history and toggles, including a failing-image control and synchronization validation
 ---
 
 # Application render targets, graphics and compute passes
@@ -586,6 +594,20 @@ unbound slot returns the fallback, not uninitialized data. Pass inputs follow
 the same fence rule. A renderer resize waits for the GPU before replacing all
 affected descriptors.
 
+The default shared sampler layout still has four slots at light-set bindings
+7–10. Opt in to more at construction with `glyphengine.WithShaderTextureSlots(5)`
+(or the renderer option). Slot `i` is always binding
+`renderer.ShaderTextureFirstBinding+i`, in set 1 for static/terrain/sky/application
+pipelines and set 2 for skinned pipelines. Vertex, fragment and compute shaders
+can read these bindings. No existing binding moves. `ShaderTextureCapacity()`
+reports the enabled count; `Capabilities().MaxShaderTextureSlots` reports the
+device/layout ceiling, capped at 32. Invalid requests fail during construction,
+before pipeline creation. Zero preserves four; the minimum explicit request is
+four. Extra slots use the same graph reads, per-frame descriptors, history,
+resize and destruction paths as the original four. An unused slot issues no draw
+or dispatch. Disabling a producer retains its previous image contents; the
+application must disable sampling or bind nil if stale contents are unwanted.
+
 Destroy passes with `DestroyAppPass` or `DestroyAppCompute`, and targets with
 `DestroyRenderTarget`.
 Destroying a target also destroys passes writing it; other readers and slots
@@ -601,12 +623,25 @@ formats and sample counts from the same compiled description immediately at
 `CreateAppPass`. Explicit graph barriers handle attachment entry/exit, including
 return to sampled layouts. See [ADR 0009](../adr/0009-execute-render-passes-with-dynamic-rendering.md).
 
-`Timed` reserves one of 16 application timing entries shared by graphics and
-compute. A seventeenth active
-timed pass is rejected. `GPUTimings.App` contains `{Name, Ms}` in creation
+`Timed` reserves one application timing entry shared by graphics and compute.
+The default registration budget is 16, including disabled passes. Set
+`glyphengine.WithAppTimingCapacity(32)` (or the renderer option) at construction
+to increase it, up to `renderer.MaxAppTimingCapacity` (64). Zero keeps the
+default; negative values and requests above the maximum fail explicitly.
+`AppTimingCapacity()` reports the budget. Query pools and per-frame query strides
+use that capacity; the engine's own timers do not spend it. Registering one more
+timed pass than the budget is an error. `GPUTimings.App` contains `{Name, Ms}` in creation
 order, with both timestamp edges written even for disabled passes. Existing
 `Pass` values and `GPUTimings.Pass` retain their meaning. Timing slices are
 renderer-owned views; copy them if retaining them across frames.
+
+Hardware regression: `GLYPHENGINE_RESOURCE_TEST=1 go test . -run
+TestSharedResourcesGPU -count=1` checks distinct values from all five shared
+samplers, same-frame compute writes, changing values, resize, disabled producer,
+target replacement/destruction, history, and 18 mixed graphics/compute timers
+being disabled and re-enabled. All eight states are read back and checked, then
+a deliberately incorrect expected value must fail every probe pixel. Vulkan
+validation must be silent.
 
 `Timed` also needs the device to timestamp the graphics queue. When it cannot,
 `CreateAppPass` and `CreateAppCompute` refuse the descriptor with an error

@@ -145,6 +145,25 @@ func (p Pass) String() string {
 const queriesPerFrame = (int(passCount) + 1) * 2
 const maxAppTimings = 16
 
+// MaxAppTimingCapacity bounds the configurable application timestamp budget.
+// The default remains sixteen. Disabled passes retain their named timing slot.
+const MaxAppTimingCapacity = 64
+
+// WithAppTimingCapacity selects the registration budget at construction.
+// Zero keeps sixteen. New rejects negative values and counts above 64.
+func WithAppTimingCapacity(count int) Option {
+	return func(r *Renderer) { r.appTimingCapacity = count }
+}
+
+// AppTimingCapacity reports the requested registration budget (zero means the
+// default sixteen). Timed passes still require Capabilities.GPUTimestamps.
+func (r *Renderer) AppTimingCapacity() int {
+	if r.appTimingCapacity == 0 {
+		return maxAppTimings
+	}
+	return r.appTimingCapacity
+}
+
 // engineTimings is the engine's own timed passes -- GPU LOD selection and the
 // streamed upload batch -- which share the application timing pool without
 // spending an application's budget.
@@ -188,11 +207,12 @@ type GPUTimings struct {
 // measuring.
 type gpuTimer struct {
 	apps        []*AppPass
-	appRecorded [maxFramesInFlight][maxAppTimings + engineTimings]*AppPass
+	appRecorded [maxFramesInFlight][MaxAppTimingCapacity + engineTimings]*AppPass
 	appCount    [maxFramesInFlight]int
-	appScratch  [(maxAppTimings + engineTimings) * 16]byte
-	appLatest   [maxAppTimings + engineTimings]AppTiming
-	appMean     [maxAppTimings + engineTimings]AppTiming
+	appScratch  [(MaxAppTimingCapacity + engineTimings) * 16]byte
+	appLatest   [MaxAppTimingCapacity + engineTimings]AppTiming
+	appMean     [MaxAppTimingCapacity + engineTimings]AppTiming
+	capacity    int
 	appSums     map[*AppPass]appTimingSum
 	pool        core1_0.QueryPool
 	period      float32 // nanoseconds per tick
@@ -243,8 +263,11 @@ type gpuTimer struct {
 // construction instead of silently never measured. The two device answers
 // behind the flag, and why one without the other returns zeros on real
 // hardware, are in negotiateCapabilities.
-func newGPUTimer(deviceDriver core1_0.DeviceDriver, caps Capabilities) (*gpuTimer, error) {
-	t := &gpuTimer{}
+func newGPUTimer(deviceDriver core1_0.DeviceDriver, caps Capabilities, requested ...int) (*gpuTimer, error) {
+	t := &gpuTimer{capacity: maxAppTimings}
+	if len(requested) > 0 {
+		t.capacity = requested[0]
+	}
 
 	if !caps.GPUTimestamps {
 		return t, nil // not fatal; the engine renders fine without timing
@@ -252,7 +275,7 @@ func newGPUTimer(deviceDriver core1_0.DeviceDriver, caps Capabilities) (*gpuTime
 
 	pool, _, err := deviceDriver.CreateQueryPool(nil, core1_0.QueryPoolCreateInfo{
 		QueryType:  core1_0.QueryTypeTimestamp,
-		QueryCount: queryPoolSize,
+		QueryCount: (queriesPerFrame + (t.capacity+engineTimings)*2) * maxFramesInFlight,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create timestamp query pool: %w", err)
@@ -302,7 +325,7 @@ func (t *gpuTimer) reset(deviceDriver core1_0.DeviceDriver, cmdBuf core1_0.Comma
 		}
 	}
 	if n := t.appCount[frame]; n > 0 {
-		deviceDriver.CmdResetQueryPool(cmdBuf, t.pool, appQueryBase(frame), n*2)
+		deviceDriver.CmdResetQueryPool(cmdBuf, t.pool, t.appQueryBase(frame), n*2)
 	}
 	t.recorded[frame] = true
 }
@@ -489,13 +512,21 @@ type appTimingSum struct {
 }
 
 func appQueryBase(frame int) int { return queriesPerFrame*maxFramesInFlight + frame*appQueriesPerFrame }
+
+func (t *gpuTimer) appQueryBase(frame int) int {
+	capacity := t.capacity
+	if capacity == 0 {
+		capacity = maxAppTimings
+	}
+	return queriesPerFrame*maxFramesInFlight + frame*(capacity+engineTimings)*2
+}
 func (t *gpuTimer) appEdge(d core1_0.DeviceDriver, cmd core1_0.CommandBuffer, frame int, p *AppPass, edge int) {
 	if t == nil || !t.supported {
 		return
 	}
 	for i := 0; i < t.appCount[frame]; i++ {
 		if t.appRecorded[frame][i] == p {
-			d.CmdWriteTimestamp(cmd, core1_0.PipelineStageBottomOfPipe, t.pool, appQueryBase(frame)+i*2+edge)
+			d.CmdWriteTimestamp(cmd, core1_0.PipelineStageBottomOfPipe, t.pool, t.appQueryBase(frame)+i*2+edge)
 			return
 		}
 	}
@@ -511,7 +542,7 @@ func (t *gpuTimer) collectApps(d core1_0.DeviceDriver, frame int, out *GPUTiming
 	if n == 0 {
 		return
 	}
-	res, err := d.GetQueryPoolResults(t.pool, appQueryBase(frame), n*2, t.appScratch[:n*16], 8, core1_0.QueryResult64Bit)
+	res, err := d.GetQueryPoolResults(t.pool, t.appQueryBase(frame), n*2, t.appScratch[:n*16], 8, core1_0.QueryResult64Bit)
 	if err != nil || res != core1_0.VKSuccess {
 		return
 	}

@@ -233,7 +233,7 @@ A texture reaches a shader three ways:
 | | Where |
 |---|---|
 | `MeshRef.Texture` / `MaterialRef` | set 0, binding 0, for a draw. See [`material-maps.md`](material-maps.md) |
-| `SetShaderTexture(slot, tex)` | light-set bindings 7..10, `ShaderTextureSlots` of them, visible to every vertex and fragment stage. See [`render-targets.md`](render-targets.md) |
+| `SetShaderTexture(slot, tex)` | light-set bindings `7+slot`, four by default; `WithShaderTextureSlots` extends the layout at construction. Vertex, fragment and compute stages. See [`render-targets.md`](render-targets.md) |
 | `AppPassDesc.Reads` | set 2, bindings 0..3, for one application pass |
 
 `SetShaderTexture` is format-agnostic: a GLSL `sampler2D` reads whatever the

@@ -217,7 +217,7 @@ func createDescriptorPool(deviceDriver core1_0.DeviceDriver, maxSets int) (core1
 				Type: core1_0.DescriptorTypeCombinedImageSampler,
 				// +4 sun shadow + 2 cube shadow samplers, then four maps per material
 				// The tonemap's sets take two samplers each, hence the doubling.
-				DescriptorCount: maxSets + appPoolSamplers + ShaderTextureSlots*maxFramesInFlight + 6 + maxMaterials*materialTextureBindings + uiLayerSetFactor*(maxHDRSets*2+maxBloomSets),
+				DescriptorCount: maxSets + appPoolSamplers + maxShaderTextureSlots*maxFramesInFlight + 6 + maxMaterials*materialTextureBindings + uiLayerSetFactor*(maxHDRSets*2+maxBloomSets),
 			},
 			{
 				Type: core1_0.DescriptorTypeUniformBuffer,
@@ -252,7 +252,7 @@ func createDescriptorPool(deviceDriver core1_0.DeviceDriver, maxSets int) (core1
 				// one of each per frame in flight. Fixed rather than
 				// swapchain-scaled -- that descriptor set is allocated once
 				// in createShadowResources and never reallocated on resize.
-				DescriptorCount: lightStorageBuffersPerSet*maxFramesInFlight + 4*maxAppTimings*maxFramesInFlight + 128,
+				DescriptorCount: lightStorageBuffersPerSet*maxFramesInFlight + 4*MaxAppTimingCapacity*maxFramesInFlight + 128,
 			},
 		},
 	})

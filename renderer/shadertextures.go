@@ -7,12 +7,43 @@ import (
 )
 
 // ShaderTextureSlots are combined image samplers at light-set bindings 7..10,
-// visible in vertex and fragment shaders. Nil bindings use the white fallback.
+// visible in vertex, fragment and compute shaders. Nil bindings use the white fallback.
 const ShaderTextureSlots = 4
 
+// ShaderTextureFirstBinding is the first shared application sampler in the
+// light descriptor set (set 1, or set 2 in skinned pipelines).
+const ShaderTextureFirstBinding = 7
+const maxShaderTextureSlots = 32
+
+// WithShaderTextureSlots extends the shared sampler layout at construction.
+// Zero keeps the four-slot contract. New rejects counts below four or above
+// Capabilities.MaxShaderTextureSlots; it never silently changes shader bindings.
+func WithShaderTextureSlots(count int) Option {
+	return func(r *Renderer) { r.shaderTextureSlots = count }
+}
+
+// ShaderTextureCapacity is the enabled shared sampler count. Slot i is binding
+// ShaderTextureFirstBinding+i. Existing slots keep their layout and lifetime.
+func (r *Renderer) ShaderTextureCapacity() int {
+	if r.shaderTextureSlots == 0 {
+		return ShaderTextureSlots
+	}
+	return r.shaderTextureSlots
+}
+
+func shaderTextureLimit(l *core1_0.PhysicalDeviceLimits) int {
+	// Reserve the other pipeline samplers: two light maps, five material
+	// textures and four pass-local reads. Some pipelines use fewer, but the
+	// shared layout must be legal for every supported consumer.
+	const reserved = 2 + materialTextureBindings + 4
+	return max(0, min(maxShaderTextureSlots, l.MaxPerStageDescriptorSamplers-reserved,
+		l.MaxPerStageDescriptorSampledImages-reserved, l.MaxDescriptorSetSamplers-reserved,
+		l.MaxDescriptorSetSampledImages-reserved, l.MaxPerStageResources-reserved-16))
+}
+
 func (r *Renderer) SetShaderTexture(slot int, t *Texture) error {
-	if slot < 0 || slot >= ShaderTextureSlots {
-		return fmt.Errorf("shader texture slot: %d outside [0,%d)", slot, ShaderTextureSlots)
+	if slot < 0 || slot >= r.ShaderTextureCapacity() {
+		return fmt.Errorf("shader texture slot: %d outside [0,%d)", slot, r.ShaderTextureCapacity())
 	}
 	if t != nil && t.destroyed {
 		return fmt.Errorf("shader texture: destroyed texture")
@@ -31,8 +62,8 @@ func (r *Renderer) SetShaderTexture(slot int, t *Texture) error {
 }
 
 func (r *Renderer) SetShaderTarget(slot int, t *RenderTarget) error {
-	if slot < 0 || slot >= ShaderTextureSlots {
-		return fmt.Errorf("shader target slot: %d outside [0,%d)", slot, ShaderTextureSlots)
+	if slot < 0 || slot >= r.ShaderTextureCapacity() {
+		return fmt.Errorf("shader target slot: %d outside [0,%d)", slot, r.ShaderTextureCapacity())
 	}
 	if t != nil && (t.r != r || t.destroyed) {
 		return fmt.Errorf("shader target: not a live target of this renderer")
@@ -56,7 +87,7 @@ func (r *Renderer) writeAppSampler(set core1_0.DescriptorSet, binding int, tex *
 }
 
 func (r *Renderer) flushShaderTextures(frame int) error {
-	for slot := range ShaderTextureSlots {
+	for slot := range r.ShaderTextureCapacity() {
 		t := r.shaderTextures[slot]
 		if target := r.shaderTargets[slot]; target != nil && !target.destroyed {
 			t = target.Texture()

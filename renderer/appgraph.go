@@ -332,7 +332,7 @@ func (r *Renderer) releaseAppResizeTargets() {
 	// retiring views; each waited slot is filled with the replacement on draw.
 	if r.fallbackTexture != nil {
 		for frame := range maxFramesInFlight {
-			for slot := range ShaderTextureSlots {
+			for slot := range r.ShaderTextureCapacity() {
 				_ = r.writeAppSampler(r.shadow.descriptorSets[frame], 7+slot, r.fallbackTexture)
 			}
 		}

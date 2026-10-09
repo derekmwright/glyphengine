@@ -285,6 +285,16 @@ func TestCapabilitiesHashAgreesWithTrace(t *testing.T) {
 	if got := tracedConfig(t, r); got != want {
 		t.Fatalf("config=%x, predicted %x from Capabilities()", got, want)
 	}
+	WithShaderTextureSlots(5)(r)
+	if tracedConfig(t, r) == want {
+		t.Fatal("extended shader layout absent from trace")
+	}
+	WithShaderTextureSlots(0)(r)
+	WithAppTimingCapacity(32)(r)
+	if tracedConfig(t, r) == want {
+		t.Fatal("extended timing capacity absent from trace")
+	}
+	WithAppTimingCapacity(0)(r)
 
 	// And every identity field the report carries has to reach the field, or a
 	// run on a different GPU could diff clean. Each edit is applied to the
