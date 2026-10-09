@@ -97,7 +97,15 @@ type Renderer struct {
 	// bookkeeping DestroyModel's release closure keeps for r.meshes/
 	// r.textures/r.materials, and for the same reason: the resource is still
 	// genuinely alive for the frames still in flight when the call is made.
-	instanceSets               []*InstanceSet
+	instanceSets []*InstanceSet
+	// fenceWaited[f] is true from the moment DrawFrame has waited slot f's
+	// in-flight fence until it resubmits that slot. That is exactly the window
+	// in which a host write into slot f's buffers is safe, because nothing
+	// submitted can still be reading them, and flushInstanceSets asserts on it
+	// rather than trusting its call site: the zero value is false everywhere,
+	// so a renderer that has not reached the fence refuses the copy instead of
+	// making it silently unsafe.
+	fenceWaited                [maxFramesInFlight]bool
 	lodSets                    []*InstanceSetLOD
 	storageBuffers             []*StorageBuffer
 	gpuLODTimer                *AppPass
@@ -2081,6 +2089,10 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 		r.trace.Str("outcome", "fence-error")
 		return err
 	}
+	// From here until this slot is resubmitted, its buffers are the CPU's: the
+	// fence says the GPU has finished reading them. Everything that copies
+	// staged host data into a slot's memory below depends on it.
+	r.fenceWaited[f] = true
 
 	// The fence guarantees this slot's previous submission finished, which makes
 	// it both the earliest point its timestamps are readable and the last point
@@ -2119,10 +2131,11 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 		return err
 	}
 
-	// Copy staged joint matrices, particle instances, and dynamic mesh data
-	// into this frame's buffers now that its fence has signaled (the GPU is
-	// done reading them).
+	// Copy staged joint matrices, instance placements, particle instances, and
+	// dynamic mesh data into this frame's buffers now that its fence has
+	// signaled (the GPU is done reading them).
 	r.flushJointUploads(f)
+	r.flushInstanceSets(f)
 
 	// Drop draws whose streamed geometry has not arrived, before anything
 	// reads the lists: the water split, LOD selection and range batching all
@@ -2233,8 +2246,12 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 		return err
 	}
 	// The batch is now the submission's; its staging and tickets retire with
-	// this slot's fence.
+	// this slot's fence. The slot's buffers are the GPU's again for the same
+	// reason, so the window in which host copies into them are safe closes
+	// here. A frame that returns before submitting never closes it, which is
+	// right: nothing is reading that slot.
 	r.finishUploadBatch(f)
+	r.fenceWaited[f] = false
 
 	// Present
 	r.lastPresented = imageIndex

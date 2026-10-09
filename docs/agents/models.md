@@ -1155,17 +1155,19 @@ recorded for the sampler, and the reason the count exists.
 the level's repeated props batched into `InstanceSet`s (see
 [`instancing.md`](instancing.md#turning-a-levels-repeated-nodes-into-instances))
 instead of one entity per node. `Renderer.DestroyInstanceSet` gives each
-set's buffer back the same way `DestroyModel` gives a model's resources back
+set's buffers back the same way `DestroyModel` gives a model's resources back
 -- deferred past the frames in flight, because the harder case is the same
 one: the new level's sets are already in the draw list before the old ones
-are released, in the same tick.
+are released, in the same tick. Buffers, plural: a set carries one per frame
+in flight (see [`instancing.md`](instancing.md#updating-one-safely)), and all
+of them are released in that one deferred callback.
 
 An `InstanceSet` holds no descriptor set of its own -- it is a plain vertex
-buffer of placements, not a pool allocation -- so it needed a count of its
-own rather than riding along on `DescriptorSets`: a `DestroyInstanceSet` that
-did nothing would leave all four numbers above at their baseline while an
-`InstanceSet`'s buffer leaked every cycle, silently, since nothing else here
-would move. `ResourceCounts.InstanceSets` is that count, kept the same way
+buffer of placements per frame slot, not a pool allocation -- so it needed a
+count of its own rather than riding along on `DescriptorSets`: a
+`DestroyInstanceSet` that did nothing would leave all four numbers above at
+their baseline while an `InstanceSet`'s buffers leaked every cycle, silently,
+since nothing else here would move. `ResourceCounts.InstanceSets` is that count, kept the same way
 the others are -- not decremented until the deferred free actually runs. See
 [`instancing.md`](instancing.md#releasing-one) for the API, the measured
 `-reload -instanced` counts on both committed level files, and the three

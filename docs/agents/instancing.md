@@ -23,7 +23,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-09-24
+verified: 2026-10-09 # placement updates are staged on the CPU and copied into per-frame-slot buffers after the fence (#188)
 ---
 
 # Draw repeated static meshes in one call
@@ -61,7 +61,77 @@ apply to the set as a whole.
 
 To move, add or remove a placement, call `Renderer.UpdateInstanceSet` with the
 new slice. Capacity is fixed at creation — a set that has to grow is a new set,
-because resizing means reallocating a buffer the GPU may still be reading.
+because resizing means reallocating buffers the GPU may still be reading.
+
+## Updating one safely
+
+`UpdateInstanceSet` writes **no GPU memory**. It copies the placements into a
+CPU staging list owned by the set and recomputes the bound from it; inside the
+next `DrawFrame`, once that frame slot's fence has signalled, the renderer
+copies staging into **that slot's own instance buffer** and records the count it
+copied. Every pass in the frame — the cascade and point-light shadow stages, the
+depth prepass, the lit pass and the instanced recorder — binds that one slot's
+buffer and that one count, so two passes in a frame cannot disagree about what
+the set holds.
+
+This is why a game can rebase a whole field of props around its camera every
+tick, from anywhere in its update, and needs **none** of the following:
+
+- pooling sets and returning the old one through `DeferDestroy`,
+- skipping an update because the placements have not changed *enough*,
+- holding an update back while the window is minimised,
+- `DeviceWaitIdle` or a queue wait anywhere near the update path.
+
+Procedural Planet implemented the first three by hand, and they are now
+unnecessary; the pool in particular costs the same memory as the slot buffers
+below for as long as the change rate keeps retired sets alive, plus an
+allocation and a mapping per change.
+
+Several updates before one frame are fine and the last one wins. `Count` and
+`Bounds` report the **staged** state — what the next recorded frame will draw —
+which is the question a caller between frames is asking.
+
+### What it costs
+
+Storage is `80 × Capacity` bytes **per frame in flight**, so a set's GPU memory
+doubles against the single shared buffer this replaces: 1,000 placements is
+80 KB per slot, 160 KB in total. CPU staging adds another `80 × Capacity`. An
+update itself allocates nothing after the set is created —
+`TestUpdateInstanceSetDoesNotAllocate` pins 0 allocations per call at 600
+placements, which matters because this is a per-frame call — and a slot is
+copied only when staging has actually changed since that slot last ran, so an
+unchanging set costs nothing per frame beyond publishing a handle.
+
+### The failure this removes
+
+Before this, `UpdateInstanceSet` copied straight into one persistently mapped,
+host-coherent buffer that submitted frames were still drawing from. Host
+coherency does not retire a GPU read: changing camera-relative transforms, or
+the placement order or count, could modify a previous frame's vertex data while
+its draws executed, and the shadow, prepass and colour passes could each see
+different data. **Ordinary Vulkan validation does not see this at all**, because
+the write never reaches the driver.
+
+It is not theoretical. The showcase measured rocks flickering during movement
+and, capturing the previous submitted frame after the next upload, found 4,167
+pixels differing by more than eight channel levels at up to 207/255 along rock
+silhouettes, with the water and landscape matching exactly; retaining buffers
+until retirement made every capture identical (issue #188).
+
+`task instances` is the gate. It alternates one set between two placement arrays
+of different lengths every frame with the prepass on and shadows enabled, reads
+back each submitted frame *after* staging the next frame's placements, and
+requires every capture to be byte-identical to the same frame captured with no
+update in between. Routing the update straight into the slot buffers again
+changed all eight captures, 904,258 to 921,582 pixels each at up to 161/255.
+Its `-churn` arm runs the same comparison with a swapchain rebuilt underneath
+the run and with frames that are never drawn at all, because both leave an
+update staged across a frame that copies nothing.
+
+The ordering is asserted, not just documented: the copy refuses to run for a
+slot whose fence `DrawFrame` has not waited on, and moving the call above that
+wait panics on the first frame rather than producing a frame that is quietly
+wrong.
 
 ## What it is for
 
@@ -553,8 +623,13 @@ describes it.
   occupies four consecutive locations, so the model is at 4–7 and the tint at 8,
   not 5. `TestInstanceAttributeLayout` pins this.
 - **Placements past the capacity silently disappear.** `UpdateInstanceSet`
-  truncates rather than reallocating under a buffer the GPU may be reading.
+  truncates rather than reallocating under buffers the GPU may be reading.
   `InstanceSet.Capacity` reports the limit.
+- **Props flicker or tear while the camera moves, and only when placements are
+  being updated.** This was the shared-buffer update, fixed in #188 and gated by
+  `task instances`. If it ever returns, suspect a write that reaches an instance
+  buffer from outside `UpdateInstanceSet`: nothing else can, and the validation
+  layer will not say so.
 - **`Translucent` on the entity does nothing.** There is no blended instanced
   pipeline; the set stays opaque rather than silently losing its placements. See
   [`translucency.md`](translucency.md).
