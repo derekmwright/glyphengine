@@ -54,13 +54,16 @@ api:
   - renderer.AppStats
   - renderer.AppStats.Pass
   - renderer.AppPassStats
+  - renderer.PipelineStats.App
+  - renderer.AppPipelineStats
+  - renderer.PipelineStats.Pass
 example: examples/24-custom-passes
 run: task example:24-custom-passes -- -timings
 requires:
   - cgo
   - vulkan-runtime
 assets: procedural
-verified: 2026-10-09 # opt-in shared sampler capacity (#191) and named timing capacity (#192); TestSharedResourcesGPU validates five distinct fields and 18 mixed timers through replacement, resize, history and toggles, including a failing-image control and synchronization validation
+verified: 2026-10-09 # pipeline statistics per named application pass cross-referenced to profiling.md: a Timed graphics pass is counted and a dispatch reads not bracketed (#187); opt-in shared sampler capacity (#191) and named timing capacity (#192); TestSharedResourcesGPU validates five distinct fields and 18 mixed timers through replacement, resize, history and toggles, including a failing-image control and synchronization validation; renderer.ShaderTextureSlots listed, which SetShaderTexture's slot argument is bounded by and which nothing listed before (#178); per-pass uniform blocks (AppPassDesc.Params/SetParams, set 2 binding 12, #170), proved on hardware by `apppasscheck -params`; the include set listed per fragment, with the dependency-free group and volumetric_common.inc (#169); directional shadow sampling from compute; application submission counts per pass; storage buffers, sampler probes and explicit barriers; exported GLSL include set; Timed refused without device timestamps (#160)
 ---
 
 # Application render targets, graphics and compute passes
@@ -310,6 +313,14 @@ naming `Name`, so that lookup is unambiguous; destroying a pass frees its name
 again. `App.Passes` is the renderer's own storage, refilled in place by each
 `DrawFrame` rather than reallocated, so read it before the next frame or copy
 what you keep.
+
+These are CPU counts of what was submitted. What the GPU did with it -- fragment
+invocations and primitives after clipping, per named pass -- is
+`PipelineStats.App`, behind `WithPipelineStatistics`, and
+[`profiling.md`](profiling.md#named-application-passes) has the rules: a `Timed`
+graphics pass is counted, a dispatch is reported as not bracketed rather than as
+a measured zero, and the result is safe to retain. The two reports key on the
+same `Name`, so a row here and a row there are the same pass.
 
 ## Application storage buffers
 

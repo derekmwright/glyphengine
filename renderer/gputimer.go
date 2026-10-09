@@ -313,6 +313,11 @@ func (t *gpuTimer) reset(deviceDriver core1_0.DeviceDriver, cmdBuf core1_0.Comma
 	// are supported, because a device can grant pipelineStatisticsQuery and no
 	// usable timestamp bits.
 	t.stats.reset(deviceDriver, cmdBuf, frame)
+	// The slot's application statistics table is decided here as well, from the
+	// same t.apps the timer's own table below is built from, so a statistics row
+	// and a timing row always belong to the same pass. Same placement rule and
+	// same capability independence as the line above.
+	t.stats.resetApps(deviceDriver, cmdBuf, frame, t.apps)
 	if !t.supported {
 		return
 	}
@@ -531,11 +536,31 @@ func (t *gpuTimer) appEdge(d core1_0.DeviceDriver, cmd core1_0.CommandBuffer, fr
 		}
 	}
 }
+
+// beginApp and endApp open and close an application pass's interval, with the
+// statistics query outside the timestamps -- begun before the opening one and
+// ended after the closing one -- exactly as gpuTimer.begin and end do for an
+// engine bracket, and for the reason given there: the counted interval then
+// encloses the timed one rather than cutting a corner off it, and neither
+// timestamp write is work a counter can see.
+//
+// Hanging these off the timer's own edges rather than giving them call sites in
+// the executor is the same decision pipelineStats documents for the engine
+// brackets: a game reads a pass's fragment count against that pass's gpu time,
+// and two independent sets of call sites is how the two drift apart.
 func (t *gpuTimer) beginApp(d core1_0.DeviceDriver, cmd core1_0.CommandBuffer, frame int, p *AppPass) {
+	if t == nil {
+		return
+	}
+	t.stats.beginApp(d, cmd, frame, p)
 	t.appEdge(d, cmd, frame, p, 0)
 }
 func (t *gpuTimer) endApp(d core1_0.DeviceDriver, cmd core1_0.CommandBuffer, frame int, p *AppPass) {
+	if t == nil {
+		return
+	}
 	t.appEdge(d, cmd, frame, p, 1)
+	t.stats.endApp(d, cmd, frame, p)
 }
 func (t *gpuTimer) collectApps(d core1_0.DeviceDriver, frame int, out *GPUTimings) {
 	n := t.appCount[frame]

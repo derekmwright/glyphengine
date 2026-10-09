@@ -111,9 +111,22 @@ func TestPipelineStatisticsPoolExistsOnlyWhenAskedAndGranted(t *testing.T) {
 	if o.PipelineStatistics != wantFlags {
 		t.Errorf("statistics flags %v, want fragment invocations and clipping primitives", o.PipelineStatistics)
 	}
-	if want := statsQueriesPerFrame * maxFramesInFlight; o.QueryCount != want {
-		t.Errorf("query count %d, want %d (%d bracketed passes x %d frame slots)",
-			o.QueryCount, want, statsQueriesPerFrame, maxFramesInFlight)
+	// Both regions in one pool: the engine's bracketed passes and the
+	// application's own. A pool short by the application region would create
+	// successfully and then begin a query past its end on the first timed
+	// application pass, which the validation layer reports and nothing else does.
+	if want := (statsQueriesPerFrame + maxAppStats) * maxFramesInFlight; o.QueryCount != want {
+		t.Errorf("query count %d, want %d ((%d bracketed passes + %d application) x %d frame slots)",
+			o.QueryCount, want, statsQueriesPerFrame, maxAppStats, maxFramesInFlight)
+	}
+	// The application regions start past EVERY slot's engine region, so adding an
+	// application pass cannot renumber an engine query, and the last one ends
+	// exactly at the pool's end.
+	if got, want := appStatsBase(0), statsQueriesPerFrame*maxFramesInFlight; got != want {
+		t.Errorf("the application region starts at %d, want %d (past every engine region)", got, want)
+	}
+	if got := appStatsBase(maxFramesInFlight-1) + maxAppStats; got != o.QueryCount {
+		t.Errorf("the last application region ends at %d, past the pool's %d queries", got, o.QueryCount)
 	}
 }
 
@@ -274,11 +287,27 @@ func (d *statsBracketDriver) CmdBeginRendering(cb core1_0.CommandBuffer, o khr_d
 }
 
 func (d *statsBracketDriver) CmdBeginQuery(_ core1_0.CommandBuffer, _ core1_0.QueryPool, query int, _ core1_0.QueryControlFlags) {
-	d.events = append(d.events, fmt.Sprintf("%s:qbegin", statsPassOf(query)))
+	d.events = append(d.events, statsQueryLabel(query)+":qbegin")
 }
 
 func (d *statsBracketDriver) CmdEndQuery(_ core1_0.CommandBuffer, _ core1_0.QueryPool, query int) {
-	d.events = append(d.events, fmt.Sprintf("%s:qend", statsPassOf(query)))
+	d.events = append(d.events, statsQueryLabel(query)+":qend")
+}
+
+// statsQueryLabel names a query by the pass it belongs to, from its index alone.
+//
+// Two regions, so the label has to say which: an application query index past
+// every slot's engine region would otherwise be reduced modulo
+// statsQueriesPerFrame and reported as an engine pass, which is exactly the kind
+// of mislabelling that makes a legality walk pass while counting the wrong
+// thing. The application label is the slot query rather than the pass name
+// because the driver sees only indices; the walk below needs them to be
+// DISTINCT, not meaningful, and the bracket test resolves names separately.
+func statsQueryLabel(query int) string {
+	if query >= statsQueriesPerFrame*maxFramesInFlight {
+		return fmt.Sprintf("app%d", (query-statsQueriesPerFrame*maxFramesInFlight)%maxAppStats)
+	}
+	return statsPassOf(query).String()
 }
 
 // statsPassOf inverts statsQueryOf for the driver above.
@@ -405,69 +434,103 @@ func TestPipelineStatisticsBracketsMatchTheTimerBrackets(t *testing.T) {
 // cannot be", which is the rule the whole-frame bracket is excluded under; it has
 // no query index at all, so that exclusion is held by statsQueryOf and by the
 // query count asserted at the end of this test rather than by a branch here.
+// The application nodes are walked by the same state machine and not by a second
+// one, which is the point of doing it here: the rule is "no two queries of this
+// type are ever active in this command buffer", and an application pass and an
+// engine bracket are two queries in one command buffer. A separate test per kind
+// could not see one nested inside the other.
+//
+// Verified to fail a fourth time for the application half: beginning an
+// application query inside the pass's rendering instance -- driving
+// pipelineStats.beginApp from executeSteps after CmdBeginRendering instead of
+// from gpuTimer.beginApp -- reports "app0: its query ends outside the render
+// pass instance it began in" and the same for app1, while the engine-only case
+// still passes. Application brackets really do nest: GPU LOD selection
+// brackets the whole pre-shadow range, including the streamed-upload node's own
+// bracket, so making either of those carry a query would report them active at
+// the same time here. frameGraph.statsBracketed is where that is excluded.
 func TestPipelineStatisticsQueriesAreLegalVulkan(t *testing.T) {
-	fx := buildFrame(61)
-	fx.timer = &gpuTimer{supported: true, stats: &pipelineStats{
-		requested: true, supported: true,
-		scratch: make([]byte, statsQueriesPerFrame*statsResultBytes),
-	}}
-	d := &statsBracketDriver{timingDriver: &timingDriver{fakeDriver: &fakeDriver{}}}
-	if err := fx.record(d, 0); err != nil {
-		t.Fatalf("record: %v", err)
-	}
-
-	// The fixture has to contain rendering instances, or "no query straddles one"
-	// is true of a frame with none.
-	instances := 0
-	for _, ev := range d.events {
-		if ev == "beginpass" {
-			instances++
-		}
-	}
-	if instances == 0 {
-		t.Fatal("the fixture opened no render pass instance, so this test proves nothing")
-	}
-
-	active := Pass(-1)
-	depth, queries := 0, 0
-	for _, ev := range d.events {
-		switch {
-		case ev == "beginpass":
-			depth++
-		case ev == "endpass":
-			depth--
-			if active >= 0 && depth < 0 {
-				t.Errorf("%s: its query ends outside the render pass instance it began in", active)
-				depth = 0
+	for _, tc := range []struct {
+		name        string
+		fixture     func() *frame
+		wantQueries int
+		wantAppNode bool
+	}{
+		{"engine passes only", func() *frame {
+			fx := buildFrame(61)
+			fx.timer = &gpuTimer{supported: true, stats: &pipelineStats{
+				requested: true, supported: true,
+				scratch: make([]byte, statsQueriesPerFrame*statsResultBytes),
+			}}
+			return fx
+		}, statsQueriesPerFrame, false},
+		// Two application graphics passes, a compute dispatch and the engine's
+		// own transfer node, all timed. Only the two graphics passes add a
+		// query, so the count is the engine's plus two.
+		{"with application nodes", func() *frame {
+			fx, _ := appStatsFrame(61, true)
+			return fx
+		}, statsQueriesPerFrame + 2, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := tc.fixture()
+			d := &statsBracketDriver{timingDriver: &timingDriver{fakeDriver: &fakeDriver{}}}
+			if err := fx.record(d, 0); err != nil {
+				t.Fatalf("record: %v", err)
 			}
-		case len(ev) > 7 && ev[len(ev)-7:] == ":qbegin":
-			p := Pass(-1)
-			for q := Pass(0); q < passCount; q++ {
-				if q.String()+":qbegin" == ev {
-					p = q
+
+			// The fixture has to contain rendering instances, or "no query
+			// straddles one" is true of a frame with none.
+			instances := 0
+			for _, ev := range d.events {
+				if ev == "beginpass" {
+					instances++
 				}
 			}
-			if active >= 0 {
-				t.Errorf("%s and %s are active at the same time; two queries of one type cannot be", active, p)
+			if instances == 0 {
+				t.Fatal("the fixture opened no render pass instance, so this test proves nothing")
 			}
-			active, depth, queries = p, 0, queries+1
-		case len(ev) > 5 && ev[len(ev)-5:] == ":qend":
-			if active < 0 {
-				t.Errorf("%s ends a query that was never begun", ev)
+			if apps := len(fx.graph.apps); tc.wantAppNode != (apps > 0) {
+				t.Fatalf("the fixture has %d application nodes; this case needs wantAppNode=%v", apps, tc.wantAppNode)
 			}
-			if depth != 0 {
-				t.Errorf("%s: its query ends %d render pass instances deeper than it began", active, depth)
+
+			active := ""
+			depth, queries := 0, 0
+			for _, ev := range d.events {
+				switch {
+				case ev == "beginpass":
+					depth++
+				case ev == "endpass":
+					depth--
+					if active != "" && depth < 0 {
+						t.Errorf("%s: its query ends outside the render pass instance it began in", active)
+						depth = 0
+					}
+				case len(ev) > 7 && ev[len(ev)-7:] == ":qbegin":
+					p := ev[:len(ev)-7]
+					if active != "" {
+						t.Errorf("%s and %s are active at the same time; two queries of one type cannot be", active, p)
+					}
+					active, depth, queries = p, 0, queries+1
+				case len(ev) > 5 && ev[len(ev)-5:] == ":qend":
+					if active == "" {
+						t.Errorf("%s ends a query that was never begun", ev)
+					}
+					if depth != 0 {
+						t.Errorf("%s: its query ends %d render pass instances deeper than it began", active, depth)
+					}
+					active = ""
+				}
 			}
-			active = Pass(-1)
-		}
+			if active != "" {
+				t.Errorf("%s left a query active at the end of the frame", active)
+			}
+			if queries != tc.wantQueries {
+				t.Errorf("%d queries over the frame, want %d", queries, tc.wantQueries)
+			}
+			t.Logf("%d queries, each inside one render pass instance or outside all of them, over %d instances", queries, instances)
+		})
 	}
-	if active >= 0 {
-		t.Errorf("%s left a query active at the end of the frame", active)
-	}
-	if queries != statsQueriesPerFrame {
-		t.Errorf("%d queries over the frame, want %d", queries, statsQueriesPerFrame)
-	}
-	t.Logf("%d queries, each inside one render pass instance or outside all of them, over %d instances", queries, instances)
 }
 
 // Off is free, at the level of driver calls: a frame recorded by a renderer that

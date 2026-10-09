@@ -22,6 +22,9 @@ api:
   - renderer.GPUTimings
   - renderer.Pass
   - renderer.PipelineStats
+  - renderer.PipelineStats.App
+  - renderer.PipelineStats.Pass
+  - renderer.AppPipelineStats
   - renderer.StatisticsBracketed
   - renderer.WithPipelineStatistics
   - renderer.Renderer.PipelineStats
@@ -44,7 +47,7 @@ api:
   - renderer.AppPassStats
 assets: none
 run: task bench
-verified: 2026-10-03 # pipeline statistics per pass behind WithPipelineStatistics and GLYPHENGINE_PIPELINE_STATS, with the four brackets that cannot carry a query; helper lanes measured NOT counted on an RX 7900 XTX, so the counter bounds quad overshading from below only (#182); cpu drawsort split out of cpu drawlist; App beside the GPU timings; the depth prepass bracket and the shadow bracket's new end; the prepass estimate and decision in the stats block, and the threshold sweep scene
+verified: 2026-10-09 # pipeline statistics per NAMED APPLICATION pass behind the same option (#187): bracketed only for a Timed graphics node that is a rendering instance of its own, a dispatch and the engine's upload/lodselect nodes reported not bracketed rather than as a measured zero, rows invalidated on disable/destroy/rebuild/resize, App cloned on the way out; measured exact on an RX 7900 XTX by `apppasscheck -stats` (50,400 invocations over 50,400 covered pixels, 2 clipped for 2 submitted; 7,632/7,632 and 8/8); pipeline statistics per pass behind WithPipelineStatistics and GLYPHENGINE_PIPELINE_STATS, with the four brackets that cannot carry a query; helper lanes measured NOT counted on an RX 7900 XTX, so the counter bounds quad overshading from below only (#182); cpu drawsort split out of cpu drawlist; App beside the GPU timings; the depth prepass bracket and the shadow bracket's new end; the prepass estimate and decision in the stats block, and the threshold sweep scene
 ---
 
 # Measuring frame cost
@@ -387,6 +390,112 @@ timer's equivalent check is what caught its `TopOfPipe`/`BottomOfPipe` mismatch.
 A zero on a bracketed pass is a pass that shaded nothing. A zero on an unbracketed
 one is not measured, and `StatisticsBracketed` is the only thing that tells them
 apart.
+
+### Named application passes
+
+`PipelineStats.App` is the same two counters for the game's own passes, under the
+name `GPUTimings().App` reports their timing by and in the same order, so a row
+reads beside its timer:
+
+```go
+st, err := e.MeanPipelineStats()
+if row, ok := st.Pass("caustic projection"); ok && row.Bracketed && row.Valid {
+    log.Printf("%s: %d invocations, %d primitives after clipping over %d frames",
+        row.Name, row.FragmentInvocations, row.ClippingPrimitives, row.Frames)
+}
+```
+
+**Two flags, because a zero here has three meanings.** `Bracketed` is a property
+of the pass and `Valid` a property of the frame:
+
+| `Bracketed` | `Valid` | what a zero means |
+|---|---|---|
+| true | true | the pass ran and shaded nothing |
+| true | false | not measured this frame: the pass was disabled, or there has been a rebuild or a resize since |
+| false | — | no measurement exists: a compute dispatch, or one of the engine's own timed nodes |
+
+A dispatch is `Bracketed: false` and not a measured zero, and that is not
+pedantry: fragment invocations and clipping primitives do not exist for a
+dispatch, so a zero would be a number nobody took. The engine's two timed nodes
+that ride in the application budget -- `upload` and `lodselect` -- read the same
+way, one being a transfer copy and the other a bracket over compute work.
+
+**A pass must be `Timed`.** The statistics query is begun and ended at the pass's
+own timer edges, so the counted interval is the timed one by construction rather
+than by agreement; a pass with no timer has no edges. `Timed` already needs the
+device to timestamp the graphics queue (see
+[`render-targets.md`](render-targets.md)), and `CreateAppPass` refuses it when it
+cannot.
+
+**What can hold a query, and why.** A pass is bracketable when its frame-graph
+node is a rendering instance of its own. Two Vulkan rules reduce to that one
+condition: a query begun inside a rendering instance must end inside the same
+one, and the executor writes an application pass's timer edges outside its own
+`vkCmdBeginRendering`/`vkCmdEndRendering`; and two queries of this type may not
+be active at once in a command buffer, whatever pool they come from, and no
+application node sits between a counted engine bracket's begin and end. The two
+engine brackets that span several nodes, `PassBloom` and `PassUIGlow`, have their
+application passes declared ahead of the chain rather than inside it.
+
+Application brackets **do** nest, which is why this is decided from the graph
+rather than from "is it a compute pass": GPU LOD selection brackets the whole
+pre-shadow range, including the streamed-upload node's own bracket. Neither is a
+rendering instance, so neither carries a query, and the legality walk in
+`renderer/pipelinestats_test.go` fails loudly if that ever changes.
+
+**Lifecycle.** The per-slot table of which pass owns which query is rebuilt at
+every frame's query-pool reset, from the live pass list, so a reading always
+belongs to the frame it was recorded in. On top of that:
+
+- A **disabled** pass is given no query at all, rather than a query that would
+  count zero, and reads `Valid: false`. Giving it one would be worse than
+  useless: a query that is reset and never begun makes the whole slot's readback
+  come back `NotReady` and loses every other pass's number with it.
+- A **destroyed** pass loses its row entirely, because its name is free for reuse
+  the moment it is destroyed.
+- A **graph rebuild** and a **resize** invalidate every application row and clear
+  their means. A rebuild is where a pass is created, destroyed or re-staged; after
+  a resize every count is a count of covered pixels at an extent that no longer
+  exists. Both leave the rows in place reading `Valid: false` so a HUD line does
+  not move, and the next measured frame refills them.
+- The readback stays fence-delayed and non-blocking, and with statistics off
+  there are zero queries: the pinned command streams are byte for byte unchanged.
+
+**Copy semantics.** `PipelineStats` and `MeanPipelineStats` hand out a clone of
+`App`, so the slice is the caller's and no later frame writes through it. That is
+the one allocation in this feature and it is on whoever asks, once per ask: the
+recorded and collected frame allocate nothing. (`RenderStats.App.Passes` is the
+other way round -- renderer-owned storage, refilled in place -- so do not reason
+from one to the other.)
+
+**Where they show up.** `GLYPHENGINE_TIMING=1` prints one `stat app <name>` line
+per row, and prints the rows with no number too -- "not counted" for a dispatch,
+"not measured" for a pass that was off -- because an omitted row would read as a
+pass that costs nothing. `LogTimingsTSV` gains `frag_app_<name>` and
+`clip_app_<name>` columns for the rows that carry a measurement, under the same
+opt-in, and no existing column moves: the line is label/value pairs, so added
+columns cost a parser nothing. A name becomes a column label with everything but
+letters, digits and underscores replaced, since a space in a tab-separated label
+would split a column in two.
+
+**Measured on hardware.** `go run ./cmd/apppasscheck -stats` renders two
+application graphics passes of known, different triangle counts and covered
+areas, as axis-aligned rectangles on exact pixel boundaries at MSAA 1, and checks
+both counters against the geometry and against a covered-pixel count read back
+out of the frame. On an RX 7900 XTX (2026-10-09) at 640x360 under the fixed clock:
+`stats wide` 50,400 invocations over 50,400 covered pixels and 2 primitives after
+clipping for 2 submitted; `stats grid` 7,632 over 7,632 and 8 for 8. Exact to the
+unit and bit-identical across three consecutive frames. The dispatch in the same
+run reads not bracketed, the disabled pass reads invalid, and destroying the
+dispatch invalidates the live pass's row until the next measured frame.
+
+**Verified to fail.** Transposing the readback's row-to-query mapping, so each
+pass is handed its neighbour's query, reports `stats wide: 8 primitives after
+clipping, submitted 2` -- the counts cross. Swapping the two indices in the slot
+table instead does **not** fail, and that is correct: the recording and readback
+sides read one table, so a consistent relabelling is invisible. Beginning an
+application query inside its rendering instance reports `app0: its query ends
+outside the render pass instance it began in` from the GPU-free legality walk.
 
 ### Availability
 

@@ -1170,6 +1170,12 @@ func (e *Engine) LogTimings() {
 // zeroes buries the two that matter. The header says how many frames the mean
 // covers and names the counter's open question, so a number copied out of this
 // block carries the caveat with it rather than leaving it behind in a document.
+//
+// Every application row is printed, including the ones with no number, and that
+// asymmetry is deliberate: an engine pass is always there and a zero on it says
+// "shaded nothing", while an application row's absence of a number is the
+// information -- a dispatch that cannot be counted, or a pass that was off when
+// the frame was recorded. A row omitted would read as a pass that costs nothing.
 func (e *Engine) LogPipelineStats() {
 	st, err := e.renderer.MeanPipelineStats()
 	if err != nil {
@@ -1190,6 +1196,17 @@ func (e *Engine) LogPipelineStats() {
 		}
 		log.Printf("stat %-10s %12d fragment invocations  %10d primitives after clipping",
 			pass, st.FragmentInvocations[p], st.ClippingPrimitives[p])
+	}
+	for _, a := range st.App {
+		switch {
+		case !a.Bracketed:
+			log.Printf("stat app %-16s not counted: a dispatch or a scope that cannot hold a query", a.Name)
+		case !a.Valid:
+			log.Printf("stat app %-16s not measured: disabled, destroyed or not yet read back", a.Name)
+		default:
+			log.Printf("stat app %-16s %12d fragment invocations  %10d primitives after clipping over %d frames",
+				a.Name, a.FragmentInvocations, a.ClippingPrimitives, a.Frames)
+		}
 	}
 }
 
@@ -1240,8 +1257,40 @@ func (e *Engine) LogTimingsTSV(label string) {
 			}
 			fmt.Fprintf(&b, "	frag_%s	%d	clip_%s	%d", pass, ps.FragmentInvocations[p], pass, ps.ClippingPrimitives[p])
 		}
+		// The named application passes, which the timing columns above
+		// deliberately leave out -- a timing column could not say whether a
+		// missing one was cheap or absent, and these can: a row appears only
+		// when it carries a measurement, so a column that is not here is not a
+		// zero. Labels go through tsvLabel because a pass's name is the game's
+		// and a tab or a space in one would split a column in two.
+		for _, a := range ps.App {
+			if !a.Valid {
+				continue
+			}
+			name := tsvLabel(a.Name)
+			fmt.Fprintf(&b, "	frag_app_%s	%d	clip_app_%s	%d", name, a.FragmentInvocations, name, a.ClippingPrimitives)
+		}
 	}
 	log.Println(b.String())
+}
+
+// tsvLabel makes an application pass's name usable as a column label: anything
+// that is not a letter, a digit or an underscore becomes an underscore.
+//
+// A pass name is whatever the game called it -- "caustic projection" is a
+// perfectly good one -- and a space in a tab-separated label/value stream breaks
+// the pairing for every column after it. Two names that differ only in
+// punctuation would collide here; names are unique as created, so the collision
+// is a label collision rather than a wrong number, and the human-readable block
+// above prints the real names.
+func tsvLabel(name string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
+			return r
+		}
+		return '_'
+	}, name)
 }
 
 // LogGPUTimings prints one line per pass plus the measured frame total, averaged

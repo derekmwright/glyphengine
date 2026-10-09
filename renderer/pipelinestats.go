@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"slices"
 
 	"github.com/vkngwrapper/core/v3/core1_0"
 )
@@ -44,6 +45,15 @@ type PipelineStats struct {
 	// after clipping, so a back-facing triangle is in here and shades nothing.
 	ClippingPrimitives [passCount]uint64
 
+	// App is the same two counters for each timed application pass, under the
+	// name GPUTimings reports its timing by and in that same order, so a row
+	// here reads beside the row there. For an application pass a zero has three
+	// meanings rather than two, and AppPipelineStats carries which one it is.
+	//
+	// Safe to retain: PipelineStats and MeanPipelineStats hand out a clone, so
+	// the slice is the caller's and no later frame writes through it.
+	App []AppPipelineStats
+
 	// Frames is how many frames these numbers cover: 1 for the latest reading
 	// and the averaged count for a mean. Reported because a mean over three
 	// frames and a mean over two hundred are not the same evidence.
@@ -55,6 +65,69 @@ type PipelineStats struct {
 	// one has not been measured. See StatisticsBracketed for the third case --
 	// a pass that is measured on the clock and deliberately not here.
 	Valid bool
+}
+
+// AppPipelineStats is one named application pass's fragment invocations and
+// post-clip primitives.
+//
+// Two flags rather than one, because a zero here has three meanings and a game
+// that cannot tell them apart will read the wrong one. Bracketed is a property
+// of the pass: false for a compute dispatch -- fragment invocations and clipping
+// primitives do not exist for a dispatch, and reporting zero for one would be
+// inventing a measurement -- and false for the engine's own timed nodes, which
+// are a transfer copy and a bracket over compute work. Valid is a property of
+// this frame: false for a pass that was disabled or not yet measured when the
+// slot was recorded, or whose reading a graph rebuild or a resize has since
+// invalidated. A DESTROYED pass has no row at all, because its name is free for
+// reuse. So Bracketed && Valid && zero is a pass that really shaded nothing, and
+// the other two zeroes are not numbers at all.
+type AppPipelineStats struct {
+	// Name is the pass's own name, as CreateAppPass or CreateAppCompute was
+	// given it and as GPUTimings().App reports it. Unique among live passes:
+	// CreateAppPass refuses a duplicate precisely so this is a key.
+	Name string
+
+	FragmentInvocations uint64
+	ClippingPrimitives  uint64
+
+	// Frames is how many frames this row covers -- 1 for a latest reading, and
+	// its own count for a mean, which is NOT PipelineStats.Frames: a pass
+	// switched off for half a run has a mean over the half it ran.
+	Frames int
+
+	// Bracketed is whether this pass's scope can legally hold a query at all.
+	Bracketed bool
+
+	// Valid is whether this frame measured it.
+	Valid bool
+}
+
+// Pass returns the counters recorded for the application pass with this name,
+// and false when no row carries that name.
+//
+// Keyed by name rather than by index for the reason AppStats.Pass is: the index
+// of a pass in graph order moves when another pass is created, and a HUD line
+// keyed on it would silently start reading its neighbour.
+func (p PipelineStats) Pass(name string) (AppPipelineStats, bool) {
+	for _, a := range p.App {
+		if a.Name == name {
+			return a, true
+		}
+	}
+	return AppPipelineStats{}, false
+}
+
+// clone detaches App from the recorder's own storage.
+//
+// The engine arrays are arrays and copy with the struct; App is a slice into
+// storage the next collected frame refills in place, so handing it over as-is
+// would give a caller a view that changes under it two frames later -- and the
+// issue asks explicitly for a result that is safe to retain and copy. Cloning in
+// the accessor rather than in collect is what keeps the recorded and collected
+// frame allocation-free: the cost lands on whoever asks, once per ask.
+func (p PipelineStats) clone() PipelineStats {
+	p.App = slices.Clone(p.App)
+	return p
 }
 
 // StatisticsBracketed reports whether p's GPU-timing bracket also carries
@@ -124,6 +197,32 @@ var statsQueryOf, statsQueriesPerFrame = func() ([passCount]int, int) {
 	return idx, n
 }()
 
+// maxAppStats is how many application queries a frame slot holds.
+//
+// maxAppTimings and not maxAppTimings+engineTimings: the two engine nodes that
+// ride in the application timing budget are the streamed-upload transfer copy
+// and the GPU LOD bracket, and neither is a rendering instance, so neither can
+// carry one of these (see frameGraph.statsBracketed). validateAppTiming caps
+// the application's own timed passes at maxAppTimings, so this cannot be short.
+const maxAppStats = maxAppTimings
+
+// appStatsBase is the first query index of a frame slot's application region.
+//
+// The application regions sit past EVERY slot's engine region, the way the
+// timer lays its application timestamps out, so creating an application pass
+// cannot renumber an engine query and base(frame) stays what it was.
+func appStatsBase(frame int) int {
+	return statsQueriesPerFrame*maxFramesInFlight + frame*maxAppStats
+}
+
+// appStatsSum accumulates one application pass's counters for the mean. Its own
+// frame count, because a pass disabled for part of a run is measured for part of
+// a run and a mean over the whole would understate it.
+type appStatsSum struct {
+	frag, clip uint64
+	frames     int
+}
+
 // pipelineStats records the per-pass statistics with one query per bracketed
 // pass per frame slot.
 //
@@ -168,6 +267,45 @@ type pipelineStats struct {
 	// ready", and it comes back NotReady either way -- see the same field on
 	// gpuTimer.
 	recorded [maxFramesInFlight]bool
+
+	// appRows is the slot's application table, rebuilt at every reset for the
+	// reason gpuTimer.appRecorded is: it is the only record of what the slot
+	// being read back actually recorded, and a table carried over from a
+	// previous frame is how a pass gets charged its neighbour's count. It holds
+	// every TIMED pass, so a row exists for one that carries no query, and
+	// appQuery is that row's index inside the slot's application region or -1.
+	//
+	// A pass gets -1 for more than one reason -- it is not bracketable at all,
+	// or it was disabled or destroyed when the slot was reset -- and the row's
+	// Bracketed flag is what keeps those apart for a reader. A disabled pass is
+	// deliberately given no query rather
+	// than a query that would count zero: "this pass did not run" and "this pass
+	// ran and shaded nothing" are different answers.
+	appRows   [maxFramesInFlight][maxAppTimings + engineTimings]*AppPass
+	appQuery  [maxFramesInFlight][maxAppTimings + engineTimings]int
+	appRowN   [maxFramesInFlight]int
+	appQueryN [maxFramesInFlight]int
+
+	appScratch [maxAppStats * statsResultBytes]byte
+
+	// appLatest is the row storage latest.App points into, and appOwner the pass
+	// each row belongs to -- needed by invalidateApps, which has to drop the row
+	// of a destroyed pass and cannot ask a name.
+	appLatest [maxAppTimings + engineTimings]AppPipelineStats
+	appOwner  [maxAppTimings + engineTimings]*AppPass
+	appN      int
+	appMean   [maxAppTimings + engineTimings]AppPipelineStats
+
+	// bracketed is the application passes whose graph node is a rendering
+	// instance of its own, rebuilt with the frame graph (see bindApps). A map
+	// rather than a field on AppPass because it is a property of the live graph
+	// and CreateAppPass compiles a throwaway one to read pipeline formats.
+	bracketed map[*AppPass]bool
+
+	// appSums is the mean's accumulator. Entries are created at graph rebuild
+	// rather than on first collect, so a collected frame assigns to a key that
+	// already exists and allocates nothing.
+	appSums map[*AppPass]appStatsSum
 }
 
 // newPipelineStats creates the query pool, or returns an inert recorder.
@@ -194,9 +332,17 @@ func newPipelineStats(deviceDriver core1_0.DeviceDriver, caps Capabilities, requ
 		return s, nil
 	}
 
+	// One pool for the engine brackets and the application ones, not two.
+	//
+	// A second pool would buy exactly nothing: two pipeline-statistics queries
+	// may not be active in one command buffer whatever pools they come from
+	// (VUID-vkCmdBeginQuery-queryPool-01922), so splitting them would not make a
+	// nested bracket legal -- it would only hide that it is the same rule. One
+	// pool also keeps the capability gate, the single creation failure and the
+	// destruction in one place, and both regions want the same two counters.
 	pool, _, err := deviceDriver.CreateQueryPool(nil, core1_0.QueryPoolCreateInfo{
 		QueryType:  core1_0.QueryTypePipelineStatistics,
-		QueryCount: statsQueriesPerFrame * maxFramesInFlight,
+		QueryCount: (statsQueriesPerFrame + maxAppStats) * maxFramesInFlight,
 		PipelineStatistics: core1_0.QueryPipelineStatisticFragmentShaderInvocations |
 			core1_0.QueryPipelineStatisticClippingPrimitives,
 	})
@@ -228,6 +374,153 @@ func (s *pipelineStats) reset(deviceDriver core1_0.DeviceDriver, cmdBuf core1_0.
 	}
 	deviceDriver.CmdResetQueryPool(cmdBuf, s.pool, s.base(frame), statsQueriesPerFrame)
 	s.recorded[frame] = true
+}
+
+// resetApps rebuilds the frame slot's application table and discards the
+// queries it hands out, in the same place and for the same reasons reset does.
+//
+// The table is decided here, before the first application edge of the slot, and
+// nothing between here and the slot's readback consults the live pass list
+// again. That is what makes a disabled or destroyed pass report invalid rather
+// than stale: the row it gets is the row this reset gave it.
+//
+// Only the queries actually handed out are reset, because only those are read.
+// A query that is reset and never begun comes back unavailable and makes the
+// WHOLE readback NotReady -- the trap statsQueryOf's compaction exists for, and
+// the one an application pass hits every time it is switched off.
+func (s *pipelineStats) resetApps(deviceDriver core1_0.DeviceDriver, cmdBuf core1_0.CommandBuffer, frame int, apps []*AppPass) {
+	if s == nil || !s.supported {
+		return
+	}
+	rows, queries := 0, 0
+	for _, p := range apps {
+		if !p.desc.Timed || rows == len(s.appRows[frame]) {
+			continue
+		}
+		q := -1
+		if s.bracketed[p] && p.enabled && !p.destroyed && queries < maxAppStats {
+			q, queries = queries, queries+1
+		}
+		s.appRows[frame][rows], s.appQuery[frame][rows] = p, q
+		rows++
+	}
+	s.appRowN[frame], s.appQueryN[frame] = rows, queries
+	if queries > 0 {
+		deviceDriver.CmdResetQueryPool(cmdBuf, s.pool, appStatsBase(frame), queries)
+	}
+}
+
+// appQueryOf is the slot query p was given this frame, or -1.
+//
+// A linear scan over at most eighteen entries, which is gpuTimer.appEdge's scan
+// and is deliberately the same shape: the two instruments find a pass's slot the
+// same way, so they cannot disagree about which pass they are bracketing.
+func (s *pipelineStats) appQueryOf(frame int, p *AppPass) int {
+	if s == nil || !s.supported {
+		return -1
+	}
+	for i := 0; i < s.appRowN[frame]; i++ {
+		if s.appRows[frame][i] == p {
+			return s.appQuery[frame][i]
+		}
+	}
+	return -1
+}
+
+func (s *pipelineStats) beginApp(deviceDriver core1_0.DeviceDriver, cmdBuf core1_0.CommandBuffer, frame int, p *AppPass) {
+	if q := s.appQueryOf(frame, p); q >= 0 {
+		deviceDriver.CmdBeginQuery(cmdBuf, s.pool, appStatsBase(frame)+q, 0)
+	}
+}
+
+func (s *pipelineStats) endApp(deviceDriver core1_0.DeviceDriver, cmdBuf core1_0.CommandBuffer, frame int, p *AppPass) {
+	if q := s.appQueryOf(frame, p); q >= 0 {
+		deviceDriver.CmdEndQuery(cmdBuf, s.pool, appStatsBase(frame)+q)
+	}
+}
+
+// bindApps records which application passes can carry a query, from the graph
+// that is about to become the live one.
+//
+// Called where gpuTimer.apps is rebuilt, from the same list, so the statistics
+// rows and the timing rows are the same rows. The mean's accumulator gets its
+// keys here too, so collect only ever assigns to one that exists.
+func (s *pipelineStats) bindApps(apps []*AppPass, f *frameGraph) {
+	if s == nil || !s.supported {
+		return
+	}
+	if s.bracketed == nil {
+		s.bracketed = make(map[*AppPass]bool, len(apps))
+	}
+	if s.appSums == nil {
+		s.appSums = make(map[*AppPass]appStatsSum, len(apps))
+	}
+	clear(s.bracketed)
+	for _, p := range apps {
+		if !f.statsBracketed(p) {
+			continue
+		}
+		s.bracketed[p] = true
+		if _, ok := s.appSums[p]; !ok {
+			s.appSums[p] = appStatsSum{}
+		}
+	}
+}
+
+// forgetApp drops a destroyed pass from the mean and from the bracketed set.
+// Its rows are dropped by invalidateApps, which the rebuild that follows a
+// destroy runs anyway.
+func (s *pipelineStats) forgetApp(p *AppPass) {
+	if s == nil {
+		return
+	}
+	delete(s.bracketed, p)
+	delete(s.appSums, p)
+}
+
+// invalidateApps drops the application rows' numbers, keeping the rows.
+//
+// Called where a reading stops describing the frame rather than merely being a
+// couple of frames old: a frame-graph rebuild, which is where a pass is created,
+// destroyed or re-staged, and a swapchain rebuild, after which every count here
+// is a count of covered pixels at an extent that no longer exists. Without it a
+// pass that has stopped being measured keeps reporting the last number it had,
+// which is the one failure mode the Valid flag exists to prevent.
+//
+// The row survives with Valid false rather than disappearing, so a HUD line does
+// not move when an effect is switched off -- except a destroyed pass's, which
+// goes: its name is free for reuse the moment it is destroyed, and a row under a
+// name the next CreateAppPass can take is worse than no row. The mean goes with
+// it for the same reason it is not carried across a resize: a mean of two frame
+// sizes is a mean of nothing.
+//
+// DrawFrame collects the retired slot before it replaces a dirty graph, so this
+// runs after that frame's collect rather than before it. The order is
+// load-bearing: reversed, the rebuild's invalidation would be overwritten by the
+// same frame's reading and nothing would ever read invalid. Slots still in
+// flight were recorded against the old table and come back a frame or two later
+// with real numbers, which is right -- they measured frames the passes really
+// rendered -- so a rebuild costs one frame of rows and not a whole mean.
+func (s *pipelineStats) invalidateApps() {
+	if s == nil {
+		return
+	}
+	n := 0
+	for i := 0; i < s.appN; i++ {
+		p := s.appOwner[i]
+		if p == nil || p.destroyed {
+			continue
+		}
+		row := s.appLatest[i]
+		row.FragmentInvocations, row.ClippingPrimitives, row.Frames, row.Valid = 0, 0, 0, false
+		s.appLatest[n], s.appOwner[n] = row, p
+		n++
+	}
+	s.appN = n
+	s.latest.App = s.appLatest[:n]
+	for p := range s.appSums {
+		s.appSums[p] = appStatsSum{}
+	}
 }
 
 func (s *pipelineStats) begin(deviceDriver core1_0.DeviceDriver, cmdBuf core1_0.CommandBuffer, frame int, p Pass) {
@@ -268,12 +561,58 @@ func (s *pipelineStats) collect(deviceDriver core1_0.DeviceDriver, frame int) {
 		out.ClippingPrimitives[p] = binary.LittleEndian.Uint64(s.scratch[at+statsClipping*8:])
 		out.FragmentInvocations[p] = binary.LittleEndian.Uint64(s.scratch[at+statsFragment*8:])
 	}
+	s.collectApps(deviceDriver, frame, &out)
 	s.latest = out
 	for p := range out.FragmentInvocations {
 		s.sumFrag[p] += out.FragmentInvocations[p]
 		s.sumClip[p] += out.ClippingPrimitives[p]
 	}
 	s.frames++
+}
+
+// collectApps reads the slot's application region and refills the rows.
+//
+// The rows are rebuilt whole every time, from the table the slot was reset with,
+// which is what makes a pass that recorded nothing report Valid false instead of
+// its previous number. A readback that does not come back leaves every row
+// invalid rather than leaving the previous frame's numbers under this frame's
+// names.
+//
+// A destroyed pass's row is dropped here as collectApps's timing counterpart
+// drops it: by the time a slot is read its pass may be gone, and a count under a
+// freed name is worse than no count.
+func (s *pipelineStats) collectApps(deviceDriver core1_0.DeviceDriver, frame int, out *PipelineStats) {
+	read := false
+	if n := s.appQueryN[frame]; n > 0 {
+		res, err := deviceDriver.GetQueryPoolResults(s.pool, appStatsBase(frame), n,
+			s.appScratch[:n*statsResultBytes], statsResultBytes, core1_0.QueryResult64Bit)
+		read = err == nil && res == core1_0.VKSuccess
+	}
+	count := 0
+	for i := 0; i < s.appRowN[frame]; i++ {
+		p := s.appRows[frame][i]
+		if p.destroyed {
+			continue
+		}
+		row := AppPipelineStats{Name: p.desc.Name, Bracketed: s.bracketed[p]}
+		if q := s.appQuery[frame][i]; q >= 0 && read {
+			at := q * statsResultBytes
+			row.ClippingPrimitives = binary.LittleEndian.Uint64(s.appScratch[at+statsClipping*8:])
+			row.FragmentInvocations = binary.LittleEndian.Uint64(s.appScratch[at+statsFragment*8:])
+			row.Frames, row.Valid = 1, true
+			if _, ok := s.appSums[p]; ok {
+				v := s.appSums[p]
+				v.frag += row.FragmentInvocations
+				v.clip += row.ClippingPrimitives
+				v.frames++
+				s.appSums[p] = v
+			}
+		}
+		s.appLatest[count], s.appOwner[count] = row, p
+		count++
+	}
+	s.appN = count
+	out.App = s.appLatest[:count]
 }
 
 // mean averages every frame collected since the last reset.
@@ -292,6 +631,20 @@ func (s *pipelineStats) mean() PipelineStats {
 		out.FragmentInvocations[p] = s.sumFrag[p] / n
 		out.ClippingPrimitives[p] = s.sumClip[p] / n
 	}
+	// The application rows in the order and under the names the latest reading
+	// has them, each averaged over ITS OWN frame count rather than over s.frames:
+	// a pass switched on halfway through a run would otherwise read half of what
+	// it costs, which is the shape of error that gets an effect called cheap.
+	for i := 0; i < s.appN; i++ {
+		row := AppPipelineStats{Name: s.appLatest[i].Name, Bracketed: s.appLatest[i].Bracketed}
+		if a := s.appSums[s.appOwner[i]]; a.frames > 0 {
+			row.FragmentInvocations = a.frag / uint64(a.frames)
+			row.ClippingPrimitives = a.clip / uint64(a.frames)
+			row.Frames, row.Valid = a.frames, true
+		}
+		s.appMean[i] = row
+	}
+	out.App = s.appMean[:s.appN]
 	return out
 }
 
@@ -331,7 +684,7 @@ func (r *Renderer) PipelineStats() (PipelineStats, error) {
 	if err := r.pipelineStats.err(); err != nil {
 		return PipelineStats{}, err
 	}
-	return r.pipelineStats.latest, nil
+	return r.pipelineStats.latest.clone(), nil
 }
 
 // MeanPipelineStats averages every frame collected since the last
@@ -342,7 +695,7 @@ func (r *Renderer) MeanPipelineStats() (PipelineStats, error) {
 	if err := r.pipelineStats.err(); err != nil {
 		return PipelineStats{}, err
 	}
-	return r.pipelineStats.mean(), nil
+	return r.pipelineStats.mean().clone(), nil
 }
 
 // ResetPipelineStats discards the accumulated mean, for measuring one phase of a
@@ -354,6 +707,9 @@ func (r *Renderer) ResetPipelineStats() {
 		return
 	}
 	s.sumFrag, s.sumClip, s.frames = [passCount]uint64{}, [passCount]uint64{}, 0
+	for p := range s.appSums {
+		s.appSums[p] = appStatsSum{}
+	}
 }
 
 // PipelineStatsSupported reports whether this renderer is recording pipeline

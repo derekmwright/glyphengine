@@ -745,6 +745,21 @@ tasks:
           [ "$msgs" = "0" ] || { echo "$out"; exit 1; }
           echo "instancecheck -validate $args: clean"
         done
+        # Pipeline statistics on named application passes (#187). Two queries
+        # from the same pool must never be active at once and one begun inside a
+        # rendering instance must end inside it, and the layer is the only thing
+        # that says so on a device -- the GPU-free walk in
+        # renderer/pipelinestats_test.go holds the rule, this holds the device.
+        # The mode also disables a pass and destroys a dispatch mid-run, which
+        # resets the slot tables while queries are in flight.
+        cd ..
+        out=$(GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./cmd/apppasscheck -stats -validate -frames 12 2>&1) || { echo "$out"; exit 1; }
+        probe=$(echo "VULKAN ERROR: self-check" | grep -cE "VULKAN (ERROR|WARNING)" || true)
+        [ "$probe" = "1" ] || { echo "cannot count validation messages"; exit 1; }
+        msgs=$(echo "$out" | grep -cE "VULKAN (ERROR|WARNING)" || true)
+        [ "$msgs" = "0" ] || { echo "$out"; exit 1; }
+        echo "$out" | grep -q "identical across three frames" || { echo "$out"; exit 1; }
+        echo "apppasscheck -stats: clean"
 
   syncvalidate:
     desc: "Run the validation suite with synchronization hazard detection (needs GPU and SDK)"
@@ -776,6 +791,16 @@ tasks:
         msgs=$(echo "$out" | grep -cE "VULKAN (ERROR|WARNING)" || true)
         if [ "$msgs" != "0" ]; then echo "$out"; exit 1; fi
         echo "apppasscheck -shadowcompute -provoke-recreate: clean"
+      - |
+        # The statistics mode again under synchronization validation: a query
+        # pool reset races the frame it belongs to if it is recorded in the
+        # wrong place, and a disabled pass changes which queries are reset
+        # between one frame and the next.
+        out=$(GLYPHENGINE_VALIDATION=1 GLYPHENGINE_SYNC_VALIDATION=1 GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./cmd/apppasscheck -stats -validate -frames 12 2>&1) || { echo "$out"; exit 1; }
+        echo "$out" | grep -q "Vulkan synchronization validation enabled" || { echo "$out"; exit 1; }
+        msgs=$(echo "$out" | grep -cE "VULKAN (ERROR|WARNING)" || true)
+        if [ "$msgs" != "0" ]; then echo "$out"; exit 1; fi
+        echo "apppasscheck -stats: clean under synchronization validation"
 
   reload:
     desc: "Check that swapping a level for a freshly loaded copy never drops a frame's geometry"
@@ -2279,8 +2304,10 @@ tasks:
       # is only reported for a frame that covered what it meant to, and the
       # denominator comes from a readback rather than from the counter.
       #
-      # MEASUREMENT PENDING: the numbers, the verdict and the break are recorded in
-      # docs/agents/profiling.md and ADR 0013 once this has run on hardware.
+      # MEASURED on the RX 7900 XTX: FRAGMENT_SHADER_INVOCATIONS excludes helper
+      # lanes (19,200 one-pixel triangles read exactly 19,200), so the counter
+      # bounds quad overshading from below. The numbers, the verdict and the
+      # break are in docs/agents/profiling.md and ADR 0013.
       - go run ./cmd/quadcheck -validate
 
   widetex:

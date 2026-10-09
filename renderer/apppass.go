@@ -317,6 +317,10 @@ func (r *Renderer) DestroyAppPass(p *AppPass) {
 	if r.gpuTimer != nil {
 		delete(r.gpuTimer.appSums, p)
 	}
+	// The statistics recorder's mean and bracketed set go the same way and for
+	// the same reason: the name is free for reuse now, and a later pass taking
+	// it would otherwise inherit this one's accumulated counts.
+	r.pipelineStats.forgetApp(p)
 	r.DeferDestroy(p.release)
 }
 
