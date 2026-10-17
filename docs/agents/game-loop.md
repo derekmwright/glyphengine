@@ -67,7 +67,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-10-03 # Capabilities.PipelineStatistics listed, the device feature WithPipelineStatistics needs (#182); the depth prepass returned as DepthPrepassAuto, gated on an online depth-complexity estimate (#158, ADR 0013) -- threshold 2.02 measured by the sweep at both resolutions, rule passed on all six clauses, and C/pixels refuted; the global block named as the game's, with AppPassDesc.Params as the per-pass alternative (#170); Engine.Renderer listed (#169); the hierarchical-Z follow-up measured and removed (#154); the draw list's order and the rejected opaque policy; releasing mid-frame (#153); the capabilities report and who owns which fallback (#160); the depth prepass measured and removed by its own rule (#158); the sky slot, the one ShaderSet stage group with no embedded fallback (#161 step 4)
+verified: 2026-10-17 # the orbit camera follows a moving player from LateUpdate with the interpolated position; previously 2026-10-03: Capabilities.PipelineStatistics listed, the device feature WithPipelineStatistics needs (#182); the depth prepass returned as DepthPrepassAuto, gated on an online depth-complexity estimate (#158, ADR 0013) -- threshold 2.02 measured by the sweep at both resolutions, rule passed on all six clauses, and C/pixels refuted; the global block named as the game's, with AppPassDesc.Params as the per-pass alternative (#170); Engine.Renderer listed (#169); the hierarchical-Z follow-up measured and removed (#154); the draw list's order and the rejected opaque policy; releasing mid-frame (#153); the capabilities report and who owns which fallback (#160); the depth prepass measured and removed by its own rule (#158); the sky slot, the one ShaderSet stage group with no embedded fallback (#161 step 4)
 ---
 
 # Run a game loop with Engine and Game
@@ -140,6 +140,25 @@ func main() {
 ```
 
 Full program: `examples/02-cube`.
+
+That program's cube never moves, so setting `Target` once in `Init` is enough.
+For a moving player, follow it every frame from `LateUpdate`, using the
+interpolated transform (see "Rendering between ticks" below for why not the raw one):
+
+```go
+func (g *game) LateUpdate(e *glyph.Engine, dt float32) {
+	if t, ok := e.InterpolatedTransform(g.player); ok {
+		g.camera.Target = t.Position
+	}
+	g.camera.ResolveCollision(e.Scene, g.player, dt)
+	e.SetCamera(g.camera.ViewVectors())
+}
+```
+
+`Update` keeps `g.camera.Update(e.Input())`. The raw `Transform` holds the last
+simulated tick, while the renderer draws the blend of the last two ticks, so a
+camera targeted at the raw position moves at the tick rate and the player jitters
+against the view.
 
 ## What the device granted, and who owns the fallback
 

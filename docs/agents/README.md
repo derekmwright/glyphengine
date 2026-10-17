@@ -8,7 +8,7 @@ since: v0.1.0
 api: []
 requires: []
 assets: none
-verified: 2026-07-28
+verified: 2026-10-17 # paragraph on where example: and run: paths live for module consumers
 ---
 
 # Capability docs
@@ -51,6 +51,17 @@ verified: 2026-07-28         # date the page was last checked against the code
 ```
 
 ### Field notes
+
+- **`example`** and **`run`** are paths in the *repository*, not in the Go
+  module you installed. The examples are a separate module (`examples/`,
+  ADR 0003) so that `go get` of the engine never pulls example code, assets or
+  anyone's opinions, which means they are absent from the module cache. Browse
+  them at https://github.com/derekmwright/glyphengine, at the tag matching the
+  engine version in your `go.mod`:
+  `https://github.com/derekmwright/glyphengine/tree/<tag>/<example path>`, so
+  `examples/04-first-person` is at `.../tree/<tag>/examples/04-first-person`. Reading the tag rather
+  than `main` means the code is the version your pages describe, so no page
+  carries its own URL.
 
 - **`id`** is a permanent identifier. Change `title` freely; never change `id`.
 - **`capability`** is the primary index key. Values in use: `rendering`,

@@ -30,7 +30,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-09-25
+verified: 2026-10-17 # live-pointer example added, compiled by TestLivePointersMutateInPlace
 ---
 
 # Build a scene from entities and components
@@ -134,7 +134,24 @@ ecs.Query3(s.C.Transform, s.C.Velocity, s.C.Collider,
 ```
 
 The pointers handed to the callback are **live** — write through them to mutate
-the component.
+the component. So is the pointer `Store.Get` returns:
+
+```go
+// Through Get: move one entity.
+if t, ok := s.C.Transform.Get(e); ok {
+	t.Position = t.Position.Add(mgl32.Vec3{0, 2, 0}) // stored component, edited in place
+}
+
+// Through a query: move every entity that also has a Velocity.
+ecs.Query2(s.C.Transform, s.C.Velocity, func(_ ecs.Entity, t *Transform, _ *Velocity) {
+	t.Position = t.Position.Add(mgl32.Vec3{1, 0, 0})
+})
+```
+
+Neither needs `s.C.Transform.Set(e, t)` afterwards. Calling it with the same
+pointer also works but changes nothing; calling it with a different pointer
+replaces the stored component, which any pointer you fetched earlier no longer
+refers to. `TestLivePointersMutateInPlace` compiles and checks both forms.
 
 ### Iteration order is undefined, and Go makes sure you notice
 

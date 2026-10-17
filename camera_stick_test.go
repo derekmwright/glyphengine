@@ -56,9 +56,11 @@ func TestStickLookIsFrameRateIndependent(t *testing.T) {
 }
 
 // TestStickLookDirections pins the sign conventions, which differ between the two
-// cameras — FPCamera's positive pitch looks down, the orbit camera's looks up. The
-// field comments say so; this makes sure the stick paths honour it, because an
-// inverted look axis is the sort of thing that ships.
+// cameras. Both share one pitch convention, positive looks down (see
+// TestPitchConventionBothCamerasLookDown), so the stick mappings differ: FPCamera
+// negates to look up, the orbit camera adds to raise the eye. This makes sure the
+// stick paths honour it, because an inverted look axis is the sort of thing that
+// ships.
 func TestStickLookDirections(t *testing.T) {
 	const dt = 1.0 / 60.0
 
@@ -77,7 +79,7 @@ func TestStickLookDirections(t *testing.T) {
 	start := o.Pitch
 	o.LookStick(0, 1, dt) // push up
 	if o.Pitch <= start {
-		t.Errorf("orbit pitch %g after pushing up, was %g; positive pitch looks up", o.Pitch, start)
+		t.Errorf("orbit pitch %g after pushing up, was %g; pushing up raises the camera", o.Pitch, start)
 	}
 
 	// InvertY flips the vertical axis for the stick as well as the mouse.

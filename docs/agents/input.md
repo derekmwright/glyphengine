@@ -33,7 +33,7 @@ api:
 assets: none
 example: examples/17-input
 run: go run ./17-input
-verified: 2026-09-17
+verified: 2026-10-17 # the cameras do not disagree on pitch sign; points to cameras.md
 ---
 
 # Input
@@ -161,9 +161,10 @@ g.camera.LookStick(lx, ly, dt)        // stick: rate, needs dt
 full deflection. `Camera.ZoomBy` is the same distinction for a held trigger
 versus the scroll wheel, which already arrives pre-quantised per frame.
 
-The two cameras also disagree on pitch sign — `FPCamera`'s positive pitch looks
-down, `Camera`'s looks up — which their field comments record and both stick
-paths honour.
+The two cameras share one pitch convention (positive looks down), measured in
+[`cameras.md`](cameras.md); the stick mappings differ because the orbit camera
+adds a pushed-up stick to pitch and `FPCamera` subtracts it. Both paths honour
+it.
 
 ## MousePos is pixels, MouseDelta is points
 
