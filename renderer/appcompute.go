@@ -22,8 +22,19 @@ type AppComputeDesc struct {
 	// the shader declares as sampler3D, checked against the textures' shapes
 	// at creation in both directions.
 	Reads3D []int
-	Writes  []*RenderTarget
-	Buffers []*StorageBuffer
+	// ReadRanges is AppPassDesc.ReadRanges for a dispatch. It is also what
+	// lets a dispatch read one level of a chain it writes another level of:
+	// a read of a target the dispatch also writes, without History, must name
+	// a range that excludes the written level.
+	ReadRanges []LevelRange
+	Writes     []*RenderTarget
+	// WriteLevels is parallel to Writes and selects the mip level each
+	// storage binding writes; an index it does not reach writes level 0. A
+	// level a target does not have, and any level but 0 on a single-level
+	// target, is refused at creation. Size the dispatch from LevelExtent of
+	// the level written, not from Extent.
+	WriteLevels []int
+	Buffers     []*StorageBuffer
 	// ReadsShadows declares that the shader samples the directional cascades at
 	// set 1 bindings 0 and 1. It adds the frame-graph edge from the cascade
 	// passes to this dispatch, so their depth writes are made visible to the
@@ -108,12 +119,103 @@ func (r *Renderer) validateAppCompute(d AppComputeDesc) error {
 	if err := r.validateAppReads(d.Reads, d.Reads3D, d.Stage, false, fail); err != nil {
 		return err
 	}
-	for _, t := range d.Reads {
-		if t.target != nil && slices.Contains(d.Writes, t.target) && !t.target.desc.History {
-			return fail("Reads", fmt.Sprintf("target %q needs History when also written", t.target.desc.Name))
-		}
+	if err := validateAppLevels(d.Reads, d.ReadRanges, d.Writes, d.WriteLevels, fail); err != nil {
+		return err
+	}
+	if err := validateAppOverlap(d.Reads, d.ReadRanges, d.Writes, d.WriteLevels, fail); err != nil {
+		return err
 	}
 	return r.validateAppTiming(d.Timed, fail, wrap)
+}
+
+// validateAppOverlap refuses a read of a target the dispatch also writes,
+// unless the read sees the previous frame (History) or its level range
+// excludes the level written. Without either, the shader samples the
+// subresource it is storing into, which no barrier can order.
+func validateAppOverlap(reads []*Texture, ranges []LevelRange, writes []*RenderTarget, writeLevels []int, fail func(string, string) error) error {
+	for i, t := range reads {
+		target := t.target
+		if target == nil || target.desc.History {
+			continue
+		}
+		j := slices.Index(writes, target)
+		if j < 0 {
+			continue
+		}
+		if target.Levels() <= 1 {
+			return fail("Reads", fmt.Sprintf("target %q needs History when also written", target.desc.Name))
+		}
+		rg := LevelRange{Count: target.Levels()}
+		if i < len(ranges) && ranges[i].Count > 0 {
+			rg = ranges[i]
+		}
+		level := 0
+		if j < len(writeLevels) {
+			level = writeLevels[j]
+		}
+		if level >= rg.Base && level < rg.Base+rg.Count {
+			return fail("Reads", fmt.Sprintf("index %d reads levels [%d,%d) of target %q, overlapping level %d that Writes index %d writes; give it a ReadRanges entry that excludes that level",
+				i, rg.Base, rg.Base+rg.Count, target.desc.Name, level, j))
+		}
+	}
+	return nil
+}
+
+// validateAppLevels checks a pass's level declarations against the chains
+// the named targets have now. Creation calls it, and so does the rebuild that
+// can shorten a swapchain-relative chain, so a pass naming a level that no
+// longer exists is refused there rather than binding a view of nothing.
+func validateAppLevels(reads []*Texture, ranges []LevelRange, writes []*RenderTarget, writeLevels []int, fail func(string, string) error) error {
+	if len(ranges) > len(reads) {
+		return fail("ReadRanges", fmt.Sprintf("%d entries for %d reads", len(ranges), len(reads)))
+	}
+	for i, rg := range ranges {
+		if rg == (LevelRange{}) {
+			continue
+		}
+		if rg.Base < 0 || rg.Count <= 0 {
+			return fail("ReadRanges", fmt.Sprintf("index %d: {Base %d, Count %d} is not a level range; the zero value is the whole chain", i, rg.Base, rg.Count))
+		}
+		t := reads[i]
+		if t == nil || t.target == nil {
+			return fail("ReadRanges", fmt.Sprintf("index %d restricts a texture that is not a render target", i))
+		}
+		switch n := t.target.Levels(); {
+		case n <= 1:
+			return fail("ReadRanges", fmt.Sprintf("index %d selects levels [%d,%d) of target %q, which has one level", i, rg.Base, rg.Base+rg.Count, t.target.desc.Name))
+		case rg.Base+rg.Count > n:
+			return fail("ReadRanges", fmt.Sprintf("index %d selects levels [%d,%d) of target %q, which has %d levels", i, rg.Base, rg.Base+rg.Count, t.target.desc.Name, n))
+		}
+	}
+	if len(writeLevels) > len(writes) {
+		return fail("WriteLevels", fmt.Sprintf("%d entries for %d writes", len(writeLevels), len(writes)))
+	}
+	for i, l := range writeLevels {
+		t := writes[i]
+		switch n := t.Levels(); {
+		case l < 0:
+			return fail("WriteLevels", fmt.Sprintf("index %d selects level %d of target %q; levels count from 0", i, l, t.desc.Name))
+		case l == 0:
+		case n <= 1:
+			return fail("WriteLevels", fmt.Sprintf("index %d selects level %d of target %q, which has one level", i, l, t.desc.Name))
+		case l >= n:
+			return fail("WriteLevels", fmt.Sprintf("index %d selects level %d of target %q, which has %d levels", i, l, t.desc.Name, n))
+		}
+	}
+	return nil
+}
+
+// createRangeViews registers every ranged read of a pass on its target. The
+// views belong to the target, see RenderTarget.ranges.
+func (r *Renderer) createRangeViews(reads []*Texture, ranges []LevelRange) error {
+	for i, rg := range ranges {
+		if rg.Count > 0 {
+			if _, err := r.rangeView(reads[i].target, rg); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (r *Renderer) CreateAppCompute(d AppComputeDesc) (_ *AppCompute, err error) {
@@ -123,10 +225,14 @@ func (r *Renderer) CreateAppCompute(d AppComputeDesc) (_ *AppCompute, err error)
 	if err = r.ensureComputeLayout(d.Params > 0); err != nil {
 		return nil, fmt.Errorf("app compute %q: input layout: %w", d.Name, err)
 	}
+	if err = r.createRangeViews(d.Reads, d.ReadRanges); err != nil {
+		return nil, fmt.Errorf("app compute %q: ReadRanges: %w", d.Name, err)
+	}
 	d.Reads, d.Writes = slices.Clone(d.Reads), slices.Clone(d.Writes)
 	d.Buffers, d.Reads3D = slices.Clone(d.Buffers), slices.Clone(d.Reads3D)
+	d.ReadRanges, d.WriteLevels = slices.Clone(d.ReadRanges), slices.Clone(d.WriteLevels)
 	c := &AppCompute{desc: d}
-	p := &AppPass{r: r, desc: AppPassDesc{Name: d.Name, Stage: d.Stage, Reads: d.Reads, Reads3D: d.Reads3D, Timed: d.Timed, Params: d.Params}, enabled: true, compute: c}
+	p := &AppPass{r: r, desc: AppPassDesc{Name: d.Name, Stage: d.Stage, Reads: d.Reads, Reads3D: d.Reads3D, ReadRanges: d.ReadRanges, Timed: d.Timed, Params: d.Params}, enabled: true, compute: c}
 	c.pass = p
 	r.appPasses = append(r.appPasses, p)
 	defer func() {
@@ -259,7 +365,11 @@ func (r *Renderer) flushComputeOutputs(p *AppCompute, set core1_0.DescriptorSet,
 		if t.desc.History {
 			instance = frame % 2
 		}
-		r.appInfos[0] = core1_0.DescriptorImageInfo{ImageView: t.color.views[instance], ImageLayout: core1_0.ImageLayoutGeneral}
+		level := 0
+		if i < len(p.desc.WriteLevels) {
+			level = p.desc.WriteLevels[i]
+		}
+		r.appInfos[0] = core1_0.DescriptorImageInfo{ImageView: t.color.levelView(instance, level), ImageLayout: core1_0.ImageLayoutGeneral}
 		r.appWrites[0] = core1_0.WriteDescriptorSet{DstSet: set, DstBinding: 4 + i, DescriptorType: core1_0.DescriptorTypeStorageImage, ImageInfo: r.appInfos[:1]}
 		if err := r.deviceDriver.UpdateDescriptorSets(r.appWrites[:1], nil); err != nil {
 			return err

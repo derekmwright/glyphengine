@@ -1,0 +1,17 @@
+#version 450
+
+// Level 0 of the chain: a checker of 4x4 blocks in red, a linear ramp in
+// green and a quadratic one in blue, so every level below it has structure to
+// average and no channel's mean is the trivial 0.5 of the others.
+layout(set = 2, binding = 4, rgba16f) uniform writeonly image2D level0;
+layout(local_size_x = 8, local_size_y = 8) in;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(level0);
+    if (any(greaterThanEqual(p, size))) return;
+    float checker = ((p.x / 4 + p.y / 4) % 2 == 0) ? 0.75 : 0.25;
+    float ramp = float(p.x) / float(size.x - 1) * 0.8;
+    float quad = float(p.y) / float(size.y - 1);
+    imageStore(level0, p, vec4(checker, ramp, quad * quad, 1.0));
+}

@@ -2,12 +2,34 @@ package renderer
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/derekmwright/glyphengine/renderer/framegraph"
 	"github.com/vkngwrapper/core/v3/core1_0"
 )
 
 type appGraphTarget struct{ write, read, depth framegraph.ResourceID }
+
+// graphLevels is read i's declared range as a frame-graph range, the zero
+// value (the whole image) where ranges does not reach i or names none.
+func graphLevels(ranges []LevelRange, i int) framegraph.LevelRange {
+	if i >= len(ranges) || ranges[i].Count == 0 {
+		return framegraph.LevelRange{}
+	}
+	return framegraph.LevelRange{Base: uint32(ranges[i].Base), Count: uint32(ranges[i].Count)}
+}
+
+// covered reports whether uses already reads id over levels: a whole-image
+// use covers any range, and a range covers itself. For a single-level image
+// every use is whole, so this is "id is already used", the test it replaced.
+func covered(uses []framegraph.Use, id framegraph.ResourceID, levels framegraph.LevelRange) bool {
+	for _, u := range uses {
+		if u.Resource == id && (u.Levels == framegraph.LevelRange{} || u.Levels == levels) {
+			return true
+		}
+	}
+	return false
+}
 
 // shadowCascadeNode names the declaration standing in for the hand-recorded sun
 // cascade passes. The recording fixture matches on it, as it does the streamed
@@ -101,6 +123,9 @@ func (r *Renderer) extendAppGraph(f *frameGraph, g *framegraph.Graph) error {
 	for _, t := range r.appTargets {
 		format, _ := targetFormat(t.desc.Format)
 		d := framegraph.ImageDesc{Name: t.desc.Name, Format: format, Extent: t.desc.extent(), Samples: core1_0.Samples1, Aspect: core1_0.ImageAspectColor, Persistent: true}
+		if n := t.Levels(); n > 1 {
+			d.Levels = uint32(n)
+		}
 		ids := appGraphTarget{write: g.AddImage(d), depth: -1}
 		ids.read = ids.write
 		if t.desc.History {
@@ -111,6 +136,7 @@ func (r *Renderer) extendAppGraph(f *frameGraph, g *framegraph.Graph) error {
 			d.Name = t.desc.Name + " depth"
 			d.Format = r.depth.format
 			d.Aspect = core1_0.ImageAspectDepth
+			d.Levels = 0
 			ids.depth = g.AddImage(d)
 		}
 		f.targets[t] = ids
@@ -146,13 +172,14 @@ func (r *Renderer) extendAppGraph(f *frameGraph, g *framegraph.Graph) error {
 	appendNode(framegraph.Node{Name: shadowCascadeNode, Kind: framegraph.Legacy,
 		Uses: []framegraph.Use{{Resource: f.sunShadow, Access: framegraph.DepthWrite, Rewrites: true}}},
 		graphNode{name: shadowCascadeNode, begin: -1, end: -1, resolve: -1})
-	read := func(uses []framegraph.Use, id framegraph.ResourceID) []framegraph.Use {
-		for _, u := range uses {
-			if u.Resource == id {
-				return uses
-			}
+	readRange := func(uses []framegraph.Use, id framegraph.ResourceID, levels framegraph.LevelRange) []framegraph.Use {
+		if covered(uses, id, levels) {
+			return uses
 		}
-		return append(uses, framegraph.Use{Resource: id, Access: framegraph.SampledRead, Stages: core1_0.PipelineStageVertexShader | core1_0.PipelineStageFragmentShader})
+		return append(uses, framegraph.Use{Resource: id, Access: framegraph.SampledRead, Levels: levels, Stages: core1_0.PipelineStageVertexShader | core1_0.PipelineStageFragmentShader})
+	}
+	read := func(uses []framegraph.Use, id framegraph.ResourceID) []framegraph.Use {
+		return readRange(uses, id, framegraph.LevelRange{})
 	}
 	slots := func(uses []framegraph.Use, target *RenderTarget) []framegraph.Use {
 		for _, t := range r.shaderTargets {
@@ -198,12 +225,12 @@ func (r *Renderer) extendAppGraph(f *frameGraph, g *framegraph.Graph) error {
 				}
 				n.Uses = append(n.Uses, u)
 			}
-			for _, t := range d.Reads {
+			for i, t := range d.Reads {
 				if t == nil || t.destroyed {
 					continue
 				}
 				if t.target != nil && !t.target.destroyed {
-					n.Uses = read(n.Uses, f.targets[t.target].read)
+					n.Uses = readRange(n.Uses, f.targets[t.target].read, graphLevels(d.ReadRanges, i))
 				} else if t.scene == r {
 					if t.sceneDepth {
 						n.Uses = read(n.Uses, f.resolvedDepth)
@@ -439,6 +466,19 @@ func (r *Renderer) rebuildAppTargets(undo *rebuildUndo) error {
 			return fmt.Errorf("recreate application target %q: %w", t.desc.Name, err)
 		}
 		undo.push(func() { t.color.destroy(r.deviceDriver); t.depth.destroy(r.deviceDriver); t.color, t.depth = nil, nil })
+		if t.desc.MipLevels > 1 {
+			// The new extent may hold fewer levels, and the plan's whole-image
+			// barriers and per-level runs were compiled for the old count.
+			r.graphDirty = true
+		}
+	}
+	// A chain that came back shorter can no longer hold a level a pass
+	// selected. Refuse that here, naming the pass, rather than bind a view of
+	// a level the image does not have.
+	for _, p := range r.appPasses {
+		if err := p.validateLevels(); err != nil {
+			return err
+		}
 	}
 	if r.depthResolve != nil {
 		if err := r.ensureSceneDepth(); err != nil {
@@ -466,6 +506,32 @@ func (r *Renderer) rebuildAppTargets(undo *rebuildUndo) error {
 		}
 	}
 	return nil
+}
+
+// validateLevels re-checks p's level declarations against its targets' chains
+// as they are now.
+func (p *AppPass) validateLevels() error {
+	kind, writes, writeLevels := "app pass", []*RenderTarget(nil), []int(nil)
+	if p.compute != nil {
+		kind, writes, writeLevels = "app compute", p.compute.desc.Writes, p.compute.desc.WriteLevels
+	}
+	fail := func(field, why string) error {
+		return fmt.Errorf("%s %q: %s: %s after its target was rebuilt", kind, p.desc.Name, field, why)
+	}
+	reads := make([]*Texture, len(p.desc.Reads))
+	for i, t := range p.desc.Reads {
+		// A destroyed target's reads bind the fallback and declare nothing.
+		if t != nil && !t.destroyed {
+			reads[i] = t
+		}
+	}
+	ranges := slices.Clone(p.desc.ReadRanges)
+	for i := range ranges {
+		if reads[i] == nil {
+			ranges[i] = LevelRange{}
+		}
+	}
+	return validateAppLevels(reads, ranges, writes, writeLevels, fail)
 }
 
 func (r *Renderer) destroyAppResources() {

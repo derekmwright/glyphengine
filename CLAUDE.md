@@ -44,6 +44,7 @@ task stream    # streamed patches land, and the frame they land in matches a syn
 task instances # an instance set updated every frame never shows a frame reading half-written placements
 task prepass   # the depth prepass, on or auto, renders the same pixels as the pass without it
 task tex3d     # a sampled volume interpolates along Z, repeats on every axis and reads the right level
+task mips      # a target's mip chain reduced in place samples at fractional LOD and keeps its mean, sync-clean
 ```
 
 The sky, the clouds, the day cycle and their shaders live in `x/sky` now, not in

@@ -12,6 +12,13 @@ api:
   - renderer.DestroyRenderTarget
   - renderer.RenderTarget.Texture
   - renderer.RenderTarget.Extent
+  - renderer.RenderTarget.Levels
+  - renderer.RenderTarget.LevelExtent
+  - renderer.RenderTargetDesc.MipLevels
+  - renderer.LevelRange
+  - renderer.AppPassDesc.ReadRanges
+  - renderer.AppComputeDesc.ReadRanges
+  - renderer.AppComputeDesc.WriteLevels
   - renderer.AppPassDesc
   - renderer.AppPassDesc.Reads3D
   - renderer.CreateAppPass
@@ -65,7 +72,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: procedural
-verified: 2026-10-17 # the ShadowData declaration with the cascade tail after volumetric, head unmoved, for shaders and compute reading a third and fourth cascade (#189); the three water includes in the include table, water_waves.inc compiled alone behind #version; Reads3D on both pass descriptors, the dimension check at creation in both directions and the sampler3D binding example (#190); pipeline statistics per named application pass cross-referenced to profiling.md: a Timed graphics pass is counted and a dispatch reads not bracketed (#187); opt-in shared sampler capacity (#191) and named timing capacity (#192); TestSharedResourcesGPU validates five distinct fields and 18 mixed timers through replacement, resize, history and toggles, including a failing-image control and synchronization validation
+verified: 2026-10-17 # render-target mip chains (#200): MipLevels, LevelExtent and Levels, ReadRanges and WriteLevels with every refusal, per-level barriers, a chain shortened by a resize refused at the rebuild, all checked by renderer/targetmips_test.go and cmd/mipcheck on an RX 7900 XTX under synchronization validation; the ShadowData declaration with the cascade tail after volumetric, head unmoved, for shaders and compute reading a third and fourth cascade (#189); the three water includes in the include table, water_waves.inc compiled alone behind #version; Reads3D on both pass descriptors, the dimension check at creation in both directions and the sampler3D binding example (#190); pipeline statistics per named application pass cross-referenced to profiling.md: a Timed graphics pass is counted and a dispatch reads not bracketed (#187); opt-in shared sampler capacity (#191) and named timing capacity (#192); TestSharedResourcesGPU validates five distinct fields and 18 mixed timers through replacement, resize, history and toggles, including a failing-image control and synchronization validation
 ---
 
 # Application render targets, graphics and compute passes
@@ -191,7 +198,8 @@ storage format feature; an unsupported format returns an error naming that
 format and target. `Writes` accepts up to four distinct, live targets, each with
 `Storage`; a missing flag is an error naming the target. Reading an output in
 the same pass requires `History`, with the sampled previous instance distinct
-from the storage destination. Scene colour and depth can be sampled after the
+from the storage destination, unless the target is a mip chain and the read's
+level range excludes the written level; see [mip chains](#mip-chains). Scene colour and depth can be sampled after the
 scene but cannot be storage outputs. `Reads` follows the graphics input rules.
 
 `SetDispatch` takes workgroup counts, initially zero. Any zero axis records no
@@ -329,6 +337,183 @@ before. Compute dispatches declare `ReadsShadows` as above; the edge covers ever
 layer of the array. `TestCascadeTailOffsetsMatchGLSL` holds this declaration,
 and every other `ShadowData` in the repository, to the offsets
 `renderer/shadow.go` packs.
+## Mip chains
+
+A target can carry a mip chain that application dispatches fill one level at a
+time, in place, and that any pass then samples with hardware LOD and trilinear
+filtering. It is for the reductions a generic blit cannot express -- slope
+moments, normal variance, depth pyramids, a roughness-filtered sky -- without
+packing levels into an atlas by hand.
+
+```go
+pyramid, err := r.CreateRenderTarget(renderer.RenderTargetDesc{
+    Name: "pyramid", Format: renderer.TargetRGBA16F, Width: 64, Height: 32,
+    MipLevels: 7, Storage: true, Filter: renderer.FilterLinear, Wrap: renderer.WrapRepeat,
+})
+if err != nil { return err }
+for n := range pyramid.Levels() - 1 {
+    reduce, err := r.CreateAppCompute(renderer.AppComputeDesc{
+        Name: fmt.Sprintf("reduce %d", n), Stage: renderer.StageBeforeScene, Comp: reduceSPV,
+        Reads:      []*renderer.Texture{pyramid.Texture()},
+        ReadRanges: []renderer.LevelRange{{Base: n, Count: 1}}, // level n alone
+        Writes:     []*renderer.RenderTarget{pyramid},
+        WriteLevels: []int{n + 1},                              // into level n+1
+    })
+    if err != nil { return err }
+    w, h := pyramid.LevelExtent(n + 1) // not Extent(): that is level 0
+    reduce.SetDispatch((w+7)/8, (h+7)/8, 1)
+}
+```
+
+`RenderTargetDesc.MipLevels` is the chain's length. Zero or one is one level:
+the default, the cost every target had before chains existed, and exactly the
+same image, view, sampler and barriers. A longer chain is checked at creation
+against the extent -- at most one level per halving of the longer side, down
+to 1x1 -- and an over-long one is refused: `render target "long": MipLevels: 8
+levels exceed the 7 a 64x32 chain has`. A negative count is refused too.
+Level `l` is the base halved `l` times with each axis floored and held at one,
+so a non-square chain reaches one texel in its short axis first and keeps
+halving the long one: 64x32, 32x16, 16x8, 8x4, 4x2, 2x1, 1x1.
+`RenderTarget.LevelExtent(l)` reports it (0, 0 for a level the target lacks)
+and `Levels()` the count; size every dispatch from the level it writes. A
+dispatch sized from `Extent()` runs level 0's invocation count over every
+level, 2048 times what the 1x1 level of a 64x32 chain needs.
+
+What a chain allocates, per colour image (both of them with `History`):
+
+- the image with `MipLevels` levels, every level cleared and resting in
+  `ShaderReadOnlyOptimal`;
+- the level-0 view attachments render through, as before;
+- one view of the whole chain, which is `Texture()`'s and every whole read's.
+  The target's sampler opens its LOD range to every level (`MaxLod` is the
+  level count) and blends between levels exactly when `Filter` already blends
+  within one: `FilterLinear` is trilinear, `FilterNearest` steps. `Wrap`
+  applies at every level;
+- with `Storage`, one storage view per level;
+- one view per distinct `ReadRanges` entry a pass names, owned by the target,
+  shared by every pass naming the same range, rebuilt with the images and
+  released with them.
+
+### The declarations, and why they are on the pass
+
+`AppComputeDesc.WriteLevels` is parallel to `Writes` and picks the level each
+storage binding writes; an index it does not reach writes level 0.
+`ReadRanges` (on `AppComputeDesc` and `AppPassDesc`) is parallel to `Reads`
+and restricts a read of a target to `[Base, Base+Count)` through a view of
+exactly those levels, so in the shader that view's level 0 is `Base`; the
+zero `LevelRange`, and an index it does not reach, read the whole chain. This
+is the style `Reads3D` set: a declaration beside the binding it describes.
+
+They live on the pass, not on the target, because a level is a property of a
+use, not of a resource. In one frame the same pyramid is level 0's
+destination for the seed, level 3's source and level 4's destination for one
+reduction, and the whole chain for the pass that samples the result. A
+"current level" on the target would be one mutable answer to six questions,
+and the frame graph derives every barrier from what each pass declares, so the
+declaration has to sit where the barrier does.
+
+Each of these is an error at creation that names the pass, the index and the
+counts, and creates nothing:
+
+| Declared | Message |
+|---|---|
+| more `ReadRanges` than `Reads` | `ReadRanges: 2 entries for 1 reads` |
+| a negative base, or a base with no count | `ReadRanges: index 0: {Base 2, Count 0} is not a level range; the zero value is the whole chain` |
+| a range on a texture that is not a render target | `ReadRanges: index 0 restricts a texture that is not a render target` |
+| a range on a single-level target | `ReadRanges: index 0 selects levels [0,1) of target "flat", which has one level` |
+| a range past the chain | `ReadRanges: index 0 selects levels [5,8) of target "chain", which has 7 levels` |
+| more `WriteLevels` than `Writes` | `WriteLevels: 2 entries for 1 writes` |
+| a negative level | `WriteLevels: index 0 selects level -1 of target "chain"; levels count from 0` |
+| a nonzero level on a single-level target | `WriteLevels: index 0 selects level 1 of target "flat", which has one level` |
+| a level past the chain | `WriteLevels: index 0 selects level 7 of target "chain", which has 7 levels` |
+| a read of a written chain that includes the written level | `Reads: index 0 reads levels [2,4) of target "chain", overlapping level 3 that Writes index 0 writes; give it a ReadRanges entry that excludes that level` |
+
+A dispatch may read a chain it writes without `History` exactly when its read
+range excludes the written level: the read and the write are then different
+subresources of one image. The whole-chain default overlaps every level, so
+an undeclared read of a written chain is refused like an overlapping range.
+With `History` the read is the previous frame's image and the rule is the
+single-level one. A single-level target read and written still needs
+`History`.
+
+### What the frame graph derives
+
+A frame-graph `Use` carries a level range (`framegraph.LevelRange`, zero for
+the whole image), and every barrier carries the range it covers. For the
+reduction above the graph declares two uses on one image -- a sampled read of
+level n, a storage write of level n+1 -- and its sampled-outputs node returns
+level n+1 to the sampled layout. The barriers name those levels and no
+others: level n+1 into `General` on entry and back to `ShaderReadOnlyOptimal`
+in the sampled-outputs node; level n gets a memory dependency on the sampled
+layout, because the dispatch that wrote it can be disabled. A write to level
+4 in one pass and a read of it in a later pass is an edge on level 4 alone.
+
+Layouts are tracked per level for an image with more than one, so a level can
+sit in `General` while another is sampled. A whole-image use whose levels
+agree is still one whole-image barrier; one whose levels disagree takes one
+barrier per run of equal levels. A single-level image never reaches that code
+and records what it always recorded. See
+[the frame graph's level ranges](frame-graph.md#level-ranges).
+
+Disabling a reduction (`SetEnabled(false)` or a zero dispatch) skips its node,
+its sampled-outputs node and both barriers, and leaves its level with last
+frame's contents, as for any disabled producer.
+
+### GLSL
+
+A reduction reads one level through its range and stores the next. A source
+axis already at one texel repeats its last texel, so each level's mean is the
+mean above it:
+
+```glsl
+layout(set = 2, binding = 0) uniform sampler2D src;              // ReadRanges[0] = {n, 1}
+layout(set = 2, binding = 4, rgba16f) uniform writeonly image2D dst; // WriteLevels[0] = n+1
+layout(local_size_x = 8, local_size_y = 8) in;
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, imageSize(dst)))) return;
+    ivec2 last = textureSize(src, 0) - 1;                        // level n's extent: the view starts there
+    vec4 sum = texelFetch(src, min(2 * p, last), 0) + texelFetch(src, min(2 * p + ivec2(1, 0), last), 0)
+             + texelFetch(src, min(2 * p + ivec2(0, 1), last), 0) + texelFetch(src, min(2 * p + ivec2(1, 1), last), 0);
+    imageStore(dst, p, sum * 0.25);
+}
+```
+
+Any pass reading the whole chain samples at a fractional LOD; with
+`FilterLinear` LOD 1.5 is the equal blend of levels 1 and 2, each bilinear:
+
+```glsl
+layout(set = 2, binding = 0) uniform sampler2D pyramid;          // Reads[0], no range
+vec4 v = textureLod(pyramid, uv, 1.5);
+ivec2 level3 = textureSize(pyramid, 3);
+```
+
+### Failure modes
+
+- **A dispatch sized from `Extent()`** runs level 0's invocation count into a
+  smaller level. With a bounds check against `imageSize` it is only waste;
+  without one it stores outside the image, which Vulkan leaves undefined. Use
+  `LevelExtent`.
+- **A pass reading the whole chain while it writes one level of it** is
+  refused at creation. Another pass reading the chain runs in graph order: one
+  after the writer sees the level it wrote, one before it sees last frame's,
+  exactly as for single-level targets.
+- **A swapchain-relative chain** keeps as many levels as its new extent holds
+  after a resize; `Levels()` reports the count it got. A pass that selects a
+  level the shorter chain lacks is refused when the resize rebuilds the
+  targets -- `app compute "reduce 4": WriteLevels: index 0 selects level 5 of
+  target "relative chain", which has 5 levels after its target was rebuilt`
+  -- and the frame fails rather than binding a view of nothing. Fixed-size
+  chains never change length.
+- **Cube, layered and 3D targets** are not covered, nor is a generic colour
+  mip generator; a chain is filled by the application's own dispatches.
+
+`cmd/mipcheck` (`task mips`) is the acceptance: a 64x32 seven-level chain
+filled by a seed and six in-place reductions, probed for every level's mean,
+LOD 1.5 at seven points, the repeat edge at every level and seven texels of
+level 3 through a range, through a resize, history rotation, a disabled
+reduction and a recreated chain, under validation and synchronization
+validation. Its Taskfile entry records the numbers and the breaks.
 
 ## Counted work
 
@@ -661,7 +846,9 @@ a pass skips its whole graph node; frame indices continue to advance.
 
 `*RenderTarget` and its `Texture()` pointer remain valid through resize.
 Relative targets are reallocated on swapchain recreation and their history
-starts over. Fixed-size images survive. Descriptors and Go-side rendering bindings are
+starts over; a relative mip chain is reallocated whole, every level of both
+history images and every range view, and may come back shorter (see
+[mip chains](#mip-chains)). Fixed-size images survive. Descriptors and Go-side rendering bindings are
 rebuilt against replacement views. Use `Extent()` for the current dimensions.
 Recreated target samplers retain `Filter` and `Wrap`, and the stable
 `Texture()` is updated with a descriptor set referencing the new view and

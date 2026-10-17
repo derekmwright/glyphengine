@@ -77,7 +77,7 @@ func TestCommittedSPIRVMatchesGLSL(t *testing.T) {
 		t.Fatal(err)
 	}
 	sources = append(sources, probes...)
-	for _, pattern := range []string{"../cmd/apppasscheck/*.vert", "../cmd/apppasscheck/*.frag", "../cmd/apppasscheck/*.comp", "../cmd/widetexcheck/*.frag", "../cmd/tex3dcheck/*.frag", "../cmd/tex3dcheck/*.comp", "../examples/*/*.vert", "../examples/*/*.frag", "../examples/*/*.comp"} {
+	for _, pattern := range []string{"../cmd/apppasscheck/*.vert", "../cmd/apppasscheck/*.frag", "../cmd/apppasscheck/*.comp", "../cmd/widetexcheck/*.frag", "../cmd/tex3dcheck/*.frag", "../cmd/tex3dcheck/*.comp", "../cmd/mipcheck/*.frag", "../cmd/mipcheck/*.comp", "../examples/*/*.vert", "../examples/*/*.frag", "../examples/*/*.comp"} {
 		app, err := filepath.Glob(pattern)
 		if err != nil {
 			t.Fatal(err)

@@ -3,6 +3,7 @@ package framegraph
 import (
 	"fmt"
 	"math"
+	"slices"
 
 	"github.com/vkngwrapper/core/v3/core1_0"
 )
@@ -55,7 +56,13 @@ func (g *Graph) Build() (*Plan, error) {
 		Timed: make([]NodeID, 0), FinalBarriers: make([]Barrier, 0),
 	}
 	states := make([]imageState, len(g.images))
+	// levels holds one state per mip level for an image with more than one,
+	// and is nil for every other resource. Only those images split a use into
+	// per-level runs; a single-level image never reaches that code and keeps
+	// exactly the barriers it compiled to before levels existed.
+	levels := make([][]imageState, len(g.images))
 	groupEntry := make([]imageState, len(g.images))
+	groupLevels := make([][]imageState, len(g.images))
 	groupTouched := make([]bool, len(g.images))
 	for i, d := range g.images {
 		if b, ok := g.buffers[ResourceID(i)]; ok {
@@ -77,6 +84,7 @@ func (g *Graph) Build() (*Plan, error) {
 		d.Usage |= s.usage
 		d.Instances = max(d.Instances, 1)
 		d.Layers = max(d.Layers, 1)
+		d.Levels = max(d.Levels, 1)
 		if d.Extent.Fixed != [2]uint32{} {
 			d.Extent.Scale, d.Extent.RoundUp = 0, false
 		}
@@ -94,10 +102,18 @@ func (g *Graph) Build() (*Plan, error) {
 			layout = d.InitialLayout
 		}
 		states[i] = g.restingState(ResourceID(i), layout, uses)
+		if d.Levels > 1 {
+			levels[i] = slices.Repeat([]imageState{states[i]}, int(d.Levels))
+		}
 	}
 	for ni, n := range g.nodes {
 		if g.groupStarts(ni) {
 			copy(groupEntry, states)
+			for id, ls := range levels {
+				if ls != nil {
+					groupLevels[id] = append(groupLevels[id][:0], ls...)
+				}
+			}
 			clear(groupTouched)
 		}
 		step := Step{Node: NodeID(ni), Barriers: make([]Barrier, 0), AfterBarriers: make([]Barrier, 0)}
@@ -122,47 +138,47 @@ func (g *Graph) Build() (*Plan, error) {
 				states[u.Resource] = after
 				continue
 			}
-			if attachment(u.Access) && n.Kind == Legacy {
-				after.layout = r.Resting
+			ls := levels[u.Resource]
+			if ls == nil {
+				after, err := g.imageUse(&step, n, u, r, before, after, LevelRange{}, uses)
+				if err != nil {
+					return nil, err
+				}
+				states[u.Resource] = after
+				continue
 			}
-			if n.Kind == Legacy && u.FinalLayout != core1_0.ImageLayoutUndefined {
-				after.layout = u.FinalLayout
+			// Levels that already share a state take one barrier between them;
+			// a range spanning levels in different states takes one per run.
+			// The run is the barrier's range, so a write to level N+1 never
+			// names level N, which another use may be sampling.
+			begin, end := u.Levels.span(uint32(len(ls)))
+			err := levelRuns(ls, begin, end, func(run LevelRange, first, last uint32) error {
+				next, err := g.imageUse(&step, n, u, r, ls[first], after, run, uses)
+				for l := first; l < last; l++ {
+					ls[l] = next
+				}
+				return err
+			})
+			if err != nil {
+				return nil, err
 			}
-			barrierBefore := before
-			if u.Discard && u.Access == TransferDst {
-				barrierBefore = stateForLayout(core1_0.ImageLayoutUndefined)
-			}
-			if n.Kind != Legacy && needsBarrier(u, barrierBefore, after) {
-				step.Barriers = append(step.Barriers, barrier(u.Resource, barrierBefore, after))
-			}
-			// A graphics attachment returns to its resting layout on the way out,
-			// unless the declaration names the layout this node leaves instead.
-			// See Use.FinalLayout.
-			leave := r.Resting
-			if n.Kind == Graphics && u.FinalLayout != core1_0.ImageLayoutUndefined {
-				leave = u.FinalLayout
-			}
-			if n.Kind == Graphics && attachment(u.Access) && after.layout != leave {
-				rest := g.restingState(u.Resource, leave, uses)
-				step.AfterBarriers = append(step.AfterBarriers, barrier(u.Resource, after, rest))
-				after = rest
-			}
-			if n.Optional && n.OptionalGroup == 0 && before.layout != after.layout {
-				return nil, g.fail(n.Name, u.Resource, "optional node must be layout-neutral")
-			}
-			if !writes(u.Access) && before.layout == after.layout && before.access == after.access {
-				// A later writer must wait for every reader, including readers in
-				// different shader stages which needed no barrier between them.
-				after.stage |= before.stage
-			}
-			if n.Optional && n.OptionalGroup == 0 {
-				after = optionalState(before, after)
-			}
-			states[u.Resource] = after
+			// Level 0 is what an attachment renders, and the render pass
+			// above reads its entry layout through states.
+			states[u.Resource] = ls[0]
 		}
 		if g.groupEnds(ni) {
 			for id, touched := range groupTouched {
 				if !touched {
+					continue
+				}
+				if ls := levels[id]; ls != nil {
+					for l := range ls {
+						if groupLevels[id][l].layout != ls[l].layout {
+							return nil, g.fail(n.Name, ResourceID(id), fmt.Sprintf("optional group %d must be layout-neutral (level %d)", n.OptionalGroup, l))
+						}
+						ls[l] = optionalState(groupLevels[id][l], ls[l])
+					}
+					states[id] = ls[0]
 					continue
 				}
 				if groupEntry[id].layout != states[id].layout {
@@ -180,12 +196,94 @@ func (g *Graph) Build() (*Plan, error) {
 		p.Steps[ni] = step
 	}
 	for i, s := range states {
+		if ls := levels[i]; ls != nil && summaries[i].used {
+			resting := p.Resources[i].Resting
+			rest := g.restingState(ResourceID(i), resting, uses)
+			_ = levelRuns(ls, 0, uint32(len(ls)), func(run LevelRange, first, _ uint32) error {
+				if ls[first].layout != resting {
+					b := barrier(ResourceID(i), ls[first], rest)
+					b.Levels = run
+					p.FinalBarriers = append(p.FinalBarriers, b)
+				}
+				return nil
+			})
+			continue
+		}
 		if summaries[i].used && s.layout != p.Resources[i].Resting {
 			p.FinalBarriers = append(p.FinalBarriers, barrier(ResourceID(i), s, g.restingState(ResourceID(i), p.Resources[i].Resting, uses)))
 		}
 	}
 	groupUndefinedBarriers(p.FinalBarriers)
 	return p, nil
+}
+
+// imageUse derives one use's barriers for an image, or for one run of an
+// image's levels that share a state, and returns the state it leaves. Every
+// barrier it appends carries levels, the zero value for a whole image.
+func (g *Graph) imageUse(step *Step, n Node, u compiledUse, r *ResourceInfo, before, after imageState, levels LevelRange, uses [][]compiledUse) (imageState, error) {
+	if attachment(u.Access) && n.Kind == Legacy {
+		after.layout = r.Resting
+	}
+	if n.Kind == Legacy && u.FinalLayout != core1_0.ImageLayoutUndefined {
+		after.layout = u.FinalLayout
+	}
+	barrierBefore := before
+	if u.Discard && u.Access == TransferDst {
+		barrierBefore = stateForLayout(core1_0.ImageLayoutUndefined)
+	}
+	if n.Kind != Legacy && needsBarrier(u, barrierBefore, after) {
+		b := barrier(u.Resource, barrierBefore, after)
+		b.Levels = levels
+		step.Barriers = append(step.Barriers, b)
+	}
+	// A graphics attachment returns to its resting layout on the way out,
+	// unless the declaration names the layout this node leaves instead.
+	// See Use.FinalLayout.
+	leave := r.Resting
+	if n.Kind == Graphics && u.FinalLayout != core1_0.ImageLayoutUndefined {
+		leave = u.FinalLayout
+	}
+	if n.Kind == Graphics && attachment(u.Access) && after.layout != leave {
+		rest := g.restingState(u.Resource, leave, uses)
+		b := barrier(u.Resource, after, rest)
+		b.Levels = levels
+		step.AfterBarriers = append(step.AfterBarriers, b)
+		after = rest
+	}
+	if n.Optional && n.OptionalGroup == 0 && before.layout != after.layout {
+		return after, g.fail(n.Name, u.Resource, "optional node must be layout-neutral")
+	}
+	if !writes(u.Access) && before.layout == after.layout && before.access == after.access {
+		// A later writer must wait for every reader, including readers in
+		// different shader stages which needed no barrier between them.
+		after.stage |= before.stage
+	}
+	if n.Optional && n.OptionalGroup == 0 {
+		after = optionalState(before, after)
+	}
+	return after, nil
+}
+
+// levelRuns calls f once for each maximal run of equal states in
+// ls[begin:end], with the run as a range -- the zero value when the run is
+// every level of the image, so a whole-image use whose levels agree records
+// the same whole-image barrier a single-level image would.
+func levelRuns(ls []imageState, begin, end uint32, f func(run LevelRange, first, last uint32) error) error {
+	for first := begin; first < end; {
+		last := first + 1
+		for last < end && ls[last] == ls[first] {
+			last++
+		}
+		run := LevelRange{Base: first, Count: last - first}
+		if first == 0 && last == uint32(len(ls)) {
+			run = LevelRange{}
+		}
+		if err := f(run, first, last); err != nil {
+			return err
+		}
+		first = last
+	}
+	return nil
 }
 
 func (g *Graph) groupStarts(ni int) bool {
@@ -301,6 +399,9 @@ func (g *Graph) validate() ([][]compiledUse, []resourceUses, error) {
 		if d.Instances < 0 || (d.Layers > 1 && !d.Imported) {
 			return fail("instances must be nonnegative; image arrays must be imported")
 		}
+		if d.Levels > 1 && d.Samples != core1_0.Samples1 {
+			return fail("a multisampled image has one level")
+		}
 		summaries[i].onlyResolve = true
 	}
 	for ni, n := range g.nodes {
@@ -337,6 +438,18 @@ func (g *Graph) validate() ([][]compiledUse, []resourceUses, error) {
 			if buffer && (u.HasResolve || u.FinalLayout != core1_0.ImageLayoutUndefined) {
 				return nil, nil, g.fail(n.Name, u.Resource, "buffers have no image layout or resolve")
 			}
+			if !u.Levels.whole() {
+				// An attachment renders through a single-level view the graph
+				// does not choose, so a range on one would describe a barrier
+				// that disagrees with what the pass actually writes.
+				if buffer || attachment(u.Access) {
+					return nil, nil, g.fail(n.Name, u.Resource, "a level range needs a sampled, storage or transfer use of an image")
+				}
+				count := max(g.images[u.Resource].Levels, 1)
+				if u.Levels.Count == 0 || u.Levels.Base >= count || u.Levels.Count > count-u.Levels.Base {
+					return nil, nil, g.fail(n.Name, u.Resource, fmt.Sprintf("level range {Base %d, Count %d} is outside the image's %d levels", u.Levels.Base, u.Levels.Count, count))
+				}
+			}
 			// On a Graphics node FinalLayout replaces the exit transition the
 			// compiler derives for an attachment, so on any other access it
 			// would be a promise about a transition that does not exist. A
@@ -368,7 +481,7 @@ func (g *Graph) validate() ([][]compiledUse, []resourceUses, error) {
 				all[ni] = append(all[ni], compiledUse{Use: Use{Resource: u.ResolveTo, Access: ColorWrite, Stages: u.Stages}, resolve: true})
 			}
 		}
-		seen := make(map[ResourceID]Access)
+		seen := make(map[ResourceID][]Use)
 		firstAttachment, depth := ResourceID(-1), false
 		for _, u := range all[ni] {
 			d := g.images[u.Resource]
@@ -379,11 +492,23 @@ func (g *Graph) validate() ([][]compiledUse, []resourceUses, error) {
 			if u.Access == Present && !d.Imported {
 				return nil, nil, g.fail(n.Name, u.Resource, "Present requires an imported image")
 			}
-			if old, ok := seen[u.Resource]; ok && (writes(old) || writes(u.Access) ||
-				(g.buffers[u.Resource].Size == 0 && accessState(n.Kind, Use{Access: old}).layout != accessState(n.Kind, u.Use).layout)) {
-				return nil, nil, g.fail(n.Name, u.Resource, "same-node read/write, repeated write, or incompatible read layouts; use a load form or StorageReadWrite")
+			for _, old := range seen[u.Resource] {
+				// Disjoint level ranges are different subresources, so a read
+				// of level N beside a write of level N+1 is not a hazard; the
+				// two take separate barriers over separate ranges.
+				if disjoint(old.Levels, u.Levels) {
+					continue
+				}
+				if writes(old.Access) || writes(u.Access) ||
+					(g.buffers[u.Resource].Size == 0 && accessState(n.Kind, Use{Access: old.Access}).layout != accessState(n.Kind, u.Use).layout) {
+					if !old.Levels.whole() || !u.Levels.whole() {
+						return nil, nil, g.fail(n.Name, u.Resource, fmt.Sprintf("%s and %s overlap in one node with a write or incompatible layouts; read and write one image in a node only through disjoint level ranges",
+							old.Levels, u.Levels))
+					}
+					return nil, nil, g.fail(n.Name, u.Resource, "same-node read/write, repeated write, or incompatible read layouts; use a load form or StorageReadWrite")
+				}
 			}
-			seen[u.Resource] = u.Access
+			seen[u.Resource] = append(seen[u.Resource], u.Use)
 			if attachment(u.Access) {
 				want := core1_0.ImageAspectColor
 				if isDepth(u.Access) {
@@ -416,6 +541,23 @@ func (g *Graph) validate() ([][]compiledUse, []resourceUses, error) {
 
 	}
 	return all, summaries, nil
+}
+
+// String names the range as an error message should.
+func (r LevelRange) String() string {
+	if r.whole() {
+		return "the whole image"
+	}
+	return fmt.Sprintf("levels [%d,%d)", r.Base, r.Base+r.Count)
+}
+
+// disjoint reports whether two ranges name no level in common. A whole-image
+// range overlaps every other range.
+func disjoint(a, b LevelRange) bool {
+	if a.whole() || b.whole() {
+		return false
+	}
+	return a.Base+a.Count <= b.Base || b.Base+b.Count <= a.Base
 }
 
 func validExtent(e Extent) bool {

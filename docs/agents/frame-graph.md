@@ -15,6 +15,10 @@ api:
   - framegraph.DepthSampledRead
   - framegraph.Use.Rewrites
   - framegraph.Use.FinalLayout
+  - framegraph.Use.Levels
+  - framegraph.ImageDesc.Levels
+  - framegraph.LevelRange
+  - framegraph.Barrier.Levels
   - renderer.recordCommandBuffer
   - renderer.Pass
   - renderer.AppComputeDesc
@@ -30,7 +34,7 @@ requires:
   - VK_KHR_dynamic_rendering
   - vulkan-sdk
 assets: procedural
-verified: 2026-10-17 # the water foam compute node and its sampled edge into the water pass; the optional depth prepass node, FinalLayout on a graphics attachment, and why the node stays on a frame DepthPrepassAuto declined; the mip-chain barrier trap recorded after #154's evaluation; the cascade declaration and compute shadow reads; dynamic rendering, attachment barriers and the streamed upload node
+verified: 2026-10-17 # level ranges on uses and barriers with per-level layout tracking for images with more than one level, single-level plans unchanged (#200); the water foam compute node and its sampled edge into the water pass; the optional depth prepass node, FinalLayout on a graphics attachment, and why the node stays on a frame DepthPrepassAuto declined; the mip-chain barrier trap recorded after #154's evaluation; the cascade declaration and compute shadow reads; dynamic rendering, attachment barriers and the streamed upload node
 ---
 
 # Record the renderer's frame graph
@@ -249,24 +253,41 @@ counts, so no workgroup assumes another workgroup has already reset them.
 These nodes precede application nodes without moving application work across
 its existing shadow boundary. See [ADR 0008](../adr/0008-buffer-resources-and-gpu-draw-generation.md).
 
-## A mip chain needs a barrier that covers it
+## Level ranges
 
-`ImageDesc` has no `Mips`, and nothing in the engine declares a mip chain -- but
-the next thing that does has a trap waiting, so it is written down here rather
-than rediscovered. The executor emits image barriers with `LevelCount: 1`. On a
-chain that is a dependency covering the top level only: a reduction's writes to
-level three are ordered against nothing at all, which costs nothing on a driver
-that happens not to cache them and corrupts the image on one that does. Nothing
-sees it but synchronization validation.
+`ImageDesc.Levels` is an image's mip chain length (zero means one), and
+`Use.Levels` restricts a use to `[Base, Base+Count)` of it; the zero
+`LevelRange` is the whole image. `Barrier.Levels` is the range a derived
+barrier covers, zero for the whole image, and the executor records exactly
+that subresource range -- `LevelCount` is the plan's level count for a
+whole-image barrier, which is the `1` it always recorded for a single-level
+image. Application render targets with `MipLevels` are the chains the
+renderer declares; see [render targets](render-targets.md#mip-chains).
 
-The hierarchical-Z pyramid of issue #154 added a `Mips` field for exactly that
-reason, and it was removed with the rest of that mechanism; the field, its
-validation (a chain must be `Imported`, as an image array must, because nothing
-in a plan allocates one) and the one-line executor change are in the recipe in
-[lod-instancing](lod-instancing.md). That mechanism also had a resource read a
-frame BEFORE it was written -- selection at the head of the frame sampling what
-the previous submission left -- which worked, was synchronization-clean, and is
-the other half of the same recipe.
+`Build` keeps one layout state per level for an image with more than one, and
+none for any other image: a single-level resource never enters the per-level
+code, so every pinned stream is unchanged. A use over a range splits into runs
+of levels that share a state, one barrier per run, and a run covering every
+level is a whole-image barrier again. So:
+
+- one node may read levels `[0,N)` and write level `N` of the same image, as
+  two uses with disjoint ranges; each gets its own barrier over its own range;
+- overlapping ranges with a write in one node are refused, naming both: `levels
+  [2,4) and levels [3,4) overlap in one node with a write or incompatible
+  layouts; read and write one image in a node only through disjoint level
+  ranges`. A whole-image use overlaps every range;
+- a write to level 4 in node A and a read of it in node B is a barrier on level
+  4 alone in B, and a level left in `General` does not disturb another level
+  being sampled;
+- optional nodes and groups must be layout-neutral per level, and final
+  barriers restore each level that is not at rest.
+
+A range on an attachment, on a buffer, past the image's levels or with no
+count is refused at `Build`; so is a multisampled image with more than one
+level. Content tracking (`read before a guaranteed write`) stays per resource.
+
+`framegraph/levels_test.go` pins each rule above, and records the message each
+one gave when the rule was broken.
 
 ## Layouts and optional work
 
