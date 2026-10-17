@@ -45,6 +45,7 @@ type ImageDesc struct {
 	Samples       core1_0.SampleCountFlags
 	Aspect        core1_0.ImageAspectFlags
 	Layers        uint32 // Zero means one; arrays must be imported.
+	Levels        uint32 // Zero means one; only a longer chain is tracked per level.
 	Instances     int    // Zero means one; the executor chooses the physical copy.
 	Persistent    bool
 	Imported      bool
@@ -53,6 +54,22 @@ type ImageDesc struct {
 }
 
 type Access int
+
+// LevelRange selects the mip levels [Base, Base+Count) of an image. The zero
+// value is the whole image, which is what every use that names no range means
+// and what a single-level image can only ever be.
+type LevelRange struct{ Base, Count uint32 }
+
+// whole reports whether r is the zero value.
+func (r LevelRange) whole() bool { return r == LevelRange{} }
+
+// span resolves r against an image of n levels.
+func (r LevelRange) span(n uint32) (begin, end uint32) {
+	if r.whole() {
+		return 0, n
+	}
+	return r.Base, r.Base + r.Count
+}
 
 // BufferDesc describes one logical buffer. Persistent and imported contents
 // must be initialized by the owner before any graph reads them.
@@ -130,6 +147,12 @@ type Use struct {
 	// read as it stands, so without this flag a dispatch scheduled ahead of the
 	// cascade passes would compile and silently sample the previous frame.
 	Rewrites bool
+	// Levels restricts the use to a range of the image's mip levels; the zero
+	// value is every level. Barriers and layouts are derived for exactly that
+	// range, so one node may read levels [0,N) of an image while writing level
+	// N, as two uses whose ranges are disjoint. Attachments and buffers take
+	// no range.
+	Levels LevelRange
 }
 
 type Clear struct {
@@ -228,6 +251,9 @@ type Barrier struct {
 	SrcStage, DstStage   core1_0.PipelineStageFlags
 	SrcAccess, DstAccess core1_0.AccessFlags
 	OldLayout, NewLayout core1_0.ImageLayout
+	// Levels is the mip range the barrier covers; the zero value is the whole
+	// image, which is every barrier a single-level resource ever gets.
+	Levels LevelRange
 }
 
 type RenderPassDesc struct {

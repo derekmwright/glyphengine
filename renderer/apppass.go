@@ -46,7 +46,21 @@ type AppPassDesc struct {
 	// one are each an error naming the index and both dimensions, rather
 	// than a descriptor the validation layer rejects at the first draw -- or,
 	// without the layer, a sampler reading an image of the wrong shape.
-	Reads3D    []int
+	Reads3D []int
+	// ReadRanges is parallel to Reads and restricts a read of a render
+	// target's mip chain to the levels [Base, Base+Count), bound through a
+	// view of exactly those levels, so level 0 of the shader's sampler is the
+	// range's Base. An index it does not reach, and the zero LevelRange, read
+	// the whole chain. A range on a texture that is not a render target, on a
+	// single-level target, or past the target's levels is refused at creation.
+	//
+	// It is declared on the pass rather than chosen on the target because the
+	// level is a property of the use: one target is read at level N by the
+	// pass that writes level N+1 and at every level by the pass that samples
+	// the finished chain, in the same frame. The frame graph derives each
+	// pass's barriers from what that pass declares, so the declaration has to
+	// be where the barrier is.
+	ReadRanges []LevelRange
 	Vert, Frag []byte
 	Fullscreen bool
 	Timed      bool
@@ -130,6 +144,9 @@ func (r *Renderer) validateAppPass(d AppPassDesc) error {
 		}
 	}
 	if err := r.validateAppReads(d.Reads, d.Reads3D, d.Stage, d.Target == nil, fail); err != nil {
+		return err
+	}
+	if err := validateAppLevels(d.Reads, d.ReadRanges, nil, nil, fail); err != nil {
 		return err
 	}
 	for _, t := range d.Reads {
@@ -301,7 +318,10 @@ func (r *Renderer) CreateAppPass(d AppPassDesc) (_ *AppPass, err error) {
 	if err = r.ensureAppLayout(d.Params > 0); err != nil {
 		return nil, err
 	}
-	d.Reads, d.Reads3D = slices.Clone(d.Reads), slices.Clone(d.Reads3D)
+	if err = r.createRangeViews(d.Reads, d.ReadRanges); err != nil {
+		return nil, fmt.Errorf("app pass %q: ReadRanges: %w", d.Name, err)
+	}
+	d.Reads, d.Reads3D, d.ReadRanges = slices.Clone(d.Reads), slices.Clone(d.Reads3D), slices.Clone(d.ReadRanges)
 	p := &AppPass{r: r, desc: d, enabled: true}
 	r.appPasses = append(r.appPasses, p)
 	defer func() {

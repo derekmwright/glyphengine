@@ -1,0 +1,40 @@
+#version 450
+
+// Probes the finished chain into a 7x4 chart:
+//   row 0, column l: the mean of level l, by texelFetch over every texel;
+//   row 1: the whole chain sampled at LOD 1.5 at seven points (trilinear);
+//   row 2, column l: level l sampled at u = 0, where repeat blends the last
+//          column into the first;
+//   row 3: seven texels of level 3 through a view of level 3 alone.
+layout(set = 2, binding = 0) uniform sampler2D chain;
+layout(set = 2, binding = 1) uniform sampler2D level3;
+layout(set = 2, binding = 4, rgba16f) uniform writeonly image2D chart;
+layout(local_size_x = 8, local_size_y = 4) in;
+
+const vec2 lodPoints[7] = vec2[](vec2(0.3, 0.6), vec2(0.0, 0.0), vec2(0.71, 0.13), vec2(0.5, 0.5),
+    vec2(0.93, 0.87), vec2(0.17, 0.41), vec2(0.62, 0.99));
+const ivec2 rangeTexels[7] = ivec2[](ivec2(0, 0), ivec2(1, 0), ivec2(3, 1), ivec2(5, 2), ivec2(7, 3), ivec2(2, 3), ivec2(6, 1));
+const float edgeV = 0.3;
+
+void main() {
+    ivec2 c = ivec2(gl_GlobalInvocationID.xy);
+    if (c.x >= 7 || c.y >= 4) return;
+    vec4 v;
+    if (c.y == 0) {
+        ivec2 size = textureSize(chain, c.x);
+        vec4 sum = vec4(0.0);
+        for (int y = 0; y < size.y; y++) {
+            for (int x = 0; x < size.x; x++) {
+                sum += texelFetch(chain, ivec2(x, y), c.x);
+            }
+        }
+        v = sum / float(size.x * size.y);
+    } else if (c.y == 1) {
+        v = textureLod(chain, lodPoints[c.x], 1.5);
+    } else if (c.y == 2) {
+        v = textureLod(chain, vec2(0.0, edgeV), float(c.x));
+    } else {
+        v = texelFetch(level3, rangeTexels[c.x], 0);
+    }
+    imageStore(chart, c, vec4(v.rgb, 1.0));
+}

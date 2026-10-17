@@ -31,7 +31,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: procedural
-verified: 2026-10-09 # ordinary sets now stage updates and copy after the fence too, so LOD is no longer the safe-update path (#188)
+verified: 2026-10-17 # the pyramid recipe points at the frame graph's level ranges now that they exist (#200); ordinary sets now stage updates and copy after the fence too, so LOD is no longer the safe-update path (#188)
 ---
 
 # Cull and select distance levels per placement
@@ -397,14 +397,13 @@ half-day if rediscovered rather than read.
    the level where the projected rect spans at most two of them, the instance's
    bounding box rather than its sphere, its NEAREST point against the minimum of
    the four, and no test at all when a corner has `w <= 0`.
-3. **A barrier that covers the chain.** See
-   [frame-graph](frame-graph.md#a-mip-chain-needs-a-barrier-that-covers-it). The
-   executor emits `LevelCount: 1`; a chain needs a `Mips` field threaded to it,
-   and mip chains have to be imported because nothing in a plan allocates one.
-   Levels declare `StorageReadWrite` on the one resource so consecutive nodes are
-   ordered pairwise, and the chain stays in `General` throughout -- declaring the
-   sampled read as `SampledRead` derives a barrier naming a layout the image is
-   never in.
+3. **A barrier that covers the chain.** `ImageDesc.Levels` and a level range
+   on each `Use` now exist (#200), and the executor's barriers cover what they
+   name; see [frame-graph](frame-graph.md#level-ranges). Each reduction can
+   declare its source level as a ranged read and its destination as a ranged
+   write, and the graph tracks each level's layout. When this was built the
+   executor still emitted `LevelCount: 1`, so it declared `StorageReadWrite` on
+   the one resource and kept the chain in `General` throughout instead.
 4. **Selection reads it a frame early, and that has to be declared.** Selection
    runs at the head of the frame and the reduction after the scene, so the
    dispatch that samples the pyramid is EARLIER in the plan than the nodes that

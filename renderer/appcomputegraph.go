@@ -19,7 +19,7 @@ func (r *Renderer) appendComputeGraph(f *frameGraph, p *AppCompute, group int, a
 	for _, b := range p.desc.Buffers {
 		n.Uses = append(n.Uses, framegraph.Use{Resource: f.storage[b], Access: framegraph.StorageReadWrite})
 	}
-	read := func(t *Texture) {
+	read := func(t *Texture, levels framegraph.LevelRange) {
 		if t == nil || t.destroyed {
 			return
 		}
@@ -34,30 +34,40 @@ func (r *Renderer) appendComputeGraph(f *frameGraph, p *AppCompute, group int, a
 		} else {
 			return
 		}
-		for _, u := range n.Uses {
-			if u.Resource == id {
-				return
-			}
+		if !covered(n.Uses, id, levels) {
+			n.Uses = append(n.Uses, framegraph.Use{Resource: id, Access: framegraph.SampledRead, Levels: levels})
 		}
-		n.Uses = append(n.Uses, framegraph.Use{Resource: id, Access: framegraph.SampledRead})
 	}
-	for _, t := range p.desc.Reads {
-		read(t)
+	for i, t := range p.desc.Reads {
+		read(t, graphLevels(p.desc.ReadRanges, i))
 	}
 	for _, t := range r.shaderTargets {
 		if t != nil && !t.destroyed && (!slices.Contains(p.desc.Writes, t) || t.desc.History) {
-			read(t.Texture())
+			read(t.Texture(), framegraph.LevelRange{})
 		}
 	}
 	var rest []framegraph.Use
-	for _, t := range p.desc.Writes {
+	for i, t := range p.desc.Writes {
 		id := f.targets[t].write
 		access := framegraph.StorageWrite
-		if slices.Contains(p.desc.Reads, t.Texture()) {
+		// A chain read and written without History is read through a range
+		// that excludes the written level (validateAppOverlap), so the read is
+		// its own use and this one writes only.
+		if slices.Contains(p.desc.Reads, t.Texture()) && (t.Levels() <= 1 || t.desc.History) {
 			access = framegraph.StorageReadWrite
 		}
-		n.Uses = append(n.Uses, framegraph.Use{Resource: id, Access: access})
-		rest = append(rest, framegraph.Use{Resource: id, Access: framegraph.SampledRead,
+		// A storage view is one level, so on a chain the write is exactly
+		// that level and the barriers in and out of General name only it.
+		var levels framegraph.LevelRange
+		if t.Levels() > 1 {
+			level := 0
+			if i < len(p.desc.WriteLevels) {
+				level = p.desc.WriteLevels[i]
+			}
+			levels = framegraph.LevelRange{Base: uint32(level), Count: 1}
+		}
+		n.Uses = append(n.Uses, framegraph.Use{Resource: id, Access: access, Levels: levels})
+		rest = append(rest, framegraph.Use{Resource: id, Access: framegraph.SampledRead, Levels: levels,
 			Stages: core1_0.PipelineStageVertexShader | core1_0.PipelineStageFragmentShader | core1_0.PipelineStageComputeShader})
 	}
 	appendNode(n, graphNode{name: p.desc.Name, app: p.pass, record: f.appRecorder(p.pass, p.record), enabled: p.active, begin: -1, end: -1, resolve: -1})

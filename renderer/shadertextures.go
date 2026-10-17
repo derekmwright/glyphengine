@@ -121,6 +121,16 @@ func (r *Renderer) flushAppInputs(p *AppPass, set core1_0.DescriptorSet) error {
 		if i < len(p.desc.Reads) {
 			t = p.desc.Reads[i]
 		}
+		if i < len(p.desc.ReadRanges) && p.desc.ReadRanges[i].Count > 0 && t != nil && !t.destroyed && t.target != nil {
+			// The target's own sampler with a view of only the declared
+			// levels, in the instance the texture shows this frame.
+			r.appInfos[0] = core1_0.DescriptorImageInfo{Sampler: t.sampler, ImageView: t.target.readView(p.desc.ReadRanges[i]), ImageLayout: core1_0.ImageLayoutShaderReadOnlyOptimal}
+			r.appWrites[0] = core1_0.WriteDescriptorSet{DstSet: set, DstBinding: i, DescriptorType: core1_0.DescriptorTypeCombinedImageSampler, ImageInfo: r.appInfos[:1]}
+			if err := r.deviceDriver.UpdateDescriptorSets(r.appWrites[:1], nil); err != nil {
+				return err
+			}
+			continue
+		}
 		if err := r.writeAppSampler(set, i, t); err != nil {
 			return err
 		}

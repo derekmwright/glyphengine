@@ -1,0 +1,20 @@
+#version 450
+
+// One reduction: level n through a view of that level alone (ReadRanges), the
+// 2x2 box mean of it stored into level n+1 (WriteLevels). A source axis that
+// has already reached one texel repeats its last texel rather than reading
+// past the level, so the mean of a level is the mean of the one above it.
+layout(set = 2, binding = 0) uniform sampler2D src;
+layout(set = 2, binding = 4, rgba16f) uniform writeonly image2D dst;
+layout(local_size_x = 8, local_size_y = 8) in;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, imageSize(dst)))) return;
+    ivec2 last = textureSize(src, 0) - 1;
+    vec4 sum = texelFetch(src, min(2 * p, last), 0)
+             + texelFetch(src, min(2 * p + ivec2(1, 0), last), 0)
+             + texelFetch(src, min(2 * p + ivec2(0, 1), last), 0)
+             + texelFetch(src, min(2 * p + ivec2(1, 1), last), 0);
+    imageStore(dst, p, sum * 0.25);
+}

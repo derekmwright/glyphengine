@@ -421,9 +421,16 @@ func (f *frameGraph) barriers(c *graphFrame, bs []framegraph.Barrier) error {
 			if aspect&core1_0.ImageAspectDepth != 0 {
 				aspect |= depthAspect(desc.Format)
 			}
+			// A whole-image barrier covers every level the plan says the image
+			// has, which for a single-level image is the one level it always
+			// named; only a ranged use of a longer chain names a subrange.
+			base, levels := 0, int(desc.Levels)
+			if b.Levels.Count != 0 {
+				base, levels = int(b.Levels.Base), int(b.Levels.Count)
+			}
 			c.scratch.barriers[imageCount] = core1_0.ImageMemoryBarrier{OldLayout: b.OldLayout, NewLayout: b.NewLayout,
 				SrcQueueFamilyIndex: -1, DstQueueFamilyIndex: -1, Image: images[instance],
-				SubresourceRange: core1_0.ImageSubresourceRange{AspectMask: aspect, LevelCount: 1, LayerCount: int(desc.Layers)},
+				SubresourceRange: core1_0.ImageSubresourceRange{AspectMask: aspect, BaseMipLevel: base, LevelCount: levels, LayerCount: int(desc.Layers)},
 				SrcAccessMask:    b.SrcAccess, DstAccessMask: b.DstAccess}
 			imageCount++
 			j++
