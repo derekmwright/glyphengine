@@ -39,7 +39,7 @@ layout(set = 0, binding = 1) uniform ShadowData {
     mat4 cascadeVP[2];
     vec4 nightGrade;
     vec4 skyPalette[6];
-    // Declared so this block's size matches renderer/shadow.go's litUBOSize.
+    // Declared so this block's size matches renderer/shadow.go's litUBOHeadSize.
     // The dome does not read it; the in-scattering it fronts is a separate
     // draw of its own (skyvolumetric.frag), for the reason recorded there.
     vec4 volumetric;

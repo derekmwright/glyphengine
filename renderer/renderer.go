@@ -157,15 +157,18 @@ type Renderer struct {
 	appParamsSetLayout     core1_0.DescriptorSetLayout
 	shaderTextureSlots     int
 	appTimingCapacity      int
-	shaderTextures         [maxShaderTextureSlots]*Texture
-	shaderTargets          [maxShaderTextureSlots]*RenderTarget
-	hdrReadTexture         Texture
-	appWrites              [1]core1_0.WriteDescriptorSet
-	appInfos               [1]core1_0.DescriptorImageInfo
-	depthResolve           *sceneDepthResources
-	waterFormats           renderingFormats
-	sceneColor             *sceneColorTarget
-	grass                  *GrassSystem
+	// shadowCascades is WithShadowCascades; zero is ShadowCascades. Read it
+	// through ShadowCascadeCount.
+	shadowCascades int
+	shaderTextures [maxShaderTextureSlots]*Texture
+	shaderTargets  [maxShaderTextureSlots]*RenderTarget
+	hdrReadTexture Texture
+	appWrites      [1]core1_0.WriteDescriptorSet
+	appInfos       [1]core1_0.DescriptorImageInfo
+	depthResolve   *sceneDepthResources
+	waterFormats   renderingFormats
+	sceneColor     *sceneColorTarget
+	grass          *GrassSystem
 	// waterPlanes is scratch for the per-frame split of blended draws onto
 	// either side of the water, kept so a frame that draws water does not
 	// allocate to classify against it. See waterorder.go.
@@ -649,6 +652,42 @@ func WithPipelineStatistics() Option {
 	return func(r *Renderer) { r.pipelineStatsRequested = true }
 }
 
+// WithShadowCascades sets how many directional shadow cascades the renderer
+// allocates and draws: ShadowCascades (two) to MaxShadowCascades (four). Zero
+// keeps two. New refuses anything else rather than clamping, because the count
+// is also what a shader loops to.
+//
+// The default costs nothing in the sense the other options mean it: two layers
+// per frame in flight, two cascade passes, and the same allocation and recorded
+// stream as a renderer that never heard of the option. Each extra cascade is
+// one more ShadowMapSize-square depth layer per frame in flight
+// (ResourceCounts.ShadowMapBytes reports the total the driver sized) and one
+// more pass over every shadow caster inside its volume, inside the PassShadow
+// timing bracket.
+//
+// It is an option rather than a setter because the count sizes the sun array
+// image and the frame graph's declaration of it, both built once. What each
+// cascade covers is per frame, and lives in ShadowCoverage: an Engine refuses
+// a coverage whose count disagrees with this one, and draws
+// DefaultShadowCoverageFor(n) until it is given one.
+//
+// The matrices past the first two reach shaders at the tail of the ShadowData
+// block, after volumetric, so a shader that declares only the two-cascade head
+// keeps reading the first two exactly as before; docs/agents/environment.md
+// has the declaration a shader adds to read the rest.
+func WithShadowCascades(n int) Option {
+	return func(r *Renderer) { r.shadowCascades = n }
+}
+
+// ShadowCascadeCount is how many directional cascades this renderer allocated
+// and records -- WithShadowCascades, with zero read as ShadowCascades.
+func (r *Renderer) ShadowCascadeCount() int {
+	if r.shadowCascades == 0 {
+		return ShadowCascades
+	}
+	return r.shadowCascades
+}
+
 // New initializes the full Vulkan rendering stack: instance, surface, device,
 // swapchain, pipelines, rendering bindings, command buffers, and sync
 // objects. Call Destroy on the result.
@@ -687,6 +726,9 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	}
 	if n := r.AppTimingCapacity(); n < 1 || n > MaxAppTimingCapacity {
 		return nil, fmt.Errorf("renderer: application timing capacity %d outside [1,%d]", n, MaxAppTimingCapacity)
+	}
+	if n := r.ShadowCascadeCount(); n < ShadowCascades || n > MaxShadowCascades {
+		return nil, fmt.Errorf("renderer: shadow cascades %d outside [%d,%d]", n, ShadowCascades, MaxShadowCascades)
 	}
 	// An override may set only the stages it cares about.
 	r.shaders = r.shaders.withDefaults()
@@ -883,7 +925,7 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	r.onInit(func() { r.deviceDriver.DestroyDescriptorSetLayout(r.jointDescriptorSetLayout, nil) })
 
 	// Step 7b: Shadow resources (needs descriptor pool)
-	r.shadow, err = createShadowResources(r.instanceDriver, r.deviceDriver, r.shaders, r.physicalDevice, r.descriptorPool, r.jointDescriptorSetLayout, r.ShaderTextureCapacity())
+	r.shadow, err = createShadowResources(r.instanceDriver, r.deviceDriver, r.shaders, r.physicalDevice, r.descriptorPool, r.jointDescriptorSetLayout, r.ShaderTextureCapacity(), r.ShadowCascadeCount())
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create shadow resources: %w", err)
 	}
@@ -1236,7 +1278,7 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 		r.onInit(func() { r.uiLayer.destroy(r.deviceDriver) })
 	}
 
-	r.frameGraph, err = newFrameGraph(r.msaaSamples, r.depth.format, r.sc.imageFormat, len(r.sc.imageViews), r.depthPrepassMode != DepthPrepassOff)
+	r.frameGraph, err = newFrameGraph(r.msaaSamples, r.depth.format, r.sc.imageFormat, len(r.sc.imageViews), r.depthPrepassMode != DepthPrepassOff, r.ShadowCascadeCount())
 	if err != nil {
 		return nil, fmt.Errorf("renderer: build frame graph: %w", err)
 	}
@@ -2205,14 +2247,14 @@ func (r *Renderer) DrawFrame(draws []RenderObject, overlays []RenderObject, cele
 	if t := r.trace; t != nil {
 		r.traceStreamedBuffers(t)
 		r.traceStaticGPUState(t)
-		traceLighting(t, lighting)
+		traceLighting(t, lighting, r.ShadowCascadeCount())
 	}
 
 	// Always upload the cascade VP matrices so the fragment shader never reads
 	// stale data. When shadows are disabled, the VPs are zero matrices, causing
 	// all fragments to project to the shadow map origin where depth=1.0
 	// (cleared) → fully lit.
-	r.shadow.uploadLitUBO(f, lighting.CascadeVPs, lighting.NightGrade, lighting.SkyPalette, lighting.Volumetrics)
+	r.shadow.uploadLitUBO(f, lighting.CascadeVPs, lighting.CascadeReceivers, lighting.NightGrade, lighting.SkyPalette, lighting.Volumetrics)
 	r.flushShaderParameters(f)
 	if t := r.trace; t != nil {
 		t.Hash("shaderparams", NewHash.Bytes(r.shadow.shaderParameterMapped[f]))
@@ -2380,6 +2422,12 @@ func (r *Renderer) traceStaticGPUState(t *StateTrace) {
 	if r.ShaderTextureCapacity() != ShaderTextureSlots || r.AppTimingCapacity() != maxAppTimings {
 		cfg = cfg.Int(r.ShaderTextureCapacity()).Int(r.AppTimingCapacity())
 	}
+	// Folded only when it is not the default, like the two capacities above, so
+	// a two-cascade run keeps the config= it always had and a run with a third
+	// layer cannot diff clean against one without it.
+	if n := r.ShadowCascadeCount(); n != ShadowCascades {
+		cfg = cfg.Int(n)
+	}
 	t.Hash("config", cfg)
 }
 
@@ -2446,10 +2494,18 @@ func (r *Renderer) traceStreamedBuffers(t *StateTrace) {
 // fit that saw a different centre. Worth a field of its own for that reason:
 // it is the difference between "the simulation moved" and "the same simulation
 // produced different GPU state".
-func traceLighting(t *StateTrace, l SceneLighting) {
+func traceLighting(t *StateTrace, l SceneLighting, cascades int) {
 	h := NewHash.Bool(l.ShadowEnabled)
-	for c := range l.CascadeVPs {
+	// Only the cascades the renderer draws, and the receiver bands only when a
+	// coverage set one: a default frame then hashes the same two matrices it
+	// always hashed, and a trace taken before the count existed still compares.
+	for c := range cascades {
 		h = h.Float32s(l.CascadeVPs[c][:])
+	}
+	if l.CascadeReceivers != ([MaxShadowCascades]ShadowReceiverRange{}) {
+		for c := range cascades {
+			h = h.Float32(l.CascadeReceivers[c].Near).Float32(l.CascadeReceivers[c].Far)
+		}
 	}
 	t.Hash("cascades", h)
 

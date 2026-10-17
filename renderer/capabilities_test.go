@@ -295,6 +295,19 @@ func TestCapabilitiesHashAgreesWithTrace(t *testing.T) {
 		t.Fatal("extended timing capacity absent from trace")
 	}
 	WithAppTimingCapacity(0)(r)
+	// The cascade count is folded only off its default: two, spelled or not,
+	// is the config= every run had, and three cannot diff clean against it.
+	// Verified break (2026-10-17): dropping the fold fails with "a third
+	// shadow cascade absent from trace".
+	WithShadowCascades(ShadowCascades)(r)
+	if tracedConfig(t, r) != want {
+		t.Fatal("an explicit two-cascade count moved the trace")
+	}
+	WithShadowCascades(3)(r)
+	if tracedConfig(t, r) == want {
+		t.Fatal("a third shadow cascade absent from trace")
+	}
+	WithShadowCascades(0)(r)
 
 	// And every identity field the report carries has to reach the field, or a
 	// run on a different GPU could diff clean. Each edit is applied to the

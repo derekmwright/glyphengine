@@ -26,7 +26,7 @@ func withDepthPrepass(fx *frame) *frame {
 		lit: h.pipeline(), material: h.pipeline(), instanced: h.pipeline(),
 		layout: fx.litPipelineLayout, mode: DepthPrepassOn, active: true,
 	}
-	g, err := newFrameGraph(core1_0.Samples4, core1_0.FormatD32SignedFloat, core1_0.FormatB8G8R8A8SRGB, 1, true)
+	g, err := newFrameGraph(core1_0.Samples4, core1_0.FormatD32SignedFloat, core1_0.FormatB8G8R8A8SRGB, 1, true, ShadowCascades)
 	if err != nil {
 		panic(err)
 	}
@@ -64,7 +64,7 @@ func (d *prepassRecorder) first(p core1_0.Pipeline) int {
 // always did. What this test adds is the other half of the same statement at the
 // level of the graph -- no declaration, no node, no step, nothing to skip.
 func TestDepthPrepassOffDeclaresNothing(t *testing.T) {
-	f, err := newFrameGraph(core1_0.Samples4, core1_0.FormatD32SignedFloat, core1_0.FormatB8G8R8A8SRGB, 1, false)
+	f, err := newFrameGraph(core1_0.Samples4, core1_0.FormatD32SignedFloat, core1_0.FormatB8G8R8A8SRGB, 1, false, ShadowCascades)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestDepthPrepassOffDeclaresNothing(t *testing.T) {
 // cannot share depth with.
 func TestDepthPrepassNodePrecedesTheSceneAndKeepsItsDepth(t *testing.T) {
 	for _, samples := range []core1_0.SampleCountFlags{core1_0.Samples1, core1_0.Samples4} {
-		f, err := newFrameGraph(samples, core1_0.FormatD32SignedFloat, core1_0.FormatB8G8R8A8SRGB, 3, true)
+		f, err := newFrameGraph(samples, core1_0.FormatD32SignedFloat, core1_0.FormatB8G8R8A8SRGB, 3, true, ShadowCascades)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -151,7 +151,7 @@ func TestDepthPrepassLeavesDepthAnAttachment(t *testing.T) {
 		depth: &depthResources{format: core1_0.FormatD32SignedFloat},
 		sc:    &swapchainDetails{imageFormat: core1_0.FormatB8G8R8A8SRGB, imageViews: make([]core1_0.ImageView, 1), extent: core1_0.Extent2D{Width: 640, Height: 360}}}
 	r.depthResolve = &sceneDepthResources{r: r}
-	f, err := newFrameGraph(r.msaaSamples, r.depth.format, r.sc.imageFormat, 1, true, r)
+	f, err := newFrameGraph(r.msaaSamples, r.depth.format, r.sc.imageFormat, 1, true, ShadowCascades, r)
 	if err != nil {
 		t.Fatal(err)
 	}

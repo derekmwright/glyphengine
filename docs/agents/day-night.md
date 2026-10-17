@@ -44,7 +44,7 @@ requires:
 assets: none
 example: examples/09-water
 run: go run ./09-water -time 0.78
-verified: 2026-10-02 # the clock and its curves moved to x/sky as sky.DayNight and sky.DayCycleSource; the atmosphere model, the night grade and the palette stayed in the engine; Scene.DayNight/TimeOfDay/SetTimeOfDay/SetDayCycleSpeed are gone (#161 step 4)
+verified: 2026-10-17 # the ShadowData head stays 256 bytes and the cascade tail for WithShadowCascades follows it (#189); the clock and its curves moved to x/sky as sky.DayNight and sky.DayCycleSource; the atmosphere model, the night grade and the palette stayed in the engine; Scene.DayNight/TimeOfDay/SetTimeOfDay/SetDayCycleSpeed are gone (#161 step 4)
 ---
 
 # Day/night cycle
@@ -224,8 +224,8 @@ scene's, and `Scene.SetNightGrade` is what sets that. See
 for the rule and why the zero value is the sentinel rather than an answer. The
 values ride to the shaders in the per-frame `ShadowData` uniform
 block, appended after the cascade matrices because the push constant block is
-full at its 256-byte guaranteed minimum; all seven lit fragment shaders declare
-that block and must agree with `renderer/shadow.go`'s `litUBOSize`.
+full at its 256-byte guaranteed minimum; every lit fragment shader declares that
+block, and its head must agree with `renderer/shadow.go` up to `litUBOHeadSize`.
 
 Two consequences worth knowing:
 

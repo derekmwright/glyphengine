@@ -9,7 +9,7 @@ import (
 
 func (fx *frame) initGraph() {
 	var err error
-	fx.graph, err = newFrameGraph(core1_0.Samples4, core1_0.FormatD32SignedFloat, core1_0.FormatB8G8R8A8SRGB, 1, false)
+	fx.graph, err = newFrameGraph(core1_0.Samples4, core1_0.FormatD32SignedFloat, core1_0.FormatB8G8R8A8SRGB, 1, false, ShadowCascades)
 	if err != nil {
 		panic(err)
 	}
@@ -76,7 +76,7 @@ func (fx *frame) bindGraph() {
 func TestFrameGraphWaterFormatsMatchScene(t *testing.T) {
 	for _, prepass := range []bool{false, true} {
 		for _, samples := range []core1_0.SampleCountFlags{core1_0.Samples1, core1_0.Samples4} {
-			f, err := newFrameGraph(samples, core1_0.FormatD32SignedFloat, core1_0.FormatB8G8R8A8SRGB, 3, prepass)
+			f, err := newFrameGraph(samples, core1_0.FormatD32SignedFloat, core1_0.FormatB8G8R8A8SRGB, 3, prepass, ShadowCascades)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -95,7 +95,7 @@ func TestFrameGraphWaterFormatsMatchScene(t *testing.T) {
 // graph whose declaration and node indices coincided was the one New compiles,
 // and the prepass is what stopped them coinciding.
 func TestEngineFormatsSurviveTheDepthPrepass(t *testing.T) {
-	f, err := newFrameGraph(core1_0.Samples4, core1_0.FormatD32SignedFloat, core1_0.FormatB8G8R8A8SRGB, 3, true)
+	f, err := newFrameGraph(core1_0.Samples4, core1_0.FormatD32SignedFloat, core1_0.FormatB8G8R8A8SRGB, 3, true, ShadowCascades)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestResizeCreatesNoRenderPassesOrFramebuffers(t *testing.T) {
 }
 func TestFrameGraphTailLayouts(t *testing.T) {
 	for _, samples := range []core1_0.SampleCountFlags{core1_0.Samples1, core1_0.Samples4} {
-		f, err := newFrameGraph(samples, core1_0.FormatD32SignedFloat, core1_0.FormatB8G8R8A8SRGB, 3, false)
+		f, err := newFrameGraph(samples, core1_0.FormatD32SignedFloat, core1_0.FormatB8G8R8A8SRGB, 3, false, ShadowCascades)
 		if err != nil {
 			t.Fatal(err)
 		}

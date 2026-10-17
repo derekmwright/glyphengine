@@ -83,11 +83,17 @@ type SceneLighting struct {
 	// FogBaseHeight is the world Y at which density equals FogDensity.
 	FogBaseHeight float32
 
-	VP            [16]float32                // camera view-projection matrix (for instanced grass)
-	CameraRight   [3]float32                 // camera right vector (for billboard particles)
-	CameraUp      [3]float32                 // camera up vector (for billboard particles)
-	CascadeVPs    [ShadowCascades]mgl32.Mat4 // per-cascade light view-projections for shadow mapping
-	ShadowEnabled bool                       // true when the sun is above the horizon
+	VP            [16]float32                   // camera view-projection matrix (for instanced grass)
+	CameraRight   [3]float32                    // camera right vector (for billboard particles)
+	CameraUp      [3]float32                    // camera up vector (for billboard particles)
+	CascadeVPs    [MaxShadowCascades]mgl32.Mat4 // per-cascade light view-projections; the first ShadowCascadeCount() are read
+	ShadowEnabled bool                          // true when the sun is above the horizon
+
+	// CascadeReceivers bounds, per cascade, the normalised light depth a
+	// receiver must lie in to select that cascade. The zero value is the whole
+	// volume, which is what every cascade used before the field existed.
+	// ShadowCoverage.ReceiverRanges fills it from ShadowCascadeCoverage.ReceiverDepth.
+	CascadeReceivers [MaxShadowCascades]ShadowReceiverRange
 
 	// NightGrade is the scotopic grade the lit shaders apply as daylight goes.
 	// Nil means DefaultNightGrade, which is deliberately not the same as a
@@ -578,7 +584,7 @@ func recordCommandBuffer(
 		Offset: core1_0.Offset2D{X: 0, Y: 0},
 		Extent: core1_0.Extent2D{Width: ShadowMapSize, Height: ShadowMapSize},
 	}
-	for cascade := 0; cascade < ShadowCascades; cascade++ {
+	for cascade := range shadow.cascadeCount() {
 		err = shadow.targets[frame][cascade].begin(deviceDriver, scratch.dynamic, cmdBuf)
 		if err != nil {
 			return err

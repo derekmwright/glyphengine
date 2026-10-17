@@ -31,12 +31,28 @@ api:
   - renderer.ShadowCoverage
   - renderer.ShadowCascadeCoverage
   - renderer.DefaultShadowCoverage
+  - renderer.DefaultShadowCoverageFor
   - renderer.ComputeCascadeVPsWithCoverage
+  - glyphengine.WithShadowCascades
+  - renderer.WithShadowCascades
+  - renderer.Renderer.ShadowCascadeCount
+  - renderer.ShadowCascades
+  - renderer.MaxShadowCascades
+  - renderer.ShadowCoverage.Count
+  - renderer.ShadowCoverage.CascadeCount
+  - renderer.ShadowCoverage.ValidateFor
+  - renderer.ShadowCoverage.ReceiverRanges
+  - renderer.ShadowCascadeCoverage.ReceiverDepth
+  - renderer.ShadowReceiverRange
+  - renderer.SceneLighting.CascadeReceivers
+  - renderer.Capabilities.ShadowCascades
+  - renderer.Capabilities.MaxShadowCascades
+  - renderer.ResourceCounts.ShadowMapBytes
 requires: []
 assets: none
 example: examples/09-water
 run: go run ./09-water -alien
-verified: 2026-10-02 # the sky moved to x/sky (#161 step 4): StaticSource is the only built-in source and has no Sky, Scene.DayNight/TimeOfDay/SetTimeOfDay/SetDayCycleSpeed and Engine.SetFogDensity are gone, NewScene leaves Scene.Env nil, and SkyFrag/StarsFrag/CloudsFrag are the sky slot
+verified: 2026-10-17 # opt-in third and fourth directional cascades (#189): WithShadowCascades, ShadowCoverage.Count, ReceiverDepth, DefaultShadowCoverageFor, the ShadowData tail after volumetric with the head unmoved, hardware ROIs, texel sizes and the third tier's measured cost
 ---
 
 # Environment
@@ -238,9 +254,9 @@ the sun disc turned off.
 
 ## Directional shadow coverage
 
-`CastShadows` enables the directional maps. Their default half-extents remain
-15 and 90 world units, at 2048 squared texels each. For larger scenes, call this
-on the frame thread (`Init` or `Update`):
+`CastShadows` enables the directional maps. By default there are two, with
+half-extents of 15 and 90 world units, at 2048 squared texels each. For larger
+scenes, call this on the frame thread (`Init` or `Update`):
 
 ```go
 coverage := renderer.DefaultShadowCoverage()
@@ -256,44 +272,253 @@ light-space XY half-extent; `TowardLight` places the light eye ahead of the
 centre, with a 0.1-unit near plane, and `AwayFromLight` reaches behind it.
 Increasing caster depth alone preserves XY texel density. Increasing radius
 trades detail for coverage: radius 15 is 0.01465 units/texel, radius 90 is
-0.08789, and radius 2000 is 1.953125. Two maps cannot guarantee detailed shadows
-over arbitrary distances; measure your geometry and camera positions.
+0.08789, and radius 2000 is 1.953125.
 
 All fields must be finite and positive, and `TowardLight` must exceed 0.1.
 An entirely zero `ShadowCoverage` restores defaults; partially specified
-volumes are rejected without changing the active setting. This allocates no
-new GPU resources and survives resize and scene replacement. Default shader
-bindings, map count, resolution and sampling remain unchanged.
+volumes are rejected without changing the active setting. Changing coverage
+allocates no GPU resources and survives resize and scene replacement.
 
-Casters outside the camera are kept if either cascade sees them, including
-non-nested volumes. Renderer-only consumers can call
-`ComputeCascadeVPsWithCoverage` and pass the returned matrices through
-`SceneLighting.CascadeVPs`; they must likewise cull against both volumes.
-`ComputeCascadeVPs` retains its original defaults. For camera-relative worlds,
-use the same rebased coordinates for the centre, camera and all geometry.
-Texel snapping operates in that coordinate system; changing the world origin
-can change its snapping phase, so this is not a promise of phase continuity
-across arbitrary rebases.
+### More than two cascades
+
+Two maps cannot cover arbitrary distances in detail: contact shadows around
+rocks and shadows from mountain ranges are a 1,333x scale gap, and no pair of
+radii bridges it. `glyph.WithShadowCascades(n)` (`renderer.WithShadowCascades`
+underneath) allocates `n` cascades, from 2 to `renderer.MaxShadowCascades` (4),
+at construction:
+
+```go
+e, err := glyph.New(g, glyph.WithShadowCascades(3))
+
+// in Init: a coverage that says what each of the three covers
+coverage := renderer.ShadowCoverage{Count: 3}
+coverage.Cascades[0] = renderer.ShadowCascadeCoverage{Radius: 90, TowardLight: 200000, AwayFromLight: 120000, ReceiverDepth: 90}
+coverage.Cascades[1] = renderer.ShadowCascadeCoverage{Radius: 3000, TowardLight: 200000, AwayFromLight: 120000, ReceiverDepth: 3000}
+coverage.Cascades[2] = renderer.ShadowCascadeCoverage{Radius: 120000, TowardLight: 200000, AwayFromLight: 120000}
+if err := e.SetShadowCoverage(coverage); err != nil { return err }
+```
+
+- **The count is the renderer's.** `ShadowCoverage.Count` must equal it (zero
+  means two), and entries past the count must be zero; `SetShadowCoverage`
+  refuses a mismatch with an error that names both numbers. The zero coverage
+  is accepted at any count and means `renderer.DefaultShadowCoverageFor(n)`,
+  which is what an engine built with more cascades draws until a coverage is
+  set: radii 15, 90, 540 and 3240, `TowardLight` equal to the radius and
+  `AwayFromLight` 1.5 times it. That default is **derived, not measured** --
+  the factor of six that already separates the historical 15 and 90, carried
+  on -- and exists so shadows are never silently absent. What the extra tiers
+  should cover is a property of your world; set it.
+  `ShadowCoverage.ValidateFor(n)` is the same check for a renderer-only
+  consumer. `Capabilities().ShadowCascades` and `.MaxShadowCascades`, and
+  `Renderer.ShadowCascadeCount()`, report what was built.
+- **The default is unchanged.** Two cascades keep their two layers per frame
+  in flight, their two passes, the recorded command stream (pinned by
+  `TestMigrationDrawStreams` and `TestShadowPassRecordsEveryCascade`) and their
+  trace fields; a count other than two is folded into the state trace's
+  `config=`. Measured: 26 fixed-clock captures across 24 examples (the
+  `task screenshots` set, the three `23-shadow-coverage` arms and
+  `28-overdraw`) are byte-identical to the build before the option, and
+  `task screenshots` changes no image. The first build of the generalised
+  `calcShadow` was not: one loop to the renderer's count moved 1 to 10 pixels
+  by one level in six of them, so the head's two cascades keep a
+  constant-length loop of their own (see `calcShadow`).
+- **Every caster reaches every layer.** Static, skinned and instanced casters,
+  LOD sets and impostors render into each active cascade, culled against that
+  cascade's volume, and the draw list keeps an off-camera caster if any active
+  cascade sees it.
+
+#### Which cascade a receiver gets
+
+`calcShadow` takes the first cascade whose XY bounds (less a 1% margin for the
+filter taps) contain the receiver **and** whose receiver band contains its
+light depth. The band comes from `ShadowCascadeCoverage.ReceiverDepth`: how far
+from the centre, along the light either way, a receiver may lie and still be
+shadowed by that cascade. Zero, the default, is the whole caster volume, which
+is the only rule there was before. Casters are never affected:
+`ReceiverDepth` bounds receivers, not reach.
+
+The depth test alone cannot keep a fine cascade to nearby receivers once its
+caster reach is long, and with the configuration above that is arithmetic
+rather than a judgement (`TestReceiverDepthKeepsFarReceiversOffTheNearMap`): a
+receiver 10 km down-sun and 5 m off the light axis projects inside the 90 m
+map's XY bounds and, with 320 km of depth, inside its depth range, so without a
+band the 90 m map is its first match. With `ReceiverDepth` 90 and 3000 on the
+two finer tiers it falls through to the 120 km tier. A ground point 150 m from
+the centre along the light and 40 m off it is the other side of the same rule:
+inside the 90 m map's XY bounds, past its receiver depth, and shaded by the
+3 km tier rather than left with no cascade.
+
+What the rule does **not** do, measured: change the picture when every tier has
+the same caster reach. The near map then holds every caster on such a
+receiver's light ray, so it answers what the coarser map would. On
+`23-shadow-coverage -cascades 3`, the frame with the bands and the frame with
+`-receivers=false` are byte-identical, with and without the mountain. The
+bands are a selection contract -- the near tier stops where you say, which is
+what a game that filters or blends per tier needs -- not a correctness fix for
+equal-reach tiers.
+
+The band is normalised light depth (`ShadowCoverage.ReceiverRanges`), and the
+shader compares against it where it used to compare against 0 and 1, so it
+costs nothing per fragment.
+
+On hardware (`task shadowcoverage`, RX 7900 XTX, 800x600, fixed clock), the
+mountain 4 km behind the camera darkens every band of ground straight ahead
+from 180.3-180.7/255 to 118.3-118.7: near ground on the 90 m map (z about -40,
+box 370,240,60,10), the point past the near tier's receiver depth served by the
+3 km map (z about -130, box 370,181,60,5), and middle-tier ground at z about
+-235, -650 and -1250. Ground past the end of the mountain's shadow reads 180.33
+in both captures. Repeat captures are byte-identical.
+
+#### Texel sizes
+
+XY texel size is `2 * Radius / 2048`, read back out of each matrix by
+`TestCascadeTexelSizes`:
+
+| Radius | units per texel |
+|---|---|
+| 90 | 0.08789 |
+| 3,000 | 2.9297 |
+| 120,000 | 117.19 |
+
+The middle tier is the 2.93 m the planet configuration asked for, between the
+near tier's 0.088 and the far tier's 117.
+
+Measured on hardware with `23-shadow-coverage -cascades 3 -probe N`, which
+looks straight down at the mountain shadow's side edge (aligned with the maps'
+X axis) and gives every finer tier a 0.1 mm `ReceiverDepth` so the probed tier
+serves the whole view. The stock filter ramps over three texels, so the edge
+width over three is the texel size: 46, 62 and 165 pixels, 0.0847, 2.853 and
+113.9 units per texel, 2.6-3.6% under the arithmetic because the one-level
+threshold that finds the ramp trims its ends. `task shadowcoverage` holds each
+within 8%.
+
+#### Depth bias per cascade
+
+Each cascade's bias is two numbers, a scale on the normal-offset bias and the
+depth range it was tuned at, sent as data rather than compiled in. Cascades 0
+and 1 are exactly the two pairs the shader always used, (1, 37.4) and
+(4, 224.9), so a default frame is unchanged; cascades 2 and 3 reuse cascade 1's
+pair, the only far-cascade bias the engine has been tuned with. The depth term
+holds the world-space bias at its historical size whatever depth range a
+coverage chooses: without it, `23-shadow-coverage` with `TowardLight=1500`
+loses the nearby prop's shadow (ROI 140,295,25,15 reads 181.67/255 instead of
+119.33; `task shadowcoverage`, 800x600, fixed clock). On the planet arm's flat, sunlit ground the middle tier
+with cascade 1's pair shows no acne: lit ground reads constant to one level
+across it, the only steps being 8-bit banding of the distance gradient. Grazing
+terrain at the middle tier has not been measured.
+
+#### What a third tier costs
+
+Memory is one 2048-square depth layer per frame in flight per extra cascade;
+`Renderer.ResourceCounts().ShadowMapBytes` reports the total as the driver
+sized it. GPU time is inside the `PassShadow` bracket, which times the whole
+shadow pass, so the extra tier's share is the difference between a scene at
+three cascades and the same scene at two.
+
+Measured on RX 7900 XTX, 2026-10-17: fixed clock, vsync off (`-novsync`), 1500
+frames per run, the two arms of each scene run back to back in alternating
+order in each of three trials, one discarded warm-up run first, and both halves
+of the idle poll (no engine or game process, 3D-engine utilisation within five
+points of an 8% baseline) quiet before every run. `23-shadow-coverage` is the
+planet arm, `-planet` (90 m and 3 km) against `-cascades 3` (plus 120 km), mean
+after 30 warm-up frames; `07-terrain` is the stock scene against `-cascades 3`
+with no coverage set, so its third tier is the derived 540-unit default, mean
+over the whole run, printed to 0.001 ms.
+
+| Scene | `PassShadow`, two cascades | three cascades | third tier |
+|---|---|---|---|
+| `23-shadow-coverage` planet arm | 0.0463, 0.0467, 0.0477 ms | 0.0588, 0.0579, 0.0579 ms | +0.011 ms |
+| `07-terrain` | 0.036, 0.036, 0.035 ms | 0.054, 0.053, 0.054 ms | +0.018 ms |
+
+| Cascades | `ShadowMapBytes` (two frames in flight) |
+|---|---|
+| 2 | 68,157,472 (65.0 MiB) |
+| 3 | 102,236,192 (97.5 MiB) |
+| 4 | 136,314,912 (130.0 MiB) |
+
+Each tier adds 34,078,720 bytes: two 2048 x 2048 32-bit depth layers and
+524,288 bytes of driver alignment. `07-terrain -cascades 3` renders the same
+pixels as at two cascades -- nothing in that view lies past the 90-unit tier's
+receivers and inside the 540-unit one's -- so its 0.018 ms is the price of a
+tier that changes nothing on screen, which is what a game that does not set a
+coverage pays.
+
+Take timings unpaced. With vsync the card idles most of each frame and the pass
+times follow its clock state rather than the work: the same three-cascade arm
+read 1.54, 0.51 and 1.56 ms in three paced runs, and the first unpaced runs of
+a session read about 0.8 ms before settling to 0.05.
+
+### Shaders and the ShadowData block
+
+The extra matrices reach shaders through the **tail** of the `ShadowData`
+block, after `volumetric`, and nothing at a lower offset moved. A shader --
+yours, or a consumer's hand-written copy -- that declares only the head:
+
+```glsl
+mat4 cascadeVP[2]; vec4 nightGrade; vec4 skyPalette[6]; vec4 volumetric;
+```
+
+still reads the first two cascades, the night grade, the palette and the
+volumetric block exactly where it always did, at any cascade count. It sees two
+cascades. To read the rest, append the tail and say so before including
+`lighting.inc`:
+
+```glsl
+    mat4 cascadeVPExtra[2]; // cascades 2 and 3
+    vec4 cascadeInfo;       // x = the active cascade count
+    vec4 cascadeParams[4];  // per cascade: bias scale, bias depth, receiver band near, far
+} shadow;
+#define SHADOW_CASCADE_TAIL
+```
+
+With `SHADOW_CASCADE_TAIL` defined, `calcShadow` loops over
+`shadowCascadeCount()` cascades through `shadowCascadeVP(c)` and
+`shadowCascadeParams(c)`. Without it the same three functions return the two
+head cascades, their historical bias and the whole volume as each band, so a
+head-only shader that includes `lighting.inc` compiles and shades as it did.
+Cascade `c` is layer `c` of the `sampler2DArrayShadow` at binding 1. The full
+declaration with offsets is in
+[render-targets](render-targets.md#sampling-the-sun-shadow-cascades);
+`TestCascadeTailOffsetsMatchGLSL` lays out every `ShadowData` declaration in the
+repository, these pages included, against the Go offsets.
+
+### Renderer-only consumers and rebasing
+
+Renderer-only consumers call `ComputeCascadeVPsWithCoverage` (which fills
+`Count` matrices and leaves the rest zero) -- with
+`DefaultShadowCoverageFor(n)` for the default, since the zero value there
+means the two-cascade one -- and `ShadowCoverage.ReceiverRanges`,
+and pass them through `SceneLighting.CascadeVPs` and
+`SceneLighting.CascadeReceivers`; they must cull casters against the union of
+every active cascade themselves. `ComputeCascadeVPs` keeps its original
+two-cascade defaults. For camera-relative worlds, use the same rebased
+coordinates for the centre, camera and all geometry. Texel snapping operates in
+that coordinate system; changing the world origin can change its snapping
+phase, so this is not a promise of phase continuity across arbitrary rebases.
+
+### The two-cascade measurements
 
 `examples/23-shadow-coverage` places a caster one kilometre toward the sun.
 `-coverage=false` restores the old volumes; `-caster=false` removes the distant
 caster. `task shadowcoverage` checks the receiver and a nearby prop under a
-fixed clock. No planetary atmosphere or terrain policy is supplied.
+fixed clock. `-cascades 3` is the planet-scale arm described above, with
+`-caster=false` and `-receivers=false` as its controls; `-probe N` looks
+straight down at a shadow edge served by cascade N, `-pan` moves the camera
+every frame and rebases the world every 25 (validation-clean and repeatable),
+`-planet` is the same scene at two cascades, and `-novsync` is for timing. No planetary atmosphere
+or terrain policy is supplied.
 
 Measured on RX 7900 XTX, 800x600: the central receiver drops from 181.67 to
 119.33/255 (62.33, 1.52x) when extended coverage includes the caster; removing
-the caster restores 181.67. The nearby prop's shadow stays at 119.33. Depth bias
-is rescaled from the matrix's depth row to retain its historical world-space
-size: without that adjustment the nearby shadow disappears (181.67). The check
-fails with that adjustment removed, and the culling test fails when only the
-last cascade is considered. A fixed-clock `02-cube -frames 60` capture remained
-byte-identical to the preceding build with default coverage.
+the caster restores 181.67. The nearby prop's shadow stays at 119.33. The check
+fails with the depth-bias adjustment removed, and the culling test fails when
+only the last cascade is considered. A fixed-clock `02-cube -frames 60` capture
+remained byte-identical to the preceding build with default coverage.
 
 For this deliberately small scene, three 200-frame GPU means after 30 warmup
 frames (validation off) measured default shadow-pass time at 0.0393–0.0407 ms
 and extended coverage at roughly 0.039 ms. That establishes no meaningful
 speed difference; a terrain scene can submit many more casters when enlarged.
-The map allocation remains two 2048-square layers per frame in flight.
 Custom shadow shaders must likewise scale normalized depth bias with their
 matrix depth range; the stock shader derives it from the Z row, without changing
 any descriptor layout.

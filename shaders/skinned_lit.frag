@@ -17,7 +17,7 @@ layout(set = 2, binding = 0) uniform ShadowData {
     // scotopic tint, w the strength (0 disables). Nine shaders declare this
     // block -- the seven lit ones, plus sky.frag and clouds.frag, which reach
     // the same buffer through the cloud descriptor set -- and all nine must
-    // agree with renderer/shadow.go's litUBOSize.
+    // agree with renderer/shadow.go up to litUBOHeadSize.
     vec4 nightGrade;
     // The sky gradient's six palette endpoints; see atmSkyPalette in
     // atmosphere.inc for the order. They live here rather than as constants
@@ -29,7 +29,17 @@ layout(set = 2, binding = 0) uniform ShadowData {
     // volInscatter in volumetric.inc, and Volumetrics in renderer/shadow.go for
     // why these are data rather than constants in this file.
     vec4 volumetric;
+    // The cascades past the first two, appended after everything above so
+    // that no offset a two-cascade declaration reads has moved; see the
+    // ShadowData layout in renderer/shadow.go. x of cascadeInfo is the
+    // active count; cascadeParams[c] is cascade c's bias scale, bias depth
+    // and receiver band. Declaring them is what SHADOW_CASCADE_TAIL tells
+    // lighting.inc.
+    mat4 cascadeVPExtra[2];
+    vec4 cascadeInfo;
+    vec4 cascadeParams[4];
 } shadow;
+#define SHADOW_CASCADE_TAIL
 layout(set = 2, binding = 1) uniform sampler2DArrayShadow shadowMap;
 layout(set = 2, binding = 2) uniform samplerCube pointShadowMap;
 

@@ -38,10 +38,14 @@ var paramsLit []byte
 func main() {
 	runtime.LockOSThread()
 	parameters := flag.Bool("parameters", false, "check application per-frame uniforms instead of shadows")
+	// -cascades 3 or 4 builds the renderer with extra directional cascades. Both
+	// custom shaders declare only the two-cascade head of ShadowData, so they
+	// must read exactly what they read at the default.
+	cascades := flag.Int("cascades", 0, "directional shadow cascades (0 = the default two)")
 	flag.Parse()
 	var messages bytes.Buffer
 	log.SetOutput(io.MultiWriter(os.Stderr, &messages))
-	err := run(*parameters)
+	err := run(*parameters, *cascades)
 	log.SetOutput(os.Stderr)
 	if err != nil {
 		log.Fatal(err)
@@ -54,7 +58,7 @@ func main() {
 	}
 }
 
-func run(parameters bool) error {
+func run(parameters bool, cascades int) error {
 	w, err := window.New(400, 300, "Custom sky shadow sampling")
 	if err != nil {
 		return err
@@ -67,7 +71,7 @@ func run(parameters bool) error {
 		sh.SkyFrag = paramsSky
 		sh.LitFrag = paramsLit
 	}
-	r, err := renderer.New(w, renderer.WithShaders(sh), renderer.WithValidation(true))
+	r, err := renderer.New(w, renderer.WithShaders(sh), renderer.WithValidation(true), renderer.WithShadowCascades(cascades))
 	if err != nil {
 		return err
 	}
