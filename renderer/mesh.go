@@ -45,6 +45,10 @@ type Mesh struct {
 	// game that never checks its ticket still cannot read a buffer mid-copy.
 	upload *UploadTicket
 
+	// waterFoam is the persistent foam target CreateWaterFoam attached, or
+	// nil. Released with the mesh; see releaseMesh.
+	waterFoam *WaterFoam
+
 	destroyed bool
 }
 
@@ -164,6 +168,10 @@ func (r *Renderer) createDeviceLocalBuffer(data []byte, usage core1_0.BufferUsag
 
 	err = r.deviceDriver.CmdCopyBuffer(cmdBuf, stagingBuf, dstBuf, core1_0.BufferCopy{Size: size})
 	if err != nil {
+		// The command buffer was never submitted, so endSingleTimeCommands
+		// will not free it. Leaked before the foam target's failure injection
+		// reached this site: "CommandBuffer: created 2 destroyed 1".
+		r.deviceDriver.FreeCommandBuffers(cmdBuf)
 		r.deviceDriver.FreeMemory(dstMem, nil)
 		r.deviceDriver.DestroyBuffer(dstBuf, nil)
 		return core1_0.Buffer{}, core1_0.DeviceMemory{}, fmt.Errorf("record copy command: %w", err)
@@ -679,6 +687,12 @@ func (r *Renderer) releaseMesh(m *Mesh) bool {
 		return false
 	}
 	m.destroyed = true
+	// The foam target goes through its own deferred release rather than this
+	// mesh's: it is not a buffer of the mesh, and DestroyWaterFoam is the one
+	// place that detaches it from the frame graph.
+	if m.waterFoam != nil {
+		r.DestroyWaterFoam(m.waterFoam)
+	}
 
 	// A copy that is still only queued is dropped and its staging handed back
 	// at once. One already recorded into a command buffer that will run has to

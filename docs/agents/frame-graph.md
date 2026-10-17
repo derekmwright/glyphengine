@@ -30,7 +30,7 @@ requires:
   - VK_KHR_dynamic_rendering
   - vulkan-sdk
 assets: procedural
-verified: 2026-10-03 # the optional depth prepass node, FinalLayout on a graphics attachment, and why the node stays on a frame DepthPrepassAuto declined; the mip-chain barrier trap recorded after #154's evaluation; the cascade declaration and compute shadow reads; dynamic rendering, attachment barriers and the streamed upload node
+verified: 2026-10-17 # the water foam compute node and its sampled edge into the water pass; the optional depth prepass node, FinalLayout on a graphics attachment, and why the node stays on a frame DepthPrepassAuto declined; the mip-chain barrier trap recorded after #154's evaluation; the cascade declaration and compute shadow reads; dynamic rendering, attachment barriers and the streamed upload node
 ---
 
 # Record the renderer's frame graph
@@ -230,6 +230,16 @@ mesh, so the node records their trailing transfer-to-vertex-input group itself,
 plus a leading group for destinations a frame in flight may still be reading.
 The node is timed like an application pass, under the name `upload`, once the
 renderer has streamed anything.
+
+A renderer with a water foam target (`CreateWaterFoam`; see [water](water.md))
+splices one engine-owned `Compute` node per target, `water foam`, after the
+`StageAfterScene` application nodes and before the scene-colour copy. It
+declares `StorageReadWrite` on the target, a persistent fixed-extent R16F image,
+and a trailing transfer-kind node in the same optional group returns it to the
+sampled layout with the fragment stage in its consumer scope; the water node
+declares a fragment-stage `SampledRead` of it. The pair runs only on a frame
+whose surface is drawn with foam, and a renderer with no target declares neither
+the image nor the nodes.
 
 GPU LOD adds engine-owned classify/prefix/scatter nodes before shadows and
 before application StageBeforeScene work. A trailing copy obtains diagnostic

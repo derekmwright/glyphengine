@@ -140,6 +140,8 @@ type Renderer struct {
 	grassPipeline                 core1_0.Pipeline
 	grassImpostorPipeline         core1_0.Pipeline
 	waterPipeline                 core1_0.Pipeline
+	waterFoams                    []*WaterFoam    // live foam targets, in creation order; see CreateWaterFoam
+	waterFoam                     waterFoamShared // the pipelines they share, built on first use
 	godRayPipeline                core1_0.Pipeline
 	frameGraph                    *frameGraph
 	graphDirty                    bool
@@ -1242,7 +1244,7 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	r.cmdScratch.dynamic = khr_dynamic_rendering.CreateExtensionDriverFromCoreDriver(r.deviceDriver)
 	r.waterFormats = r.frameGraph.engineFormats(graphWater)
 
-	r.waterPipeline, err = createWaterPipeline(r.deviceDriver, r.shaders, r.waterFormats, r.litPipelineLayout, r.sc.extent, r.msaaSamples)
+	r.waterPipeline, err = createWaterPipeline(r.deviceDriver, r.shaders.WaterVert, r.shaders.WaterFrag, r.waterFormats, r.litPipelineLayout, r.sc.extent, r.msaaSamples)
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create water pipeline: %w", err)
 	}
@@ -1447,6 +1449,9 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 		return nil, fmt.Errorf("renderer: bind graph targets: %w", err)
 	}
 	r.onInit(func() { r.destroyAppResources() })
+	// Foam targets and their pipelines are made after New, on demand, like the
+	// application resources above; this is where shutdown gives them back.
+	r.onInit(func() { r.destroyWaterFoamResources() })
 	r.onInit(func() { r.releaseGraphBindings() })
 
 	cmdBufs, err := createCommandBuffers(r.deviceDriver, r.commandPool, maxFramesInFlight)

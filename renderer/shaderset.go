@@ -79,6 +79,12 @@ type ShaderSet struct {
 	GrassBakeVert, GrassBakeFrag []byte // impostor atlas bake
 	GrassImpostorVert            []byte // billboard LOD (pairs with GrassFrag)
 	WaterVert, WaterFrag         []byte // animated water surface
+	// WaterFoamFrag is WaterFrag's twin for a surface with whitecap foam
+	// (WaterFoamDesc), adding set 2 -- the foam target and its grid -- and the
+	// foam layer; WaterFoamComp advances the target once a frame. Both are
+	// used only by a surface that has foam, and a game replacing WaterFrag
+	// replaces this too or its foamed surfaces keep the engine's shading.
+	WaterFoamFrag, WaterFoamComp []byte
 	GodRayFrag                   []byte // screen-space light shafts (uses SkyVert)
 	TonemapFrag                  []byte // HDR resolve to the swapchain (uses SkyVert)
 	CloudsFrag                   []byte // volumetric clouds at half res (uses SkyVert); in the sky slot
@@ -131,6 +137,8 @@ func DefaultShaders() ShaderSet {
 		GrassBakeFrag:          shaders.GrassBakeFragSpv,
 		WaterVert:              shaders.WaterVertSpv,
 		WaterFrag:              shaders.WaterFragSpv,
+		WaterFoamFrag:          shaders.WaterFoamFragSpv,
+		WaterFoamComp:          shaders.WaterFoamCompSpv,
 		GodRayFrag:             shaders.GodRayFragSpv,
 		TonemapFrag:            shaders.TonemapFragSpv,
 
@@ -180,6 +188,7 @@ func (s ShaderSet) withDefaults() ShaderSet {
 		{&s.GrassBakeVert, d.GrassBakeVert}, {&s.GrassBakeFrag, d.GrassBakeFrag},
 		{&s.GrassImpostorVert, d.GrassImpostorVert},
 		{&s.WaterVert, d.WaterVert}, {&s.WaterFrag, d.WaterFrag},
+		{&s.WaterFoamFrag, d.WaterFoamFrag}, {&s.WaterFoamComp, d.WaterFoamComp},
 		{&s.GodRayFrag, d.GodRayFrag},
 		{&s.TonemapFrag, d.TonemapFrag},
 		{&s.BloomPrefilterFrag, d.BloomPrefilterFrag},

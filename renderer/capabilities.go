@@ -157,6 +157,12 @@ type Capabilities struct {
 	// GPUTimestamps above then come from one negotiation rather than two
 	// queries that can disagree.
 	timestampPeriod float32
+
+	// storageImageExtendedFormats is whether the device enabled the feature a
+	// shader needs to write an R16F storage image, which the water foam target
+	// is. Unexported for the same reason as the two above: one consumer, which
+	// reports its absence as an error naming the format.
+	storageImageExtendedFormats bool
 }
 
 // Capabilities returns what the device granted this renderer. The result is a
@@ -360,6 +366,8 @@ func negotiateCapabilities(a deviceAnswers, requested core1_0.SampleCountFlags) 
 		deviceType:                int(a.props.DriverType),
 		cacheUUID:                 a.props.PipelineCacheUUID,
 		timestampPeriod:           a.props.Limits.TimestampPeriod,
+
+		storageImageExtendedFormats: a.features.ShaderStorageImageExtendedFormats,
 	}
 	// Zero means unavailable rather than "no filtering": the limit is a
 	// maximum and a device without the feature reports one anyway, so reading

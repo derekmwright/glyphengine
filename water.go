@@ -83,6 +83,86 @@ type WaterOptions struct {
 	// lake bed. Zero disables refraction entirely and falls back to ordinary
 	// alpha blending, which costs nothing but shows an undistorted bottom.
 	RefractStrength float32
+
+	// Subsurface is light let through a backlit crest. The zero value is no
+	// term at all, and a surface without it renders byte for byte what it
+	// rendered before the option existed. DefaultWaterSubsurface is the
+	// measured starting point.
+	Subsurface WaterSubsurface
+
+	// Foam is whitecap foam on crests that are close to breaking. The zero
+	// value is no foam and costs nothing: CreateWaterMesh makes no target and
+	// the frame has no dispatch for it. Unlike the other options it has to be
+	// decided when the mesh is created, because that is when the target is.
+	// DefaultWaterFoam is the measured starting point.
+	Foam WaterFoam
+}
+
+// WaterFoam is whitecap foam: marked where the wave sum squeezes the surface
+// together hard enough to break, kept in a persistent target over the surface
+// grid, and faded out over Decay seconds, so a crest leaves foam behind it
+// rather than carrying a highlight along.
+//
+// Where the surface is squeezed is the Jacobian of the Gerstner sum's
+// horizontal displacement, evaluated by the same shader code that displaces
+// the vertices and builds their normal: one on calm water, falling toward zero
+// under a sharp crest. WaterOptions.SurfaceAt reports it at any point.
+//
+// The target is one R16F texel per grid vertex, stepped by one compute
+// dispatch per surface per frame the surface is drawn, and the foam is blended
+// over the water as a matte layer lit by the sun and the ambient. See
+// docs/agents/water.md for what it costs and how the defaults were measured.
+type WaterFoam struct {
+	// Threshold is the Jacobian below which a crest makes foam; new foam
+	// ramps from none at the threshold to full 0.1 below it.
+	Threshold float32
+	// Decay is how many seconds full foam takes to fade to nothing, in
+	// shader time (Engine.Elapsed). Zero, the default, is no foam at all.
+	Decay float32
+	// Color is the foam's albedo, lit by the sun and the ambient.
+	Color [3]float32
+}
+
+// DefaultWaterFoam is the measured starting point for WaterOptions.Foam.
+// DefaultWaterOptions leaves foam off: whether the engine's lake has
+// whitecaps by default is a decision for someone looking at it.
+func DefaultWaterFoam() WaterFoam {
+	return WaterFoam{
+		Threshold: 0.8,
+		Decay:     3.0,
+		Color:     [3]float32{0.83, 0.88, 0.88},
+	}
+}
+
+// WaterSubsurface is the glow of a thin wave crest with the sun low behind it.
+//
+// The fragment stage adds Color * Strength, times the sun's colour and the
+// shadow the surface is already in, times three factors that say where the glow
+// belongs: how far the crest rose above still water as a fraction of
+// WaveAmplitude, how nearly the sun is behind the crest from the eye, and how
+// edge-on the eye sees it. It is added under the Fresnel reflection, so a crest
+// seen at a glancing angle shows the sky rather than the glow, as it would.
+//
+// It reads the sun and nothing else: a lamp behind a wave does not light it
+// through. See docs/agents/water.md.
+type WaterSubsurface struct {
+	// Color is the water's colour in transmission. Light through a crest has
+	// crossed centimetres of water rather than metres, so it is the shallow
+	// colour rather than the deep one.
+	Color [3]float32
+	// Strength scales the whole term. Zero, the default, is no term.
+	Strength float32
+}
+
+// DefaultWaterSubsurface is the measured starting point for
+// WaterOptions.Subsurface. DefaultWaterOptions leaves it off: whether the
+// engine's lake glows by default is a decision for someone looking at it.
+func DefaultWaterSubsurface() WaterSubsurface {
+	return WaterSubsurface{
+		// DefaultWaterOptions' ShallowColor, for the reason on Color.
+		Color:    [3]float32{0.30, 0.52, 0.52},
+		Strength: 1.0,
+	}
 }
 
 // DefaultWaterOptions is a calm freshwater lake.
@@ -103,6 +183,25 @@ func DefaultWaterOptions(level float32) WaterOptions {
 	}
 }
 
+// params is what the water shader reads of these options, per frame; the rest
+// are baked into the mesh.
+func (o WaterOptions) params() renderer.WaterParams {
+	return renderer.WaterParams{
+		Amplitude:       o.WaveAmplitude,
+		WaveLength:      o.WaveLength,
+		AbsorptionDepth: o.AbsorptionDepth,
+		RefractStrength: o.RefractStrength,
+		WaveNoise:       o.WaveNoise,
+
+		SubsurfaceColor:    o.Subsurface.Color,
+		SubsurfaceStrength: o.Subsurface.Strength,
+
+		FoamThreshold: o.Foam.Threshold,
+		FoamDecay:     o.Foam.Decay,
+		FoamColor:     o.Foam.Color,
+	}
+}
+
 // WaterMesh builds a surface grid covering the submerged parts of a heightmap.
 //
 // Quads whose four corners are all above Level are dropped, so the mesh
@@ -115,14 +214,39 @@ func DefaultWaterOptions(level float32) WaterOptions {
 // real lake bed without a depth buffer read, which is what lets the shore fade,
 // the colour absorption, and the wave shoaling all work in the first pass.
 func WaterMesh(h *Heightmap, opts WaterOptions) ([]renderer.Vertex, []uint32, error) {
+	grid, err := NewWaterGrid(h, opts)
+	if err != nil {
+		return nil, nil, err
+	}
+	vertices, indices, err := grid.mesh(opts)
+	return vertices, indices, err
+}
+
+// WaterGrid is the still grid a water surface is built on: the rest position
+// of every vertex and the depth of still water under it. WaterMesh emits the
+// underwater part of it as a mesh; the foam target is laid out over all of it,
+// one texel per point; and WaterOptions.SurfaceAt evaluates the waves at any of
+// its points as the vertex stage displaces the vertex there.
+type WaterGrid struct {
+	// Origin is the rest X and Z of point (0, 0), Step the spacing along X and
+	// Z, and Width and Height the point counts -- Resolution+1 each way.
+	Origin, Step  [2]float32
+	Width, Height int
+	// Depth is the still-water depth under each point, in rows along X; zero
+	// over dry land.
+	Depth []float32
+}
+
+// NewWaterGrid lays out the grid WaterMesh builds over a heightmap.
+func NewWaterGrid(h *Heightmap, opts WaterOptions) (WaterGrid, error) {
 	if h == nil {
-		return nil, nil, fmt.Errorf("glyphengine: WaterMesh: nil heightmap")
+		return WaterGrid{}, fmt.Errorf("glyphengine: WaterMesh: nil heightmap")
 	}
 	if opts.Resolution < 2 {
-		return nil, nil, fmt.Errorf("glyphengine: WaterMesh: resolution %d must be at least 2", opts.Resolution)
+		return WaterGrid{}, fmt.Errorf("glyphengine: WaterMesh: resolution %d must be at least 2", opts.Resolution)
 	}
 	if opts.AbsorptionDepth <= 0 {
-		return nil, nil, fmt.Errorf("glyphengine: WaterMesh: absorption depth must be positive, got %g", opts.AbsorptionDepth)
+		return WaterGrid{}, fmt.Errorf("glyphengine: WaterMesh: absorption depth must be positive, got %g", opts.AbsorptionDepth)
 	}
 
 	minX, minZ, maxX, maxZ := h.Bounds()
@@ -148,6 +272,24 @@ func WaterMesh(h *Heightmap, opts WaterOptions) ([]renderer.Vertex, []uint32, er
 			}
 		}
 	}
+	return WaterGrid{Origin: [2]float32{minX, minZ}, Step: [2]float32{stepX, stepZ}, Width: n + 1, Height: n + 1, Depth: depth}, nil
+}
+
+// Spacing is the coarser of the two steps, which is what the water shader
+// judges which wave components the grid can carry by; see water.vert. It is
+// the spacing SurfaceAt wants for a point of this grid.
+func (g WaterGrid) Spacing() float32 { return max32(g.Step[0], g.Step[1]) }
+
+// Point returns the rest X and Z of grid point (ix, iz) and the depth under it.
+func (g WaterGrid) Point(ix, iz int) (x, z, depth float32) {
+	return g.Origin[0] + float32(ix)*g.Step[0], g.Origin[1] + float32(iz)*g.Step[1], g.Depth[iz*g.Width+ix]
+}
+
+func (g WaterGrid) mesh(opts WaterOptions) ([]renderer.Vertex, []uint32, error) {
+	n := g.Width - 1
+	depth := g.Depth
+	minX, minZ := g.Origin[0], g.Origin[1]
+	stepX, stepZ := g.Step[0], g.Step[1]
 
 	// Emit only vertices that some kept quad actually uses, so the buffer does
 	// not carry the dry parts of the grid.
@@ -163,7 +305,7 @@ func WaterMesh(h *Heightmap, opts WaterOptions) ([]renderer.Vertex, []uint32, er
 	// The coarser of the two steps, so a non-square grid is judged by its worst
 	// direction. The shader needs it to know which wave components this mesh is
 	// too coarse to represent; see water.vert.
-	spacing := max32(stepX, stepZ)
+	spacing := g.Spacing()
 
 	emit := func(ix, iz int) uint32 {
 		gi := iz*(n+1) + ix
@@ -227,10 +369,27 @@ func WaterMesh(h *Heightmap, opts WaterOptions) ([]renderer.Vertex, []uint32, er
 //	e.C.MeshRef.Set(ent, &glyph.MeshRef{Mesh: mesh})
 //	e.C.Water.Set(ent, &glyph.Water{Options: opts})
 //	e.C.Static.Set(ent, &glyph.Static{})
+//
+// With opts.Foam.Decay above zero the mesh also gets its foam target, laid over
+// the same grid; the target is released with the mesh.
 func (e *Engine) CreateWaterMesh(h *Heightmap, opts WaterOptions) (*renderer.Mesh, error) {
-	vertices, indices, err := WaterMesh(h, opts)
+	grid, err := NewWaterGrid(h, opts)
 	if err != nil {
 		return nil, err
 	}
-	return e.renderer.CreateIndexedMesh32(vertices, indices)
+	vertices, indices, err := grid.mesh(opts)
+	if err != nil {
+		return nil, err
+	}
+	mesh, err := e.renderer.CreateIndexedMesh32(vertices, indices)
+	if err != nil || !(opts.Foam.Decay > 0) {
+		return mesh, err
+	}
+	if _, err := e.renderer.CreateWaterFoam(mesh, renderer.WaterFoamDesc{
+		Origin: grid.Origin, Step: grid.Step, Width: grid.Width, Height: grid.Height, Depth: grid.Depth,
+	}); err != nil {
+		e.renderer.DestroyMesh(mesh)
+		return nil, fmt.Errorf("glyphengine: CreateWaterMesh: %w", err)
+	}
+	return mesh, nil
 }

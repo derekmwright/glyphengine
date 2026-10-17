@@ -1,0 +1,88 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// One step of a water surface's whitecap foam: new foam where this frame's
+// Jacobian is under the threshold, and everything already there decayed.
+//
+// One invocation per texel, one texel per vertex of the surface grid. The
+// target is a function of the grid rather than of the screen because foam has
+// to outlive the frame that made it, and the grid is the one parameterisation
+// of the surface that does not move: a crest passes over a texel and leaves its
+// foam there, fading, which is what makes it read as foam rather than as a
+// highlight riding the crest.
+//
+// The Jacobian comes from water_wave_sum.inc, the same statements water.vert
+// displaces the surface with, at the same rest position and still depth the
+// vertex there was built with. So foam lands exactly where the drawn crest is
+// squeezed, and FOAM_RAMP is the only softening between the two.
+
+#include "water_waves.inc"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+// Binding 0 is the fragment stage's sampled view of the same target; this
+// stage writes through binding 2 and only reads the grid.
+layout(set = 0, binding = 1, std430) readonly buffer FoamGrid {
+    vec4 grid;     // xy rest position of texel (0, 0), zw texel spacing
+    float depth[]; // still-water depth under each texel, row by row
+} foamGrid;
+layout(set = 0, binding = 2, r16f) uniform image2D foam;
+
+layout(push_constant) uniform Push {
+    vec4 wave;  // x time, y WaveAmplitude, z WaveLength, w grid spacing
+    vec4 step;  // x threshold, y decay this frame (dt / Decay), zw unused
+} pc;
+
+// quantize rounds coverage to the nearest value an R16F texel holds, ties to
+// even, so the store after it converts exactly and the target is the same on
+// every driver. The store's own rounding is the driver's choice -- Vulkan
+// allows round-to-zero -- and this one truncates: without this, 150 frames of
+// `09-water -foam -foamthreshold 0.9 -waveamp 0.6` left 908 of 40401 texels
+// more than 0.02 below a round-to-nearest replay, the worst by 0.044, while a
+// round-toward-zero replay matched to 0.0005: every one of a fading texel's
+// steps lost up to a whole half-precision step on top of its dt/Decay. Truncation made foam fade faster than Decay asked, by more the
+// brighter it was. Coverage under half's smallest normal, 6e-5, is flushed to
+// zero rather than rounded as a subnormal: it is invisible either way, and
+// the flush keeps the rounding a mask.
+float quantize(float v) {
+    if (v < 6.103515625e-05) {
+        return 0.0;
+    }
+    uint bits = floatBitsToUint(v);
+    bits += 0x0FFFu + ((bits >> 13) & 1u);
+    return uintBitsToFloat(bits & ~0x1FFFu);
+}
+
+void main() {
+    ivec2 texel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(foam);
+    if (texel.x >= size.x || texel.y >= size.y) {
+        return;
+    }
+
+    float time      = pc.wave.x;
+    float amplitude = pc.wave.y;
+    float baseLen   = max(pc.wave.z, 0.001);
+    float spacing   = pc.wave.w;
+    // Noise moves the height and not the horizontal map, so it cannot change
+    // the Jacobian; zero skips its three evaluations.
+    float noiseFrac = 0.0;
+
+    // The grid vertex this texel stands for: its rest position, and the depth
+    // WaterMesh baked into it. y is irrelevant to the horizontal map.
+    vec3 rest = vec3(foamGrid.grid.x + float(texel.x) * foamGrid.grid.z, 0.0,
+                     foamGrid.grid.y + float(texel.y) * foamGrid.grid.w);
+    vec3 pos = rest;
+    float shoal = waterShoal(foamGrid.depth[texel.y * size.x + texel.x]);
+
+    #include "water_wave_sum.inc"
+
+    float fresh = waterFoamFresh(waterJacobian(jxx, jzz, jxz), pc.step.x);
+
+    // Linear decay to nothing over the Decay time, and never below what this
+    // frame makes: a crest standing over old foam refreshes it rather than
+    // stacking on it. The target starts cleared, so the first step is fresh
+    // foam alone.
+    float previous = imageLoad(foam, texel).r;
+    imageStore(foam, texel, vec4(quantize(max(previous - pc.step.y, fresh))));
+}

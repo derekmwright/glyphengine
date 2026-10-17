@@ -1180,9 +1180,12 @@ func createUIPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, formats r
 // Blending stays enabled even when the shader composites the refracted scene
 // itself: the surface still fades out at the shoreline, and that fade has to
 // reach the framebuffer somehow.
-func createWaterPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, formats renderingFormats, litPipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
+//
+// The foam pipeline is the same state with WaterFoamFrag and a layout that adds
+// set 2, which is why the stages and the layout are parameters.
+func createWaterPipeline(deviceDriver core1_0.DeviceDriver, vert, frag []byte, formats renderingFormats, litPipelineLayout core1_0.PipelineLayout, extent core1_0.Extent2D, samples core1_0.SampleCountFlags) (core1_0.Pipeline, error) {
 	vertModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
-		Code: bytesToUint32Slice(sh.WaterVert),
+		Code: bytesToUint32Slice(vert),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, err
@@ -1190,7 +1193,7 @@ func createWaterPipeline(deviceDriver core1_0.DeviceDriver, sh ShaderSet, format
 	defer deviceDriver.DestroyShaderModule(vertModule, nil)
 
 	fragModule, _, err := deviceDriver.CreateShaderModule(nil, core1_0.ShaderModuleCreateInfo{
-		Code: bytesToUint32Slice(sh.WaterFrag),
+		Code: bytesToUint32Slice(frag),
 	})
 	if err != nil {
 		return core1_0.Pipeline{}, err

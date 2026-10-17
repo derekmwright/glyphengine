@@ -274,6 +274,7 @@ are that pipeline's own real-Blender fixture, in the same spirit as
 | `task prepass` | The optional depth prepass renders byte-identical frames to the pass without it, in both `On` and `Auto`, with a control that must differ (needs a GPU) |
 | `task nightlight` | Warm lamps stay warm on the ground after the night shift (needs a GPU) |
 | `task waterlight` | A lamp beside a lake reaches the water, in the lamp's colour (needs a GPU) |
+| `task waterfx` | Whitecap foam lands where the wave function's Jacobian says, persists and decays on the clock; the subsurface term lights backlit crests, nothing else, and keeps its share when the sea is halved (needs a GPU) |
 | `task volumetric` | A light's beam is in the air inside its cone and nowhere else (needs a GPU) |
 | `task clouds` | Sunset gold/rose, independent cirrus, layer occlusion and repeatability (needs a GPU) |
 | `task skypalette` | The sky palette reaches the fog, the water and the clouds, not just the dome (needs a GPU) |

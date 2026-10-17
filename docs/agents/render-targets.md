@@ -65,7 +65,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: procedural
-verified: 2026-10-17 # Reads3D on both pass descriptors, the dimension check at creation in both directions and the sampler3D binding example (#190); pipeline statistics per named application pass cross-referenced to profiling.md: a Timed graphics pass is counted and a dispatch reads not bracketed (#187); opt-in shared sampler capacity (#191) and named timing capacity (#192); TestSharedResourcesGPU validates five distinct fields and 18 mixed timers through replacement, resize, history and toggles, including a failing-image control and synchronization validation
+verified: 2026-10-17 # the three water includes in the include table, water_waves.inc compiled alone behind #version; Reads3D on both pass descriptors, the dimension check at creation in both directions and the sampler3D binding example (#190); pipeline statistics per named application pass cross-referenced to profiling.md: a Timed graphics pass is counted and a dispatch reads not bracketed (#187); opt-in shared sampler capacity (#191) and named timing capacity (#192); TestSharedResourcesGPU validates five distinct fields and 18 mixed timers through replacement, resize, history and toggles, including a failing-image control and synchronization validation
 ---
 
 # Application render targets, graphics and compute passes
@@ -577,6 +577,9 @@ The set, and what each fragment expects you to have declared first:
 | `volumetric.inc` | `LIGHT_SET`, `pc`, the `shadow` UBO |
 | `lighting.inc` | those, plus `shadowMap` and `pointShadowMap` |
 | `material_shading.inc`, `grass_fragment.inc` | everything `lighting.inc` wants, the material bindings and the vertex inputs — these are fragment bodies, not helpers |
+| `water_waves.inc` | nothing: the water surface's wave table, noise, `waterShoal`, `waterJacobian` and `waterFoamFresh` |
+| `water_wave_sum.inc` | statements, not declarations, spliced inside a function: `rest`, `pos`, `time`, `amplitude`, `baseLen`, `noiseFrac`, `shoal` and `spacing` in scope, after `water_waves.inc` (its header says why it is not a function) |
+| `water_shading.inc` | nothing at all -- it is the whole water fragment stage, included straight after `#version` and the include extension; define `WATER_FOAM` first for the foam variant |
 
 The first row is measured rather than read off the sources: each of those five
 compiles on its own behind nothing but a `#version` line and an output.

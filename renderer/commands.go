@@ -173,7 +173,35 @@ type WaterParams struct {
 	AbsorptionDepth float32
 	RefractStrength float32
 	WaveNoise       float32
+
+	// SubsurfaceColor and SubsurfaceStrength are the backlit-crest term.
+	// Zero strength is no term, and pushes exactly the bytes a surface pushed
+	// before the term existed; see pcWaterSubsurfaceColor.
+	SubsurfaceColor    [3]float32
+	SubsurfaceStrength float32
+
+	// FoamThreshold, FoamDecay and FoamColor are whitecap foam, drawn only
+	// for a mesh with a target from CreateWaterFoam. Zero FoamDecay is no
+	// foam: no dispatch, and the plain water pipeline.
+	FoamThreshold float32
+	FoamDecay     float32
+	FoamColor     [3]float32
 }
+
+// Push-constant floats the water draw carries beyond packLightingPC's.
+//
+// The block is full at 256 bytes, so these reuse slots the water shader does
+// not otherwise read. The legacy point light's position and colour qualify:
+// water takes lamps through the clustered set only (water.frag's lamp loop),
+// never through evalLighting, which is the one reader of pointPos and
+// pointColor.rgb. ambient.w is metallic for the lit shaders, and water pushes
+// zero there, which is what lets it double as the subsurface switch: a surface
+// without the term leaves every byte where it was.
+// TestWaterPushSlotsAreUnreadByWater holds the shader to that.
+const (
+	pcWaterSubsurfaceColor    = 44 // pointPos.xyz
+	pcWaterSubsurfaceStrength = 55 // ambient.w
+)
 
 // IsTranslucent reports whether this draw goes through the blended pipeline
 // rather than the opaque one.
@@ -1399,6 +1427,7 @@ func recordCommandBuffer(
 		return err
 	}
 
+	prepareWaterFoam(graph, draws, lighting.Time)
 	graph.frame = graphFrame{
 		driver: deviceDriver, cmd: cmdBuf, imageIndex: imageIndex, frame: frame,
 		extent: extent, scratch: scratch, timer: timer, stats: stats,
@@ -1611,13 +1640,26 @@ func recordWaterDraws(
 		if d.Water == nil || d.ShadowOnly {
 			continue
 		}
-		deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, waterPipeline)
+		// A surface whose foam target stepped this frame draws with the foam
+		// pipeline, which is the plain one plus set 2; every other surface
+		// records exactly what it recorded before foam existed.
+		pipeline, layout := waterPipeline, litPipelineLayout
+		foam := foamFor(d)
+		if foam != nil {
+			pipeline, layout = foam.r.waterFoam.graphics, foam.r.waterFoam.graphicsLayout
+		}
+		deviceDriver.CmdBindPipeline(cmdBuf, core1_0.PipelineBindPointGraphics, pipeline)
 		scratch.setViewport(deviceDriver, cmdBuf, viewport)
 		scratch.setScissor(deviceDriver, cmdBuf, scissor)
 
 		// Set 0 is the opaque scene rather than a material texture.
-		scratch.bindDescriptorSets(deviceDriver, cmdBuf, core1_0.PipelineBindPointGraphics, litPipelineLayout, 0,
-			sceneColor.texture.DescriptorSet, shadowDS)
+		if foam != nil {
+			scratch.bindDescriptorSets(deviceDriver, cmdBuf, core1_0.PipelineBindPointGraphics, layout, 0,
+				sceneColor.texture.DescriptorSet, shadowDS, foam.set)
+		} else {
+			scratch.bindDescriptorSets(deviceDriver, cmdBuf, core1_0.PipelineBindPointGraphics, layout, 0,
+				sceneColor.texture.DescriptorSet, shadowDS)
+		}
 
 		scratch.resetPC()
 		copy(scratch.pc[:16], d.MVP[:])
@@ -1634,7 +1676,15 @@ func recordWaterDraws(
 		// sunDir.w, which packLightingPC leaves as padding and only the grass
 		// pipeline otherwise claims. It is the last free scalar in this block.
 		scratch.pc[39] = d.Water.WaveNoise
-		scratch.pushConstants(deviceDriver, cmdBuf, litPipelineLayout, core1_0.StageVertex|core1_0.StageFragment)
+		if d.Water.SubsurfaceStrength > 0 {
+			copy(scratch.pc[pcWaterSubsurfaceColor:pcWaterSubsurfaceColor+3], d.Water.SubsurfaceColor[:])
+			scratch.pc[pcWaterSubsurfaceStrength] = d.Water.SubsurfaceStrength
+		}
+		if foam != nil {
+			scratch.pc[pcWaterFoamThreshold] = d.Water.FoamThreshold
+			copy(scratch.pc[pcWaterFoamColor:pcWaterFoamColor+3], d.Water.FoamColor[:])
+		}
+		scratch.pushConstants(deviceDriver, cmdBuf, layout, core1_0.StageVertex|core1_0.StageFragment)
 
 		scratch.bindVertexBuffers(deviceDriver, cmdBuf, 0, d.Mesh.vertexBuffer)
 		stats.addDraw(1, d.Mesh.IndexCount, d.Mesh.VertexCount)

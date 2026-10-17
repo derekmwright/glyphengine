@@ -2047,13 +2047,8 @@ func (e *Engine) buildDrawList(vp mgl32.Mat4, shadowEnabled bool, lightVPs ...mg
 
 		var water *renderer.WaterParams
 		if w, ok := c.Water.Get(entity); ok {
-			water = &renderer.WaterParams{
-				Amplitude:       w.Options.WaveAmplitude,
-				WaveLength:      w.Options.WaveLength,
-				AbsorptionDepth: w.Options.AbsorptionDepth,
-				RefractStrength: w.Options.RefractStrength,
-				WaveNoise:       w.Options.WaveNoise,
-			}
+			p := w.Options.params()
+			water = &p
 		}
 
 		var joints *renderer.JointBuffer
