@@ -67,6 +67,11 @@ type frameGraph struct {
 	hdr, depth, copy, color, ui, swapchain framegraph.ResourceID
 	bloom, uiBloom                         [bloomLevels]framegraph.ResourceID
 	frame                                  graphFrame
+
+	// foams are the water foam targets this graph steps, and foamImages their
+	// image declarations, index for index. See appendWaterFoamGraph.
+	foams      []*WaterFoam
+	foamImages []framegraph.ResourceID
 }
 
 // Retained on frameGraph: passing a freshly allocated context through a draw

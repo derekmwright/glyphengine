@@ -132,6 +132,17 @@ var WaterVertSpv []byte
 //go:embed water.frag.spv
 var WaterFragSpv []byte
 
+// WaterFoamFragSpv is water.frag with the whitecap foam layer: the same body,
+// compiled again with WATER_FOAM. Only a surface with a foam target draws it.
+//
+//go:embed water_foam.frag.spv
+var WaterFoamFragSpv []byte
+
+// WaterFoamCompSpv advances one surface's persistent foam target by a frame.
+//
+//go:embed water_foam.comp.spv
+var WaterFoamCompSpv []byte
+
 //go:embed godray.frag.spv
 var GodRayFragSpv []byte
 

@@ -78,12 +78,12 @@ func TestWaterMeshBakesVertexSpacing(t *testing.T) {
 // that clamp is a default whose crests are being quietly flattened, so it is
 // worth knowing.
 //
-// The wave tables and constants are read out of water.vert rather than copied,
+// The wave tables and constants are read out of the shader rather than copied,
 // because a copy is exactly the kind of thing that drifts and then proves
 // nothing. It has teeth: raising DefaultWaterOptions' WaveAmplitude to 0.7, or
 // dropping WaveLength to 2, fails it.
 func TestDefaultWaterOptionsStayInsideTheFoldLimit(t *testing.T) {
-	src, err := os.ReadFile(filepath.Join("shaders", "water.vert"))
+	src, err := os.ReadFile(filepath.Join("shaders", "include", "water_waves.inc"))
 	if err != nil {
 		t.Skipf("shader source unavailable: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestDefaultWaterOptionsStayInsideTheFoldLimit(t *testing.T) {
 	floats := func(name string) []float64 {
 		m := regexp.MustCompile(name + `\[\d+\]\s*=\s*float\[\d+\]\(([^)]*)\)`).FindSubmatch(src)
 		if m == nil {
-			t.Fatalf("water.vert no longer declares %s; this check is unanchored", name)
+			t.Fatalf("water_waves.inc no longer declares %s; this check is unanchored", name)
 		}
 		var out []float64
 		for _, f := range regexp.MustCompile(`[-0-9.]+`).FindAllString(string(m[1]), -1) {
@@ -106,7 +106,7 @@ func TestDefaultWaterOptionsStayInsideTheFoldLimit(t *testing.T) {
 	constant := func(name string) float64 {
 		m := regexp.MustCompile(`const float ` + name + `\s*=\s*([-0-9.]+)`).FindSubmatch(src)
 		if m == nil {
-			t.Fatalf("water.vert no longer declares %s; this check is unanchored", name)
+			t.Fatalf("water_waves.inc no longer declares %s; this check is unanchored", name)
 		}
 		v, err := strconv.ParseFloat(string(m[1]), 64)
 		if err != nil {

@@ -259,6 +259,10 @@ func (r *Renderer) extendAppGraph(f *frameGraph, g *framegraph.Graph) error {
 			}
 		case graphCopy:
 			stage(StageAfterScene)
+			// After the application's after-scene work and before the copy,
+			// so the copy/water group stays contiguous and the water pass is
+			// the first reader of what the dispatch wrote.
+			r.appendWaterFoamGraph(f, g, len(r.appPasses)+2+len(r.lodSets), appendNode)
 		case graphBloom:
 			stage(StageBeforeBloom)
 		case graphTonemap:
@@ -267,6 +271,12 @@ func (r *Renderer) extendAppGraph(f *frameGraph, g *framegraph.Graph) error {
 		f.engine[i] = len(f.nodes)
 		if i == graphLegacy || i == graphWater {
 			n.Uses = slots(n.Uses, nil)
+		}
+		if i == graphWater {
+			// Fragment only: the vertex stage never sees the foam.
+			for _, id := range f.foamImages {
+				n.Uses = append(n.Uses, framegraph.Use{Resource: id, Access: framegraph.SampledRead, Stages: core1_0.PipelineStageFragmentShader})
+			}
 		}
 		appendNode(n, nodes[i])
 		if i == graphLegacy && r.depthResolve != nil {
@@ -358,6 +368,11 @@ func (r *Renderer) bindAppGraphImages() {
 	}
 	for id, b := range f.lodBuffers {
 		f.images[id] = b
+	}
+	for i, wf := range f.foams {
+		if wf.image != nil {
+			f.images[f.foamImages[i]] = graphImage{images: wf.image.images, views: wf.image.views}
+		}
 	}
 	for b, id := range f.storage {
 		f.images[id] = graphImage{buffers: b.buffers, frameInstance: b.desc.History}

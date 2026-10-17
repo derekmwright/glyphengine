@@ -682,6 +682,14 @@ tasks:
         # where the layer's images are written in a frame that also copies the
         # scene for refraction.
         check 09-water -hud 26 -uiglow
+        # The water options. -foam is the only thing in the tree that puts an
+        # engine compute write in front of a fragment stage that samples it in
+        # the same frame, which is what the synchronization arm of this matrix
+        # is for, and -rewater releases the foamed mesh and builds a new one
+        # every 7 frames, so a target is retired while frames that dispatched
+        # into it are in flight and the graph is rebuilt around its successor.
+        check 09-water -foam -sss -waveamp 0.6
+        check 09-water -foam -sss -waveamp 0.6 -rewater 7
         # And a swapchain rebuild with the layer on. recreateSwapchain destroys
         # the layer's images, its bloom chain, its framebuffers and the
         # resolve's descriptor sets and builds them all again; a set still
@@ -696,6 +704,9 @@ tasks:
         check 25-lod-forest -replace
         check 25-lod-forest -gpu -replace
         check 25-lod-forest -gpu -indexed
+        # A fixed-extent foam target has to survive the rebuild untouched, and
+        # the graph bound around it again.
+        check 09-water -foam -sss -waveamp 0.6
         unset GLYPHENGINE_PROVOKE_RECREATE_FRAMES
         exit $status
       - |
@@ -756,7 +767,9 @@ tasks:
         # that says so on a device -- the GPU-free walk in
         # renderer/pipelinestats_test.go holds the rule, this holds the device.
         # The mode also disables a pass and destroys a dispatch mid-run, which
-        # resets the slot tables while queries are in flight.
+        # resets the slot tables while queries are in flight. Already at the
+        # repository root: the instancecheck block above changed directory, and
+        # a second `cd ..` here left the repository ("go.mod file not found").
         out=$(GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./cmd/apppasscheck -stats -validate -frames 12 2>&1) || { echo "$out"; exit 1; }
         probe=$(echo "VULKAN ERROR: self-check" | grep -cE "VULKAN (ERROR|WARNING)" || true)
         [ "$probe" = "1" ] || { echo "cannot count validation messages"; exit 1; }
@@ -1102,7 +1115,14 @@ tasks:
         # 28-overdraw is the mode a game would run, where the per-frame decision
         # is itself a thing two runs have to agree on -- a decision that differed
         # on one frame would change which pipelines that frame bound.
-        for ex in "08-grass" "08-grass -timeofday 0.0" "08-grass -timeofday 0.03" "09-water" "12-particles" "06-skinned -demo" "15-kitchen-sink -demo" "09-water -plume -ghost -marker -submerged" "09-water -time 0.72 -yaw 1.771 -pitch -0.185 -pillars" "13-ui -glow on" "21-streetlights -volumetric 1 -lampvolumetric 1 -skylamp" "24-custom-passes" "25-lod-forest" "25-lod-forest -gpu" "29-ridge -pan" "08-grass -prepass on" "24-custom-passes -prepass on" "28-overdraw -prepass auto"; do
+        #
+        # The last entry is the only one with the water options on. The foam
+        # target is state carried from frame to frame by a compute dispatch, and
+        # its decay is the shader clock's difference between two frames -- a
+        # target stepped by the wall clock, or one that read last frame's
+        # texels before they were written, would make two runs disagree here
+        # while every single frame still looked right.
+        for ex in "08-grass" "08-grass -timeofday 0.0" "08-grass -timeofday 0.03" "09-water" "12-particles" "06-skinned -demo" "15-kitchen-sink -demo" "09-water -plume -ghost -marker -submerged" "09-water -time 0.72 -yaw 1.771 -pitch -0.185 -pillars" "13-ui -glow on" "21-streetlights -volumetric 1 -lampvolumetric 1 -skylamp" "24-custom-passes" "25-lod-forest" "25-lod-forest -gpu" "29-ridge -pan" "08-grass -prepass on" "24-custom-passes -prepass on" "28-overdraw -prepass auto" "09-water -foam -sss -waveamp 0.6"; do
           set -- $ex
           name=$1; shift
           shot 16.667ms $name a "$*"
@@ -1323,7 +1343,7 @@ tasks:
             status=1
           fi
         }
-        for ex in "08-grass" "08-grass -timeofday 0.0" "08-grass -timeofday 0.03" "09-water" "12-particles" "06-skinned -demo" "15-kitchen-sink -demo" "09-water -plume -ghost -marker -submerged" "18-translucent" "13-ui" "10-text" "19-instanced" "21-streetlights" "24-custom-passes" "25-lod-forest" "25-lod-forest -gpu" "29-ridge -pan" "19-instanced -prepass on" "28-overdraw -prepass auto"; do
+        for ex in "08-grass" "08-grass -timeofday 0.0" "08-grass -timeofday 0.03" "09-water" "12-particles" "06-skinned -demo" "15-kitchen-sink -demo" "09-water -plume -ghost -marker -submerged" "18-translucent" "13-ui" "10-text" "19-instanced" "21-streetlights" "24-custom-passes" "25-lod-forest" "25-lod-forest -gpu" "29-ridge -pan" "19-instanced -prepass on" "28-overdraw -prepass auto" "09-water -foam -sss -waveamp 0.6"; do
           drawseq "$ex"
         done
 
@@ -3380,6 +3400,97 @@ tasks:
         # captures back wastes the evidence.
         if [ $status -ne 0 ]; then
           echo "captures kept in examples/$d"
+        else
+          rm -rf $d
+        fi
+        exit $status
+
+  waterfx:
+    desc: "Check whitecap foam lands where the wave function says and persists, and the subsurface term lights backlit crests and nothing else"
+    dir: examples
+    cmds:
+      # Needs a GPU, so it sits with waterlight and waterblend rather than in
+      # `task ci`.
+      #
+      # Every judgement is a CPU prediction from glyphengine.WaterOptions.
+      # SurfaceAt -- the Go mirror of water_wave_sum.inc -- at the grid points
+      # and through the camera 09-water -fxdump reports, compared with what the
+      # GPU drew or accumulated. See cmd/waterfxcheck for each check and why.
+      #
+      # The sea state is WaveAmplitude 0.6, the steepest the fold clamp allows
+      # anything like, because the engine's default lake never reaches the foam
+      # threshold at all (docs/agents/water.md has the distribution).
+      #
+      # PROVED, once per check, by breaking the thing it guards and running
+      # this task against the build:
+      #
+      #   foam written without decay, max(previous, fresh) in water_foam.comp:
+      #     "FAIL: 53 of 53 texels a second past their crest are not between
+      #     the decayed and the fresh value" (and 2012 texels off the CPU, and
+      #     42 % of the foam-free water changed on screen).
+      #   the threshold compared the wrong way, (jacobian - threshold) in
+      #   waterFoamFresh, which puts foam on everything but the crests:
+      #     "FAIL: 40386 texels differ from the simulation by more than 0.020
+      #     (allowed 40)" and "FAIL: 38030 texels hold foam the Jacobian never
+      #     made".
+      #   the sun-behind lobe dropped from subsurface() (behind = 1.0):
+      #     "FAIL: with the sun behind the eye the term should be near zero,
+      #     got crests +15.9562 troughs 0.0353".
+      #   the height not divided by WaveAmplitude in water.vert:
+      #     "FAIL: the term per unit of normalised crest changed by -49% with
+      #     the amplitude halved, want within 25%" (1.009 of the full sea's
+      #     with the division, 0.510 without).
+
+      - |
+        status=0
+        d=../.task/waterfx
+        rm -rf $d && mkdir -p $d
+        # `shift` before "$@" for waterlight's reason: a name left in the
+        # arguments ends flag parsing and drops every flag after it.
+        run() {
+          name=$1; shift
+          GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./09-water -background -clouds 0 "$@" \
+            -screenshot $d/$name.png -fxdump $d/$name.json >/dev/null 2>&1
+          if [ ! -s $d/$name.png ] || [ ! -s $d/$name.json ]; then
+            echo "$name: MISSING CAPTURE -- this gate proves nothing"
+            status=1
+          fi
+        }
+        same() {
+          if go run ../cmd/pngsame $d/$1.png $d/$2.png; then :; else echo "$1 and $2 differ: the repeat is not byte-identical"; status=1; fi
+        }
+
+        echo "── whitecap foam ──"
+        F="-frames 300 -waveamp 0.6"
+        run foam $F -foam
+        run foam2 $F -foam
+        run nofoam $F
+        go run ../cmd/waterfxcheck -foam $d/foam.json -foamoff $d/nofoam.json -foamrepeat $d/foam2.json \
+          -foamon $d/foam.png -foamoffpng $d/nofoam.png || status=1
+        same foam foam2
+
+        echo "── the subsurface term ──"
+        # Standing on the +X shore at 0.72, the sun low over the far side of
+        # the lake, and a few units up so the near water is seen from above
+        # rather than edge-on. The front pose is the -X shore at the same hour,
+        # looking away from the sun.
+        S="-frames 150 -time 0.72 -eyeheight 6 -pitch 0.3"
+        B="-spawnangle 1.5708 -yaw 1.5708"
+        run behind $S -waveamp 0.6 $B -sss
+        run behind2 $S -waveamp 0.6 $B -sss
+        run behindoff $S -waveamp 0.6 $B
+        run front $S -waveamp 0.6 -spawnangle -1.5708 -yaw -1.5708 -sss
+        run frontoff $S -waveamp 0.6 -spawnangle -1.5708 -yaw -1.5708
+        run half $S -waveamp 0.3 $B -sss
+        run halfoff $S -waveamp 0.3 $B
+        go run ../cmd/waterfxcheck \
+          -sssbehind $d/behind.json,$d/behind.png,$d/behindoff.png \
+          -sssfront $d/front.json,$d/front.png,$d/frontoff.png \
+          -ssshalf $d/half.json,$d/half.png,$d/halfoff.png || status=1
+        same behind behind2
+
+        if [ $status -ne 0 ]; then
+          echo "captures kept in .task/waterfx"
         else
           rm -rf $d
         fi

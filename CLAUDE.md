@@ -32,6 +32,7 @@ task waterblend # a flame in front of the lake is not painted over by it
 task lights    # clustered and brute-force light renderers match exactly
 task nightlight # warm lamps stay warm on the ground at night
 task waterlight # a lamp beside a lake reaches the water, in the lamp's colour
+task waterfx   # foam lands where the Jacobian says and fades on the clock; backlit crests glow, troughs do not
 task reload    # reloading a level never shows a frame without it
 task volumetric # a light's beam is in the air inside its cone and nowhere else
 task clouds    # sunset colour, high cirrus, layer occlusion and repeatability

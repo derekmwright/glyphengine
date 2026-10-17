@@ -264,6 +264,36 @@ type game struct {
 	// else moves.
 	alien bool
 
+	// The water options for issues #194 and #195, off by default so every
+	// other capture of this scene is byte for byte what it was. sss is the
+	// subsurface strength (0 = no term), waveAmp and waveLen replace the sea
+	// state when non-zero.
+	sss     float32
+	waveAmp float32
+	waveLen float32
+	// foam is whitecap foam at foamOpts, which starts as DefaultWaterFoam;
+	// off unless foamOpts.Decay is above zero.
+	foamOpts glyph.WaterFoam
+	surface  *renderer.Mesh
+	grid     glyph.WaterGrid
+	opts     glyph.WaterOptions
+	// rewater rebuilds the lake from the heightmap every rewater frames,
+	// releasing the old mesh -- and its foam target -- while frames that drew
+	// it are still in flight. `task validate` runs it with -foam, which is the
+	// level-reload path as far as a foamed surface is concerned.
+	rewater int
+	hm      *glyph.Heightmap
+
+	// spawnAngle stands the player on a different stretch of shore, walking
+	// out from the basin centre at this angle from +Z toward +X. Zero is the
+	// usual spawn. The subsurface term needs the sun beyond the lake from the
+	// eye, and the sun sets in -X, so `task waterfx` stands on the +X shore.
+	spawnAngle float32
+	// eye replaces eyeHeight when non-zero. `task waterfx` stands it a few
+	// units up so the near lake is seen from above rather than edge-on, where
+	// every crest hides the trough behind it.
+	eye float32
+
 	flame   *glyph.ParticleEmitter
 	bubbles *glyph.ParticleEmitter
 
@@ -301,12 +331,29 @@ func (g *game) Init(e *glyph.Engine) error {
 	// ── water ──
 	opts := glyph.DefaultWaterOptions(waterLevel)
 	opts.Resolution = 200
+	if g.waveAmp > 0 {
+		opts.WaveAmplitude = g.waveAmp
+	}
+	if g.waveLen > 0 {
+		opts.WaveLength = g.waveLen
+	}
+	if g.sss > 0 {
+		opts.Subsurface = glyph.DefaultWaterSubsurface()
+		opts.Subsurface.Strength = g.sss
+	}
+	opts.Foam = g.foamOpts
 	if !g.refract {
 		opts.RefractStrength = 0
 	}
 
 	surface, err := e.CreateWaterMesh(hm, opts)
 	if err != nil {
+		return err
+	}
+	// Kept for -fxdump, which reports the grid and the foam target after the
+	// last frame so `task waterfx` can predict both on the CPU.
+	g.surface, g.opts, g.hm = surface, opts, hm
+	if g.grid, err = glyph.NewWaterGrid(hm, opts); err != nil {
 		return err
 	}
 	g.water = e.Spawn()
@@ -354,10 +401,20 @@ func (g *game) Init(e *glyph.Engine) error {
 	// assuming it means -seed keeps working: the noise moves the shoreline
 	// around, and a hardcoded spawn ends up either swimming or behind a hill.
 	spawnX, spawnZ := float32(0), float32(lakeRadius)
-	for d := float32(0); d < worldSize/2; d += 0.5 {
-		if h, ok := hm.HeightAt(0, d); ok && h > waterLevel+0.5 {
-			spawnZ = d + 2
-			break
+	if g.spawnAngle == 0 {
+		for d := float32(0); d < worldSize/2; d += 0.5 {
+			if h, ok := hm.HeightAt(0, d); ok && h > waterLevel+0.5 {
+				spawnZ = d + 2
+				break
+			}
+		}
+	} else {
+		dx, dz := float32(math.Sin(float64(g.spawnAngle))), float32(math.Cos(float64(g.spawnAngle)))
+		for d := float32(0); d < worldSize/2; d += 0.5 {
+			if h, ok := hm.HeightAt(dx*d, dz*d); ok && h > waterLevel+0.5 {
+				spawnX, spawnZ = dx*(d+2), dz*(d+2)
+				break
+			}
 		}
 	}
 	spawnY, _ := hm.HeightAt(spawnX, spawnZ)
@@ -444,6 +501,9 @@ func (g *game) Init(e *glyph.Engine) error {
 
 	g.camera = glyph.NewFPCamera()
 	g.camera.EyeHeight = eyeHeight
+	if g.eye > 0 {
+		g.camera.EyeHeight = g.eye
+	}
 	g.camera.Yaw = g.yaw // 0 faces back toward the lake
 	g.camera.Pitch = g.pitch
 
@@ -832,6 +892,16 @@ func (g *game) Update(e *glyph.Engine, dt float32) {
 		e.SetTimeScale(0)
 	}
 
+	if g.rewater > 0 && e.FrameCount() > 0 && e.FrameCount()%g.rewater == 0 {
+		surface, err := e.CreateWaterMesh(g.hm, g.opts)
+		if err != nil {
+			log.Fatalf("-rewater: %v", err)
+		}
+		e.C.MeshRef.Set(g.water, &glyph.MeshRef{Mesh: surface})
+		e.Renderer().DestroyMesh(g.surface)
+		g.surface = surface
+	}
+
 	// -hud draws a block of identical HUD lines down the frame, crossing the
 	// waterline. Every line is the same string on purpose: the lines are then
 	// interchangeable, so any difference in what reaches the screen between one
@@ -1087,9 +1157,35 @@ func main() {
 	lampPosts := flag.Bool("lampposts", true, "draw the piles and bulb markers under the lamps (off measures the light loop against identical geometry)")
 	alien := flag.Bool("alien", false, "a violet-and-amber sky palette instead of Earth's, through Scene.SetSkyPalette")
 	lightDebug := flag.String("lightdebug", "", "light debug mode: heatmap or bruteforce (default: off)")
+	foam := flag.Bool("foam", false, "whitecap foam at glyph.DefaultWaterFoam (off by default)")
+	foamDecay := flag.Float64("foamdecay", 0, "seconds foam takes to fade instead of the default's; implies -foam (0 keeps the default)")
+	foamThreshold := flag.Float64("foamthreshold", 0, "the Jacobian below which crests foam, instead of the default's; implies -foam (0 keeps the default)")
+	rewater := flag.Int("rewater", 0, "rebuild the lake's mesh, and its foam target, every N frames (0 = never)")
+	fxDump := flag.String("fxdump", "", "after the last frame, write the camera, the water grid and the foam target to this JSON file for `task waterfx`")
+	sss := flag.Bool("sss", false, "light through backlit wave crests at glyph.DefaultWaterSubsurface (off by default)")
+	sssStrength := flag.Float64("sssstrength", 0, "subsurface strength instead of the default's; implies -sss (0 keeps the default)")
+	waveAmp := flag.Float64("waveamp", 0, "WaveAmplitude instead of the default lake's 0.13 (0 keeps it); 0.6 is a steep sea")
+	spawnAngle := flag.Float64("spawnangle", 0, "stand on the shore this many radians from +Z toward +X (0 = the usual spawn); 1.5708 faces the sunset across the lake at -yaw 1.5708")
+	eye := flag.Float64("eyeheight", 0, "camera height above the player's centre instead of 0.7 (0 keeps it)")
+	waveLen := flag.Float64("wavelen", 0, "WaveLength instead of the default lake's 7 (0 keeps it)")
 	xw := flag.Bool("water", false, "x/water's underwater volume: absorption, the water's own colour and sun shafts, once the camera goes under (off by default)")
 	uiGlow := flag.Bool("uiglow", false, "route the screen-space UI through its own HDR layer; nothing here asks to glow, so `task hud` uses it as the second path the HUD has to survive")
 	flag.Parse()
+
+	sssValue := float32(*sssStrength)
+	if sssValue == 0 && *sss {
+		sssValue = glyph.DefaultWaterSubsurface().Strength
+	}
+	var foamOpts glyph.WaterFoam
+	if *foam || *foamDecay > 0 || *foamThreshold > 0 {
+		foamOpts = glyph.DefaultWaterFoam()
+		if *foamDecay > 0 {
+			foamOpts.Decay = float32(*foamDecay)
+		}
+		if *foamThreshold > 0 {
+			foamOpts.Threshold = float32(*foamThreshold)
+		}
+	}
 
 	opts := []glyph.Option{
 		glyph.WithShaders(xsky.Shaders()),
@@ -1122,7 +1218,8 @@ func main() {
 		opts = append(opts, glyph.WithUIGlow())
 	}
 
-	e, err := glyph.New(&game{seed: *seed, refract: *refract, pitch: float32(*pitch), tod: float32(*tod), clouds: *clouds, cirrus: float32(*cirrus), stars: *stars, milkyway: *milkyway, band: *band, fogHeight: float32(*fogHeight), yaw: float32(*yaw), shafts: float32(*shafts), shaftShape: glyph.LightShaftShape{Radius: float32(*shaftRadius), Decay: float32(*shaftDecay), Threshold: [2]float32{float32(*shaftLow), float32(*shaftHigh)}}, pillars: *pillars, pauseAt: *pauseAt, hud: *hud, bloom: float32(*bloom), bloomThres: float32(*bloomThreshold), plume: *plume, ghost: *ghost, marker: *marker, submerged: *submerged, lampCount: *lamps, spotCount: *spots, lampsOff: *lampsOff, volumetric: float32(*volumetric), lampPosts: *lampPosts, alien: *alien, volume: *xw}, opts...)
+	g := &game{seed: *seed, refract: *refract, pitch: float32(*pitch), tod: float32(*tod), clouds: *clouds, cirrus: float32(*cirrus), stars: *stars, milkyway: *milkyway, band: *band, fogHeight: float32(*fogHeight), yaw: float32(*yaw), shafts: float32(*shafts), shaftShape: glyph.LightShaftShape{Radius: float32(*shaftRadius), Decay: float32(*shaftDecay), Threshold: [2]float32{float32(*shaftLow), float32(*shaftHigh)}}, pillars: *pillars, pauseAt: *pauseAt, hud: *hud, bloom: float32(*bloom), bloomThres: float32(*bloomThreshold), plume: *plume, ghost: *ghost, marker: *marker, submerged: *submerged, lampCount: *lamps, spotCount: *spots, lampsOff: *lampsOff, volumetric: float32(*volumetric), lampPosts: *lampPosts, alien: *alien, volume: *xw, sss: sssValue, waveAmp: float32(*waveAmp), waveLen: float32(*waveLen), spawnAngle: float32(*spawnAngle), eye: float32(*eye), foamOpts: foamOpts, rewater: *rewater}
+	e, err := glyph.New(g, opts...)
 	if err != nil {
 		log.Fatalf("create engine: %v", err)
 	}
@@ -1141,6 +1238,11 @@ func main() {
 
 	e.Run()
 	log.Printf("rendered %d frames", e.FrameCount())
+	if *fxDump != "" {
+		if err := g.writeFXDump(e, *fxDump); err != nil {
+			log.Fatalf("-fxdump: %v", err)
+		}
+	}
 }
 
 // loadMilkyWay reads an equirectangular panorama off disk and hands it to the
