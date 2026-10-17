@@ -265,6 +265,7 @@ are that pipeline's own real-Blender fixture, in the same spirit as
 | `task xskylut` | `x/sky/lut`'s lookup-table sky has the gradient and the sun its model says, and costs less than `x/sky` on the same scene (needs a GPU) |
 | `task widetex` | A CPU-uploaded half-float texture keeps its values through the sampler where an 8-bit one cannot (needs a GPU) |
 | `task bench` | Per-pass GPU and per-phase CPU cost over a fixed scene set (needs a GPU) |
+| `task instances` | An instance set rebased every frame leaves the frame still in flight byte-identical, across swapchain rebuilds and undrawn frames, with controls for both halves of that claim (needs a GPU) |
 | `task ranges` | Shared mesh ranges, both index widths, indirect/instanced/LOD equivalence and deferred replacement (needs a GPU) |
 | `task stream` | A patch grid streamed in over 100 frames matches one built synchronously, standalone and in an arena (needs a GPU) |
 | `task lod` | CPU/GPU LOD culling, fades, impostors, exact indexed/nonindexed captures, replacement lifetime and interleaved performance (needs a GPU) |

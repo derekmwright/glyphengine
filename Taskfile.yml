@@ -729,6 +729,22 @@ tasks:
         [ "$msgs" = "0" ] || { echo "$out"; exit 1; }
         if echo "$out" | grep -q "07988"; then echo "$out"; exit 1; fi
         echo "$out"
+      - |
+        # An instance set whose placements are replaced every frame, with the
+        # depth prepass on and shadows enabled. The layer cannot see the host
+        # write this guards against -- that is what `task instances` compares
+        # pixels for -- but it is the only thing that can say the per-slot
+        # buffers are created, bound and released correctly, and syncvalidate
+        # reuses this block for the slot buffers' own hazards.
+        cd ..
+        probe=$(echo "VULKAN ERROR: self-check" | grep -cE "VULKAN (ERROR|WARNING)" || true)
+        [ "$probe" = "1" ] || { echo "cannot count validation messages"; exit 1; }
+        for args in "" "-churn"; do
+          out=$(GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./cmd/instancecheck -validate -frames 40 -captures 20 $args 2>&1) || { echo "$out"; exit 1; }
+          msgs=$(echo "$out" | grep -cE "VULKAN (ERROR|WARNING)" || true)
+          [ "$msgs" = "0" ] || { echo "$out"; exit 1; }
+          echo "instancecheck -validate $args: clean"
+        done
 
   syncvalidate:
     desc: "Run the validation suite with synchronization hazard detection (needs GPU and SDK)"
@@ -3658,6 +3674,36 @@ tasks:
       # has not caught up with: without it, a comparator that matched two
       # empty frames would pass every case above.
       - go run ./cmd/streamcheck {{.CLI_ARGS}}
+
+  instances:
+    desc: "An instance set rebased every frame never disturbs the frame still in flight"
+    env:
+      GLYPHENGINE_FIXED_FRAME_TIME: 16.667ms
+    cmds:
+      # Needs a GPU, so it sits with smoke, validate and determinism rather
+      # than in `task ci`.
+      #
+      # Each capture is read back AFTER the next frame's placements have been
+      # staged, which is the only ordering that can see the hazard: capturing
+      # first waits for the device and hides it. Two controls stop it passing on
+      # nothing -- consecutive frames must differ, and two runs of the quiet arm
+      # must agree.
+      #
+      # Broken 2026-10-09: routed UpdateInstanceSet straight into the slot
+      # buffers again, which is the pre-#188 single-buffer update. All eight
+      # captures changed, 904,258 to 921,582 pixels each, 898,027 to 905,279 of
+      # them by more than eight levels, max 161/255; task exits 1.
+      - go run ./cmd/instancecheck {{.CLI_ARGS}}
+      # The same comparison with the awkward frames in it: a swapchain rebuilt
+      # underneath the run, and frames that are never drawn at all, the path a
+      # minimised window takes. Both leave an update staged across a frame that
+      # copies nothing, so a slot that forgot it still owed a copy draws
+      # placements from before the update -- which this reads back as pixels.
+      #
+      # The churn is real, not nominal: at -frames 40 the arm logs 15 swapchain
+      # lines against the quiet arm's 3 (one creation per run), so the rebuilds
+      # happen rather than being asked for and skipped.
+      - go run ./cmd/instancecheck -churn {{.CLI_ARGS}}
 
   ranges:
     desc: Compare mesh ranges and indirect batches against separate meshes

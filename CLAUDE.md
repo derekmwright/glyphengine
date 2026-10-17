@@ -39,6 +39,7 @@ task skypalette # the sky palette reaches the fog, the water and the clouds, not
 task skymigration # three scenes render what the built-in sky rendered before it moved to x/sky
 task scroll    # a scroll_view row crossing an edge stops at the edge
 task stream    # streamed patches land, and the frame they land in matches a synchronous one
+task instances # an instance set updated every frame never shows a frame reading half-written placements
 task prepass   # the depth prepass, on or auto, renders the same pixels as the pass without it
 ```
 

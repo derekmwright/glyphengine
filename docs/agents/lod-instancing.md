@@ -31,7 +31,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: procedural
-verified: 2026-10-03 # a hierarchical-Z occlusion test was measured and removed by its rule; CPU/GPU indirect path and ordered compaction
+verified: 2026-10-09 # ordinary sets now stage updates and copy after the fence too, so LOD is no longer the safe-update path (#188)
 ---
 
 # Cull and select distance levels per placement
@@ -151,6 +151,16 @@ camera elevations. Each atlas can be shared by several sets.
 `UpdateInstanceSetLOD` copies the full placement list. Capacity is fixed:
 both create and update drop the tail beyond it and report those placements as
 culled. There is no implicit GPU buffer growth.
+
+An ordinary `InstanceSet` is now safe to update every frame as well, and for
+the same structural reason as this page's buckets: the update stages on the CPU
+and each frame slot's buffer is written only after that slot's fence has
+signalled. **This is no longer a reason to reach for LOD.** Per-placement
+culling, distance meshes and impostors are; LOD still culls individual
+placements, which loses offscreen shadow casters, and its draws do not enter the
+opaque prepass. See [instancing](instancing.md#updating-one-safely) for the
+ordinary set's update contract, what it costs in memory, and the hazard it
+removes.
 
 Sets borrow their meshes and atlas. Destroying a set does not destroy those
 resources. Remove all referring draws, call `DestroyInstanceSetLOD`, then
@@ -425,7 +435,8 @@ For the default CPU path and a fixed number of levels, selection is linear in pl
 renderer walks placements once, retains bucket scratch, then copies each
 survivor into the current frame's host-coherent buffer after its fence signals.
 Fade regions copy a placement twice. Uploading one band never overwrites the
-other frame's buffer. No allocation occurs per frame after scratch is sized;
+other frame's buffer. The ordinary `InstanceSet` copies into per-slot buffers
+at the same point in the frame, from the same fence. No allocation occurs per frame after scratch is sized;
 the recorder fixture measures **0 allocations at 40 and 160 placements**,
 including all mesh bands and the impostor.
 

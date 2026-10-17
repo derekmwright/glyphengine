@@ -33,10 +33,12 @@ const meshInstanceSize = int(unsafe.Sizeof(MeshInstance{})) // 80
 // records them.
 //
 // Build one with Renderer.CreateInstanceSet and change it with
-// Renderer.UpdateInstanceSet. The buffer is host-visible and written directly
-// rather than staged through a transfer, because placements change when a
-// player builds something and staging a 72KB copy through a command buffer for
-// that is more machinery than the write is worth.
+// Renderer.UpdateInstanceSet. The buffers are host-visible and written
+// directly rather than staged through a transfer, because placements change
+// when a player builds something and staging a 72KB copy through a command
+// buffer for that is more machinery than the write is worth. An update is
+// nonetheless safe against frames in flight: it lands in CPU memory, and a
+// frame slot's buffer is written only once that slot's fence has signalled.
 //
 // Give it back with Renderer.DestroyInstanceSet when the level or the group of
 // props it draws goes away; see that method's comment for what a stale draw
@@ -47,6 +49,17 @@ type InstanceSet struct {
 	lodLevel int
 	batch    *meshRangeBatch
 
+	// buffer and count are the slot snapshot the frame being recorded draws:
+	// flushInstanceSets publishes slot f's buffer and the number of placements
+	// it holds, and every pass -- shadow, point shadow, depth prepass, lit and
+	// the instanced recorder, plus the prepass predicate's own count test --
+	// reads this one pair. One pair rather than a frame argument threaded
+	// through all of them, so no two passes in a frame can disagree about what
+	// the set holds.
+	//
+	// For a staged set these are a view of slots[f] and are not owned here. The
+	// LOD buckets and mesh-range batches that reuse this struct are per-slot by
+	// construction and own them directly; see staged below.
 	buffer         core1_0.Buffer
 	offset         int
 	indirect       core1_0.Buffer
@@ -56,6 +69,36 @@ type InstanceSet struct {
 	capacity       int
 	count          int
 	destroyed      bool
+
+	// staging is where UpdateInstanceSet writes, and it writes nowhere else.
+	// A placement update is a host write, and host coherency does not retire a
+	// GPU read: a frame submitted last tick can still be fetching instance
+	// attributes while a game rebases its transforms around the camera, which
+	// is measured corruption along the silhouettes of whatever the set draws
+	// (issue #188) and which ordinary validation cannot see, because the write
+	// never goes near the driver. So placements land here and each frame slot
+	// takes its own copy once its fence says the GPU is finished with that
+	// slot's buffer.
+	//
+	// Grown to capacity once at creation: a 600-placement set rebased every
+	// frame must not allocate per frame.
+	staging []MeshInstance
+
+	// slots is one buffer per frame in flight. This is what doubles a set's GPU
+	// memory against the single shared buffer this used to be -- 80 bytes per
+	// placement per slot -- and it is the cheaper of the two ways to be safe:
+	// the alternative is a fresh set per change released through DeferDestroy,
+	// which is what the showcase had to implement by hand, costs the same
+	// memory for as long as the change rate keeps old sets alive, and pays an
+	// allocation and a map per change on top.
+	slots [maxFramesInFlight]instanceSlot
+
+	// staged marks a set whose placements live in staging and slots: every set
+	// CreateInstanceSet hands out. The LOD buckets and mesh-range batches that
+	// reuse this struct own buffer/memory/mapped themselves and have no slots,
+	// so the release paths must not go looking for slots to free -- or, worse,
+	// free a staged set's published view of a slot's buffer a second time.
+	staged bool
 
 	// Bound sphere over every instance, in world space. The draw list frustum
 	// tests this once for the set rather than once per instance.
@@ -68,10 +111,53 @@ type InstanceSet struct {
 	boundRadius float32
 }
 
+// instanceSlot is one frame slot's copy of a set's placements: its own buffer,
+// mapped once for the set's life, plus the count that buffer holds and whether
+// staging has moved on since it was filled.
+//
+// dirty is per slot rather than per set because a set updated once has to be
+// copied into every slot, each the first time that slot comes round again,
+// and then not again -- clearing it for all slots on one copy leaves the other
+// slot drawing the placements from before the update.
+type instanceSlot struct {
+	buffer core1_0.Buffer
+	memory core1_0.DeviceMemory
+	mapped unsafe.Pointer
+	count  int
+	dirty  bool
+}
+
+// release gives the slot's buffer and mapping back. Safe on a slot that was
+// only partly built, which is what a failed CreateInstanceSet unwinds.
+func (sl *instanceSlot) release(deviceDriver core1_0.DeviceDriver) {
+	if sl.mapped != nil {
+		deviceDriver.UnmapMemory(sl.memory)
+		sl.mapped = nil
+	}
+	if sl.buffer.Handle() != 0 {
+		deviceDriver.DestroyBuffer(sl.buffer, nil)
+		sl.buffer = core1_0.Buffer{}
+	}
+	if sl.memory.Handle() != 0 {
+		deviceDriver.FreeMemory(sl.memory, nil)
+		sl.memory = core1_0.DeviceMemory{}
+	}
+}
+
 // Count returns how many instances the set currently draws.
+//
+// This is the staged count -- what the frame about to be recorded will draw --
+// not what the last submitted frame drew. The two differ only between an
+// UpdateInstanceSet call and the next DrawFrame, which is the window every
+// caller asking this question is in: the engine's own draw-list builder skips
+// an instanced entity on Count() == 0, so reporting the slot's count would drop
+// a set's first frame entirely, the frame after it was created.
 func (s *InstanceSet) Count() int {
 	if s == nil {
 		return 0
+	}
+	if s.staged {
+		return len(s.staging)
 	}
 	return s.count
 }
@@ -85,7 +171,8 @@ func (s *InstanceSet) Capacity() int {
 }
 
 // Bounds returns the set's world-space bounding sphere, which is what the draw
-// list frustum tests.
+// list frustum tests. Like Count, it describes the staged placements: the ones
+// the next recorded frame draws.
 func (s *InstanceSet) Bounds() (center [3]float32, radius float32) {
 	if s == nil {
 		return [3]float32{}, 0
@@ -112,40 +199,62 @@ func (r *Renderer) CreateInstanceSet(mesh *Mesh, capacity int, instances []MeshI
 	}
 
 	size := capacity * meshInstanceSize
-	buf, mem, err := r.createBuffer(size,
-		core1_0.BufferUsageVertexBuffer,
-		core1_0.MemoryPropertyHostVisible|core1_0.MemoryPropertyHostCoherent,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("create instance set: %w", err)
-	}
-
-	// Mapped once and left mapped. Vulkan allows a persistent mapping, the
-	// memory is host-coherent so there is nothing to flush, and an update is
-	// then a copy rather than a map/unmap pair.
-	ptr, _, err := r.deviceDriver.MapMemory(mem, 0, size, 0)
-	if err != nil {
-		r.deviceDriver.DestroyBuffer(buf, nil)
-		r.deviceDriver.FreeMemory(mem, nil)
-		return nil, fmt.Errorf("create instance set: map memory: %w", err)
-	}
-
 	s := &InstanceSet{
 		Mesh:     mesh,
-		buffer:   buf,
-		memory:   mem,
-		mapped:   ptr,
 		capacity: capacity,
+		staged:   true,
+		staging:  make([]MeshInstance, 0, capacity),
 	}
+
+	// One buffer per frame in flight. Each is mapped once and left mapped:
+	// Vulkan allows a persistent mapping, the memory is host-coherent so there
+	// is nothing to flush, and the per-slot copy is then a plain copy rather
+	// than a map/unmap pair.
+	for i := range s.slots {
+		sl := &s.slots[i]
+		buf, mem, err := r.createBuffer(size,
+			core1_0.BufferUsageVertexBuffer,
+			core1_0.MemoryPropertyHostVisible|core1_0.MemoryPropertyHostCoherent,
+		)
+		if err != nil {
+			s.destroy(r.deviceDriver)
+			return nil, fmt.Errorf("create instance set: %w", err)
+		}
+		sl.buffer, sl.memory = buf, mem
+		ptr, _, err := r.deviceDriver.MapMemory(mem, 0, size, 0)
+		if err != nil {
+			s.destroy(r.deviceDriver)
+			return nil, fmt.Errorf("create instance set: map memory: %w", err)
+		}
+		sl.mapped = ptr
+	}
+
+	// Registered only once every slot exists, so a failed creation leaves
+	// nothing for Renderer.Destroy or ResourceCounts to find.
 	r.instanceSets = append(r.instanceSets, s)
+	// The initial placements are staged like any other update, so nothing is
+	// drawn out of a slot buffer before the first copy into it: count is zero
+	// in every slot until flushInstanceSets fills one, and both draw paths skip
+	// a set whose count is zero.
 	r.UpdateInstanceSet(s, instances)
 	return s, nil
 }
 
 // UpdateInstanceSet replaces the set's placements and recomputes its bounds.
 //
+// It writes no GPU memory. The placements are copied into the set's CPU
+// staging list, and each frame slot's buffer is filled from it inside DrawFrame
+// once that slot's fence has signalled -- the only moment no submitted frame
+// can still be reading it. A game may therefore rebase a set's transforms every
+// tick, from anywhere in its update, without pooling sets or waiting for the
+// device; see the InstanceSet.staging comment for what went wrong when the
+// write went straight to the shared buffer.
+//
+// Several calls in one frame are fine and the last one wins: only the frame
+// about to be recorded reads staging.
+//
 // Instances past the set's capacity are dropped rather than silently
-// reallocating underneath a buffer the GPU may still be reading.
+// reallocating underneath buffers the GPU may still be reading.
 func (r *Renderer) UpdateInstanceSet(s *InstanceSet, instances []MeshInstance) {
 	if s == nil {
 		return
@@ -154,18 +263,60 @@ func (r *Renderer) UpdateInstanceSet(s *InstanceSet, instances []MeshInstance) {
 	if n > s.capacity {
 		n = s.capacity
 	}
-	s.count = n
-	if n > 0 {
-		dst := unsafe.Slice((*MeshInstance)(s.mapped), s.capacity)
-		copy(dst[:n], instances[:n])
+	s.staging = append(s.staging[:0], instances[:n]...)
+	for i := range s.slots {
+		s.slots[i].dirty = true
 	}
-	s.recomputeBounds(instances[:n])
+	s.recomputeBounds(s.staging)
+}
+
+// flushInstanceSets copies staging into frame slot f's buffer for every staged
+// set whose copy in that slot is out of date, and publishes that slot's buffer
+// and count as what this frame's passes bind.
+//
+// Called from DrawFrame once slot f's fence has been waited on, beside the
+// joint, particle and dynamic-mesh flushes and for the same reason: the fence
+// is the one point in the frame at which nothing submitted can still be reading
+// this slot's memory. InstanceSetLOD.upload already had this ordering; the
+// ordinary set did not, and host writes are invisible to the validation layer,
+// so the ordering is asserted rather than described.
+func (r *Renderer) flushInstanceSets(frame int) {
+	if !r.fenceWaited[frame] {
+		// Loud, because the failure this prevents is silent: a copy landing in
+		// a slot a submitted frame is still reading corrupts that frame's
+		// geometry on the GPU and nothing anywhere reports it.
+		panic(fmt.Sprintf("renderer: instance staging flushed into slot %d before its fence was waited on", frame))
+	}
+	for _, s := range r.instanceSets {
+		// A destroyed set keeps its registration until its deferred release
+		// runs; its slots are gone or going, and nothing may draw from it.
+		if !s.staged || s.destroyed {
+			continue
+		}
+		sl := &s.slots[frame]
+		if sl.dirty {
+			if n := len(s.staging); n > 0 {
+				copy(unsafe.Slice((*MeshInstance)(sl.mapped), s.capacity), s.staging)
+			}
+			sl.count = len(s.staging)
+			sl.dirty = false
+		}
+		s.buffer, s.count = sl.buffer, sl.count
+	}
 }
 
 // recomputeBounds builds a sphere around every instance's transformed mesh
 // bound. It is a loose fit -- centre of the bounding box of the centres, radius
 // out to the farthest -- which is what a frustum test wants: cheap, and never
 // smaller than the truth.
+//
+// Two walks over the placements rather than one walk plus a pair of scratch
+// slices: UpdateInstanceSet is on the per-frame path for a game that rebases
+// its placements around the camera, and two slice allocations per set per frame
+// is what that costs. The second walk repeats the same centre and scale
+// arithmetic on the same inputs, so the result is unchanged: checked, not
+// assumed, by running both forms over 500 random sets of up to 200 placements
+// and comparing centre and radius for bit equality.
 func (s *InstanceSet) recomputeBounds(instances []MeshInstance) {
 	if len(instances) == 0 {
 		s.boundCenter, s.boundRadius = [3]float32{}, 0
@@ -173,21 +324,17 @@ func (s *InstanceSet) recomputeBounds(instances []MeshInstance) {
 	}
 
 	mc := s.Mesh.BoundCenter
-	centers := make([][3]float32, len(instances))
-	scales := make([]float32, len(instances))
-	var lo, hi [3]float32
-	for i := range instances {
-		m := &instances[i].Model
-		c := [3]float32{
+	center := func(m *[16]float32) [3]float32 {
+		return [3]float32{
 			m[0]*mc[0] + m[4]*mc[1] + m[8]*mc[2] + m[12],
 			m[1]*mc[0] + m[5]*mc[1] + m[9]*mc[2] + m[13],
 			m[2]*mc[0] + m[6]*mc[1] + m[10]*mc[2] + m[14],
 		}
-		sx := float32(math.Sqrt(float64(m[0]*m[0] + m[1]*m[1] + m[2]*m[2])))
-		sy := float32(math.Sqrt(float64(m[4]*m[4] + m[5]*m[5] + m[6]*m[6])))
-		sz := float32(math.Sqrt(float64(m[8]*m[8] + m[9]*m[9] + m[10]*m[10])))
-		centers[i] = c
-		scales[i] = max(sx, sy, sz)
+	}
+
+	var lo, hi [3]float32
+	for i := range instances {
+		c := center(&instances[i].Model)
 		if i == 0 {
 			lo, hi = c, c
 			continue
@@ -200,18 +347,23 @@ func (s *InstanceSet) recomputeBounds(instances []MeshInstance) {
 
 	mid := [3]float32{(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2}
 	var r float32
-	for i := range centers {
-		dx, dy, dz := centers[i][0]-mid[0], centers[i][1]-mid[1], centers[i][2]-mid[2]
-		d := float32(math.Sqrt(float64(dx*dx+dy*dy+dz*dz))) + s.Mesh.BoundRadius*scales[i]
+	for i := range instances {
+		m := &instances[i].Model
+		c := center(m)
+		sx := float32(math.Sqrt(float64(m[0]*m[0] + m[1]*m[1] + m[2]*m[2])))
+		sy := float32(math.Sqrt(float64(m[4]*m[4] + m[5]*m[5] + m[6]*m[6])))
+		sz := float32(math.Sqrt(float64(m[8]*m[8] + m[9]*m[9] + m[10]*m[10])))
+		dx, dy, dz := c[0]-mid[0], c[1]-mid[1], c[2]-mid[2]
+		d := float32(math.Sqrt(float64(dx*dx+dy*dy+dz*dz))) + s.Mesh.BoundRadius*max(sx, sy, sz)
 		r = max(r, d)
 	}
 	s.boundCenter, s.boundRadius = mid, r
 }
 
-// DestroyInstanceSet releases the set's instance buffer, after the frames
-// currently in flight have finished drawing from it, and deregisters it from
-// r.instanceSets so Renderer.Destroy does not free it a second time at
-// shutdown.
+// DestroyInstanceSet releases the set's instance buffers -- one per frame in
+// flight -- after the frames currently in flight have finished drawing from
+// them, and deregisters it from r.instanceSets so Renderer.Destroy does not
+// free it a second time at shutdown.
 //
 // Deferred through DeferDestroy for the same reason every other release here
 // is, and the reason DestroyMesh and DestroyTexture now are too: a
@@ -226,8 +378,9 @@ func (s *InstanceSet) recomputeBounds(instances []MeshInstance) {
 // wins the race to notice first, so the layer never gets a turn. See the
 // break recorded in docs/agents/instancing.md for exactly what was tried.
 //
-// Everything the deferred callback needs (buffer, memory, mapped pointer) is
-// captured into locals before this returns, and s's own copies are zeroed
+// Everything the deferred callback needs (every slot's buffer, memory and
+// mapped pointer) is captured into locals before this returns, and s's own
+// copies are zeroed
 // immediately -- not left for the callback to clear -- because a game must be
 // able to tell a destroyed set from a live one the moment this call returns,
 // the same contract DestroyModel gives ModelMesh.
@@ -256,12 +409,25 @@ func (r *Renderer) DestroyInstanceSet(s *InstanceSet) {
 	s.destroyed = true
 
 	buffer, memory, mapped := s.buffer, s.memory, s.mapped
+	slots := s.slots
+	if s.staged {
+		// buffer/memory/mapped are only the published view of whichever slot
+		// the last recorded frame bound, so releasing them as well would
+		// destroy one of the slot buffers below a second time.
+		buffer, memory, mapped = core1_0.Buffer{}, core1_0.DeviceMemory{}, nil
+	}
+	s.slots = [maxFramesInFlight]instanceSlot{}
 	s.buffer = core1_0.Buffer{}
 	s.memory = core1_0.DeviceMemory{}
 	s.mapped = nil
 	s.Mesh = nil
 
 	r.DeferDestroy(func() {
+		// Every slot, not just the last one bound: each frame in flight has its
+		// own buffer and each has to come back.
+		for i := range slots {
+			slots[i].release(r.deviceDriver)
+		}
 		if mapped != nil {
 			r.deviceDriver.UnmapMemory(memory)
 		}
@@ -293,6 +459,16 @@ func (r *Renderer) DestroyInstanceSet(s *InstanceSet) {
 // deferred free runs, so this never runs twice against the same set.
 func (s *InstanceSet) destroy(deviceDriver core1_0.DeviceDriver) {
 	if s == nil {
+		return
+	}
+	for i := range s.slots {
+		s.slots[i].release(deviceDriver)
+	}
+	if s.staged {
+		// A view of a slot buffer that has just been released; see
+		// DestroyInstanceSet. Also the shape a failed CreateInstanceSet
+		// unwinds through, where nothing was ever published.
+		s.buffer, s.memory, s.mapped = core1_0.Buffer{}, core1_0.DeviceMemory{}, nil
 		return
 	}
 	if s.mapped != nil {
