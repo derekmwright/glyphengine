@@ -47,7 +47,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-10-03 # plus the compute-stage visibility of bindings 0 and 1; the march's leaf helpers split into volumetric_common.inc (#169)
+verified: 2026-10-17 # the ShadowData head stays 256 bytes and the cascade tail for WithShadowCascades follows it (#189); plus the compute-stage visibility of bindings 0 and 1; the march's leaf helpers split into volumetric_common.inc (#169)
 ---
 
 # Light a scene with hundreds of point and spot lights
@@ -214,10 +214,14 @@ gives you yours; the CPU cost is the `cluster` phase of the engine's CPU timer
   ones, where set 1 is the joint matrices). `GpuLight` is **64 bytes**, four
   vec4s — a stale 48-byte copy reads light 0 correctly and every later light
   through a window sliding into its neighbour, so a one-lamp scene looks
-  perfect and a lit street flickers. The uniform block at binding 0 is **256
-  bytes**: `mat4 cascadeVP[2]`, then `vec4 nightGrade`, `vec4 skyPalette[6]`
-  and `vec4 volumetric`, in that order. (This page said 144 bytes, which
-  stopped being true when the palette moved into that buffer; corrected here.)
+  perfect and a lit street flickers. The uniform block at binding 0 begins
+  with a **256-byte** head: `mat4 cascadeVP[2]`, then `vec4 nightGrade`,
+  `vec4 skyPalette[6]` and `vec4 volumetric`, in that order. (This page said
+  144 bytes, which stopped being true when the palette moved into that buffer;
+  corrected here.) The engine's own stages declare a cascade tail after it,
+  464 bytes in all, for the cascades `WithShadowCascades` adds; a declaration
+  that stops after the head reads the head correctly, see
+  [environment](environment.md#shaders-and-the-shadowdata-block).
   A stale shader declares the wrong descriptor type at binding 3 or the wrong
   block size at binding 0; run it under `task validate`, which will say so.
 - **An application compute dispatch can read bindings 0 and 1, and nothing

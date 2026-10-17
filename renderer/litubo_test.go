@@ -28,14 +28,14 @@ func f32At(buf []byte, off int) float32 {
 // immediately rather than passing on a coincidence of similar magnitudes.
 func TestPackLitUBOLayout(t *testing.T) {
 	buf := make([]byte, litUBOSize)
-	var vps [ShadowCascades]mgl32.Mat4
+	var vps [MaxShadowCascades]mgl32.Mat4
 	for c := range vps {
 		for i := 0; i < 16; i++ {
 			vps[c][i] = float32(c*100 + i)
 		}
 	}
 	grade := NightGrade{Strength: 0.35, Tint: [3]float32{1.5, 0.25, 0.75}}
-	packLitUBO(buf, vps, &grade, nil, nil)
+	packLitUBO(buf, ShadowCascades, vps, noReceivers, &grade, nil, nil)
 
 	for c := 0; c < ShadowCascades; c++ {
 		for i := 0; i < 16; i++ {
@@ -79,7 +79,7 @@ func TestPackLitUBOLayout(t *testing.T) {
 // the second endpoint on, and swapping the twilight pair for the night pair in
 // SkyPalette.endpoints fails on four of the six.
 func TestPackSkyPaletteLayout(t *testing.T) {
-	var vps [ShadowCascades]mgl32.Mat4
+	var vps [MaxShadowCascades]mgl32.Mat4
 	pal := SkyPalette{
 		ZenithDay:       [3]float32{0.11, 0.12, 0.13},
 		HorizonDay:      [3]float32{0.21, 0.22, 0.23},
@@ -89,7 +89,7 @@ func TestPackSkyPaletteLayout(t *testing.T) {
 		HorizonNight:    [3]float32{0.61, 0.62, 0.63},
 	}
 	buf := make([]byte, litUBOSize)
-	packLitUBO(buf, vps, nil, &pal, nil)
+	packLitUBO(buf, ShadowCascades, vps, noReceivers, nil, &pal, nil)
 
 	// Index, name, and the value the shader must find there. The names are the
 	// ATM_* defines; the indices are what atmSkyPalette subscripts pal with.
@@ -134,9 +134,9 @@ func TestPackSkyPaletteLayout(t *testing.T) {
 // Verified to catch a real mistake: dropping the nil guard in packLitUBO, so a
 // nil palette writes zeros, fails this on all eighteen components.
 func TestPackLitUBOSkyPaletteDefaultsWhenUnset(t *testing.T) {
-	var vps [ShadowCascades]mgl32.Mat4
+	var vps [MaxShadowCascades]mgl32.Mat4
 	buf := make([]byte, litUBOSize)
-	packLitUBO(buf, vps, nil, nil, nil)
+	packLitUBO(buf, ShadowCascades, vps, noReceivers, nil, nil, nil)
 
 	for i, want := range DefaultSkyPalette().endpoints() {
 		for c := 0; c < 3; c++ {
@@ -185,11 +185,11 @@ func TestDefaultSkyPaletteIsTheShippedSky(t *testing.T) {
 // zero-valued grade still writes zeros, which is the "off" case and is
 // asserted below so the two cannot be confused.
 func TestPackLitUBODefaultsWhenUnset(t *testing.T) {
-	var vps [ShadowCascades]mgl32.Mat4
+	var vps [MaxShadowCascades]mgl32.Mat4
 	def := DefaultNightGrade()
 
 	buf := make([]byte, litUBOSize)
-	packLitUBO(buf, vps, nil, nil, nil)
+	packLitUBO(buf, ShadowCascades, vps, noReceivers, nil, nil, nil)
 	for i, want := range [4]float32{def.Tint[0], def.Tint[1], def.Tint[2], def.Strength} {
 		if got := f32At(buf, nightGradeOffset+i*4); got != want {
 			t.Errorf("nil grade, component %d = %g, want the default %g", i, got, want)
@@ -199,7 +199,7 @@ func TestPackLitUBODefaultsWhenUnset(t *testing.T) {
 	// And "off" must still be expressible, or the guard above would have
 	// bought upgrade safety by taking away the feature.
 	off := make([]byte, litUBOSize)
-	packLitUBO(off, vps, &NightGrade{}, nil, nil)
+	packLitUBO(off, ShadowCascades, vps, noReceivers, &NightGrade{}, nil, nil)
 	if got := f32At(off, nightGradeOffset+12); got != 0 {
 		t.Errorf("explicit zero grade strength = %g, want 0", got)
 	}
@@ -214,8 +214,8 @@ func TestPackLitUBOOverwritesEveryFrame(t *testing.T) {
 	for i := range buf {
 		buf[i] = 0xAB
 	}
-	var vps [ShadowCascades]mgl32.Mat4
-	packLitUBO(buf, vps, &NightGrade{Strength: 1, Tint: [3]float32{1, 1, 1}}, nil, nil)
+	var vps [MaxShadowCascades]mgl32.Mat4
+	packLitUBO(buf, ShadowCascades, vps, noReceivers, &NightGrade{Strength: 1, Tint: [3]float32{1, 1, 1}}, nil, nil)
 	for i, b := range buf {
 		if b == 0xAB {
 			// 0xAB bytes can legitimately appear inside a float, so only a
@@ -242,9 +242,9 @@ func TestPackLitUBOOverwritesEveryFrame(t *testing.T) {
 // wrong, which is exactly the pair of failures that says "offset", not
 // "value".
 func TestPackVolumetricsLayout(t *testing.T) {
-	var vps [ShadowCascades]mgl32.Mat4
+	var vps [MaxShadowCascades]mgl32.Mat4
 	buf := make([]byte, litUBOSize)
-	packLitUBO(buf, vps, nil, nil, &Volumetrics{Anisotropy: 0.55, Steps: 24})
+	packLitUBO(buf, ShadowCascades, vps, noReceivers, nil, nil, &Volumetrics{Anisotropy: 0.55, Steps: 24})
 
 	if got := f32At(buf, volumetricOffset+0); got != 0.55 {
 		t.Errorf("volumetric.x (anisotropy) = %g, want 0.55", got)
@@ -252,14 +252,15 @@ func TestPackVolumetricsLayout(t *testing.T) {
 	if got := f32At(buf, volumetricOffset+4); got != 24 {
 		t.Errorf("volumetric.y (steps) = %g, want 24", got)
 	}
-	if want := volumetricOffset + 16; litUBOSize != want {
-		t.Errorf("litUBOSize = %d, want %d", litUBOSize, want)
+	if want := volumetricOffset + 16; litUBOHeadSize != want {
+		t.Errorf("litUBOHeadSize = %d, want %d", litUBOHeadSize, want)
 	}
-	// 256 bytes exactly, which is what nine shader declarations and the
-	// descriptor range have to agree on. Spelled as a number because that is
-	// the thing a reader checks against the GLSL.
-	if litUBOSize != 256 {
-		t.Errorf("litUBOSize = %d, want 256", litUBOSize)
+	// 256 bytes exactly, which is where every two-cascade declaration of the
+	// block ends -- the engine's sky readers and every consumer's copy.
+	// Spelled as a number because that is the thing a reader checks against
+	// the GLSL. The cascade tail after it is TestCascadeTailOffsetsMatchGLSL's.
+	if litUBOHeadSize != 256 {
+		t.Errorf("litUBOHeadSize = %d, want 256", litUBOHeadSize)
 	}
 }
 
@@ -281,11 +282,11 @@ func TestPackVolumetricsLayout(t *testing.T) {
 // pair, and dropping either clamp fails the matching case with the value
 // passed straight through.
 func TestPackVolumetricsDefaultsAndClamps(t *testing.T) {
-	var vps [ShadowCascades]mgl32.Mat4
+	var vps [MaxShadowCascades]mgl32.Mat4
 	def := DefaultVolumetrics()
 
 	buf := make([]byte, litUBOSize)
-	packLitUBO(buf, vps, nil, nil, nil)
+	packLitUBO(buf, ShadowCascades, vps, noReceivers, nil, nil, nil)
 	if got := f32At(buf, volumetricOffset+0); got != def.Anisotropy {
 		t.Errorf("nil volumetrics anisotropy = %g, want the default %g", got, def.Anisotropy)
 	}
@@ -308,7 +309,7 @@ func TestPackVolumetricsDefaultsAndClamps(t *testing.T) {
 	} {
 		b := make([]byte, litUBOSize)
 		v := tc.in
-		packLitUBO(b, vps, nil, nil, &v)
+		packLitUBO(b, ShadowCascades, vps, noReceivers, nil, nil, &v)
 		if got := f32At(b, volumetricOffset+0); got != tc.wantG {
 			t.Errorf("%s: anisotropy = %g, want %g", tc.name, got, tc.wantG)
 		}
@@ -317,3 +318,7 @@ func TestPackVolumetricsDefaultsAndClamps(t *testing.T) {
 		}
 	}
 }
+
+// noReceivers is the CascadeReceivers a SceneLighting that never set them
+// carries: every cascade's whole volume.
+var noReceivers [MaxShadowCascades]ShadowReceiverRange

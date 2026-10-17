@@ -1,9 +1,11 @@
+
 // Shared lighting functions for lit fragment shaders.
 // Expects shadowMap (sampler2DArrayShadow), pointShadowMap, pc, and
 // shadow (the ShadowData UBO: mat4 cascadeVP[2], vec4 nightGrade, vec4
-// skyPalette[6]) to be declared by the including file, and LIGHT_SET #defined
-// before this include -- see lights.inc for lb/cg/li (the clustered light
-// buffers).
+// skyPalette[6], vec4 volumetric, and optionally the cascade tail -- see
+// SHADOW_CASCADE_TAIL below) to be declared by the including file, and
+// LIGHT_SET #defined before this include -- see lights.inc for lb/cg/li (the
+// clustered light buffers).
 //
 // Light contributions use the "irradiance" pattern (same as three.js):
 // irradiance = saturate(NdotL) * lightColor, then both diffuse and specular
@@ -14,64 +16,142 @@
 #include "lights.inc"
 #include "volumetric.inc"
 
+// NumCascades is the number of cascades the head of ShadowData declares. The
+// number a renderer actually draws is shadowCascadeCount(), which is this for
+// a shader that declares only the head.
 const int NumCascades = 2;
 
-// calcShadow selects the first cascade whose frustum contains the (normal-
-// offset) world position, then applies 5x5 PCF on that cascade's layer.
+// MaxShadowCascades mirrors renderer.MaxShadowCascades: cascadeVP[2] plus
+// cascadeVPExtra[2], and the length of cascadeParams.
+const int MaxShadowCascades = 4;
+
+// A shader that declares the tail of ShadowData -- mat4 cascadeVPExtra[2],
+// vec4 cascadeInfo, vec4 cascadeParams[4], after volumetric -- defines
+// SHADOW_CASCADE_TAIL before including this file and gets every cascade the
+// renderer draws, with each cascade's bias and receiver band read from
+// cascadeParams. Every engine stage that shades with calcShadow does.
+//
+// A shader that declares only the head keeps compiling and keeps reading the
+// first two cascades exactly where it always did. It cannot see the renderer's
+// count, so it shades with those two whatever WithShadowCascades says, using
+// the two bias pairs every renderer sends as cascadeParams[0] and [1] and the
+// whole volume as each receiver band -- the rule it had before the tail
+// existed. TestCascadeBiasMatchesHeadOnlyFallback holds the literals below
+// equal to renderer/shadow.go's table, so the two paths cannot drift apart.
+#ifdef SHADOW_CASCADE_TAIL
+int shadowCascadeCount() {
+    return min(int(shadow.cascadeInfo.x), MaxShadowCascades);
+}
+mat4 shadowCascadeVP(int c) {
+    return (c < NumCascades) ? shadow.cascadeVP[c] : shadow.cascadeVPExtra[c - NumCascades];
+}
+vec4 shadowCascadeParams(int c) {
+    return shadow.cascadeParams[c];
+}
+#else
+int shadowCascadeCount() {
+    return NumCascades;
+}
+mat4 shadowCascadeVP(int c) {
+    return shadow.cascadeVP[c];
+}
+vec4 shadowCascadeParams(int c) {
+    return (c == 0) ? vec4(1.0, 37.4, 0.0, 1.0) : vec4(4.0, 224.9, 0.0, 1.0);
+}
+#endif
+
+// shadowCascadeLookup is one cascade's selection test and filter: false when
+// the (normal-offset) world position lies outside the cascade's XY bounds or
+// its receiver band, otherwise true with the filtered visibility in lit.
+//
+// The receiver band is cascadeParams[c].zw. It is [0, 1], the whole volume,
+// unless the coverage set ShadowCascadeCoverage.ReceiverDepth, in which case a
+// receiver further from the centre along the light than that falls through to
+// the next cascade even though it projects inside this one: a long caster
+// reach otherwise makes a fine near map the first match for receivers far
+// down-sun. The comparison is the depth test the selection always made,
+// against different operands.
+bool shadowCascadeLookup(int c, vec3 shadowPos, float NdotL, out float lit) {
+    mat4 cascadeVP = shadowCascadeVP(c);
+    vec4 params = shadowCascadeParams(c);
+    vec4 lsPos = cascadeVP * vec4(shadowPos, 1.0);
+    vec3 proj = lsPos.xyz; // orthographic: w == 1
+    proj.xy = proj.xy * 0.5 + 0.5;
+
+    // Small margin so PCF taps near the edge fall through to the next
+    // cascade instead of clamping.
+    if (proj.x < 0.01 || proj.x > 0.99 || proj.y < 0.01 || proj.y > 0.99 || proj.z < params.z || proj.z > params.w) {
+        lit = 1.0;
+        return false;
+    }
+
+    // Normal-based bias: surfaces at grazing angles need much more bias,
+    // and a coarser cascade covers more world units per texel, so its
+    // scale is larger. params.x is that scale and params.y the depth the
+    // bias was tuned at; renderer/shadow.go's cascadeBiasScale has the
+    // measurement behind both.
+    float bias = max(0.008 * (1.0 - NdotL), 0.001) * params.x;
+    // Keep the historical world-space bias as caster depth changes: the
+    // orthographic Z row has length 1/(far-near), so this undoes whatever
+    // depth range the coverage chose.
+    float inverseDepth = length(vec3(cascadeVP[0][2],
+                                     cascadeVP[1][2],
+                                     cascadeVP[2][2]));
+    bias *= inverseDepth * params.y;
+    float ref = proj.z - bias;
+
+    // Four-tap PCF on a comparison sampler.
+    //
+    // shadowMap is a sampler2DArrayShadow, so every tap is already a hardware
+    // 2x2 percentage-closer fetch with bilinear weights -- four taps spaced a
+    // texel apart therefore cover a smooth 4x4 neighbourhood, not four points.
+    // The 5x5 loop this replaces did 25 of those, paying for a 6x6 footprint
+    // and about a hundred depth comparisons per fragment.
+    //
+    // That cost lands on every lit fragment, in grass, terrain, water and the
+    // lit path alike, and grass overdraws itself heavily. Measured with the
+    // per-pass GPU timer on 08-grass: grass 4.99 -> 3.97 ms, opaque 0.063 ->
+    // 0.030 ms, whole frame 6.89 -> 5.92 ms. The image difference against the
+    // 5x5 version is RMS 0.0008 luminance against a 0.00003 noise floor --
+    // measurable, and indistinguishable by eye on hard-edged pillar shadows,
+    // which is where a weaker kernel would show first.
+    //
+    // Offsets are fixed rather than rotated per pixel. A rotated kernel trades
+    // banding for noise, and noise on sub-pixel grass blades is exactly the
+    // "TV static" the grass shader's normal handling already exists to avoid.
+    vec2 texelSize = 1.0 / vec2(textureSize(shadowMap, 0).xy);
+    float result =
+        texture(shadowMap, vec4(proj.xy + vec2(-1.0, -1.0) * texelSize, float(c), ref)) +
+        texture(shadowMap, vec4(proj.xy + vec2( 1.0, -1.0) * texelSize, float(c), ref)) +
+        texture(shadowMap, vec4(proj.xy + vec2(-1.0,  1.0) * texelSize, float(c), ref)) +
+        texture(shadowMap, vec4(proj.xy + vec2( 1.0,  1.0) * texelSize, float(c), ref));
+    lit = mix(0.35, 1.0, result * 0.25);
+    return true;
+}
+
+// calcShadow returns the first cascade's lookup that selects the position, or
+// 1.0 (fully lit) outside every cascade.
+//
+// The head's two cascades are a loop of constant length and the tail's are a
+// second loop to the renderer's count, rather than one loop to the count. One
+// loop to a count the compiler cannot see changed default frames: on
+// RX 7900 XTX under the fixed clock, 03-physics, 05-textures, 06-skinned,
+// 15-kitchen-sink, 19-instanced and 25-lod-forest each moved 1 to 10 pixels by
+// one level against af52592, with the bias and receiver data unchanged. Bounding
+// the first loop at NumCascades puts back the code the two-cascade shader
+// compiled to, and those captures are byte-identical again.
 float calcShadow(vec3 shadowPos, float NdotL) {
+    float lit;
     for (int c = 0; c < NumCascades; c++) {
-        vec4 lsPos = shadow.cascadeVP[c] * vec4(shadowPos, 1.0);
-        vec3 proj = lsPos.xyz; // orthographic: w == 1
-        proj.xy = proj.xy * 0.5 + 0.5;
-
-        // Small margin so PCF taps near the edge fall through to the next
-        // cascade instead of clamping.
-        if (proj.x < 0.01 || proj.x > 0.99 || proj.y < 0.01 || proj.y > 0.99 || proj.z < 0.0 || proj.z > 1.0) {
-            continue;
+        if (shadowCascadeLookup(c, shadowPos, NdotL, lit)) {
+            return lit;
         }
-
-        // Normal-based bias: surfaces at grazing angles need much more bias.
-        // The far cascade covers more world units per texel, so scale up.
-        float biasScale = (c == 0) ? 1.0 : 4.0;
-        float bias = max(0.008 * (1.0 - NdotL), 0.001) * biasScale;
-        // Keep the historical world-space bias as caster depth changes.
-        // The orthographic Z row has length 1/(far-near). Without this,
-        // 23-shadow-coverage with TowardLight=1500 loses the 2-unit prop's
-        // shadow: the old normalized bias grows with the depth range.
-        // task shadowcoverage, 800x600 fixed clock: near ROI 140,295,25,15
-        // is 181.67/255 without this, 119.33 with it (default 119.33).
-        float inverseDepth = length(vec3(shadow.cascadeVP[c][0][2],
-                                         shadow.cascadeVP[c][1][2],
-                                         shadow.cascadeVP[c][2][2]));
-        bias *= inverseDepth * ((c == 0) ? 37.4 : 224.9);
-        float ref = proj.z - bias;
-
-        // Four-tap PCF on a comparison sampler.
-        //
-        // shadowMap is a sampler2DArrayShadow, so every tap is already a hardware
-        // 2x2 percentage-closer fetch with bilinear weights -- four taps spaced a
-        // texel apart therefore cover a smooth 4x4 neighbourhood, not four points.
-        // The 5x5 loop this replaces did 25 of those, paying for a 6x6 footprint
-        // and about a hundred depth comparisons per fragment.
-        //
-        // That cost lands on every lit fragment, in grass, terrain, water and the
-        // lit path alike, and grass overdraws itself heavily. Measured with the
-        // per-pass GPU timer on 08-grass: grass 4.99 -> 3.97 ms, opaque 0.063 ->
-        // 0.030 ms, whole frame 6.89 -> 5.92 ms. The image difference against the
-        // 5x5 version is RMS 0.0008 luminance against a 0.00003 noise floor --
-        // measurable, and indistinguishable by eye on hard-edged pillar shadows,
-        // which is where a weaker kernel would show first.
-        //
-        // Offsets are fixed rather than rotated per pixel. A rotated kernel trades
-        // banding for noise, and noise on sub-pixel grass blades is exactly the
-        // "TV static" the grass shader's normal handling already exists to avoid.
-        vec2 texelSize = 1.0 / vec2(textureSize(shadowMap, 0).xy);
-        float result =
-            texture(shadowMap, vec4(proj.xy + vec2(-1.0, -1.0) * texelSize, float(c), ref)) +
-            texture(shadowMap, vec4(proj.xy + vec2( 1.0, -1.0) * texelSize, float(c), ref)) +
-            texture(shadowMap, vec4(proj.xy + vec2(-1.0,  1.0) * texelSize, float(c), ref)) +
-            texture(shadowMap, vec4(proj.xy + vec2( 1.0,  1.0) * texelSize, float(c), ref));
-        return mix(0.35, 1.0, result * 0.25);
+    }
+    int count = shadowCascadeCount();
+    for (int c = NumCascades; c < count; c++) {
+        if (shadowCascadeLookup(c, shadowPos, NdotL, lit)) {
+            return lit;
+        }
     }
     return 1.0; // outside all cascades = fully lit
 }

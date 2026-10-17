@@ -17,7 +17,7 @@ layout(set = 1, binding = 0) uniform ShadowData {
     // scotopic tint, w the strength (0 disables). Nine shaders declare this
     // block -- the seven lit ones, plus sky.frag and clouds.frag, which reach
     // the same buffer through the cloud descriptor set -- and all nine must
-    // agree with renderer/shadow.go's litUBOSize.
+    // agree with renderer/shadow.go up to litUBOHeadSize.
     vec4 nightGrade;
     // The sky gradient's six palette endpoints; see atmSkyPalette in
     // atmosphere.inc for the order. They live here rather than as constants

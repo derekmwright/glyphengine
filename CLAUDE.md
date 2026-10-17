@@ -37,6 +37,7 @@ task reload    # reloading a level never shows a frame without it
 task volumetric # a light's beam is in the air inside its cone and nowhere else
 task clouds    # sunset colour, high cirrus, layer occlusion and repeatability
 task skypalette # the sky palette reaches the fog, the water and the clouds, not just the dome
+task shadowcoverage # off-camera casters reach receivers through caster depth; three cascades shade near and middle tiers at the texel sizes the radii say
 task skymigration # three scenes render what the built-in sky rendered before it moved to x/sky
 task scroll    # a scroll_view row crossing an edge stops at the edge
 task stream    # streamed patches land, and the frame they land in matches a synchronous one

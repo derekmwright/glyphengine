@@ -16,14 +16,49 @@ import (
 const ShadowMapSize = 2048
 const PointShadowMapSize = 512
 
-// ShadowCascades is the number of sun shadow cascades. Cascade 0 is a small
-// high-density region around the camera; later cascades trade texel density
-// for reach. Must match cascadeVP[] in the lit fragment shaders.
+// ShadowCascades is the default number of sun shadow cascades, and the number
+// the head of the ShadowData block declares (mat4 cascadeVP[2]). Cascade 0 is a
+// small high-density region around the camera; later cascades trade texel
+// density for reach. WithShadowCascades raises the count; the matrices past
+// these two live at the tail of the block, so a shader that declares only the
+// head keeps reading these two exactly where it always did.
 const ShadowCascades = 2
+
+// MaxShadowCascades is the most cascades WithShadowCascades accepts, and the
+// length of every per-cascade array in the API and the uniform block.
+//
+// Four because the tail of ShadowData is sized for it once, at a fixed offset,
+// and growing it later would move whatever is appended after it. The issue that
+// asked for this wanted three (90 m, 3 km and 120 km for a planet); four leaves
+// one tier of room without an ABI change.
+const MaxShadowCascades = 4
 
 // cascadeRadii are the orthographic half-extents of each cascade in world
 // units, centered on the camera.
 var cascadeRadii = [ShadowCascades]float32{15, 90}
+
+// cascadeBiasScale and cascadeBiasDepth are calcShadow's per-cascade depth
+// bias, sent as data in cascadeParams[c].xy rather than written as
+// `(c == 0) ? a : b` in the shader, so a third and fourth cascade have a value
+// at all.
+//
+// The shader computes bias = max(0.008*(1-NdotL), 0.001) * scale, then
+// multiplies by the cascade's inverse depth range times depth. The depth is
+// the cascade's historical caster depth (TowardLight+AwayFromLight-0.1 at the
+// default 15 and 90 radii), which holds the world-space bias at its old size
+// when a coverage stretches the depth range:
+// task shadowcoverage, 800x600 fixed clock: near ROI 140,295,25,15 is
+// 181.67/255 without the depth term, 119.33 with it (default 119.33).
+//
+// Cascades 0 and 1 are exactly the two constants the shader used to carry, and
+// TestCascadeBiasMatchesHeadOnlyFallback holds them equal to the fallback
+// lighting.inc still uses for a shader that declares only the head. Cascades 2
+// and 3 repeat cascade 1: it is the only far-cascade bias the engine has ever
+// been tuned with, and a different number here would be a guess.
+var (
+	cascadeBiasScale = [MaxShadowCascades]float32{1.0, 4.0, 4.0, 4.0}
+	cascadeBiasDepth = [MaxShadowCascades]float32{37.4, 224.9, 224.9, 224.9}
+)
 
 // The per-frame uniform block every lit pipeline binds at binding 0 of the
 // shadow/light set -- set 1 for the static pipelines, set 2 for the skinned
@@ -45,6 +80,16 @@ var cascadeRadii = [ShadowCascades]float32{15, 90}
 // surface includes. Add to the tail rather than the middle: each new vec4 is
 // one more offset here, one more line in nine shader declarations, and no
 // change to anything already at a lower offset.
+//
+// The cascades past the first two are the proof of that rule. Every engine
+// shader and every consumer's hand-written copy declares mat4 cascadeVP[2] at
+// offset 0, and nightGrade, the palette and the volumetric block at offsets
+// that follow from it, so a third matrix in the head would have moved all of
+// them and turned a consumer's nightGrade into the first row of a matrix. The
+// extra matrices, the active count and the per-cascade selection data are
+// appended after volumetric instead: litUBOHeadSize is where a two-cascade
+// declaration ends and stays 256, and a shader that never declares the tail
+// reads exactly what it read before.
 const (
 	cascadeUBOSize   = ShadowCascades * 64 // mat4 cascadeVP[ShadowCascades]
 	nightGradeOffset = cascadeUBOSize      // vec4 nightGrade
@@ -53,7 +98,17 @@ const (
 	// of either a 16-byte stride, so the padding is there whichever is
 	// written and a vec4 says so.
 	volumetricOffset = skyPaletteOffset + skyPaletteCount*16 // vec4 volumetric
-	litUBOSize       = volumetricOffset + 16
+	litUBOHeadSize   = volumetricOffset + 16
+
+	// mat4 cascadeVPExtra[2]: cascades 2 and 3.
+	cascadeExtraOffset = litUBOHeadSize
+	// vec4 cascadeInfo: x = the active cascade count as a float, yzw zero.
+	cascadeInfoOffset = cascadeExtraOffset + (MaxShadowCascades-ShadowCascades)*64
+	// vec4 cascadeParams[4]: per cascade, x = bias scale, y = bias depth,
+	// z and w = the normalised light-depth band a receiver must lie in to
+	// select the cascade. See cascadeBiasScale and ShadowReceiverRange.
+	cascadeParamsOffset = cascadeInfoOffset + 16
+	litUBOSize          = cascadeParamsOffset + MaxShadowCascades*16
 )
 
 // skyPaletteCount is how many endpoints atmSkyPalette blends between: zenith
@@ -244,14 +299,24 @@ func (p SkyPalette) endpoints() [skyPaletteCount][3]float32 {
 // Per-frame images/views/bindings prevent read-write conflicts between frames in flight.
 // The sun shadow map is a 2D array image with one layer per cascade.
 type shadowResources struct {
+	// cascades is how many layers the sun array has and how many cascade
+	// passes a frame records -- WithShadowCascades, fixed at construction.
+	// Zero reads as ShadowCascades so a fixture that builds this struct by
+	// hand records the default frame; see cascadeCount.
+	cascades int
+
+	// mapBytes is the device memory the sun arrays occupy across every frame
+	// in flight, as the driver sized them. ResourceCounts.ShadowMapBytes.
+	mapBytes int
+
 	images       [maxFramesInFlight]core1_0.Image
 	memories     [maxFramesInFlight]core1_0.DeviceMemory
-	cascadeViews [maxFramesInFlight][ShadowCascades]core1_0.ImageView // per-layer, for rendering attachments
-	arrayViews   [maxFramesInFlight]core1_0.ImageView                 // 2D array view, for sampling
+	cascadeViews [maxFramesInFlight][MaxShadowCascades]core1_0.ImageView // per-layer, for rendering attachments
+	arrayViews   [maxFramesInFlight]core1_0.ImageView                    // 2D array view, for sampling
 	format       core1_0.Format
 	sampler      core1_0.Sampler
 	formats      renderingFormats
-	targets      [maxFramesInFlight][ShadowCascades]*renderingTarget
+	targets      [maxFramesInFlight][MaxShadowCascades]*renderingTarget
 
 	// Per-frame UBOs for the light VP matrix (persistently mapped)
 	lightVPBuffers        [maxFramesInFlight]core1_0.Buffer
@@ -364,8 +429,9 @@ func createShadowResources(
 	descriptorPool core1_0.DescriptorPool,
 	jointSetLayout core1_0.DescriptorSetLayout,
 	textureSlots int,
+	cascades int,
 ) (*shadowResources, error) {
-	s := &shadowResources{}
+	s := &shadowResources{cascades: cascades}
 	props, err := instanceDriver.GetPhysicalDeviceProperties(physicalDevice)
 	if err != nil {
 		return nil, fmt.Errorf("shader parameter limits: %w", err)
@@ -383,86 +449,9 @@ func createShadowResources(
 	}
 	s.format = format
 
-	// Create per-frame depth array images, one layer per cascade
-	// (DepthStencilAttachment + Sampled for reading in main pass)
-	for i := 0; i < maxFramesInFlight; i++ {
-		s.images[i], _, err = deviceDriver.CreateImage(nil, core1_0.ImageCreateInfo{
-			ImageType: core1_0.ImageType2D,
-			Format:    format,
-			Extent: core1_0.Extent3D{
-				Width:  ShadowMapSize,
-				Height: ShadowMapSize,
-				Depth:  1,
-			},
-			MipLevels:     1,
-			ArrayLayers:   ShadowCascades,
-			Samples:       core1_0.Samples1,
-			Tiling:        core1_0.ImageTilingOptimal,
-			Usage:         core1_0.ImageUsageDepthStencilAttachment | core1_0.ImageUsageSampled,
-			SharingMode:   core1_0.SharingModeExclusive,
-			InitialLayout: core1_0.ImageLayoutUndefined,
-		})
-		if err != nil {
-			s.destroy(deviceDriver)
-			return nil, fmt.Errorf("shadow image %d: %w", i, err)
-		}
-
-		memReqs := deviceDriver.GetImageMemoryRequirements(s.images[i])
-		memType, err := findMemoryType(instanceDriver, physicalDevice, memReqs.MemoryTypeBits, core1_0.MemoryPropertyDeviceLocal)
-		if err != nil {
-			s.destroy(deviceDriver)
-			return nil, err
-		}
-
-		s.memories[i], _, err = deviceDriver.AllocateMemory(nil, core1_0.MemoryAllocateInfo{
-			AllocationSize:  memReqs.Size,
-			MemoryTypeIndex: memType,
-		})
-		if err != nil {
-			s.destroy(deviceDriver)
-			return nil, fmt.Errorf("shadow memory %d: %w", i, err)
-		}
-
-		_, err = deviceDriver.BindImageMemory(s.images[i], s.memories[i], 0)
-		if err != nil {
-			s.destroy(deviceDriver)
-			return nil, fmt.Errorf("bind shadow image %d: %w", i, err)
-		}
-
-		// Per-cascade layer views for rendering attachments
-		for c := 0; c < ShadowCascades; c++ {
-			s.cascadeViews[i][c], _, err = deviceDriver.CreateImageView(nil, core1_0.ImageViewCreateInfo{
-				Image:    s.images[i],
-				ViewType: core1_0.ImageViewType2D,
-				Format:   format,
-				SubresourceRange: core1_0.ImageSubresourceRange{
-					AspectMask:     core1_0.ImageAspectDepth,
-					LevelCount:     1,
-					BaseArrayLayer: c,
-					LayerCount:     1,
-				},
-			})
-			if err != nil {
-				s.destroy(deviceDriver)
-				return nil, fmt.Errorf("shadow cascade view %d/%d: %w", i, c, err)
-			}
-		}
-
-		// Array view for sampling all cascades in the fragment shader
-		s.arrayViews[i], _, err = deviceDriver.CreateImageView(nil, core1_0.ImageViewCreateInfo{
-			Image:    s.images[i],
-			ViewType: core1_0.ImageViewType2DArray,
-			Format:   format,
-			SubresourceRange: core1_0.ImageSubresourceRange{
-				AspectMask: core1_0.ImageAspectDepth,
-				LevelCount: 1,
-				LayerCount: ShadowCascades,
-			},
-		})
-		if err != nil {
-			s.destroy(deviceDriver)
-			return nil, fmt.Errorf("shadow array view %d: %w", i, err)
-		}
+	if err := s.createSunCascadeMaps(instanceDriver, deviceDriver, physicalDevice); err != nil {
+		s.destroy(deviceDriver)
+		return nil, err
 	}
 
 	// Comparison sampler for PCF (CompareOpLessOrEqual, ClampToBorder white)
@@ -483,11 +472,6 @@ func createShadowResources(
 	}
 
 	s.formats = colorDepthFormats(0, format)
-	for i := range maxFramesInFlight {
-		for c := range ShadowCascades {
-			s.targets[i][c] = depthRenderingTarget(s.images[i], s.cascadeViews[i][c], s.format, c, core1_0.Extent2D{Width: ShadowMapSize, Height: ShadowMapSize})
-		}
-	}
 
 	// Per-frame UBOs (one mat4 light VP per cascade)
 	for i := 0; i < maxFramesInFlight; i++ {
@@ -980,8 +964,8 @@ func createShadowPipelineWithInput(deviceDriver core1_0.DeviceDriver, sh ShaderS
 
 // uploadLitUBO writes this frame's cascade matrices and environment values to
 // the per-frame UBO (persistently mapped).
-func (s *shadowResources) uploadLitUBO(frame int, vps [ShadowCascades]mgl32.Mat4, grade *NightGrade, palette *SkyPalette, vol *Volumetrics) {
-	packLitUBO(s.lightVPMapped[frame], vps, grade, palette, vol)
+func (s *shadowResources) uploadLitUBO(frame int, vps [MaxShadowCascades]mgl32.Mat4, receivers [MaxShadowCascades]ShadowReceiverRange, grade *NightGrade, palette *SkyPalette, vol *Volumetrics) {
+	packLitUBO(s.lightVPMapped[frame], s.cascadeCount(), vps, receivers, grade, palette, vol)
 }
 
 // packLitUBO writes the whole block, every frame. Partial writes would leave
@@ -992,9 +976,40 @@ func (s *shadowResources) uploadLitUBO(frame int, vps [ShadowCascades]mgl32.Mat4
 // vol nil means DefaultVolumetrics -- see NightGrade, SkyPalette and
 // Volumetrics for why a caller's zero value must not be read as "no shift",
 // "six black colours" or "march nothing".
-func packLitUBO(dst []byte, vps [ShadowCascades]mgl32.Mat4, grade *NightGrade, palette *SkyPalette, vol *Volumetrics) {
-	src := unsafe.Slice((*byte)(unsafe.Pointer(&vps[0][0])), cascadeUBOSize)
-	copy(dst[:cascadeUBOSize], src)
+//
+// count is the renderer's cascade count, not anything the caller says: it is
+// how many layers the array the shader samples has. Matrices and parameters
+// past it are written as zero, so a caller that filled CascadeVPs[2] on a
+// two-cascade renderer cannot make a shader that loops to the count read it.
+func packLitUBO(dst []byte, count int, vps [MaxShadowCascades]mgl32.Mat4, receivers [MaxShadowCascades]ShadowReceiverRange, grade *NightGrade, palette *SkyPalette, vol *Volumetrics) {
+	for c := range MaxShadowCascades {
+		off := c * 64
+		if c >= ShadowCascades {
+			off = cascadeExtraOffset + (c-ShadowCascades)*64
+		}
+		m := vps[c]
+		if c >= count {
+			m = mgl32.Mat4{}
+		}
+		for i, v := range m {
+			binary.LittleEndian.PutUint32(dst[off+i*4:], math.Float32bits(v))
+		}
+
+		params := [4]float32{}
+		if c < count {
+			near, far := receivers[c].bounds()
+			params = [4]float32{cascadeBiasScale[c], cascadeBiasDepth[c], near, far}
+		}
+		for i, v := range params {
+			binary.LittleEndian.PutUint32(dst[cascadeParamsOffset+c*16+i*4:], math.Float32bits(v))
+		}
+	}
+	// The count is a float for the reason the volumetric step count is one:
+	// it shares a vec4, std140 would pad an int to the same four bytes, and
+	// int() of a small whole float is exact.
+	for i, v := range [4]float32{float32(count), 0, 0, 0} {
+		binary.LittleEndian.PutUint32(dst[cascadeInfoOffset+i*4:], math.Float32bits(v))
+	}
 
 	g := DefaultNightGrade()
 	if grade != nil {
@@ -1095,8 +1110,13 @@ func (s *shadowResources) uploadLights(frame int, lights []GpuLight, clusters *l
 // matrix per cascade, centered on the camera, with texel snapping to reduce
 // shadow shimmer. The far cascade's frustum is a superset of the near one, so
 // callers can cull shadow casters against the last cascade alone.
-func ComputeCascadeVPs(sunDir [3]float32, cameraPos mgl32.Vec3) [ShadowCascades]mgl32.Mat4 {
-	var vps [ShadowCascades]mgl32.Mat4
+//
+// It fills the two default cascades and leaves the rest of the array zero,
+// which is the SceneLighting.CascadeVPs a two-cascade renderer reads. A
+// renderer built with more cascades needs ComputeCascadeVPsWithCoverage and a
+// coverage that says what the extra tiers cover.
+func ComputeCascadeVPs(sunDir [3]float32, cameraPos mgl32.Vec3) [MaxShadowCascades]mgl32.Mat4 {
+	var vps [MaxShadowCascades]mgl32.Mat4
 	for c := 0; c < ShadowCascades; c++ {
 		vps[c] = computeLightVP(sunDir, cameraPos, cascadeRadii[c])
 	}
@@ -1106,7 +1126,7 @@ func ComputeCascadeVPs(sunDir [3]float32, cameraPos mgl32.Vec3) [ShadowCascades]
 // computeLightVP computes an orthographic light-space view-projection matrix
 // with the given half-extent radius, centered on the camera position.
 func computeLightVP(sunDir [3]float32, cameraPos mgl32.Vec3, shadowRadius float32) mgl32.Mat4 {
-	return computeLightVPCoverage(sunDir, cameraPos, ShadowCascadeCoverage{shadowRadius, shadowRadius, shadowRadius * 1.5})
+	return computeLightVPCoverage(sunDir, cameraPos, ShadowCascadeCoverage{Radius: shadowRadius, TowardLight: shadowRadius, AwayFromLight: shadowRadius * 1.5})
 }
 
 func computeLightVPCoverage(sunDir [3]float32, cameraPos mgl32.Vec3, coverage ShadowCascadeCoverage) mgl32.Mat4 {
@@ -1352,11 +1372,128 @@ func (s *shadowResources) destroy(deviceDriver core1_0.DeviceDriver) {
 	if s.sampler.Handle() != 0 {
 		deviceDriver.DestroySampler(s.sampler, nil)
 	}
+	s.destroySunCascadeMaps(deviceDriver)
+}
+
+// cascadeCount is the number of sun cascades this renderer allocated and
+// records. Zero is the default, for the fixtures that build shadowResources by
+// hand and expect the frame every renderer recorded before the count was an
+// option.
+func (s *shadowResources) cascadeCount() int {
+	if s.cascades == 0 {
+		return ShadowCascades
+	}
+	return s.cascades
+}
+
+// createSunCascadeMaps allocates the per-frame sun depth arrays with exactly
+// cascadeCount layers, one attachment view per layer, the array view the lit
+// shaders sample, and the rendering targets the cascade passes begin.
+//
+// Exactly, not MaxShadowCascades: the default two-cascade renderer keeps the
+// allocation it always had, and a third layer costs a game that asked for it
+// one more 2048-square depth layer per frame in flight and nothing else. The
+// views and targets past the count stay zero, which is what destroy and the
+// recording loop read as "not here".
+//
+// It leaves teardown of a partial result to the caller's destroy, the same
+// contract as every other step in createShadowResources.
+func (s *shadowResources) createSunCascadeMaps(instanceDriver core1_0.CoreInstanceDriver, deviceDriver core1_0.CoreDeviceDriver, physicalDevice core1_0.PhysicalDevice) error {
+	n := s.cascadeCount()
+	if n < ShadowCascades || n > MaxShadowCascades {
+		return fmt.Errorf("shadow cascades %d outside [%d,%d]", n, ShadowCascades, MaxShadowCascades)
+	}
 	for i := 0; i < maxFramesInFlight; i++ {
-		for c := 0; c < ShadowCascades; c++ {
+		var err error
+		s.images[i], _, err = deviceDriver.CreateImage(nil, core1_0.ImageCreateInfo{
+			ImageType: core1_0.ImageType2D,
+			Format:    s.format,
+			Extent: core1_0.Extent3D{
+				Width:  ShadowMapSize,
+				Height: ShadowMapSize,
+				Depth:  1,
+			},
+			MipLevels:     1,
+			ArrayLayers:   n,
+			Samples:       core1_0.Samples1,
+			Tiling:        core1_0.ImageTilingOptimal,
+			Usage:         core1_0.ImageUsageDepthStencilAttachment | core1_0.ImageUsageSampled,
+			SharingMode:   core1_0.SharingModeExclusive,
+			InitialLayout: core1_0.ImageLayoutUndefined,
+		})
+		if err != nil {
+			return fmt.Errorf("shadow image %d: %w", i, err)
+		}
+
+		memReqs := deviceDriver.GetImageMemoryRequirements(s.images[i])
+		memType, err := findMemoryType(instanceDriver, physicalDevice, memReqs.MemoryTypeBits, core1_0.MemoryPropertyDeviceLocal)
+		if err != nil {
+			return err
+		}
+
+		s.memories[i], _, err = deviceDriver.AllocateMemory(nil, core1_0.MemoryAllocateInfo{
+			AllocationSize:  memReqs.Size,
+			MemoryTypeIndex: memType,
+		})
+		if err != nil {
+			return fmt.Errorf("shadow memory %d: %w", i, err)
+		}
+		s.mapBytes += memReqs.Size
+
+		if _, err = deviceDriver.BindImageMemory(s.images[i], s.memories[i], 0); err != nil {
+			return fmt.Errorf("bind shadow image %d: %w", i, err)
+		}
+
+		// Per-cascade layer views for rendering attachments
+		for c := 0; c < n; c++ {
+			s.cascadeViews[i][c], _, err = deviceDriver.CreateImageView(nil, core1_0.ImageViewCreateInfo{
+				Image:    s.images[i],
+				ViewType: core1_0.ImageViewType2D,
+				Format:   s.format,
+				SubresourceRange: core1_0.ImageSubresourceRange{
+					AspectMask:     core1_0.ImageAspectDepth,
+					LevelCount:     1,
+					BaseArrayLayer: c,
+					LayerCount:     1,
+				},
+			})
+			if err != nil {
+				return fmt.Errorf("shadow cascade view %d/%d: %w", i, c, err)
+			}
+		}
+
+		// Array view for sampling all cascades in the fragment shader
+		s.arrayViews[i], _, err = deviceDriver.CreateImageView(nil, core1_0.ImageViewCreateInfo{
+			Image:    s.images[i],
+			ViewType: core1_0.ImageViewType2DArray,
+			Format:   s.format,
+			SubresourceRange: core1_0.ImageSubresourceRange{
+				AspectMask: core1_0.ImageAspectDepth,
+				LevelCount: 1,
+				LayerCount: n,
+			},
+		})
+		if err != nil {
+			return fmt.Errorf("shadow array view %d: %w", i, err)
+		}
+		for c := 0; c < n; c++ {
+			s.targets[i][c] = depthRenderingTarget(s.images[i], s.cascadeViews[i][c], s.format, c, core1_0.Extent2D{Width: ShadowMapSize, Height: ShadowMapSize})
+		}
+	}
+	return nil
+}
+
+// destroySunCascadeMaps releases what createSunCascadeMaps made, including a
+// partial result: every slot is walked and a zero handle skipped, so a failure
+// half way through one frame's views releases exactly what was made.
+func (s *shadowResources) destroySunCascadeMaps(deviceDriver core1_0.DeviceDriver) {
+	for i := 0; i < maxFramesInFlight; i++ {
+		for c := 0; c < MaxShadowCascades; c++ {
 			if s.cascadeViews[i][c].Handle() != 0 {
 				deviceDriver.DestroyImageView(s.cascadeViews[i][c], nil)
 			}
+			s.cascadeViews[i][c] = core1_0.ImageView{}
+			s.targets[i][c] = nil
 		}
 		if s.arrayViews[i].Handle() != 0 {
 			deviceDriver.DestroyImageView(s.arrayViews[i], nil)
@@ -1367,5 +1504,7 @@ func (s *shadowResources) destroy(deviceDriver core1_0.DeviceDriver) {
 		if s.images[i].Handle() != 0 {
 			deviceDriver.DestroyImage(s.images[i], nil)
 		}
+		s.arrayViews[i], s.memories[i], s.images[i] = core1_0.ImageView{}, core1_0.DeviceMemory{}, core1_0.Image{}
 	}
+	s.mapBytes = 0
 }

@@ -16,7 +16,12 @@ import (
 // Like other renderer mutation, call on the renderer thread between frames.
 func (r *Renderer) SetMeshRangeBatching(enabled bool) { r.rangeBatching = enabled }
 
-const meshBatchViews = 1 + ShadowCascades + 6
+// meshBatchViews is how many views one frame records a batch into: the camera,
+// each sun cascade and the six point-light cube faces. It sizes each range's
+// slice of the indirect buffer, so it follows the renderer's cascade count
+// rather than MaxShadowCascades: a two-cascade renderer keeps the buffer size
+// and the indirect offsets it always recorded.
+func meshBatchViews(cascades int) int { return 1 + cascades + 6 }
 
 type meshBatchFrame struct {
 	vertices, commands lodBuffer
@@ -25,6 +30,7 @@ type meshBatchFrame struct {
 	draws              []RenderObject
 	multi              bool
 	limit              int
+	views              int // meshBatchViews for this renderer
 }
 
 func (f *meshBatchFrame) destroy(r *Renderer) { f.vertices.destroy(r); f.commands.destroy(r) }
@@ -36,6 +42,7 @@ type meshRangeBatch struct {
 	view     int
 	multi    bool
 	limit    int
+	views    int
 }
 
 func batchable(d *RenderObject) bool {
@@ -49,6 +56,7 @@ func sameMeshBatch(a, b *RenderObject) bool {
 // steady frames reuse both mapped buffers and Go scratch.
 func (r *Renderer) prepareMeshBatches(draws []RenderObject, frame int) ([]RenderObject, error) {
 	f := &r.rangeBatchFrames[frame]
+	f.views = meshBatchViews(r.ShadowCascadeCount())
 	if len(draws) > f.capacity {
 		props, err := r.instanceDriver.GetPhysicalDeviceProperties(r.physicalDevice)
 		if err != nil {
@@ -60,7 +68,7 @@ func (r *Renderer) prepareMeshBatches(draws []RenderObject, frame int) ([]Render
 			v.destroy(r)
 			return nil, fmt.Errorf("mesh batches: instances: %w", err)
 		}
-		if err = c.create(r, capacity*meshBatchViews*20, core1_0.BufferUsageIndirectBuffer, true); err != nil {
+		if err = c.create(r, capacity*f.views*20, core1_0.BufferUsageIndirectBuffer, true); err != nil {
 			c.destroy(r)
 			v.destroy(r)
 			return nil, fmt.Errorf("mesh batches: commands: %w", err)
@@ -99,8 +107,9 @@ func (r *Renderer) prepareMeshBatches(draws []RenderObject, frame int) ([]Render
 		b.view = 0
 		b.multi = f.multi
 		b.limit = f.limit
-		b.commands = unsafe.Slice((*uint32)(f.commands.mapped), f.capacity*meshBatchViews*5)[start*meshBatchViews*5 : end*meshBatchViews*5]
-		b.set = InstanceSet{Mesh: draws[start].Mesh, batch: b, buffer: f.vertices.buffer, offset: start * meshInstanceSize, indirect: f.commands.buffer, indirectOffset: start * meshBatchViews * 20, count: end - start}
+		b.views = f.views
+		b.commands = unsafe.Slice((*uint32)(f.commands.mapped), f.capacity*f.views*5)[start*f.views*5 : end*f.views*5]
+		b.set = InstanceSet{Mesh: draws[start].Mesh, batch: b, buffer: f.vertices.buffer, offset: start * meshInstanceSize, indirect: f.commands.buffer, indirectOffset: start * f.views * 20, count: end - start}
 		instances := unsafe.Slice((*MeshInstance)(f.vertices.mapped), f.capacity)[start:end]
 		for i, d := range b.sources {
 			instances[i] = MeshInstance{Model: d.Model, Tint: [4]float32{1, 1, 1, 1}}
@@ -115,7 +124,7 @@ func (r *Renderer) prepareMeshBatches(draws []RenderObject, frame int) ([]Render
 }
 
 func (b *meshRangeBatch) record(d core1_0.DeviceDriver, stats *RenderStats, cmd core1_0.CommandBuffer, frustum *Frustum) {
-	if b.view >= meshBatchViews {
+	if b.view >= b.views {
 		panic("mesh batch: too many views in one frame")
 	}
 	base := b.view * len(b.sources) * 5

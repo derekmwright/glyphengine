@@ -219,7 +219,7 @@ func withFoamFrame(fx *frame, foamed bool) (*frame, *Renderer) {
 			r.waterFoams = append(r.waterFoams, f)
 		}
 	}
-	g, err := newFrameGraph(r.msaaSamples, r.depth.format, r.sc.imageFormat, 1, false, r)
+	g, err := newFrameGraph(r.msaaSamples, r.depth.format, r.sc.imageFormat, 1, false, r.ShadowCascadeCount(), r)
 	if err != nil {
 		panic(err)
 	}

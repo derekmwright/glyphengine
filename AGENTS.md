@@ -278,6 +278,7 @@ are that pipeline's own real-Blender fixture, in the same spirit as
 | `task volumetric` | A light's beam is in the air inside its cone and nowhere else (needs a GPU) |
 | `task clouds` | Sunset gold/rose, independent cirrus, layer occlusion and repeatability (needs a GPU) |
 | `task skypalette` | The sky palette reaches the fog, the water and the clouds, not just the dome (needs a GPU) |
+| `task shadowcoverage` | A distant off-camera caster reaches a receiver through caster depth without losing the nearby prop's shadow; at three cascades a mountain behind the camera shades the near and middle tiers, and each tier's texel size measured off a shadow edge matches `2*Radius/2048` (needs a GPU) |
 | `task ci` | Lint, build, test, race, across all three modules |
 | `task shaders:verify` | The committed `.spv` match their GLSL, compiled with `-Iinclude` (needs the SDK) |
 | `task xwater:shaders` | Recompile `x/water`'s `.spv` through the exported include set; its own test verifies them under `task ci` (needs the SDK) |

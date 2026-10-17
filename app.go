@@ -131,6 +131,7 @@ type config struct {
 	pipelineStats      bool
 	shaderTextureSlots int
 	appTimingCapacity  int
+	shadowCascades     int
 }
 
 // rendererOptions translates the engine's config into the renderer's options.
@@ -164,6 +165,9 @@ func (c *config) rendererOptions() []renderer.Option {
 	if c.pipelineStats {
 		opts = append(opts, renderer.WithPipelineStatistics())
 	}
+	if c.shadowCascades != 0 {
+		opts = append(opts, renderer.WithShadowCascades(c.shadowCascades))
+	}
 	opts = append(opts, renderer.WithShaderTextureSlots(c.shaderTextureSlots), renderer.WithAppTimingCapacity(c.appTimingCapacity))
 	return opts
 }
@@ -178,6 +182,20 @@ func WithShaderTextureSlots(count int) Option {
 // Zero keeps sixteen; the maximum is renderer.MaxAppTimingCapacity.
 func WithAppTimingCapacity(count int) Option {
 	return func(c *config) { c.appTimingCapacity = count }
+}
+
+// WithShadowCascades allocates n directional shadow cascades instead of two,
+// up to renderer.MaxShadowCascades. Zero keeps two, and two keeps the
+// allocation and recorded frame a renderer without the option has.
+//
+// A straight passthrough to renderer.WithShadowCascades, which exists for the
+// reason WithUIGlow does: the count sizes the shadow array at construction, so
+// the seam is unreachable from a game that only has an Engine. What the extra
+// cascades cover is SetShadowCoverage's to say; until it is said, the engine
+// draws renderer.DefaultShadowCoverageFor(n), so shadows are never silently
+// missing.
+func WithShadowCascades(n int) Option {
+	return func(c *config) { c.shadowCascades = n }
 }
 
 // WithScene injects an externally created Scene instead of building a fresh
@@ -517,6 +535,10 @@ type Engine struct {
 
 	fov, near, far float32
 	shadowCoverage renderer.ShadowCoverage
+	// shadowCascades is the renderer's cascade count, copied at construction
+	// so the coverage checks read one value whether or not a test built the
+	// Engine with a renderer. Zero is the default.
+	shadowCascades int
 
 	overlays     []renderer.RenderObject
 	uiOverlays   []renderer.UIRenderObject
@@ -1031,6 +1053,7 @@ func New(g Game, opts ...Option) (*Engine, error) {
 		hasQuitKey:     cfg.hasQuitKey,
 		debugKeys:      cfg.debugKeys,
 		lightCluster:   lightcluster.New(),
+		shadowCascades: r.ShadowCascadeCount(),
 	}
 
 	// Opened before Init so a game that draws during it is already traced.
@@ -1766,19 +1789,10 @@ func (e *Engine) renderFrame() {
 	// another is a hard bug to find.
 	env := e.Scene.Environment()
 
-	shadowEnabled := env.CastShadows
-	var cascadeVPs [renderer.ShadowCascades]mgl32.Mat4
-	if shadowEnabled {
-		var err error
-		cascadeVPs, err = renderer.ComputeCascadeVPsWithCoverage(env.SunDir, e.cameraCenter, e.shadowCoverage)
-		if err != nil {
-			log.Printf("glyphengine: directional shadows disabled this frame: %v", err)
-			shadowEnabled = false
-		}
-	}
+	cascadeVPs, cascades, shadowEnabled := e.fitShadowCascades(env.CastShadows, env.SunDir)
 
 	e.cpu.begin(CPUDrawList)
-	draws := e.buildDrawList(vp, shadowEnabled, cascadeVPs[:]...)
+	draws := e.buildDrawList(vp, shadowEnabled, cascadeVPs[:cascades]...)
 
 	// The sun and moon go in their own list rather than the draw list. There
 	// they wrote depth, which rejected the sky pass on those pixels and left
@@ -1833,18 +1847,19 @@ func (e *Engine) renderFrame() {
 	e.volumetrics = renderer.Volumetrics{Anisotropy: v.Anisotropy, Steps: v.Steps}
 
 	lighting := renderer.SceneLighting{
-		VP:            vp,
-		CameraRight:   [3]float32{camRight.X(), camRight.Y(), camRight.Z()},
-		CameraUp:      [3]float32{camUp.X(), camUp.Y(), camUp.Z()},
-		PointPos:      e.Scene.pointPos,
-		PointRange:    e.Scene.pointRange,
-		PointColor:    e.Scene.pointColor,
-		InvVP:         vp.Inv(),
-		CameraPos:     [3]float32{e.cameraEye.X(), e.cameraEye.Y(), e.cameraEye.Z()},
-		Time:          e.elapsed,
-		CascadeVPs:    cascadeVPs,
-		ShadowEnabled: shadowEnabled,
-		Volumetrics:   &e.volumetrics,
+		VP:               vp,
+		CameraRight:      [3]float32{camRight.X(), camRight.Y(), camRight.Z()},
+		CameraUp:         [3]float32{camUp.X(), camUp.Y(), camUp.Z()},
+		PointPos:         e.Scene.pointPos,
+		PointRange:       e.Scene.pointRange,
+		PointColor:       e.Scene.pointColor,
+		InvVP:            vp.Inv(),
+		CameraPos:        [3]float32{e.cameraEye.X(), e.cameraEye.Y(), e.cameraEye.Z()},
+		Time:             e.elapsed,
+		CascadeVPs:       cascadeVPs,
+		CascadeReceivers: e.shadowCoverage.ReceiverRanges(),
+		ShadowEnabled:    shadowEnabled,
+		Volumetrics:      &e.volumetrics,
 		// The strength the pass will DRAW with, which is env.LightShafts after
 		// the edge fade above. applyEnvironment leaves both of these alone.
 		LightShafts:  shaftStrength,
@@ -1970,7 +1985,7 @@ var identityModel = [16]float32{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1}
 // the light frustum are included with ShadowOnly set, so they still cast.
 func (e *Engine) buildDrawList(vp mgl32.Mat4, shadowEnabled bool, lightVPs ...mgl32.Mat4) []renderer.RenderObject {
 	cameraFrustum := ExtractFrustum(vp)
-	var lightFrusta [renderer.ShadowCascades]Frustum
+	var lightFrusta [renderer.MaxShadowCascades]Frustum
 	if shadowEnabled {
 		for i, lightVP := range lightVPs {
 			lightFrusta[i] = ExtractFrustum(lightVP)

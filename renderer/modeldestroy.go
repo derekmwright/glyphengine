@@ -142,6 +142,13 @@ type ResourceCounts struct {
 	// be a lie with a use-after-free hiding behind it. DestroyInstanceSet
 	// does the same for the same reason.
 	Deferred int
+
+	// ShadowMapBytes is the device memory the directional cascade arrays hold
+	// across every frame in flight, as the driver sized them -- the number a
+	// game budgets WithShadowCascades against. Unlike the counts above it is
+	// the renderer's own allocation rather than anything the application made,
+	// and it does not change after New.
+	ShadowMapBytes int
 }
 
 // ResourceCounts returns the renderer's live GPU resource counts.
@@ -168,6 +175,7 @@ func (r *Renderer) ResourceCounts() ResourceCounts {
 		ImpostorAtlases: len(r.impostorAtlases),
 		PendingUploads:  r.stagingBuffers,
 		Deferred:        len(r.deferredDestroys),
+		ShadowMapBytes:  r.shadowMapBytes(),
 	}
 }
 
@@ -268,4 +276,13 @@ func (r *Renderer) DestroySkinnedModel(m *SkinnedModel) {
 		return
 	}
 	r.DestroyModel(&m.Model)
+}
+
+// shadowMapBytes is ResourceCounts.ShadowMapBytes, zero for a renderer whose
+// shadow resources were never built.
+func (r *Renderer) shadowMapBytes() int {
+	if r.shadow == nil {
+		return 0
+	}
+	return r.shadow.mapBytes
 }

@@ -109,7 +109,7 @@ type graphFrame struct {
 // that plan is the live one for a scene that streams nothing -- so a graph that
 // learned about the option only through an owner would silently not have the
 // node on exactly the common path.
-func newFrameGraph(samples core1_0.SampleCountFlags, depthFormat, swapchainFormat core1_0.Format, instances int, prepass bool, owner ...*Renderer) (*frameGraph, error) {
+func newFrameGraph(samples core1_0.SampleCountFlags, depthFormat, swapchainFormat core1_0.Format, instances int, prepass bool, cascades int, owner ...*Renderer) (*frameGraph, error) {
 	f := &frameGraph{shadowCascades: -1, prepass: -1}
 	g := framegraph.New()
 	image := func(name string, scale float32) framegraph.ImageDesc {
@@ -144,7 +144,7 @@ func newFrameGraph(samples core1_0.SampleCountFlags, depthFormat, swapchainForma
 		d = image(name, 1)
 		d.Format, d.Aspect = depthFormat, core1_0.ImageAspectDepth
 		d.Imported, d.InitialLayout = true, core1_0.ImageLayoutDepthStencilReadOnlyOptimal
-		d.Layers, d.Instances = [2]uint32{ShadowCascades, 6}[i], maxFramesInFlight
+		d.Layers, d.Instances = [2]uint32{uint32(cascades), 6}[i], maxFramesInFlight
 		id := g.AddImage(d)
 		if i == 0 {
 			f.sunShadow = id

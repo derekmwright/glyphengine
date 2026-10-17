@@ -289,6 +289,10 @@ func main() {
 	heightmap := flag.String("heightmap", "", "load a .heightmap from disk instead of generating one procedurally")
 	skyMode := flag.String("sky", "xsky", "which x package fills the engine's sky slot: xsky (the Earth sky) or lut (the cheap lookup table)")
 	prepass := flag.String("prepass", "off", "depth prepass: off, on, auto, or empty -- auto decides per frame from the estimated depth complexity, and empty is on with the prepass's own draws withheld, which is `task prepass`'s control")
+	// More directional cascades at the derived default coverage, for measuring
+	// what a third or fourth tier costs on a terrain-sized caster set.
+	cascades := flag.Int("cascades", 0, "directional shadow cascades (0 = the default two); extra tiers use renderer.DefaultShadowCoverageFor")
+	novsync := flag.Bool("novsync", false, "disable vsync, for measuring frame cost")
 	flag.Parse()
 
 	// The sky slot is filled before the engine exists, because the shader set is
@@ -335,6 +339,13 @@ func main() {
 		opts = append(opts, glyph.WithDepthPrepass(renderer.DepthPrepassAuto))
 	default:
 		log.Fatalf("-prepass %q is not off, on, auto or empty", *prepass)
+	}
+
+	if *cascades != 0 {
+		opts = append(opts, glyph.WithShadowCascades(*cascades))
+	}
+	if *novsync {
+		opts = append(opts, glyph.WithVSync(false))
 	}
 
 	e, err := glyph.New(&game{seed: *seed, heightmapPath: *heightmap, skyMode: *skyMode}, opts...)

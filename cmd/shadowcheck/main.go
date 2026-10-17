@@ -1,4 +1,5 @@
-// Command shadowcheck checks the three captures from task shadowcoverage.
+// Command shadowcheck checks the captures from task shadowcoverage: the three
+// two-cascade captures, or with -planet the -cascades 3 arm and its probes.
 package main
 
 import (
@@ -40,7 +41,22 @@ func main() {
 	on := flag.String("on", "", "extended coverage capture")
 	off := flag.String("off", "", "default coverage capture")
 	control := flag.String("control", "", "extended coverage without distant caster")
+	planet := flag.String("planet", "", "23-shadow-coverage -cascades 3 capture")
+	planetControl := flag.String("planetcontrol", "", "the same without the mountain")
+	var probes [3]string
+	for i := range probes {
+		flag.StringVar(&probes[i], fmt.Sprintf("probe%d", i), "", fmt.Sprintf("-cascades 3 -probe %d capture", i))
+	}
 	flag.Parse()
+	if *planet != "" {
+		checkPlanet(load(*planet), load(*planetControl))
+		for i, p := range probes {
+			if p != "" {
+				checkProbe(i, load(p))
+			}
+		}
+		return
+	}
 	a, b, c := load(*on), load(*off), load(*control)
 	box := image.Rect(370, 280, 430, 320)
 	x, y, z := mean(a, box), mean(b, box), mean(c, box)

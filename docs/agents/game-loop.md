@@ -67,7 +67,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-10-17 # the orbit camera follows a moving player from LateUpdate with the interpolated position; Capabilities.MaxTexture3DExtent and VolumeMipGeneration, what CreateTexture3D checks against and what its generated chain needs (#190); previously 2026-10-03: Capabilities.PipelineStatistics listed, the device feature WithPipelineStatistics needs (#182); the depth prepass returned as DepthPrepassAuto, gated on an online depth-complexity estimate (#158, ADR 0013) -- threshold 2.02 measured by the sweep at both resolutions, rule passed on all six clauses, and C/pixels refuted; the global block named as the game's, with AppPassDesc.Params as the per-pass alternative (#170); Engine.Renderer listed (#169); the hierarchical-Z follow-up measured and removed (#154); the draw list's order and the rejected opaque policy; releasing mid-frame (#153); the capabilities report and who owns which fallback (#160); the depth prepass measured and removed by its own rule (#158); the sky slot, the one ShaderSet stage group with no embedded fallback (#161 step 4)
+verified: 2026-10-17 # the ShadowData head stays 256 bytes and the cascade tail for WithShadowCascades follows it (#189); the orbit camera follows a moving player from LateUpdate with the interpolated position; Capabilities.MaxTexture3DExtent and VolumeMipGeneration, what CreateTexture3D checks against and what its generated chain needs (#190); previously 2026-10-03: Capabilities.PipelineStatistics listed, the device feature WithPipelineStatistics needs (#182); the depth prepass returned as DepthPrepassAuto, gated on an online depth-complexity estimate (#158, ADR 0013) -- threshold 2.02 measured by the sweep at both resolutions, rule passed on all six clauses, and C/pixels refuted; the global block named as the game's, with AppPassDesc.Params as the per-pass alternative (#170); Engine.Renderer listed (#169); the hierarchical-Z follow-up measured and removed (#154); the draw list's order and the rejected opaque policy; releasing mid-frame (#153); the capabilities report and who owns which fallback (#160); the depth prepass measured and removed by its own rule (#158); the sky slot, the one ShaderSet stage group with no embedded fallback (#161 step 4)
 ---
 
 # Run a game loop with Engine and Game
@@ -576,7 +576,7 @@ ones `x/sky`'s `sky.frag` declares, so a replacement can start from that file.
 | 0 | 0 | Combined sampler for the half-resolution cloud result |
 | 0 | 1 | Shared environment UBO (same buffer as set 1 binding 0) |
 | 1 | 0 | `ShadowData` UBO, beginning with `mat4 cascadeVP[2]` |
-| 1 | 1 | `sampler2DArrayShadow`, two directional cascades |
+| 1 | 1 | `sampler2DArrayShadow`, one layer per directional cascade (two by default) |
 | 1 | 2 | Point-shadow depth sampler (`samplerCube`, manual comparison) |
 | 1 | 3–5 | Clustered lights, grid, and light-index storage buffers; see `shaders/include/lights.inc` |
 | 1 | 6 | Application-owned std140 uniform block, 4096 bytes, vertex and fragment stages |
@@ -591,8 +591,11 @@ float visible = texture(shadowMap, vec4(p.xy * 0.5 + 0.5, cascade, p.z - bias));
 ```
 
 Directional shadow depth is conventional 0..1, despite the main camera using
-reverse-Z. Select a cascade containing the sample (including its Z range),
-treat points outside both as lit, and leave a margin for filtering near the
+reverse-Z. This head-only declaration sees cascades 0 and 1 at any
+`WithShadowCascades` count; the tail that carries the rest is in
+[render-targets](render-targets.md#sampling-the-sun-shadow-cascades). Select a
+cascade containing the sample (including its Z range), treat points outside
+every cascade as lit, and leave a margin for filtering near the
 XY edges. Bias is in normalized shadow depth; custom shaders should account
 for configured depth coverage as described in [environment](environment.md#directional-shadow-coverage).
 

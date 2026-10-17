@@ -65,7 +65,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: procedural
-verified: 2026-10-17 # the three water includes in the include table, water_waves.inc compiled alone behind #version; Reads3D on both pass descriptors, the dimension check at creation in both directions and the sampler3D binding example (#190); pipeline statistics per named application pass cross-referenced to profiling.md: a Timed graphics pass is counted and a dispatch reads not bracketed (#187); opt-in shared sampler capacity (#191) and named timing capacity (#192); TestSharedResourcesGPU validates five distinct fields and 18 mixed timers through replacement, resize, history and toggles, including a failing-image control and synchronization validation
+verified: 2026-10-17 # the ShadowData declaration with the cascade tail after volumetric, head unmoved, for shaders and compute reading a third and fourth cascade (#189); the three water includes in the include table, water_waves.inc compiled alone behind #version; Reads3D on both pass descriptors, the dimension check at creation in both directions and the sampler3D binding example (#190); pipeline statistics per named application pass cross-referenced to profiling.md: a Timed graphics pass is counted and a dispatch reads not bracketed (#187); opt-in shared sampler capacity (#191) and named timing capacity (#192); TestSharedResourcesGPU validates five distinct fields and 18 mixed timers through replacement, resize, history and toggles, including a failing-image control and synchronization validation
 ---
 
 # Application render targets, graphics and compute passes
@@ -253,6 +253,8 @@ that declares one of them is rejected by the validation layer with
 
 ```glsl
 // Set 1 bindings 0 and 1 in a .comp, identical to the fragment declaration.
+// This is the two-cascade head; see "Sampling the sun shadow cascades" below
+// for the tail that carries a third and fourth.
 layout(set = 1, binding = 0, std140) uniform ShadowData {
     mat4 cascadeVP[2];
     vec4 nightGrade;
@@ -262,9 +264,10 @@ layout(set = 1, binding = 0, std140) uniform ShadowData {
 layout(set = 1, binding = 1) uniform sampler2DArrayShadow shadowMap;
 ```
 
-The lookup is the one `shaders/lighting.inc` performs: project the world position
-by `shadow.cascadeVP[c]`, map XY into 0..1, take the first cascade whose
-projection lies inside its frustum, and compare `proj.z` minus a bias. The
+The lookup is the one `shaders/include/lighting.inc` performs: project the world
+position by cascade `c`'s matrix, map XY into 0..1, take the first cascade whose
+projection lies inside its frustum and receiver band, and compare `proj.z` minus a
+bias. The
 sampler is `CompareOpLessOrEqual` with linear filtering, so every tap is a
 hardware percentage-closer fetch returning 0 (occluded) to 1 (lit). There is no
 non-comparison view of the map.
@@ -285,6 +288,48 @@ silent read of the previous frame's layers. See
 The cascade map is not swapchain-sized, so a resize or rebuild leaves it and its
 light-set descriptors in place; only the dispatch's own relative targets and
 their input sets are replaced.
+
+### Sampling the sun shadow cascades
+
+A renderer built with `WithShadowCascades(3)` or `(4)` draws more than the two
+cascades the head of `ShadowData` declares. The extra ones are at the **tail**
+of the block, after `volumetric`; nothing before it moved, so the two-cascade
+declaration above keeps working at any count and simply sees cascades 0 and 1.
+To read every cascade, a fragment or compute shader declares the whole block:
+
+```glsl
+layout(set = 1, binding = 0, std140) uniform ShadowData {
+    mat4 cascadeVP[2];      // offset   0: cascades 0 and 1 -- the head
+    vec4 nightGrade;        // offset 128
+    vec4 skyPalette[6];     // offset 144
+    vec4 volumetric;        // offset 240; a head-only declaration ends at 256
+    mat4 cascadeVPExtra[2]; // offset 256: cascades 2 and 3
+    vec4 cascadeInfo;       // offset 384: x = the active cascade count
+    vec4 cascadeParams[4];  // offset 400: per cascade x = bias scale, y = bias depth,
+                            //             z, w = the receiver band in normalised light depth
+} shadow;                   // 464 bytes
+#define SHADOW_CASCADE_TAIL // only if it then includes lighting.inc
+layout(set = 1, binding = 1) uniform sampler2DArrayShadow shadowMap; // layer c = cascade c
+```
+
+Cascade `c`'s matrix is `cascadeVP[c]` for `c < 2` and `cascadeVPExtra[c - 2]`
+after; `int(shadow.cascadeInfo.x)` is how many there are, and entries past it
+are zero. A shader that selects a cascade the way `lighting.inc` does takes the
+first one whose projection lies inside its XY bounds and whose `proj.z` lies in
+`[cascadeParams[c].z, cascadeParams[c].w]` -- `[0, 1]` unless the coverage set a
+`ReceiverDepth`; see [environment](environment.md#which-cascade-a-receiver-gets)
+for why a long caster reach needs the band.
+
+Including `lighting.inc` after `#define SHADOW_CASCADE_TAIL` gives
+`shadowCascadeCount()`, `shadowCascadeVP(c)` and `shadowCascadeParams(c)` over
+the tail. Without the define the same functions answer for the two head
+cascades with their historical bias and the whole volume as each band, which is
+what keeps a head-only shader that includes the file compiling and shading as
+before. Compute dispatches declare `ReadsShadows` as above; the edge covers every
+layer of the array. `TestCascadeTailOffsetsMatchGLSL` holds this declaration,
+and every other `ShadowData` in the repository, to the offsets
+`renderer/shadow.go` packs.
+
 ## Counted work
 
 Every application draw is in `Stats()`. `RenderStats.DrawCalls`, `Instances` and
@@ -499,7 +544,7 @@ engine `lit.frag`/`lights.inc` layouts for their complete block declarations.
 
 | Binding | Descriptor |
 |---|---|
-| 0 | `ShadowData` uniform buffer: cascades, night grade, palette, volumetrics; vertex, fragment and compute |
+| 0 | `ShadowData` uniform buffer: cascades, night grade, palette, volumetrics, then the cascade tail; vertex, fragment and compute |
 | 1 | Directional shadow `sampler2DArrayShadow`; fragment and compute |
 | 2 | Point shadow `samplerCube`; fragment |
 | 3 | Light storage buffer; fragment |

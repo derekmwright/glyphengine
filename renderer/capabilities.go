@@ -95,6 +95,15 @@ type Capabilities struct {
 	// it was taken from; this field is the build.
 	DepthPrepass DepthPrepassMode
 
+	// ShadowCascades is how many directional cascades this renderer allocated
+	// and records -- WithShadowCascades -- and MaxShadowCascades the most it
+	// accepts. Like DepthPrepass these report a choice rather than a
+	// negotiation: no device refuses a third layer, and a game reads the count
+	// here to know which ShadowData declaration its shaders need, rather than
+	// assuming the option it passed arrived.
+	ShadowCascades    int
+	MaxShadowCascades int
+
 	// GPUTimestamps reports that the device can timestamp graphics work on the
 	// queue this renderer submits to. Without it GPUTimings never becomes
 	// valid, and an application pass asking to be Timed is refused with
@@ -395,14 +404,15 @@ func portabilitySubset(extensions map[string]*core1_0.ExtensionProperties) bool 
 // sites pass to pipeline creation, and deviceIdent is folded once here rather
 // than per frame; both are derived from the report, so Capabilities cannot
 // describe a device the pipelines were not built for.
-// DepthPrepass is filled in here rather than in negotiateCapabilities, which is
-// pure over the device's own answers: the prepass is a choice the program made
-// before New ran, not something the device granted, and folding it into that
-// function would make a report about the device partly a report about an option.
-// It is deliberately outside identHash for the same reason DriverName is -- it
-// is not part of the GPU's identity.
+// DepthPrepass and the cascade counts are filled in here rather than in
+// negotiateCapabilities, which is pure over the device's own answers: they are
+// choices the program made before New ran, not something the device granted,
+// and folding them into that function would make a report about the device
+// partly a report about options. They are deliberately outside identHash for the
+// same reason DriverName is -- they are not part of the GPU's identity.
 func (r *Renderer) adopt(c Capabilities) {
 	c.DepthPrepass = r.depthPrepassMode
+	c.ShadowCascades, c.MaxShadowCascades = r.ShadowCascadeCount(), MaxShadowCascades
 	r.caps = c
 	r.msaaSamples = core1_0.SampleCountFlags(c.MSAASamples)
 	r.deviceIdent = c.identHash()
@@ -440,6 +450,9 @@ func (c Capabilities) logCapabilities(requested core1_0.SampleCountFlags) {
 	}
 	if c.DepthPrepass != DepthPrepassOff {
 		log.Printf("Depth prepass: %s", c.DepthPrepass)
+	}
+	if c.ShadowCascades != ShadowCascades && c.ShadowCascades != 0 {
+		log.Printf("Directional shadow cascades: %d", c.ShadowCascades)
 	}
 	if c.DriverName != "" {
 		log.Printf("Driver: %s", c.DriverName)
