@@ -757,7 +757,6 @@ tasks:
         # renderer/pipelinestats_test.go holds the rule, this holds the device.
         # The mode also disables a pass and destroys a dispatch mid-run, which
         # resets the slot tables while queries are in flight.
-        cd ..
         out=$(GLYPHENGINE_FIXED_FRAME_TIME=16.667ms go run ./cmd/apppasscheck -stats -validate -frames 12 2>&1) || { echo "$out"; exit 1; }
         probe=$(echo "VULKAN ERROR: self-check" | grep -cE "VULKAN (ERROR|WARNING)" || true)
         [ "$probe" = "1" ] || { echo "cannot count validation messages"; exit 1; }
@@ -772,7 +771,6 @@ tasks:
         # reverse, is exactly what the layer reports and nothing else does;
         # the check refuses both at creation, and the layer is here to say the
         # frames it did record were clean.
-        cd ..
         out=$(GLYPHENGINE_FIXED_FRAME_TIME=16.667ms GLYPHENGINE_PROVOKE_RECREATE_FRAMES=8 go run ./cmd/tex3dcheck -validate 2>&1) || { echo "$out"; exit 1; }
         msgs=$(echo "$out" | grep -cE "VULKAN (ERROR|WARNING)" || true)
         [ "$msgs" = "0" ] || { echo "$out"; exit 1; }
