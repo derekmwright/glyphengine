@@ -1632,8 +1632,14 @@ func (r *Renderer) Extent() (int, int) {
 
 // NotifyResize flags that the framebuffer was resized so the swapchain is
 // recreated before the next frame.
+//
+// The application pipeline-statistics rows are invalidated here rather than only
+// in the rebuild, because they are counts of covered pixels and the extent they
+// were counted at is already gone. A reading from before the resize would be
+// plausible and wrong, which is the worst of the three states a row can be in.
 func (r *Renderer) NotifyResize() {
 	r.framebufferResized = true
+	r.pipelineStats.invalidateApps()
 }
 
 // SetStateTrace attaches the per-frame state trace DrawFrame writes its half of.
@@ -1935,6 +1941,11 @@ func (r *Renderer) rebuildSwapchainTargets(oldExtent core1_0.Extent2D, undo *reb
 	if err := r.rebuildAppTargets(undo); err != nil {
 		return err
 	}
+	// Not every rebuild comes through NotifyResize -- a window being shown,
+	// moved to another monitor, a compositor change and a suboptimal present all
+	// reach here on their own -- and every one of them can change the extent the
+	// application statistics counted pixels at.
+	r.pipelineStats.invalidateApps()
 	if r.graphDirty {
 		if err := r.replaceAppGraph(false); err != nil {
 			return err

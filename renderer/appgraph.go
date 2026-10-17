@@ -49,6 +49,49 @@ func (f *frameGraph) appNode(p *AppPass) int {
 	panic("application pass missing from graph")
 }
 
+// statsBracketed reports whether p's application timing bracket can also hold a
+// pipeline-statistics query in this graph.
+//
+// One condition: p is a node of its own that opens a rendering instance. That is
+// what Vulkan's two rules reduce to here, and the reduction is the whole of this
+// feature's legality argument, so it is written out.
+//
+//   - A query begun inside a rendering instance must end inside the same one.
+//     executeSteps writes an application pass's timer edges OUTSIDE its own
+//     CmdBeginRendering and CmdEndRendering -- beginApp before the entry
+//     barriers, endApp after the exit ones -- and both edges are in the same
+//     step, so a query between them spans a whole rendering instance from
+//     outside it and never straddles a boundary. There is no application node
+//     that records into a rendering instance another node opened.
+//   - Two queries of this type may not be active at once
+//     (VUID-vkCmdBeginQuery-queryPool-01922). No application node sits between
+//     a counted engine bracket's begin and its end: the engine brackets that
+//     span several nodes are PassBloom and PassUIGlow, and extendAppGraph
+//     declares the StageBeforeBloom and StageBeforeTonemap passes ahead of those
+//     chains rather than inside them; PassWater spans two nodes and carries no
+//     query; and PassShadow now closes before the pre-scene steps run.
+//     Application brackets DO nest -- GPU LOD selection brackets the whole
+//     pre-shadow range including the streamed-upload node's own bracket -- which
+//     is exactly why this is decided from the graph rather than from "is it a
+//     compute pass": both of those are excluded by the rule above, the LOD
+//     bracket because it has no node at all and the upload node because it is a
+//     transfer copy.
+//
+// So a compute dispatch is out, which is also the honest answer for it: fragment
+// invocations and clipping primitives do not exist for a dispatch, and a row of
+// zeroes for one would be a measurement nobody took.
+func (f *frameGraph) statsBracketed(p *AppPass) bool {
+	if p == nil {
+		return false
+	}
+	for i := range f.nodes {
+		if f.nodes[i].app == p {
+			return f.plan.Steps[i].RenderPass != nil
+		}
+	}
+	return false
+}
+
 func (r *Renderer) extendAppGraph(f *frameGraph, g *framegraph.Graph) error {
 	f.storage = make(map[*StorageBuffer]framegraph.ResourceID)
 	for _, b := range r.storageBuffers {
@@ -284,7 +327,17 @@ func (r *Renderer) replaceAppGraph(deferOld bool) error {
 				}
 			}
 		}
+		// Which of those passes can carry a statistics query is a property of
+		// the graph that is replacing the old one, so it is read from f here
+		// rather than from each pass.
+		r.pipelineStats.bindApps(r.gpuTimer.apps, f)
 	}
+	// A rebuild is where an application row can stop existing or stop being
+	// measured -- a pass created, destroyed, re-staged or disabled -- so the
+	// numbers in hand stop describing the frame rather than merely being a
+	// couple of frames old. Outside the timer check above because a device can
+	// grant pipelineStatisticsQuery and no usable timestamp bits.
+	r.pipelineStats.invalidateApps()
 	r.graphDirty = false
 	for _, t := range r.retiredTargets {
 		r.DeferDestroy(func() { t.color.destroy(r.deviceDriver); t.depth.destroy(r.deviceDriver); t.color, t.depth = nil, nil })
