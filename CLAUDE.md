@@ -41,6 +41,7 @@ task scroll    # a scroll_view row crossing an edge stops at the edge
 task stream    # streamed patches land, and the frame they land in matches a synchronous one
 task instances # an instance set updated every frame never shows a frame reading half-written placements
 task prepass   # the depth prepass, on or auto, renders the same pixels as the pass without it
+task tex3d     # a sampled volume interpolates along Z, repeats on every axis and reads the right level
 ```
 
 The sky, the clouds, the day cycle and their shaders live in `x/sky` now, not in

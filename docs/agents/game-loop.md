@@ -67,7 +67,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-10-17 # the orbit camera follows a moving player from LateUpdate with the interpolated position; previously 2026-10-03: Capabilities.PipelineStatistics listed, the device feature WithPipelineStatistics needs (#182); the depth prepass returned as DepthPrepassAuto, gated on an online depth-complexity estimate (#158, ADR 0013) -- threshold 2.02 measured by the sweep at both resolutions, rule passed on all six clauses, and C/pixels refuted; the global block named as the game's, with AppPassDesc.Params as the per-pass alternative (#170); Engine.Renderer listed (#169); the hierarchical-Z follow-up measured and removed (#154); the draw list's order and the rejected opaque policy; releasing mid-frame (#153); the capabilities report and who owns which fallback (#160); the depth prepass measured and removed by its own rule (#158); the sky slot, the one ShaderSet stage group with no embedded fallback (#161 step 4)
+verified: 2026-10-17 # the orbit camera follows a moving player from LateUpdate with the interpolated position; Capabilities.MaxTexture3DExtent and VolumeMipGeneration, what CreateTexture3D checks against and what its generated chain needs (#190); previously 2026-10-03: Capabilities.PipelineStatistics listed, the device feature WithPipelineStatistics needs (#182); the depth prepass returned as DepthPrepassAuto, gated on an online depth-complexity estimate (#158, ADR 0013) -- threshold 2.02 measured by the sweep at both resolutions, rule passed on all six clauses, and C/pixels refuted; the global block named as the game's, with AppPassDesc.Params as the per-pass alternative (#170); Engine.Renderer listed (#169); the hierarchical-Z follow-up measured and removed (#154); the draw list's order and the rejected opaque policy; releasing mid-frame (#153); the capabilities report and who owns which fallback (#160); the depth prepass measured and removed by its own rule (#158); the sky slot, the one ShaderSet stage group with no embedded fallback (#161 step 4)
 ---
 
 # Run a game loop with Engine and Game
@@ -181,6 +181,8 @@ log.Printf("%s (%s): %dx MSAA, %gx anisotropy, timestamps=%v",
 | `PipelineStatistics` | Whether `WithPipelineStatistics` can count fragment invocations and post-clip primitives per pass. Reported whether or not this build asked; the accessors say separately whether it did ([`profiling.md`](profiling.md)) |
 | `PortabilitySubset` | The device implements a subset of Vulkan — MoltenVK, in practice |
 | `RayQuery` | Whether this renderer can issue a ray query. `false` on every device today: the extensions are not enabled yet (#159) |
+| `MaxTexture3DExtent` | The largest width, height or depth `CreateTexture3D` accepts; a volume past it on any axis is refused before anything is allocated ([`textures.md`](textures.md#volumes)) |
+| `VolumeMipGeneration` | Whether `Texture3DOptions.Mipmap` can build a volume's chain on the device. `false` means supply `Mips`; the constructor refuses rather than shortening the chain |
 | `GPUName`, `DriverName`, `DriverVersion`, `APIVersion`, `VendorID`, `DeviceID` | Who the device is. `DriverName` is empty on a device without `VK_KHR_driver_properties` |
 
 It is a plain value. Reading it costs nothing, mutating the copy you get

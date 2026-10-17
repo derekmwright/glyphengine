@@ -225,6 +225,16 @@ func createMaterialDescriptorSetLayout(deviceDriver core1_0.DeviceDriver) (core1
 // Attach the result to an entity with MaterialRef.PBR to route it through the
 // material pipeline.
 func (r *Renderer) CreateMaterial(opts MaterialOptions) (*Material, error) {
+	// Every map is a sampler2D in lit.frag; a volume behind one is a view of
+	// the wrong shape that only the validation layer would mention.
+	for _, slot := range []struct {
+		name string
+		tex  *Texture
+	}{{"Albedo", opts.Albedo}, {"Normal", opts.Normal}, {"MetallicRoughness", opts.MetallicRoughness}, {"Occlusion", opts.Occlusion}, {"Emissive", opts.Emissive}} {
+		if slot.tex.Dimensions() == 3 {
+			return nil, fmt.Errorf("create material: %s: a 3D texture cannot be a material map; the material shader declares sampler2D", slot.name)
+		}
+	}
 	m := &Material{id: newResourceID()}
 
 	buf, mem, err := r.createBuffer(materialUniformSize,

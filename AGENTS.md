@@ -264,6 +264,7 @@ are that pipeline's own real-Blender fixture, in the same spirit as
 | `task xwater` | `x/water`'s underwater volume darkens and shifts with depth, changes nothing above the surface, and balances its passes (needs a GPU) |
 | `task xskylut` | `x/sky/lut`'s lookup-table sky has the gradient and the sun its model says, and costs less than `x/sky` on the same scene (needs a GPU) |
 | `task widetex` | A CPU-uploaded half-float texture keeps its values through the sampler where an 8-bit one cannot (needs a GPU) |
+| `task tex3d` | A sampled volume interpolates along Z, repeats on every axis, clamps where asked and reads the right level, from a graphics pass and a compute dispatch (needs a GPU) |
 | `task bench` | Per-pass GPU and per-phase CPU cost over a fixed scene set (needs a GPU) |
 | `task instances` | An instance set rebased every frame leaves the frame still in flight byte-identical, across swapchain rebuilds and undrawn frames, with controls for both halves of that claim (needs a GPU) |
 | `task ranges` | Shared mesh ranges, both index widths, indirect/instanced/LOD equivalence and deferred replacement (needs a GPU) |

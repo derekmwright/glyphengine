@@ -32,6 +32,11 @@ type Texture struct {
 	scene      *Renderer // Borrowed scene colour/depth; owned by the renderer.
 	sceneDepth bool
 	destroyed  bool
+
+	// volume marks a 3D image, whose view is a sampler3D's and nothing
+	// else's. Read through Dimensions, which is what every binding site that
+	// has an opinion about it checks. See texture3d.go.
+	volume bool
 }
 
 // createDescriptorSetLayout creates the set-0 layout every non-lit pipeline and
@@ -108,6 +113,11 @@ func createTerrainDescriptorSetLayout(deviceDriver core1_0.DeviceDriver) (core1_
 // BuildTerrainMaterial allocates a descriptor set binding the four terrain
 // textures. The textures remain owned by the caller (they outlive the material).
 func (r *Renderer) BuildTerrainMaterial(grass, path, rock, splat *Texture) (*TerrainMaterial, error) {
+	for i, t := range [4]*Texture{grass, path, rock, splat} {
+		if t.Dimensions() == 3 {
+			return nil, fmt.Errorf("terrain material: texture %d: a 3D texture cannot be a terrain map; terrain.frag declares sampler2D", i)
+		}
+	}
 	sets, _, err := r.deviceDriver.AllocateDescriptorSets(core1_0.DescriptorSetAllocateInfo{
 		DescriptorPool: r.descriptorPool,
 		SetLayouts:     []core1_0.DescriptorSetLayout{r.terrainSetLayout},
@@ -418,6 +428,20 @@ type textureOptions struct {
 	// surfaces: tiling world textures seen at grazing angles, rather than the
 	// screen-aligned UI and glyph atlases that sample at 1:1.
 	mipmap bool
+
+	// depth is a volume's third extent, and zero for every 2D upload: it is
+	// the one field that switches the image type, the view type and the
+	// copy extents below to 3D, so a 2D constructor that never sets it
+	// records exactly the stream it always did. addressW is read only when
+	// depth is set; a 2D sampler's W rides along with U.
+	depth    int
+	addressW core1_0.SamplerAddressMode
+
+	// levels is an explicit mip chain below level 0, already checked for
+	// extent and byte count by the constructor that supplied it. It is
+	// staged behind the base in the one staging buffer and copied level by
+	// level; mipmap and levels are never both set.
+	levels [][]byte
 }
 
 // CreateTexture uploads RGBA pixel data as an sRGB texture with a full mipmap
@@ -783,26 +807,42 @@ func (r *Renderer) createTexture(pixels []byte, width, height int, opts textureO
 		return nil, fmt.Errorf("texture: %dx%d has no texels", width, height)
 	}
 	format := opts.format.vk
-	imageSize := width * height * opts.format.texel
+	volume := opts.depth > 0
+	depth := max(opts.depth, 1)
+	imageSize := width * height * depth * opts.format.texel
 	if len(pixels) != imageSize {
+		if volume {
+			return nil, fmt.Errorf("texture: %d bytes of pixels for %dx%dx%d at %d bytes per texel, want %d",
+				len(pixels), width, height, depth, opts.format.texel, imageSize)
+		}
 		return nil, fmt.Errorf("texture: %d bytes of pixels for %dx%d at %d bytes per texel, want %d",
 			len(pixels), width, height, opts.format.texel, imageSize)
 	}
 
 	// Full mip chain; fall back to a single level if the format can't be
-	// linearly blitted (never the case for R8G8B8A8 on desktop GPUs).
+	// linearly blitted (never the case for R8G8B8A8 on desktop GPUs). A
+	// volume never reaches the fallback: CreateTexture3D refuses a chain the
+	// device cannot blit before it gets here.
 	mipLevels := 1
 	if opts.mipmap {
-		mipLevels = bits.Len(uint(max(width, height)))
+		mipLevels = bits.Len(uint(max(width, height, depth)))
 		fmtProps := r.instanceDriver.GetPhysicalDeviceFormatProperties(r.physicalDevice, format)
 		if fmtProps.OptimalTilingFeatures&core1_0.FormatFeatureSampledImageFilterLinear == 0 {
 			mipLevels = 1
 		}
 	}
+	// A supplied chain is staged behind the base in the same buffer, one
+	// buffer-to-image copy per level. stagingSize is the whole of it; for a
+	// 2D upload, which never carries one, it is imageSize as it always was.
+	stagingSize := imageSize
+	for _, level := range opts.levels {
+		stagingSize += len(level)
+	}
+	mipLevels += len(opts.levels)
 
 	// Create staging buffer
 	stagingBuf, _, err := r.deviceDriver.CreateBuffer(nil, core1_0.BufferCreateInfo{
-		Size:        imageSize,
+		Size:        stagingSize,
 		Usage:       core1_0.BufferUsageTransferSrc,
 		SharingMode: core1_0.SharingModeExclusive,
 	})
@@ -836,26 +876,34 @@ func (r *Renderer) createTexture(pixels []byte, width, height int, opts textureO
 	}
 
 	// Copy pixel data to staging
-	ptr, _, err := r.deviceDriver.MapMemory(stagingMem, 0, imageSize, 0)
+	ptr, _, err := r.deviceDriver.MapMemory(stagingMem, 0, stagingSize, 0)
 	if err != nil {
 		return nil, fmt.Errorf("map staging memory: %w", err)
 	}
-	dst := unsafe.Slice((*byte)(ptr), imageSize)
-	copy(dst, pixels)
+	dst := unsafe.Slice((*byte)(ptr), stagingSize)
+	n := copy(dst, pixels)
+	for _, level := range opts.levels {
+		n += copy(dst[n:], level)
+	}
 	r.deviceDriver.UnmapMemory(stagingMem)
 
-	// Create device-local image (TransferSrc needed to blit mips from it)
+	// Create device-local image (TransferSrc needed to blit mips from it; a
+	// supplied chain is copied in, so it needs nothing read back)
 	usage := core1_0.ImageUsageTransferDst | core1_0.ImageUsageSampled
-	if mipLevels > 1 {
+	if opts.mipmap && mipLevels > 1 {
 		usage |= core1_0.ImageUsageTransferSrc
 	}
+	imageType, viewType := core1_0.ImageType2D, core1_0.ImageViewType2D
+	if volume {
+		imageType, viewType = core1_0.ImageType3D, core1_0.ImageViewType3D
+	}
 	img, _, err := r.deviceDriver.CreateImage(nil, core1_0.ImageCreateInfo{
-		ImageType: core1_0.ImageType2D,
+		ImageType: imageType,
 		Format:    format,
 		Extent: core1_0.Extent3D{
 			Width:  width,
 			Height: height,
-			Depth:  1,
+			Depth:  depth,
 		},
 		MipLevels:     mipLevels,
 		ArrayLayers:   1,
@@ -926,25 +974,46 @@ func (r *Renderer) createTexture(pixels []byte, width, height int, opts textureO
 		},
 	)
 
-	// Copy buffer to mip 0
-	r.deviceDriver.CmdCopyBufferToImage(cmdBuf, stagingBuf, img, core1_0.ImageLayoutTransferDstOptimal,
-		core1_0.BufferImageCopy{
-			ImageSubresource: core1_0.ImageSubresourceLayers{
-				AspectMask: core1_0.ImageAspectColor,
-				LayerCount: 1,
+	// Copy buffer to mip 0, then each supplied level from where it was
+	// staged. The level extents are derived the way checkVolumeChain derived
+	// them -- halved from the previous level and floored to one -- so the copy
+	// covers exactly the bytes the check accepted.
+	levelW, levelH, levelD := width, height, depth
+	// For every 2D upload the loop body runs exactly once, for level 0, as
+	// it always did; only a supplied chain takes it further. offset is where
+	// level i was staged: the base first, then each level behind the last.
+	offset, next := 0, len(pixels)
+	for i := 0; i <= len(opts.levels); i++ {
+		if i > 0 {
+			offset, next = next, next+len(opts.levels[i-1])
+		}
+		r.deviceDriver.CmdCopyBufferToImage(cmdBuf, stagingBuf, img, core1_0.ImageLayoutTransferDstOptimal,
+			core1_0.BufferImageCopy{
+				BufferOffset: offset,
+				ImageSubresource: core1_0.ImageSubresourceLayers{
+					AspectMask: core1_0.ImageAspectColor,
+					MipLevel:   i,
+					LayerCount: 1,
+				},
+				ImageExtent: core1_0.Extent3D{
+					Width:  levelW,
+					Height: levelH,
+					Depth:  levelD,
+				},
 			},
-			ImageExtent: core1_0.Extent3D{
-				Width:  width,
-				Height: height,
-				Depth:  1,
-			},
-		},
-	)
+		)
+		levelW, levelH, levelD = max(levelW/2, 1), max(levelH/2, 1), max(levelD/2, 1)
+	}
 
 	// Generate the mip chain: blit each level from the one above it, then
-	// transition the source level to ShaderReadOnlyOptimal.
-	mipW, mipH := width, height
-	for i := 1; i < mipLevels; i++ {
+	// transition the source level to ShaderReadOnlyOptimal. Only a generated
+	// chain blits; a supplied one was copied above and the loop is empty.
+	blitted := 0
+	if opts.mipmap {
+		blitted = mipLevels - 1
+	}
+	mipW, mipH, mipD := width, height, depth
+	for i := 1; i <= blitted; i++ {
 		r.deviceDriver.CmdPipelineBarrier(cmdBuf,
 			core1_0.PipelineStageTransfer, core1_0.PipelineStageTransfer,
 			0, nil, nil,
@@ -965,8 +1034,14 @@ func (r *Renderer) createTexture(pixels []byte, width, height int, opts textureO
 			}},
 		)
 
+		// Each axis floors to one on its own, so a 64x32x8 volume's chain
+		// runs out of Z at level 3 and keeps halving X and Y to level 6. The
+		// blit's Z range is then one slice wide and the linear filter
+		// averages the two source slices it covers, which is the box mean
+		// the other two axes get.
 		nextW := max(mipW/2, 1)
 		nextH := max(mipH/2, 1)
+		nextD := max(mipD/2, 1)
 		err = r.deviceDriver.CmdBlitImage(cmdBuf,
 			img, core1_0.ImageLayoutTransferSrcOptimal,
 			img, core1_0.ImageLayoutTransferDstOptimal,
@@ -976,13 +1051,13 @@ func (r *Renderer) createTexture(pixels []byte, width, height int, opts textureO
 					MipLevel:   i - 1,
 					LayerCount: 1,
 				},
-				SrcOffsets: [2]core1_0.Offset3D{{X: 0, Y: 0, Z: 0}, {X: mipW, Y: mipH, Z: 1}},
+				SrcOffsets: [2]core1_0.Offset3D{{X: 0, Y: 0, Z: 0}, {X: mipW, Y: mipH, Z: mipD}},
 				DstSubresource: core1_0.ImageSubresourceLayers{
 					AspectMask: core1_0.ImageAspectColor,
 					MipLevel:   i,
 					LayerCount: 1,
 				},
-				DstOffsets: [2]core1_0.Offset3D{{X: 0, Y: 0, Z: 0}, {X: nextW, Y: nextH, Z: 1}},
+				DstOffsets: [2]core1_0.Offset3D{{X: 0, Y: 0, Z: 0}, {X: nextW, Y: nextH, Z: nextD}},
 			}},
 			core1_0.FilterLinear,
 		)
@@ -1012,10 +1087,12 @@ func (r *Renderer) createTexture(pixels []byte, width, height int, opts textureO
 			}},
 		)
 
-		mipW, mipH = nextW, nextH
+		mipW, mipH, mipD = nextW, nextH, nextD
 	}
 
-	// Final level (still TransferDst) → ShaderReadOnlyOptimal
+	// Every level still in TransferDst → ShaderReadOnlyOptimal: the last
+	// one after a generated chain, since the loop above moved the rest as
+	// it read them; all of them after a supplied chain, which nothing read.
 	r.deviceDriver.CmdPipelineBarrier(cmdBuf,
 		core1_0.PipelineStageTransfer, core1_0.PipelineStageVertexShader|core1_0.PipelineStageFragmentShader|core1_0.PipelineStageComputeShader,
 		0, nil, nil,
@@ -1028,8 +1105,8 @@ func (r *Renderer) createTexture(pixels []byte, width, height int, opts textureO
 				Image:               img,
 				SubresourceRange: core1_0.ImageSubresourceRange{
 					AspectMask:   core1_0.ImageAspectColor,
-					BaseMipLevel: mipLevels - 1,
-					LevelCount:   1,
+					BaseMipLevel: blitted,
+					LevelCount:   mipLevels - blitted,
 					LayerCount:   1,
 				},
 				SrcAccessMask: core1_0.AccessTransferWrite,
@@ -1048,7 +1125,7 @@ func (r *Renderer) createTexture(pixels []byte, width, height int, opts textureO
 	// Create image view covering the full mip chain
 	view, _, err := r.deviceDriver.CreateImageView(nil, core1_0.ImageViewCreateInfo{
 		Image:    img,
-		ViewType: core1_0.ImageViewType2D,
+		ViewType: viewType,
 		Format:   format,
 		SubresourceRange: core1_0.ImageSubresourceRange{
 			AspectMask: core1_0.ImageAspectColor,
@@ -1069,20 +1146,29 @@ func (r *Renderer) createTexture(pixels []byte, width, height int, opts textureO
 		mipMode = core1_0.SamplerMipmapModeLinear
 	}
 	var maxLod, maxAniso float32
-	if opts.mipmap {
+	if opts.mipmap || len(opts.levels) > 0 {
 		mipMode = core1_0.SamplerMipmapModeLinear
 		maxLod = float32(mipLevels)
-		maxAniso = r.caps.MaxAnisotropy
+		// A volume's chain selects no anisotropy; Texture3DOptions.Mipmap
+		// says why.
+		if !volume {
+			maxAniso = r.caps.MaxAnisotropy
+		}
+	}
+	// W has no meaning for a 2D texture; it rides along with U rather than
+	// getting a third independent field nothing there ever samples. A volume
+	// is sampled along it, so it has one.
+	addressW := opts.addressU
+	if volume {
+		addressW = opts.addressW
 	}
 
 	sampler, _, err := r.deviceDriver.CreateSampler(nil, core1_0.SamplerCreateInfo{
-		MagFilter:    opts.filter,
-		MinFilter:    opts.filter,
-		AddressModeU: opts.addressU,
-		AddressModeV: opts.addressV,
-		// W has no meaning for a 2D texture; it rides along with U rather
-		// than getting a third independent field nothing here ever samples.
-		AddressModeW:     opts.addressU,
+		MagFilter:        opts.filter,
+		MinFilter:        opts.filter,
+		AddressModeU:     opts.addressU,
+		AddressModeV:     opts.addressV,
+		AddressModeW:     addressW,
 		MipmapMode:       mipMode,
 		MaxLod:           maxLod,
 		AnisotropyEnable: maxAniso > 0,
@@ -1140,6 +1226,7 @@ func (r *Renderer) createTexture(pixels []byte, width, height int, opts textureO
 		sampler:       sampler,
 		DescriptorSet: sets[0],
 		id:            newResourceID(),
+		volume:        volume,
 	}
 	r.textures = append(r.textures, tex)
 	return tex, nil
