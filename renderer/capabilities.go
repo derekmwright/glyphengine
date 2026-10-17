@@ -36,6 +36,10 @@ import (
 // branch taken once at load time, not a thing to poll: a game reads it after
 // New, picks its path, and nothing in the renderer moves it afterwards.
 type Capabilities struct {
+	// MaxShaderTextureSlots is the shared sampler count supported by the
+	// device and the renderer's complete pipeline layouts. The enabled count
+	// is ShaderTextureCapacity(); opt in with WithShaderTextureSlots.
+	MaxShaderTextureSlots int
 	// RayQuery reports that this renderer can issue a ray query from a shader.
 	//
 	// False on every device today: detecting VK_KHR_ray_query's dependency
@@ -304,6 +308,7 @@ func negotiateCapabilities(a deviceAnswers, requested core1_0.SampleCountFlags) 
 		a.graphicsFamily < len(a.families) && a.families[a.graphicsFamily].TimestampValidBits != 0
 
 	c := Capabilities{
+		MaxShaderTextureSlots:     shaderTextureLimit(a.props.Limits),
 		RayQuery:                  rayQueryEnabled && rayQueryAvailable(a.extensions),
 		MultiDrawIndirect:         a.features.MultiDrawIndirect,
 		DrawIndirectFirstInstance: a.features.DrawIndirectFirstInstance,

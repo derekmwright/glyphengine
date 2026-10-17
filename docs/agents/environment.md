@@ -585,7 +585,9 @@ The shared shadow/light set has `ShadowData` at binding 0, directional and
 point shadow samplers at 1 and 2, light/cluster storage buffers at 3-5, the
 4096-byte application uniform block at 6, and four application image samplers
 at 7-10. `SetShaderTexture` and `SetShaderTarget` populate those samplers for
-vertex and fragment shaders; nil binds the white fallback. This is set 1 for
+vertex, fragment and compute shaders; nil binds the white fallback. Opt in to
+more slots with `WithShaderTextureSlots`; existing bindings stay fixed and
+`ShaderTextureCapacity()` reports the enabled count. This is set 1 for
 sky, static lit, terrain, water and application passes, and set 2 for skinned
 lit. See [render targets](render-targets.md) for the fixed layouts, scheduling,
 resolved scene depth and history semantics.

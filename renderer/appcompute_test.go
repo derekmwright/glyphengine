@@ -280,7 +280,7 @@ func TestAppComputeDescriptions(t *testing.T) {
 		r.appPasses = append(r.appPasses, p)
 	}
 	good.Timed = true
-	if err := r.validateAppCompute(good); err == nil || !strings.Contains(err.Error(), "at most sixteen") {
+	if err := r.validateAppCompute(good); err == nil || !strings.Contains(err.Error(), "at most 16") {
 		t.Fatalf("shared timing capacity not enforced: %v", err)
 	}
 }

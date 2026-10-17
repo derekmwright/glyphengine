@@ -172,7 +172,7 @@ func TestAppPassDescriptions(t *testing.T) {
 		r.appPasses = append(r.appPasses, &AppPass{desc: AppPassDesc{Timed: true}})
 	}
 	good.Timed = true
-	if err := r.validateAppPass(good); err == nil || !strings.Contains(err.Error(), "at most sixteen") {
+	if err := r.validateAppPass(good); err == nil || !strings.Contains(err.Error(), "at most 16") {
 		t.Fatalf("17th timing: %v", err)
 	}
 	for _, d := range []RenderTargetDesc{{Format: 99, Scale: 1}, {Format: TargetR16F}, {Format: TargetR16F, Width: 1}} {

@@ -101,34 +101,36 @@ type ResizeGame interface {
 type Option func(*config)
 
 type config struct {
-	scene          *Scene
-	msaa           int
-	width          int
-	height         int
-	title          string
-	appName        string
-	appVersion     common.Version
-	fullscreen     bool
-	resizable      bool
-	background     bool
-	validation     bool
-	vsync          bool
-	interp         bool
-	tickRate       int
-	maxCatchUp     time.Duration
-	maxFrames      int
-	screenshot     string
-	fixedFrameTime time.Duration
-	fov            float32
-	near, far      float32
-	quitKey        input.Key
-	hasQuitKey     bool
-	debugKeys      bool
-	shaders        renderer.ShaderSet
-	hasShaders     bool
-	uiGlow         bool
-	depthPrepass   renderer.DepthPrepassMode
-	pipelineStats  bool
+	scene              *Scene
+	msaa               int
+	width              int
+	height             int
+	title              string
+	appName            string
+	appVersion         common.Version
+	fullscreen         bool
+	resizable          bool
+	background         bool
+	validation         bool
+	vsync              bool
+	interp             bool
+	tickRate           int
+	maxCatchUp         time.Duration
+	maxFrames          int
+	screenshot         string
+	fixedFrameTime     time.Duration
+	fov                float32
+	near, far          float32
+	quitKey            input.Key
+	hasQuitKey         bool
+	debugKeys          bool
+	shaders            renderer.ShaderSet
+	hasShaders         bool
+	uiGlow             bool
+	depthPrepass       renderer.DepthPrepassMode
+	pipelineStats      bool
+	shaderTextureSlots int
+	appTimingCapacity  int
 }
 
 // rendererOptions translates the engine's config into the renderer's options.
@@ -162,7 +164,20 @@ func (c *config) rendererOptions() []renderer.Option {
 	if c.pipelineStats {
 		opts = append(opts, renderer.WithPipelineStatistics())
 	}
+	opts = append(opts, renderer.WithShaderTextureSlots(c.shaderTextureSlots), renderer.WithAppTimingCapacity(c.appTimingCapacity))
 	return opts
+}
+
+// WithShaderTextureSlots opts into additional shared application samplers.
+// See renderer.WithShaderTextureSlots for the binding contract and limits.
+func WithShaderTextureSlots(count int) Option {
+	return func(c *config) { c.shaderTextureSlots = count }
+}
+
+// WithAppTimingCapacity sets the named application GPU timing budget.
+// Zero keeps sixteen; the maximum is renderer.MaxAppTimingCapacity.
+func WithAppTimingCapacity(count int) Option {
+	return func(c *config) { c.appTimingCapacity = count }
 }
 
 // WithScene injects an externally created Scene instead of building a fresh

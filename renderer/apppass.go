@@ -223,8 +223,8 @@ func (r *Renderer) validateAppTiming(timed bool, fail func(string, string) error
 				n++
 			}
 		}
-		if n >= maxAppTimings {
-			return fail("Timed", "at most sixteen timed passes")
+		if n >= r.AppTimingCapacity() {
+			return fail("Timed", fmt.Sprintf("at most %d timed passes; configure WithAppTimingCapacity at construction", r.AppTimingCapacity()))
 		}
 	}
 	return nil

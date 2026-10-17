@@ -145,8 +145,10 @@ type Renderer struct {
 	// that asks for none allocates from exactly the layouts it always did.
 	computeParamsSetLayout core1_0.DescriptorSetLayout
 	appParamsSetLayout     core1_0.DescriptorSetLayout
-	shaderTextures         [ShaderTextureSlots]*Texture
-	shaderTargets          [ShaderTextureSlots]*RenderTarget
+	shaderTextureSlots     int
+	appTimingCapacity      int
+	shaderTextures         [maxShaderTextureSlots]*Texture
+	shaderTargets          [maxShaderTextureSlots]*RenderTarget
 	hdrReadTexture         Texture
 	appWrites              [1]core1_0.WriteDescriptorSet
 	appInfos               [1]core1_0.DescriptorImageInfo
@@ -164,7 +166,7 @@ type Renderer struct {
 	// teardown, and the zero value (every array zeroed) is already correct on
 	// the first frame.
 	cmdScratch       commandScratch
-	shaderSlotImages [maxFramesInFlight][ShaderTextureSlots]core1_0.DescriptorImageInfo
+	shaderSlotImages [maxFramesInFlight][maxShaderTextureSlots]core1_0.DescriptorImageInfo
 	shaderParameters [ShaderParameterBytes]byte
 	// grassLOD is the distance tuning grass thins, fades and culls by.
 	// Defaulted at construction so a zero value never culls grass at zero.
@@ -670,6 +672,12 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	for _, o := range opts {
 		o(r)
 	}
+	if n := r.ShaderTextureCapacity(); n < ShaderTextureSlots || n > maxShaderTextureSlots {
+		return nil, fmt.Errorf("renderer: shader texture slots %d outside [%d,%d]", n, ShaderTextureSlots, maxShaderTextureSlots)
+	}
+	if n := r.AppTimingCapacity(); n < 1 || n > MaxAppTimingCapacity {
+		return nil, fmt.Errorf("renderer: application timing capacity %d outside [1,%d]", n, MaxAppTimingCapacity)
+	}
 	// An override may set only the stages it cares about.
 	r.shaders = r.shaders.withDefaults()
 
@@ -767,6 +775,9 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	}
 	requestedSamples := r.msaaSamples
 	r.adopt(negotiateCapabilities(answers, requestedSamples))
+	if n := r.ShaderTextureCapacity(); n > r.caps.MaxShaderTextureSlots {
+		return nil, fmt.Errorf("renderer: requested %d shader texture slots; device/layout supports %d", n, r.caps.MaxShaderTextureSlots)
+	}
 	r.caps.logCapabilities(requestedSamples)
 
 	// Step 4: Logical device
@@ -862,7 +873,7 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	r.onInit(func() { r.deviceDriver.DestroyDescriptorSetLayout(r.jointDescriptorSetLayout, nil) })
 
 	// Step 7b: Shadow resources (needs descriptor pool)
-	r.shadow, err = createShadowResources(r.instanceDriver, r.deviceDriver, r.shaders, r.physicalDevice, r.descriptorPool, r.jointDescriptorSetLayout)
+	r.shadow, err = createShadowResources(r.instanceDriver, r.deviceDriver, r.shaders, r.physicalDevice, r.descriptorPool, r.jointDescriptorSetLayout, r.ShaderTextureCapacity())
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create shadow resources: %w", err)
 	}
@@ -1385,7 +1396,7 @@ func New(w *window.Window, opts ...Option) (_ *Renderer, err error) {
 	// The scene draws into the HDR views; only the tonemap pass touches the
 	// swapchain.
 
-	r.gpuTimer, err = newGPUTimer(r.deviceDriver, r.caps)
+	r.gpuTimer, err = newGPUTimer(r.deviceDriver, r.caps, r.AppTimingCapacity())
 	if err != nil {
 		return nil, fmt.Errorf("renderer: create GPU timer: %w", err)
 	}
@@ -2333,6 +2344,9 @@ func (r *Renderer) traceStaticGPUState(t *StateTrace) {
 		Int(maxFramesInFlight).
 		Bool(r.bloom != nil).
 		Uint64(uint64(r.deviceIdent))
+	if r.ShaderTextureCapacity() != ShaderTextureSlots || r.AppTimingCapacity() != maxAppTimings {
+		cfg = cfg.Int(r.ShaderTextureCapacity()).Int(r.AppTimingCapacity())
+	}
 	t.Hash("config", cfg)
 }
 

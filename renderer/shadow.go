@@ -330,6 +330,10 @@ type shadowResources struct {
 // A function rather than a literal inside createShadowResources so the ABI nine
 // shaders depend on can be asserted without a device.
 func shadowSetBindings() []core1_0.DescriptorSetLayoutBinding {
+	return extendedShadowSetBindings(ShaderTextureSlots)
+}
+
+func extendedShadowSetBindings(slots int) []core1_0.DescriptorSetLayoutBinding {
 	const graphics = core1_0.StageVertex | core1_0.StageFragment
 	const shared = graphics | core1_0.StageCompute
 	sampler := func(binding int, stages core1_0.ShaderStageFlags) core1_0.DescriptorSetLayoutBinding {
@@ -338,14 +342,17 @@ func shadowSetBindings() []core1_0.DescriptorSetLayoutBinding {
 	storage := func(binding int) core1_0.DescriptorSetLayoutBinding {
 		return core1_0.DescriptorSetLayoutBinding{Binding: binding, DescriptorType: core1_0.DescriptorTypeStorageBuffer, DescriptorCount: 1, StageFlags: core1_0.StageFragment}
 	}
-	return []core1_0.DescriptorSetLayoutBinding{
+	bindings := []core1_0.DescriptorSetLayoutBinding{
 		{Binding: 0, DescriptorType: core1_0.DescriptorTypeUniformBuffer, DescriptorCount: 1, StageFlags: shared},
 		sampler(1, core1_0.StageFragment|core1_0.StageCompute),
 		sampler(2, core1_0.StageFragment),
 		storage(3), storage(4), storage(5),
 		{Binding: 6, DescriptorType: core1_0.DescriptorTypeUniformBuffer, DescriptorCount: 1, StageFlags: shared},
-		sampler(7, shared), sampler(8, shared), sampler(9, shared), sampler(10, shared),
 	}
+	for slot := range slots {
+		bindings = append(bindings, sampler(ShaderTextureFirstBinding+slot, shared))
+	}
+	return bindings
 }
 
 // createShadowResources creates all resources for the shadow mapping pass.
@@ -356,6 +363,7 @@ func createShadowResources(
 	physicalDevice core1_0.PhysicalDevice,
 	descriptorPool core1_0.DescriptorPool,
 	jointSetLayout core1_0.DescriptorSetLayout,
+	textureSlots int,
 ) (*shadowResources, error) {
 	s := &shadowResources{}
 	props, err := instanceDriver.GetPhysicalDeviceProperties(physicalDevice)
@@ -597,7 +605,7 @@ func createShadowResources(
 		clear(s.lightIndexMapped[i])
 	}
 
-	s.descriptorSetLayout, _, err = deviceDriver.CreateDescriptorSetLayout(nil, core1_0.DescriptorSetLayoutCreateInfo{Bindings: shadowSetBindings()})
+	s.descriptorSetLayout, _, err = deviceDriver.CreateDescriptorSetLayout(nil, core1_0.DescriptorSetLayoutCreateInfo{Bindings: extendedShadowSetBindings(textureSlots)})
 	if err != nil {
 		s.destroy(deviceDriver)
 		return nil, fmt.Errorf("shadow descriptor set layout: %w", err)
