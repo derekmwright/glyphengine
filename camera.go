@@ -23,7 +23,7 @@ type Camera struct {
 	Target     mgl32.Vec3 // position to orbit around (set from player)
 	LookOffset float32    // vertical offset above target for look-at point (pushes character down on screen)
 	Yaw        float32    // radians, 0 = looking along -Z
-	Pitch      float32    // radians, positive = looking up
+	Pitch      float32    // radians, positive = eye above target, looking down
 	Distance   float32    // orbit distance from target
 
 	LookSensitivity float32 // radians per pixel of mouse delta
@@ -66,8 +66,9 @@ func (c *Camera) LookStick(x, y, dt float32) {
 		return
 	}
 	c.Yaw -= x * c.StickLookRate * dt
-	// Positive pitch looks up here — the opposite of FPCamera, which the type's
-	// own field comment records — so a stick pushed up raises the camera.
+	// Positive pitch puts the eye above the target, looking down — the same
+	// convention as FPCamera — so adding a pushed-up stick raises the camera,
+	// where FPCamera has to negate it to look up.
 	c.Pitch += y * c.StickLookRate * dt
 	c.clampPitch()
 }

@@ -28,7 +28,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: none
-verified: 2026-07-28
+verified: 2026-10-17 # one pitch convention for both cameras, pinned by TestPitchConventionBothCamerasLookDown; the orbit snippet follows a moving player
 ---
 
 # Third-person orbit and first-person cameras
@@ -39,6 +39,14 @@ is a one-line change.
 
 Both use the same angle convention: **yaw 0 looks down −Z, positive pitch looks
 down**. That means `MoveIntent.Yaw` can be fed from either camera unchanged.
+
+For `Camera` that means positive pitch puts the eye *above* the target, so the
+view tilts down toward it; negative pitch drops the eye below. For `FPCamera`
+`Forward().Y` is negative at positive pitch. Both are measured by
+`TestPitchConventionBothCamerasLookDown` in `camera_convention_test.go`, which
+is the citation if a field comment ever seems to say otherwise. Only the stick
+mapping differs between them: `LookStick` pushed up *adds* to `Camera.Pitch`
+(raising the eye) and *subtracts* from `FPCamera.Pitch` (to look up).
 
 ## First-person
 
@@ -77,11 +85,25 @@ if hit, ok := e.Raycast(g.camera.Eye(), g.camera.Forward(), 3.0, player); ok {
 g.camera = glyphengine.NewCamera(8) // orbit distance
 g.camera.Target = mgl32.Vec3{0, 1, 0}
 
-// each frame:
+// Update: input only.
 g.camera.Update(in)                          // drag orbits, scroll zooms
+
+// LateUpdate: after simulation has settled, follow the player.
+if t, ok := e.InterpolatedTransform(player); ok {
+	g.camera.Target = t.Position             // the position being drawn this frame
+}
 g.camera.ResolveCollision(e.Scene, player, dt)
 e.SetCamera(g.camera.ViewVectors())
 ```
+
+`Target` is not tracked for you; a camera whose `Target` is set once in `Init`
+orbits that point while the player walks away from it. Set it every frame from
+`Engine.InterpolatedTransform`, not from the raw `Transform`. The simulation
+advances in fixed ticks and the renderer blends between the last two, so the
+raw position is the last tick's and the player is drawn somewhere between ticks;
+a camera on the raw value moves at the tick rate while the player moves at the
+frame rate, and the player jitters against the view. `ResolveCollision` comes
+after the `Target` update so its ray starts from where the camera now is.
 
 Drag with either mouse button to orbit; the cursor locks while a button is
 held. Scroll adjusts `Distance` between 0 and 20. Below `0.5` the camera snaps
