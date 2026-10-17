@@ -13,6 +13,7 @@ api:
   - renderer.RenderTarget.Texture
   - renderer.RenderTarget.Extent
   - renderer.AppPassDesc
+  - renderer.AppPassDesc.Reads3D
   - renderer.CreateAppPass
   - renderer.DestroyAppPass
   - renderer.AppPass.SetEnabled
@@ -22,6 +23,7 @@ api:
   - renderer.AppParamBytes
   - renderer.AppComputeDesc
   - renderer.AppComputeDesc.ReadsShadows
+  - renderer.AppComputeDesc.Reads3D
   - renderer.CreateAppCompute
   - renderer.DestroyAppCompute
   - renderer.AppCompute.SetEnabled
@@ -63,7 +65,7 @@ requires:
   - cgo
   - vulkan-runtime
 assets: procedural
-verified: 2026-10-09 # pipeline statistics per named application pass cross-referenced to profiling.md: a Timed graphics pass is counted and a dispatch reads not bracketed (#187); opt-in shared sampler capacity (#191) and named timing capacity (#192); TestSharedResourcesGPU validates five distinct fields and 18 mixed timers through replacement, resize, history and toggles, including a failing-image control and synchronization validation; renderer.ShaderTextureSlots listed, which SetShaderTexture's slot argument is bounded by and which nothing listed before (#178); per-pass uniform blocks (AppPassDesc.Params/SetParams, set 2 binding 12, #170), proved on hardware by `apppasscheck -params`; the include set listed per fragment, with the dependency-free group and volumetric_common.inc (#169); directional shadow sampling from compute; application submission counts per pass; storage buffers, sampler probes and explicit barriers; exported GLSL include set; Timed refused without device timestamps (#160)
+verified: 2026-10-17 # Reads3D on both pass descriptors, the dimension check at creation in both directions and the sampler3D binding example (#190); pipeline statistics per named application pass cross-referenced to profiling.md: a Timed graphics pass is counted and a dispatch reads not bracketed (#187); opt-in shared sampler capacity (#191) and named timing capacity (#192); TestSharedResourcesGPU validates five distinct fields and 18 mixed timers through replacement, resize, history and toggles, including a failing-image control and synchronization validation
 ---
 
 # Application render targets, graphics and compute passes
@@ -139,6 +141,17 @@ the scene. Ordinary textures need no graph resource declaration. Sampling and
 writing the same target is rejected unless it has `History`. A slot naming
 the current destination must likewise not be sampled by that pass unless the
 target has history; shader source determines which global slots it uses.
+
+`Reads3D` lists the indices into `Reads` the shader declares as `sampler3D`;
+every index not listed is declared `sampler2D`. The engine cannot read the
+declaration off the SPIR-V, so the pass states it and creation checks it against
+each texture's `Dimensions()` in both directions: a volume from
+`CreateTexture3D` at an unlisted index, or a 2D texture at a listed one, is
+refused with an error naming the pass, the index and both dimensions --
+`app pass "fog": Reads: index 1 is a 2D texture where the shader is declared
+3D`. A listed index past `Reads`, or listed twice, is an error naming `Reads3D`.
+`AppComputeDesc.Reads3D` is the same field for a dispatch. A volume binds
+nowhere else; see [`textures.md`](textures.md#volumes).
 
 `r.SceneColor()` returns a borrowed, stable texture for resolved HDR colour.
 Its image, view and existing descriptor set follow the acquired swapchain
@@ -469,6 +482,13 @@ layout(set=2, binding=1) uniform sampler2D input1; // Reads[1]
 layout(set=2, binding=2) uniform sampler2D input2; // Reads[2]
 layout(set=2, binding=3) uniform sampler2D input3; // Reads[3]
 layout(set=2, binding=12, std140) uniform Params { vec4 block[4]; } params; // only when Params > 0
+```
+
+A read listed in `Reads3D` is declared `sampler3D` at the same binding, in a
+graphics pass or a dispatch alike:
+
+```glsl
+layout(set=2, binding=1) uniform sampler3D density; // Reads[1], with Reads3D: []int{1}
 ```
 
 Set 1 is the shared shadow/light set. It is also set 1 for custom sky, static

@@ -1,0 +1,16 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// The compute arm: the same probes, written into the same shape of chart
+// through a storage image. The sampler3D declarations are the include's, at
+// the same set-2 bindings a graphics pass reads them at.
+#include "probe.inc"
+
+layout(set = 2, binding = 4, rgba16f) uniform image2D output0;
+layout(local_size_x = 16, local_size_y = 4) in;
+
+void main() {
+    ivec2 texel = ivec2(gl_GlobalInvocationID.xy);
+    if (texel.x >= probeColumns || texel.y >= probeRows) return;
+    imageStore(output0, texel, probe(texel.x, texel.y));
+}

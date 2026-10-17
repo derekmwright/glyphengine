@@ -48,6 +48,14 @@ func (r *Renderer) SetShaderTexture(slot int, t *Texture) error {
 	if t != nil && t.destroyed {
 		return fmt.Errorf("shader texture: destroyed texture")
 	}
+	// The shared slots stay 2D. The engine's own stages -- lit, terrain,
+	// water, the sky slot's fillings -- declare them sampler2D, and one slot
+	// layout serves every pipeline, so a volume here would be a 3D view
+	// behind a 2D declaration in whichever engine shader next read the slot.
+	// A volume binds through a pass's Reads, where the pass declares its shape.
+	if t.Dimensions() == 3 {
+		return fmt.Errorf("shader texture: slot %d: a 3D texture cannot fill a shared slot; the engine's shaders declare sampler2D there, so bind it through AppPassDesc.Reads with Reads3D", slot)
+	}
 	if t != nil && t.target != nil {
 		return r.SetShaderTarget(slot, t.target)
 	}
@@ -174,6 +182,12 @@ func (r *Renderer) flushAppFrameBindings(frame, imageIndex int) error {
 			tex := p.draws[i].Texture
 			if tex != nil && tex.target != nil && tex.target == p.desc.Target && !tex.target.desc.History {
 				return fmt.Errorf("app pass %q: Texture: cannot sample Target without History", p.desc.Name)
+			}
+			// Set 0 binding 0 is the draw's own descriptor set, bound as the
+			// texture is handed over, so this loop is the one place a volume
+			// there can be refused before its 3D view reaches a sampler2D.
+			if tex.Dimensions() == 3 {
+				return fmt.Errorf("app pass %q: Texture: draw %d has a 3D texture; set 0 binding 0 is sampler2D, so bind a volume through Reads with Reads3D", p.desc.Name, i)
 			}
 		}
 	}

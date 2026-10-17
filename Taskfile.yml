@@ -56,6 +56,7 @@ tasks:
       - for f in ../cmd/skyshadowcheck/*.frag; do "${VULKAN_SDK}/bin/glslc{{.EXE}}" -Iinclude "$f" -o "$f.spv"; done
       - for f in ../cmd/apppasscheck/*.vert ../cmd/apppasscheck/*.frag ../cmd/apppasscheck/*.comp; do "${VULKAN_SDK}/bin/glslc{{.EXE}}" -Iinclude "$f" -o "$f.spv"; done
       - for f in ../cmd/widetexcheck/*.frag; do "${VULKAN_SDK}/bin/glslc{{.EXE}}" -Iinclude "$f" -o "$f.spv"; done
+      - for f in ../cmd/tex3dcheck/*.frag ../cmd/tex3dcheck/*.comp; do "${VULKAN_SDK}/bin/glslc{{.EXE}}" -Iinclude "$f" -o "$f.spv" || exit 1; done
       - for f in ../examples/*/*.vert ../examples/*/*.frag ../examples/*/*.comp; do [ -f "$f" ] || continue; "${VULKAN_SDK}/bin/glslc{{.EXE}}" -Iinclude "$f" -o "$f.spv" || exit 1; done
     sources:
       - examples/*/*.vert
@@ -73,12 +74,16 @@ tasks:
       - cmd/skyshadowcheck/*.frag
       - cmd/skyshadowcheck/*.inc
       - cmd/widetexcheck/*.frag
+      - cmd/tex3dcheck/*.frag
+      - cmd/tex3dcheck/*.comp
+      - cmd/tex3dcheck/*.inc
     generates:
       - examples/*/*.spv
       - cmd/apppasscheck/*.spv
       - shaders/*.spv
       - cmd/skyshadowcheck/*.spv
       - cmd/widetexcheck/*.spv
+      - cmd/tex3dcheck/*.spv
 
   skyshadows:
     desc: "Custom sky and lit shaders share directional shadows, through resize and disabling"
@@ -760,6 +765,19 @@ tasks:
         [ "$msgs" = "0" ] || { echo "$out"; exit 1; }
         echo "$out" | grep -q "identical across three frames" || { echo "$out"; exit 1; }
         echo "apppasscheck -stats: clean"
+        # Sampled volumes (#190): three extents, each bound as sampler3D to a
+        # graphics pass and a compute dispatch, replaced and destroyed with
+        # frames in flight, resized under, and a swapchain rebuild on frame 8
+        # on top of that. A 3D view behind a sampler2D declaration, or the
+        # reverse, is exactly what the layer reports and nothing else does;
+        # the check refuses both at creation, and the layer is here to say the
+        # frames it did record were clean.
+        cd ..
+        out=$(GLYPHENGINE_FIXED_FRAME_TIME=16.667ms GLYPHENGINE_PROVOKE_RECREATE_FRAMES=8 go run ./cmd/tex3dcheck -validate 2>&1) || { echo "$out"; exit 1; }
+        msgs=$(echo "$out" | grep -cE "VULKAN (ERROR|WARNING)" || true)
+        [ "$msgs" = "0" ] || { echo "$out"; exit 1; }
+        echo "$out" | grep -q "tex3dcheck: PASS" || { echo "$out"; exit 1; }
+        echo "tex3dcheck -validate: clean"
 
   syncvalidate:
     desc: "Run the validation suite with synchronization hazard detection (needs GPU and SDK)"
@@ -801,6 +819,15 @@ tasks:
         msgs=$(echo "$out" | grep -cE "VULKAN (ERROR|WARNING)" || true)
         if [ "$msgs" != "0" ]; then echo "$out"; exit 1; fi
         echo "apppasscheck -stats: clean under synchronization validation"
+        # Sampled volumes under synchronization validation: the upload's
+        # per-level copies and the generated chain's blits are transfer work
+        # that a later frame samples, and the volumes are destroyed while the
+        # frames that sampled them are still in flight.
+        out=$(GLYPHENGINE_VALIDATION=1 GLYPHENGINE_SYNC_VALIDATION=1 GLYPHENGINE_FIXED_FRAME_TIME=16.667ms GLYPHENGINE_PROVOKE_RECREATE_FRAMES=8 go run ./cmd/tex3dcheck -validate 2>&1) || { echo "$out"; exit 1; }
+        echo "$out" | grep -q "Vulkan synchronization validation enabled" || { echo "$out"; exit 1; }
+        msgs=$(echo "$out" | grep -cE "VULKAN (ERROR|WARNING)" || true)
+        if [ "$msgs" != "0" ]; then echo "$out"; exit 1; fi
+        echo "tex3dcheck -validate: clean under synchronization validation"
 
   reload:
     desc: "Check that swapping a level for a freshly loaded copy never drops a frame's geometry"
@@ -2355,6 +2382,55 @@ tasks:
       # 0.0013880252, want under 0.001" and then exits 0, because a break that
       # exited non-zero would look like a broken check.
       - go run ./cmd/widetexcheck
+
+  tex3d:
+    desc: "A sampled volume interpolates along Z, repeats on every axis, clamps where asked and reads the right level, from a graphics pass and a compute dispatch (needs a GPU)"
+    env:
+      GLYPHENGINE_BACKGROUND: "1"
+      GLYPHENGINE_FIXED_FRAME_TIME: "16.667ms"
+      GLYPHENGINE_VALIDATION: "1"
+    cmds:
+      # Needs a GPU, so it sits with widetex rather than in `task ci`.
+      # renderer/texture3d_test.go covers the constructor with no device behind
+      # it: the 3D image and view, the per-level copies and blits, the
+      # sampler's three axes, every refusal. What it cannot cover is what a
+      # sampler3D reads back -- a volume whose slices were uploaded in the
+      # wrong order would pass every unit assertion -- and that is the issue's
+      # acceptance, so this is where it is measured.
+      #
+      # Three arms (8x8x8 RGBA8, 16x8x4 RGBA8, 8x4x4 R8), each a distinct
+      # value per texel, each uploaded three ways: a supplied two-level chain
+      # repeating on X, Y and Z; a generated chain repeating on X, Y and Z; the
+      # supplied chain clamping on Z. A graphics pass and a compute dispatch
+      # probe eleven points of each into a chart against a CPU trilinear
+      # sampler over the same bytes: the stored texel, the midpoint between two
+      # slices and between two columns and two rows, the edge on each axis
+      # (repeat blends the last texel into the first; clamp holds slice 0 and
+      # the last slice), a quarter texel past the Z edge, level 1 (the supplied
+      # bytes, or the 2x2x2 box mean of the generated chain) and level 2 (the
+      # 4x4x4 mean, which for 16x8x4 and 8x4x4 is one slice covering all four).
+      # Each arm replaces the last with frames in flight, the window resizes
+      # under the second, and every unsupported input is fed afterwards.
+      #
+      # NUMBERS, RX 7900 XTX, 2026-10-17, validation on: every one of the 198
+      # probes (3 arms x 2 stages x 3 rows x 11 columns) read back exactly, a
+      # worst error of 0.000000 against a tolerance of 1.5/255; the expected
+      # values are chosen to be multiples of 1/255, so the readout has nothing
+      # to add. The device's 3D extent limit is 8192 and volume mip
+      # generation is available. The eleven refusals each reported the
+      # message docs/agents/textures.md promises.
+      #
+      # PROVED: `-bind2d` binds a 2D texture at a Reads3D index. With the
+      # refusal in place it reports "refused at creation, as it must be: app
+      # pass "probe graphics 8x8x8 RGBA8": Reads: index 0 is a 2D texture where
+      # the shader is declared 3D" and exits 0. With the refusal disabled in
+      # validateAppReads it ran, every probe of that row read the 2D texture's
+      # (1, 0, 1) -- "got (1.0000 0.0000 1.0000), want (0.1882 0.3137
+      # 0.4392), off by 0.8118" -- and the layer reported
+      # VUID-vkCmdDraw-viewType-07752 and VUID-vkCmdDispatch-viewType-07752 for
+      # every frame, so the check failed twice over.
+      - go run ./cmd/tex3dcheck -validate
+      - go run ./cmd/tex3dcheck -bind2d
 
   waterblend:
     desc: "Check that a blended effect in front of the water is not painted over by it"

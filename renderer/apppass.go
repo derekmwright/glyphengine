@@ -30,14 +30,23 @@ const (
 // Reads supplies up to four textures at set 2; SceneColor and SceneDepth expose
 // the engine's outputs. All pass and target methods require the renderer thread.
 type AppPassDesc struct {
-	Name       string
-	Stage      PassStage
-	Target     *RenderTarget
-	Load       bool
-	Clear      [4]float32
-	Blend      BlendMode
-	DepthTest  bool
-	Reads      []*Texture
+	Name      string
+	Stage     PassStage
+	Target    *RenderTarget
+	Load      bool
+	Clear     [4]float32
+	Blend     BlendMode
+	DepthTest bool
+	Reads     []*Texture
+	// Reads3D lists the indices into Reads the shader declares as sampler3D
+	// rather than sampler2D; every index not listed is declared 2D. It is a
+	// declaration the engine cannot read off the SPIR-V for itself, and it is
+	// checked against each texture's Dimensions at creation in both
+	// directions: a volume at an unlisted index and a 2D texture at a listed
+	// one are each an error naming the index and both dimensions, rather
+	// than a descriptor the validation layer rejects at the first draw -- or,
+	// without the layer, a sampler reading an image of the wrong shape.
+	Reads3D    []int
 	Vert, Frag []byte
 	Fullscreen bool
 	Timed      bool
@@ -120,7 +129,7 @@ func (r *Renderer) validateAppPass(d AppPassDesc) error {
 			return fail("DepthTest", "Target has no depth attachment")
 		}
 	}
-	if err := r.validateAppReads(d.Reads, d.Stage, d.Target == nil, fail); err != nil {
+	if err := r.validateAppReads(d.Reads, d.Reads3D, d.Stage, d.Target == nil, fail); err != nil {
 		return err
 	}
 	for _, t := range d.Reads {
@@ -149,16 +158,35 @@ func (r *Renderer) validateAppPass(d AppPassDesc) error {
 	return nil
 }
 
-func (r *Renderer) validateAppReads(inputs []*Texture, stage PassStage, hdr bool, fail func(string, string) error) error {
+func (r *Renderer) validateAppReads(inputs []*Texture, reads3D []int, stage PassStage, hdr bool, fail func(string, string) error) error {
 	if len(inputs) > 4 {
 		return fail("Reads", "at most four inputs")
 	}
-	for _, t := range inputs {
+	// A declared index has to name a read: an unlisted binding is written with
+	// the 2D fallback, which is the wrong shape for a sampler3D, so there is
+	// no volume to fall back to and the pass has to supply one.
+	for i, idx := range reads3D {
+		if idx < 0 || idx >= len(inputs) {
+			return fail("Reads3D", fmt.Sprintf("index %d names no read (Reads has %d)", idx, len(inputs)))
+		}
+		if slices.Contains(reads3D[:i], idx) {
+			return fail("Reads3D", fmt.Sprintf("index %d is listed twice", idx))
+		}
+	}
+	for i, t := range inputs {
 		if t == nil {
 			return fail("Reads", "nil texture")
 		}
 		if t.destroyed {
 			return fail("Reads", "destroyed texture")
+		}
+		// Both directions are errors here rather than at the first draw,
+		// where the validation layer would name a VUID and nothing else would
+		// notice: the shader's declaration is what Reads3D says it is, and the
+		// texture's shape is what its constructor made.
+		if declared := slices.Contains(reads3D, i); declared != (t.Dimensions() == 3) {
+			return fail("Reads", fmt.Sprintf("index %d is a %dD texture where the shader is declared %dD (Reads3D lists the sampler3D indices)",
+				i, t.Dimensions(), map[bool]int{true: 3, false: 2}[declared]))
 		}
 		if target := t.target; target != nil {
 			if target.r != r || target.destroyed {
@@ -273,7 +301,7 @@ func (r *Renderer) CreateAppPass(d AppPassDesc) (_ *AppPass, err error) {
 	if err = r.ensureAppLayout(d.Params > 0); err != nil {
 		return nil, err
 	}
-	d.Reads = slices.Clone(d.Reads)
+	d.Reads, d.Reads3D = slices.Clone(d.Reads), slices.Clone(d.Reads3D)
 	p := &AppPass{r: r, desc: d, enabled: true}
 	r.appPasses = append(r.appPasses, p)
 	defer func() {

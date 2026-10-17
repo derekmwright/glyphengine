@@ -40,6 +40,22 @@ type Capabilities struct {
 	// device and the renderer's complete pipeline layouts. The enabled count
 	// is ShaderTextureCapacity(); opt in with WithShaderTextureSlots.
 	MaxShaderTextureSlots int
+
+	// MaxTexture3DExtent is the largest width, height or depth CreateTexture3D
+	// accepts on this device -- maxImageDimension3D, at least 256 on any
+	// conformant one. A volume past it on any axis is refused before anything
+	// is allocated, so a game sizing a cached field reads this first.
+	MaxTexture3DExtent int
+
+	// VolumeMipGeneration reports that every Texture3DFormat can be linearly
+	// blitted with optimal tiling, which is what Texture3DOptions.Mipmap
+	// needs to build a chain on the device. Without it the constructor
+	// refuses a Mipmap request and a game supplies Mips of its own. Core
+	// Vulkan requires the bits for all three formats, so this is false only
+	// on a non-conformant device -- and it is reported anyway because the
+	// alternative is a refusal a game first meets at load time on a machine
+	// nobody tried.
+	VolumeMipGeneration bool
 	// RayQuery reports that this renderer can issue a ray query from a shader.
 	//
 	// False on every device today: detecting VK_KHR_ray_query's dependency
@@ -210,6 +226,11 @@ type deviceAnswers struct {
 	// does not advertise the extension.
 	driverName string
 
+	// volumeFeatures is the optimal-tiling feature set of each
+	// Texture3DFormat, the same query CreateTexture3D makes per upload,
+	// gathered once so VolumeMipGeneration is answered from it.
+	volumeFeatures map[core1_0.Format]core1_0.FormatFeatureFlags
+
 	graphicsFamily int
 }
 
@@ -233,6 +254,10 @@ func queryDevice(instanceDriver core1_0.CoreInstanceDriver, props2 khr_get_physi
 	a.props, a.extensions = props, extensions
 	a.features = instanceDriver.GetPhysicalDeviceFeatures(device)
 	a.families = instanceDriver.GetPhysicalDeviceQueueFamilyProperties(device)
+	a.volumeFeatures = map[core1_0.Format]core1_0.FormatFeatureFlags{}
+	for _, f := range volumeFormats[Texture3DR8:] {
+		a.volumeFeatures[f.vk] = instanceDriver.GetPhysicalDeviceFormatProperties(device, f.vk).OptimalTilingFeatures
+	}
 
 	// Optional, and asked for only when advertised: VkPhysicalDeviceProperties
 	// has no driver name of its own in Vulkan 1.0 -- what vkngwrapper calls
@@ -307,8 +332,18 @@ func negotiateCapabilities(a deviceAnswers, requested core1_0.SampleCountFlags) 
 	timestamps := a.props.Limits.TimestampComputeAndGraphics &&
 		a.graphicsFamily < len(a.families) && a.families[a.graphicsFamily].TimestampValidBits != 0
 
+	// Every volume format or none: a report that was true for RGBA8 and false
+	// for R8 would need a format argument, and the constructor's own refusal
+	// already names the format when a device turns out to be that uneven.
+	volumeBlits := len(a.volumeFeatures) > 0
+	for _, f := range volumeFormats[Texture3DR8:] {
+		volumeBlits = volumeBlits && volumeBlitSupported(a.volumeFeatures[f.vk])
+	}
+
 	c := Capabilities{
 		MaxShaderTextureSlots:     shaderTextureLimit(a.props.Limits),
+		MaxTexture3DExtent:        a.props.Limits.MaxImageDimension3D,
+		VolumeMipGeneration:       volumeBlits,
 		RayQuery:                  rayQueryEnabled && rayQueryAvailable(a.extensions),
 		MultiDrawIndirect:         a.features.MultiDrawIndirect,
 		DrawIndirectFirstInstance: a.features.DrawIndirectFirstInstance,
@@ -390,6 +425,10 @@ func (c Capabilities) logCapabilities(requested core1_0.SampleCountFlags) {
 	if !c.PipelineStatistics {
 		log.Println("Pipeline statistics unavailable: the device does not support pipelineStatisticsQuery, " +
 			"so WithPipelineStatistics has nothing to count with")
+	}
+	if !c.VolumeMipGeneration {
+		log.Println("Volume mip generation unavailable: a Texture3DFormat cannot be linearly blitted, " +
+			"so CreateTexture3D refuses Mipmap and a chain has to be supplied as Mips")
 	}
 	if c.DepthPrepass != DepthPrepassOff {
 		log.Printf("Depth prepass: %s", c.DepthPrepass)

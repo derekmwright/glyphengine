@@ -14,10 +14,14 @@ import (
 // Params a private uniform block at binding 12.
 // Calls require the renderer thread, as do application graphics passes.
 type AppComputeDesc struct {
-	Name    string
-	Stage   PassStage
-	Comp    []byte
-	Reads   []*Texture
+	Name  string
+	Stage PassStage
+	Comp  []byte
+	Reads []*Texture
+	// Reads3D is AppPassDesc.Reads3D for a dispatch: the indices into Reads
+	// the shader declares as sampler3D, checked against the textures' shapes
+	// at creation in both directions.
+	Reads3D []int
 	Writes  []*RenderTarget
 	Buffers []*StorageBuffer
 	// ReadsShadows declares that the shader samples the directional cascades at
@@ -101,7 +105,7 @@ func (r *Renderer) validateAppCompute(d AppComputeDesc) error {
 			return fail("Writes", fmt.Sprintf("duplicate target %q", t.desc.Name))
 		}
 	}
-	if err := r.validateAppReads(d.Reads, d.Stage, false, fail); err != nil {
+	if err := r.validateAppReads(d.Reads, d.Reads3D, d.Stage, false, fail); err != nil {
 		return err
 	}
 	for _, t := range d.Reads {
@@ -120,9 +124,9 @@ func (r *Renderer) CreateAppCompute(d AppComputeDesc) (_ *AppCompute, err error)
 		return nil, fmt.Errorf("app compute %q: input layout: %w", d.Name, err)
 	}
 	d.Reads, d.Writes = slices.Clone(d.Reads), slices.Clone(d.Writes)
-	d.Buffers = slices.Clone(d.Buffers)
+	d.Buffers, d.Reads3D = slices.Clone(d.Buffers), slices.Clone(d.Reads3D)
 	c := &AppCompute{desc: d}
-	p := &AppPass{r: r, desc: AppPassDesc{Name: d.Name, Stage: d.Stage, Reads: d.Reads, Timed: d.Timed, Params: d.Params}, enabled: true, compute: c}
+	p := &AppPass{r: r, desc: AppPassDesc{Name: d.Name, Stage: d.Stage, Reads: d.Reads, Reads3D: d.Reads3D, Timed: d.Timed, Params: d.Params}, enabled: true, compute: c}
 	c.pass = p
 	r.appPasses = append(r.appPasses, p)
 	defer func() {
